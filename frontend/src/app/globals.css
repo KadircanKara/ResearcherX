@@ -1,0 +1,120 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+}
+
+html,
+body {
+  background-color: #f7f7f5;
+  color: #0f1115;
+}
+
+.prose {
+  font-size: 0.95rem;
+  line-height: 1.65;
+  color: #0f1115;
+}
+
+.prose > * + * {
+  margin-top: 0.75rem;
+}
+
+.prose h1,
+.prose h2,
+.prose h3,
+.prose h4 {
+  font-weight: 600;
+  line-height: 1.25;
+  margin-top: 1.5rem;
+}
+
+.prose h1 {
+  font-size: 1.6rem;
+  letter-spacing: -0.01em;
+}
+
+.prose h2 {
+  font-size: 1.25rem;
+  padding-bottom: 0.25rem;
+  border-bottom: 1px solid rgba(15, 17, 21, 0.08);
+}
+
+.prose h3 {
+  font-size: 1.05rem;
+}
+
+.prose h4 {
+  font-size: 0.95rem;
+}
+
+.prose p {
+  margin: 0;
+}
+
+.prose a {
+  color: #1d4ed8;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.prose a:hover {
+  color: #1e40af;
+}
+
+.prose ul,
+.prose ol {
+  padding-left: 1.5rem;
+}
+
+.prose ul {
+  list-style: disc;
+}
+
+.prose ol {
+  list-style: decimal;
+}
+
+.prose li + li {
+  margin-top: 0.25rem;
+}
+
+.prose strong {
+  font-weight: 600;
+}
+
+.prose blockquote {
+  border-left: 3px solid rgba(15, 17, 21, 0.15);
+  padding-left: 1rem;
+  color: rgba(15, 17, 21, 0.7);
+  font-style: italic;
+}
+
+.prose hr {
+  border: none;
+  border-top: 1px solid rgba(15, 17, 21, 0.1);
+  margin: 1.25rem 0;
+}
+
+.prose pre {
+  background: #0f1115;
+  color: #f7f7f5;
+  padding: 0.75rem 1rem;
+  border-radius: 0.5rem;
+  overflow-x: auto;
+}
+
+.prose code {
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  font-size: 0.88em;
+  background: rgba(15, 17, 21, 0.06);
+  padding: 0.1rem 0.3rem;
+  border-radius: 0.25rem;
+}
+
+.prose pre code {
+  background: transparent;
+  padding: 0;
+}
