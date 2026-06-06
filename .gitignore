@@ -12,8 +12,12 @@ node_modules/
 .next/
 dist/
 build/
+*.tsbuildinfo
 *.db
 *.db-journal
 .DS_Store
 .idea/
 .vscode/
+
+# Local working docs (deployment plan lives outside the public repo)
+HANDOFF.md
