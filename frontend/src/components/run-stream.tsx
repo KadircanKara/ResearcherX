@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import { eventsUrl, getRun } from "@/lib/api";
-import type { Critique, Finding, Plan, RunEvent, RunStatus } from "@/lib/types";
+import type { Critique, Finding, Plan, RunEvent, RunStatus, Validation } from "@/lib/types";
 
 interface Props {
   runId: string;
@@ -14,6 +14,7 @@ export function RunStream({ runId }: Props) {
   const [status, setStatus] = useState<RunStatus>("pending");
   const [plan, setPlan] = useState<Plan | null>(null);
   const [findings, setFindings] = useState<Finding[]>([]);
+  const [validations, setValidations] = useState<Record<string, Validation>>({});
   const [report, setReport] = useState<string>("");
   const [critique, setCritique] = useState<Critique | null>(null);
   const [active, setActive] = useState<string | null>(null);
@@ -59,6 +60,16 @@ export function RunStream({ runId }: Props) {
               case "finding":
                 setFindings((prev) => [...prev, data.finding]);
                 break;
+              case "validation":
+                setValidations((prev) => ({ ...prev, [data.query]: data }));
+                setActive(`planner validation: ${data.verdict} — ${data.query}`);
+                break;
+              case "search_retry":
+                setActive(
+                  `planner revising query (${data.attempt}/${data.max_attempts}): ` +
+                    `${data.old_query} → ${data.new_query}`,
+                );
+                break;
               case "report_delta":
                 setReport((prev) => prev + data.text);
                 break;
@@ -74,11 +85,15 @@ export function RunStream({ runId }: Props) {
           }
         }
 
+        // Every backend event type must be listed here — EventSource only
+        // fires listeners for named events, so unlisted types are dropped.
         for (const kind of [
           "status",
           "agent_start",
           "plan",
           "finding",
+          "validation",
+          "search_retry",
           "report_delta",
           "critique",
           "error",
@@ -147,7 +162,26 @@ export function RunStream({ runId }: Props) {
           <div className="space-y-3">
             {findings.map((f, i) => (
               <details key={i} className="rounded border border-ink/10 bg-white p-3">
-                <summary className="cursor-pointer font-mono text-sm">{f.query}</summary>
+                <summary className="cursor-pointer font-mono text-sm">
+                  {f.query}
+                  {f.validated && (
+                    <span className="ml-2 rounded bg-green-100 px-1.5 py-0.5 text-xs text-green-700">
+                      validated{(f.attempts ?? 1) > 1 ? ` · attempt ${f.attempts}` : ""}
+                    </span>
+                  )}
+                  {f.accepted_degraded && (
+                    <span className="ml-2 rounded bg-amber-100 px-1.5 py-0.5 text-xs text-amber-700">
+                      best-effort ({f.attempts ?? 1}{" "}
+                      {(f.attempts ?? 1) === 1 ? "attempt" : "attempts"})
+                    </span>
+                  )}
+                </summary>
+                {f.accepted_degraded &&
+                  (validations[f.query]?.reasons?.length ?? 0) > 0 && (
+                    <p className="mt-2 text-xs font-mono text-amber-700">
+                      planner: {validations[f.query].reasons.join("; ")}
+                    </p>
+                  )}
                 <p className="mt-2 text-sm">{f.summary}</p>
                 {f.sources.length > 0 && (
                   <ul className="mt-2 text-xs font-mono text-ink/60 list-disc pl-5">

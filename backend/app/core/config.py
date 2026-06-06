@@ -7,14 +7,20 @@ from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
-    # LLM provider: Groq (OpenAI-compatible). Free tier gives 30 req/min on
-    # llama-3.3-70b-versatile with no practical daily cap — enough headroom
-    # for the planner + searchers + synth + critic pipeline.
-    groq_api_key: str
-    groq_base_url: str = "https://api.groq.com/openai/v1"
-    llm_model: str = "llama-3.3-70b-versatile"
+    # LLM provider via the OpenAI-compatible API. Defaults target a locally-run
+    # Ollama server reached from the backend container through the Docker host
+    # (host.docker.internal). Any OpenAI-compatible cloud provider works by
+    # pointing LLM_BASE_URL/LLM_API_KEY/LLM_MODEL at it (e.g. Groq:
+    # https://api.groq.com/openai/v1 + a real key).
+    llm_base_url: str = "http://host.docker.internal:11434/v1"
+    llm_api_key: str = "ollama"  # local Ollama ignores it; placeholder satisfies the SDK
+    llm_model: str = "gemma4"  # examples: gemma4, deepseek-r1:8b, llama3.1, qwen3
 
-    # Preserved for future swap-back; unused while on Groq.
+    # SDK client retries. Local Ollama has no rate limits, but a small retry
+    # budget covers transient connection blips while a model loads into memory.
+    llm_max_retries: int = 2
+
+    # Preserved for future swap-back; unused while on local models.
     anthropic_api_key: str | None = None
     openrouter_api_key: str | None = None
 
@@ -24,9 +30,17 @@ class Settings(BaseSettings):
     )
     log_level: str = "INFO"
 
-    # Groq free tier: ~30 req/min on llama-3.3-70b. A full pipeline run is
-    # ~1 (planner) + N (searchers) + 1 (synth) + 1 (critic) requests.
+    # Local Ollama has no rate limits, but one instance serializes requests
+    # (OLLAMA_NUM_PARALLEL defaults low) and parallel calls contend for
+    # RAM/VRAM. Keep concurrency modest so searchers don't thrash the model;
+    # raise only if OLLAMA_NUM_PARALLEL is configured higher on the host.
     max_parallel_searchers: int = 3
+
+    # Planner validates each searcher finding and retries with a revised query
+    # if invalid (off-topic / empty / unhelpful). Cap retries so a hopeless
+    # sub-query can't burn latency forever; after the cap, the best attempt is
+    # accepted and marked degraded. attempts = 1 initial + max_search_retries.
+    max_search_retries: int = 2
 
     @field_validator("cors_origins", mode="before")
     @classmethod

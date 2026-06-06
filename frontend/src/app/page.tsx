@@ -8,14 +8,18 @@ export default function Home() {
           Ask a research question.
         </h1>
         <p className="mt-2 text-ink/60">
-          A planner decomposes your question, searchers fan out in parallel, a
-          synthesizer drafts a cited report, and a critic checks it.
+          A planner decomposes your question, searchers fan out in parallel,
+          the planner validates each result (retrying with revised queries),
+          a synthesizer drafts a cited report, and a critic checks it.
         </p>
       </section>
       <QueryForm />
       <section className="border-t border-ink/10 pt-6 text-sm text-ink/60 font-mono">
-        <div>pipeline: planner → searchers (parallel) → synthesizer → critic</div>
-        <div className="mt-1">provider: groq · llama-3.3-70b-versatile</div>
+        <div>
+          pipeline: planner → searchers (parallel) ⇄ validation/retry →
+          synthesizer → critic
+        </div>
+        <div className="mt-1">provider: ollama (local)</div>
       </section>
     </div>
   );

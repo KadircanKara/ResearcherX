@@ -9,6 +9,16 @@ export interface Finding {
   query: string;
   summary: string;
   sources: string[];
+  attempts?: number;
+  validated?: boolean;
+  accepted_degraded?: boolean;
+}
+
+export interface Validation {
+  query: string;
+  verdict: "valid" | "invalid";
+  reasons: string[];
+  attempt: number;
 }
 
 export interface CritiqueIssue {
@@ -46,6 +56,14 @@ export type RunEvent =
   | { type: "agent_start"; agent: string; query?: string }
   | { type: "plan"; plan: Plan }
   | { type: "finding"; finding: Finding }
+  | ({ type: "validation" } & Validation)
+  | {
+      type: "search_retry";
+      old_query: string;
+      new_query: string;
+      attempt: number;
+      max_attempts: number;
+    }
   | { type: "report_delta"; text: string }
   | { type: "critique"; critique: Critique }
   | { type: "error"; message: string };

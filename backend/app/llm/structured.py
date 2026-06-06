@@ -2,6 +2,7 @@ import json
 import re
 from typing import TypeVar
 
+from openai import BadRequestError
 from pydantic import BaseModel, ValidationError
 
 from app.core.config import settings
@@ -12,15 +13,22 @@ T = TypeVar("T", bound=BaseModel)
 
 
 _CODE_FENCE = re.compile(r"^```(?:json)?\s*|\s*```$", re.MULTILINE)
+_THINK_BLOCK = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
 
 
 def _extract_json(text: str) -> str:
     """Best-effort JSON extraction from LLM output.
 
-    Free models are noisy: they sometimes wrap JSON in fences, prepend
-    reasoning, or append trailing prose. Strip fences, then slice to the
-    first balanced object.
+    Local models are noisy: they sometimes wrap JSON in fences, prepend
+    reasoning, or append trailing prose. Reasoning models (deepseek-r1 etc.)
+    additionally emit `<think>...</think>` blocks before the answer. Strip
+    think blocks, then fences, then slice to the first balanced object.
     """
+    text = _THINK_BLOCK.sub("", text)
+    if "</think>" in text:
+        # Dangling close tag (opening tag missing or malformed): everything
+        # before it is reasoning, not answer.
+        text = text.rsplit("</think>", 1)[-1]
     text = _CODE_FENCE.sub("", text).strip()
     start = text.find("{")
     if start == -1:
@@ -50,22 +58,38 @@ def _extract_json(text: str) -> str:
     return text[start:]
 
 
+# Some Ollama versions/models reject response_format via the OpenAI-compat
+# layer. JSON mode is only a hint (the schema-in-prompt is the real guarantor),
+# so fall back without it — and remember, to skip the doomed attempt next time.
+_response_format_supported = True
+
+
 async def _one_shot(
     *,
     system: str,
     user: str,
     max_tokens: int,
 ) -> str:
+    global _response_format_supported
     client = get_client()
-    response = await client.chat.completions.create(
-        model=settings.llm_model,
-        max_tokens=max_tokens,
-        response_format={"type": "json_object"},
-        messages=[
+    base: dict = {
+        "model": settings.llm_model,
+        "max_tokens": max_tokens,
+        "messages": [
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ],
-    )
+    }
+    if _response_format_supported:
+        try:
+            response = await client.chat.completions.create(
+                **base, response_format={"type": "json_object"}
+            )
+            return response.choices[0].message.content or ""
+        except BadRequestError as exc:
+            log.warning("response_format_unsupported", error=str(exc))
+            _response_format_supported = False
+    response = await client.chat.completions.create(**base)
     return response.choices[0].message.content or ""
 
 
@@ -78,9 +102,10 @@ async def parse_structured(
 ) -> T:
     """Request a JSON object matching output_model's schema and parse it.
 
-    Free OpenRouter models are inconsistent — they sometimes emit empty
-    content, add reasoning prose, or ignore the response_format hint. We
-    retry once with a stricter prompt when the first attempt fails to parse.
+    Local models are inconsistent — they sometimes emit empty content, add
+    reasoning prose (deepseek-r1's <think> blocks), or ignore the
+    response_format hint. We retry once with a stricter prompt when the
+    first attempt fails to parse.
     """
     schema = output_model.model_json_schema()
     schema_block = (
