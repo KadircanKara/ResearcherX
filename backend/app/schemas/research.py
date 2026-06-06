@@ -42,6 +42,23 @@ class SearchFinding(BaseModel):
     query: str
     summary: str
     sources: list[str]
+    # Set by the orchestrator after planner validation; defaults keep the
+    # searcher's own construction (which doesn't know about attempts) valid.
+    attempts: int = 1
+    validated: bool = False
+    accepted_degraded: bool = False  # retries exhausted, best attempt kept
+
+
+class FindingValidation(BaseModel):
+    """Planner's verdict on a searcher finding (structured output).
+
+    One call both judges the finding (on-topic? useful? non-empty?) and, when
+    invalid, proposes the revised query for the retry — cheaper than two calls.
+    """
+
+    verdict: Literal["valid", "invalid"]
+    reasons: list[str] = Field(default_factory=list)
+    revised_query: str | None = None  # set iff verdict == "invalid"
 
 
 class CritiqueIssue(BaseModel):

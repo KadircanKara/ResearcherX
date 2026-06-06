@@ -1,11 +1,13 @@
 # ResearcherX
 
-Autonomous multi-agent research assistant. Ask a question, watch specialized agents plan, search, synthesize, and verify citations in real time.
+Autonomous multi-agent research assistant. Ask a question, watch specialized agents plan, search, synthesize, and verify citations in real time — running entirely on local models.
+
+The planner doesn't pass garbage downstream: it validates every searcher result (on-topic? complete/useful? non-empty?) and retries with a revised query when a result is off-topic, empty, or unhelpful (capped, then best-effort).
 
 ## Stack
 
 - **Backend:** FastAPI (async) + SQLAlchemy 2.0 async + Alembic + Postgres
-- **LLM:** Groq (free-tier, llama-3.3-70b-versatile via OpenAI-compatible SDK). Provider layer is a single file — flip providers by swapping `llm/client.py` + env vars.
+- **LLM:** Local models via [Ollama](https://ollama.com) (gemma4, deepseek-r1, llama3.1, …) through its OpenAI-compatible API. Provider layer is a single file — any OpenAI-compatible endpoint (e.g. Groq) works by re-pointing `LLM_*` env vars.
 - **Search:** DuckDuckGo via `ddgs` (no API key)
 - **Frontend:** Next.js 15 (App Router) + TypeScript + Tailwind
 - **Infra:** Docker Compose
@@ -22,10 +24,11 @@ Autonomous multi-agent research assistant. Ask a question, watch specialized age
                                 │  Services ─▶ Supervisor Agent      │
                                 │              ├─ Planner            │
                                 │              ├─ Searchers (N)      │
+                                │              │   ↑↓ validate/retry │
                                 │              ├─ Synthesizer        │
                                 │              └─ Critic             │
                                 │  Tools     ─▶ web_search (DDG)     │
-                                │  LLM       ─▶ Groq (free)          │
+                                │  LLM       ─▶ Ollama (local)       │
                                 │  DB        ─▶ Postgres (runs,      │
                                 │              steps, citations)     │
                                 └────────────────────────────────────┘
@@ -37,7 +40,7 @@ Layers (backend/app):
 - `services/` — orchestration, use cases (one call per API request)
 - `agents/` — specialized LLM roles (planner, searcher, synthesizer, critic)
 - `tools/` — typed pure-function wrappers around side-effectful ops
-- `llm/` — Groq (OpenAI-compatible) client + structured-output helper
+- `llm/` — Ollama (OpenAI-compatible) client + structured-output helper
 - `db/` — SQLAlchemy models, async session factory
 - `schemas/` — Pydantic DTOs (API boundary)
 - `core/` — config, logging
@@ -45,10 +48,12 @@ Layers (backend/app):
 ## Quick start
 
 ```bash
+# 1. Run Ollama on the host (https://ollama.com) and pull a model:
+ollama pull gemma4    # or deepseek-r1:8b, llama3.1, qwen3, ...
+
+# 2. Configure + start. Defaults already point at host Ollama + gemma4;
+#    set LLM_MODEL to any model from `ollama list`.
 cp .env.example .env
-# edit .env and set GROQ_API_KEY (https://console.groq.com/keys)
-# OPENROUTER_API_KEY and ANTHROPIC_API_KEY are kept in the template for future
-# provider swaps but are not read today
 make up
 ```
 

@@ -26,6 +26,7 @@ class RunStatus(StrEnum):
 class StepKind(StrEnum):
     PLAN = "plan"
     SEARCH = "search"
+    VALIDATE = "validate"  # planner validating a searcher finding
     SYNTHESIZE = "synthesize"
     CRITIQUE = "critique"
 
