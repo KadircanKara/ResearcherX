@@ -2,11 +2,11 @@ from typing import Protocol, TypeVar
 
 from pydantic import BaseModel
 
-I = TypeVar("I", bound=BaseModel, contravariant=True)
-O = TypeVar("O", bound=BaseModel, covariant=True)
+InT = TypeVar("InT", bound=BaseModel, contravariant=True)
+OutT = TypeVar("OutT", bound=BaseModel, covariant=True)
 
 
-class Tool(Protocol[I, O]):
+class Tool(Protocol[InT, OutT]):
     name: str
 
-    async def __call__(self, inp: I) -> O: ...
+    async def __call__(self, inp: InT) -> OutT: ...

@@ -2,11 +2,11 @@ from typing import Protocol, TypeVar
 
 from pydantic import BaseModel
 
-I = TypeVar("I", bound=BaseModel, contravariant=True)
-O = TypeVar("O", bound=BaseModel, covariant=True)
+InT = TypeVar("InT", bound=BaseModel, contravariant=True)
+OutT = TypeVar("OutT", bound=BaseModel, covariant=True)
 
 
-class Agent(Protocol[I, O]):
+class Agent(Protocol[InT, OutT]):
     name: str
 
-    async def run(self, inp: I) -> O: ...
+    async def run(self, inp: InT) -> OutT: ...
