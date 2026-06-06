@@ -19,7 +19,7 @@ export default function Home() {
           pipeline: planner → searchers (parallel) ⇄ validation/retry →
           synthesizer → critic
         </div>
-        <div className="mt-1">provider: ollama (local)</div>
+        <div className="mt-1">provider: groq · llama-3.3-70b-versatile</div>
       </section>
     </div>
   );

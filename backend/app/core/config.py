@@ -7,20 +7,22 @@ from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
-    # LLM provider via the OpenAI-compatible API. Defaults target a locally-run
-    # Ollama server reached from the backend container through the Docker host
-    # (host.docker.internal). Any OpenAI-compatible cloud provider works by
-    # pointing LLM_BASE_URL/LLM_API_KEY/LLM_MODEL at it (e.g. Groq:
-    # https://api.groq.com/openai/v1 + a real key).
+    # LLM provider via the OpenAI-compatible API. The checked-in .env.example
+    # points at Groq's free tier (the configuration we actually run); any
+    # OpenAI-compatible endpoint works by re-pointing LLM_BASE_URL /
+    # LLM_API_KEY / LLM_MODEL. The code defaults below target a host-run
+    # Ollama server (host.docker.internal) purely as the keyless boot
+    # fallback — .env is what selects the real provider.
     llm_base_url: str = "http://host.docker.internal:11434/v1"
     llm_api_key: str = "ollama"  # local Ollama ignores it; placeholder satisfies the SDK
     llm_model: str = "gemma4"  # examples: gemma4, deepseek-r1:8b, llama3.1, qwen3
 
-    # SDK client retries. Local Ollama has no rate limits, but a small retry
-    # budget covers transient connection blips while a model loads into memory.
+    # SDK client retries. On Groq this is the 429-backoff budget (.env raises
+    # it to 5); on local Ollama a couple cover transient connection blips
+    # while a model loads into memory.
     llm_max_retries: int = 2
 
-    # Preserved for future swap-back; unused while on local models.
+    # Preserved for future provider swaps; unused today.
     anthropic_api_key: str | None = None
     openrouter_api_key: str | None = None
 
@@ -30,10 +32,11 @@ class Settings(BaseSettings):
     )
     log_level: str = "INFO"
 
-    # Local Ollama has no rate limits, but one instance serializes requests
-    # (OLLAMA_NUM_PARALLEL defaults low) and parallel calls contend for
-    # RAM/VRAM. Keep concurrency modest so searchers don't thrash the model;
-    # raise only if OLLAMA_NUM_PARALLEL is configured higher on the host.
+    # Groq free tier allows ~30 req/min and one run is 1 (planner) + N
+    # (searchers) + N–3N (validations) + 1 (synth) + 1 (critic) requests —
+    # keep concurrency modest so a run stays inside the quota. (On local
+    # Ollama the same cap budgets RAM/VRAM contention instead: one instance
+    # serializes requests unless OLLAMA_NUM_PARALLEL is raised.)
     max_parallel_searchers: int = 3
 
     # Planner validates each searcher finding and retries with a revised query
