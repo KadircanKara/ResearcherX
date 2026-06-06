@@ -5,7 +5,7 @@ Multi-agent research assistant. Pipeline: **Planner → parallel (Searcher → P
 ## Stack
 
 - Backend: FastAPI (async) + SQLAlchemy 2.0 async + Alembic + Postgres
-- LLM: **local Ollama** (default model `gemma4`) via the OpenAI-compatible SDK. Provider is isolated to `app/llm/client.py` + `LLM_*` env vars (`LLM_BASE_URL`/`LLM_API_KEY`/`LLM_MODEL`). Any OpenAI-compatible endpoint works by re-pointing env.
+- LLM: **Groq free tier** (`llama-3.3-70b-versatile`) via the OpenAI-compatible SDK. Provider is isolated to `app/llm/client.py` + `LLM_*` env vars (`LLM_BASE_URL`/`LLM_API_KEY`/`LLM_MODEL`). Any OpenAI-compatible endpoint works by re-pointing env — including host-run Ollama for local models (see Provider swap).
 - Search: **DuckDuckGo** (`ddgs`). No API key.
 - Streaming: in-process `asyncio.Queue` event bus (`app/services/event_bus.py`) → `sse-starlette` → `EventSource` in the client.
 - Frontend: Next.js 15 App Router + TS + Tailwind.
@@ -38,24 +38,29 @@ The planner does not pass garbage downstream. Per sub-query, `search_one()` in `
 
 ## Structured outputs
 
-`app/llm/structured.py::parse_structured()` — JSON mode + schema pasted into the system prompt + retry-once-with-stricter-prompt + tolerant JSON extraction (strips `<think>...</think>` reasoning blocks, code fences, slices to first balanced `{...}`). Keep it — local models drop into reasoning prose far more often than cloud GPT-class models; deepseek-r1 *always* emits `<think>` blocks.
+`app/llm/structured.py::parse_structured()` — JSON mode + schema pasted into the system prompt + retry-once-with-stricter-prompt + tolerant JSON extraction (strips `<think>...</think>` reasoning blocks, code fences, slices to first balanced `{...}`). Keep it even on Groq — it costs nothing there, and it's what keeps the local/reasoning-model path (deepseek-r1 *always* emits `<think>` blocks) viable.
 
-`response_format={"type": "json_object"}` is best-effort: some Ollama versions/models reject it via the OpenAI-compat layer, so `_one_shot` falls back without it (and remembers). The schema-in-prompt is the real guarantor of JSON.
+`response_format={"type": "json_object"}` is best-effort: some endpoints (notably Ollama versions/models via the OpenAI-compat layer) reject it, so `_one_shot` falls back without it (and remembers). The schema-in-prompt is the real guarantor of JSON.
 
 `app/agents/searcher.py` degrades gracefully: if `parse_structured` raises, it returns a `SearchFinding` built from raw DDG snippets. Preserve this — one flaky response shouldn't fail the whole run.
 
 ## Provider swap
 
-- Default is local Ollama; the client is the plain OpenAI SDK, so flipping to any OpenAI-compatible cloud provider (e.g. Groq: `LLM_BASE_URL=https://api.groq.com/openai/v1` + real key) is **env-only** — no code changes.
+- Default is Groq; the client is the plain OpenAI SDK, so flipping to any OpenAI-compatible endpoint is **env-only** — no code changes. Local Ollama (`LLM_BASE_URL=http://host.docker.internal:11434/v1`, `LLM_API_KEY=ollama`) is the documented alternative for GPU-capable machines; it was the dev default until 2026-06 (dropped: no usable GPU on the dev machine). `config.py` code defaults still point at Ollama as the keyless boot fallback — `.env` is what selects Groq.
 - `.env.example` keeps `ANTHROPIC_API_KEY` and `OPENROUTER_API_KEY` as preserved-but-unused slots. To go to a non-OpenAI SDK, rewrite `app/llm/client.py` (and `structured.py` if needed). Agent and service code does not change.
 - **OpenRouter is not viable on the free tier for this app.** 50 req/day on unverified accounts; one full run is 5+ requests. `openrouter/free` also routes to models that reject `system` messages and `response_format`. We evaluated and rejected.
 
-## Local model notes
+## Rate-limit budget (Groq free tier)
 
-- No rate limits, but one Ollama instance serializes requests (`OLLAMA_NUM_PARALLEL` defaults low) and parallel calls contend for RAM/VRAM — that's what `max_parallel_searchers=3` budgets now, not quotas. Planner still caps sub_queries at 3 (pydantic schema).
-- One run ≈ 1 planner + N searchers + N–3N validations + 1 synth + 1 critic calls. Validation calls are small (`max_tokens=400`).
-- `llm_max_retries=2` on the SDK client covers transient blips while a model cold-loads into memory.
+- ~30 req/min on `llama-3.3-70b-versatile`. One run ≈ 1 planner + N searchers + N–3N validations + 1 synth + 1 critic calls (validation calls are small, `max_tokens=400`) — the validation loop makes runs noticeably heavier than the pre-validation pipeline, so keep `max_parallel_searchers=3` and the sub_queries cap of 3 (pydantic schema).
+- `LLM_MAX_RETRIES=5` in `.env` lets the SDK absorb 429s with exponential backoff (the `llm_max_retries` setting exists for exactly this dial).
+
+## Local model notes (Ollama alternative)
+
+- No rate limits, but one Ollama instance serializes requests (`OLLAMA_NUM_PARALLEL` defaults low) and parallel calls contend for RAM/VRAM — `max_parallel_searchers=3` budgets that instead of quotas.
+- `LLM_MAX_RETRIES=2` suffices — only covers transient blips while a model cold-loads into memory.
 - **Ollama runs on the HOST, not in compose** (macOS Docker has no GPU passthrough — containerized would be CPU-only). Backend reaches it via `host.docker.internal:11434`; `extra_hosts: host-gateway` makes that work on Linux too. An opt-in `ollama` compose profile exists for Linux/GPU setups (`docker compose --profile ollama up` + `LLM_BASE_URL=http://ollama:11434/v1`).
+- Realistically needs a GPU: CPU-only inference is too slow for the multi-call pipeline (why the dev default moved to Groq).
 
 ## Migrations
 
@@ -64,8 +69,7 @@ The planner does not pass garbage downstream. Per sub-query, `search_one()` in `
 ## Running
 
 ```bash
-ollama pull gemma4    # host-run Ollama; any model from `ollama list` works
-cp .env.example .env  # defaults already point at host Ollama + gemma4
+cp .env.example .env  # set LLM_API_KEY (free key: https://console.groq.com/keys)
 make up
 make migrate          # first time only
 ```
