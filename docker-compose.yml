@@ -20,11 +20,6 @@ services:
     env_file: .env
     environment:
       DATABASE_URL: postgresql+asyncpg://researcherx:researcherx@db:5432/researcherx
-    # Reach host-run Ollama at host.docker.internal:11434. Docker Desktop
-    # (macOS/Windows) provides the name natively; host-gateway makes it work
-    # on Linux too.
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     depends_on:
       db:
         condition: service_healthy
@@ -48,24 +43,5 @@ services:
       - /app/.next
     command: npm run dev
 
-  # Opt-in containerized Ollama: docker compose --profile ollama up
-  # On macOS this is CPU-only (no GPU passthrough) — prefer host-run Ollama.
-  # Useful on Linux hosts with GPU or when installing Ollama on the host is
-  # not an option. Set LLM_BASE_URL=http://ollama:11434/v1 in .env to use it.
-  ollama:
-    image: ollama/ollama:latest
-    profiles: ["ollama"]
-    ports:
-      - "11434:11434"
-    volumes:
-      - ollama_models:/root/.ollama
-    # GPU on Linux (uncomment with nvidia-container-toolkit installed):
-    # deploy:
-    #   resources:
-    #     reservations:
-    #       devices:
-    #         - capabilities: [gpu]
-
 volumes:
   db_data:
-  ollama_models:
