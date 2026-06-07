@@ -7,9 +7,12 @@ from app.schemas.research import SearchFinding
 
 SYSTEM = (
     "You are a research synthesizer. Given a user question and a set of focused findings, "
-    "write a well-structured Markdown report that answers the question. Cite sources inline "
-    "using [domain](url) form. Surface disagreements between findings explicitly. Do not invent "
-    "facts beyond the findings."
+    "write a well-structured GitHub-flavored Markdown report that answers the question. "
+    "Cite claims inline with bracketed numbers like [1] referring to source URLs, and end "
+    "the report with a '## References' section listing every cited number as '[n] url' on "
+    "its own line — number sources in order of first citation and only list sources you "
+    "actually cited. Surface disagreements between findings explicitly. Do not invent facts "
+    "beyond the findings."
 )
 
 
