@@ -22,6 +22,17 @@ class Settings(BaseSettings):
     # limits (~30 req/min; one run fires a dozen-plus calls).
     llm_max_retries: int = 5
 
+    # Abuse limits (decision D3): anonymous per-IP quotas + a global daily
+    # cap; the owner API key (X-API-Key header) bypasses both. The cap is
+    # the real DoS backstop for the Groq quota.
+    owner_api_key: str | None = None
+    rate_limit_runs: str = "3/hour;10/day"  # per-IP, POST /v1/research
+    rate_limit_reads: str = "120/minute"  # per-IP, GETs + SSE connects
+    # Groq free tier allows 100k tokens/day and a measured full run costs
+    # ~12.5k — 10 caps the day at ~light-overdraft, with cancelled/degraded
+    # runs costing less. Raise only alongside a paid tier.
+    global_daily_run_cap: int = 10
+
     database_url: str = "sqlite+aiosqlite:///./researcherx.db"
     cors_origins: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["http://localhost:3000"]
@@ -59,6 +70,8 @@ class Settings(BaseSettings):
             problems.append("LLM_API_KEY is empty")
         if self.database_url.startswith("sqlite"):
             problems.append("DATABASE_URL points at sqlite")
+        if not self.owner_api_key:
+            problems.append("OWNER_API_KEY is empty (required for quota bypass)")
         if problems:
             raise RuntimeError(f"refusing to start with ENVIRONMENT=prod: {'; '.join(problems)}")
 
