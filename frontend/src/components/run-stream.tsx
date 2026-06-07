@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { eventsUrl, getRun } from "@/lib/api";
 import type { Critique, Finding, Plan, RunEvent, RunStatus, Validation } from "@/lib/types";
 
@@ -301,8 +302,9 @@ export function RunStream({ runId }: Props) {
           {reportView === "rendered" ? (
             <article className="prose prose-sm max-w-none bg-white rounded border border-ink/10 p-5">
               {/* Security: report text is LLM/web-derived. react-markdown v9
-                  escapes raw HTML by default — never add rehype-raw here. */}
-              <ReactMarkdown>{report}</ReactMarkdown>
+                  escapes raw HTML by default — never add rehype-raw here.
+                  remark-gfm is a SYNTAX plugin (tables etc.), not raw HTML. */}
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>{report}</ReactMarkdown>
             </article>
           ) : (
             <pre className="whitespace-pre-wrap break-words bg-white rounded border border-ink/10 p-5 font-mono text-xs leading-relaxed text-ink/80">
