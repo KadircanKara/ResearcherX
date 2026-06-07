@@ -56,15 +56,28 @@ class ResearchService:
                     run.status = RunStatus.COMPLETED
                     await db.commit()
             await bus.publish(run_id, {"type": "status", "status": "completed"})
-        except Exception as exc:  # noqa: BLE001
+        except asyncio.CancelledError:
+            # Viewer disconnected past the grace window, or server shutdown.
+            log.info("research_run_cancelled", run_id=run_id)
+            async with SessionLocal() as db:
+                run = await db.get(ResearchRun, run_id)
+                if run and str(run.status) not in (RunStatus.COMPLETED, RunStatus.FAILED):
+                    run.status = RunStatus.FAILED
+                    run.error = "run cancelled"
+                    await db.commit()
+            raise
+        except Exception:
+            # Full traceback stays in server logs; clients get a generic
+            # message — provider/model internals must never leak out.
             log.exception("research_run_failed", run_id=run_id)
+            message = f"The research run failed. (ref: {run_id})"
             async with SessionLocal() as db:
                 run = await db.get(ResearchRun, run_id)
                 if run:
                     run.status = RunStatus.FAILED
-                    run.error = str(exc)
+                    run.error = message
                     await db.commit()
-            await bus.publish(run_id, {"type": "error", "message": str(exc)})
+            await bus.publish(run_id, {"type": "error", "message": message})
         finally:
             await bus.close(run_id)
 
@@ -213,11 +226,10 @@ class ResearchService:
                 )
             except Exception as exc:  # noqa: BLE001
                 # Fail-open: a flaky validator must not make the pipeline less
-                # robust than it was without validation.
+                # robust than it was without validation. Exception detail goes
+                # to the log only — reasons are client-visible (SSE + steps).
                 log.warning("validation_degraded", query=query, error=str(exc))
-                validation = FindingValidation(
-                    verdict="valid", reasons=[f"validator unavailable: {exc}"]
-                )
+                validation = FindingValidation(verdict="valid", reasons=["validator unavailable"])
             if empty and validation.verdict == "valid":
                 # An empty finding is garbage by definition; keep the planner's
                 # revised query (if any) but never accept it as valid.

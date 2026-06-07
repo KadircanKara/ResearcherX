@@ -7,6 +7,10 @@ from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
+    # "dev" or "prod". Prod refuses to boot on dev fallbacks — see
+    # validate_for_environment().
+    environment: str = "dev"
+
     # LLM provider: Groq free tier via its OpenAI-compatible API. The client
     # is the plain OpenAI SDK, so any OpenAI-compatible endpoint works by
     # re-pointing LLM_BASE_URL / LLM_API_KEY / LLM_MODEL in .env.
@@ -41,6 +45,22 @@ class Settings(BaseSettings):
         if isinstance(v, str):
             return [o.strip() for o in v.split(",") if o.strip()]
         return v
+
+    def validate_for_environment(self) -> None:
+        """Fail fast when prod boots on dev fallbacks. Called at startup.
+
+        The code defaults exist so dev/tests boot keyless — silently running
+        prod on them (no LLM key, sqlite) must be impossible.
+        """
+        if self.environment != "prod":
+            return
+        problems = []
+        if not self.llm_api_key:
+            problems.append("LLM_API_KEY is empty")
+        if self.database_url.startswith("sqlite"):
+            problems.append("DATABASE_URL points at sqlite")
+        if problems:
+            raise RuntimeError(f"refusing to start with ENVIRONMENT=prod: {'; '.join(problems)}")
 
 
 settings = Settings()  # type: ignore[call-arg]
