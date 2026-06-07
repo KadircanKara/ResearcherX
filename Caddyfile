@@ -1,0 +1,20 @@
+# Phase 2: HTTP-only on :80 — there is no domain yet, so no ACME. Phase 5
+# replaces the site address with the real domain and Caddy then auto-issues
+# Let's Encrypt certs over HTTP-01 (cert storage volume already mounted).
+:80 {
+	# Backend API + SSE. Caddy adds X-Forwarded-For — the backend rate
+	# limiter keys on its first hop.
+	handle /v1/* {
+		reverse_proxy backend:8000 {
+			# SSE must stream token-by-token: flush every write, never
+			# buffer. (Caddy also auto-detects text/event-stream; explicit
+			# beats implicit for the one header the UX depends on.)
+			flush_interval -1
+		}
+	}
+
+	# Everything else → Next.js
+	handle {
+		reverse_proxy frontend:3000
+	}
+}
