@@ -5,10 +5,15 @@ export interface Plan {
   rationale: string;
 }
 
+export interface SourceSummary {
+  url: string;
+  summary: string;
+}
+
 export interface Finding {
   query: string;
   summary: string;
-  sources: string[];
+  sources: SourceSummary[];
   attempts?: number;
   validated?: boolean;
   accepted_degraded?: boolean;
