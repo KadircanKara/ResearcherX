@@ -38,15 +38,40 @@ class ResearchPlan(BaseModel):
     rationale: str
 
 
+class SourceSummary(BaseModel):
+    """One source and what it specifically contributes to a sub-query.
+
+    Per-source summaries (not just a flat URL list) are what let the
+    synthesizer cite the RIGHT url for each claim instead of guessing the
+    number↔url mapping from an aggregate blob.
+    """
+
+    url: str
+    summary: str
+
+
 class SearchFinding(BaseModel):
     query: str
-    summary: str
-    sources: list[str]
+    summary: str  # overall synthesis of the sub-query (narrative scaffolding)
+    sources: list[SourceSummary]
     # Set by the orchestrator after planner validation; defaults keep the
     # searcher's own construction (which doesn't know about attempts) valid.
     attempts: int = 1
     validated: bool = False
     accepted_degraded: bool = False  # retries exhausted, best attempt kept
+
+
+class NumberedSource(BaseModel):
+    """A deduped, stably-numbered source for the synthesizer/critic.
+
+    The number is assigned ONCE in code (first-seen order across all
+    findings) and handed to the synthesizer, so it cannot reshuffle the
+    number↔url binding.
+    """
+
+    n: int
+    url: str
+    summary: str
 
 
 class FindingValidation(BaseModel):
