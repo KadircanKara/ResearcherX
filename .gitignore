@@ -16,6 +16,7 @@ build/
 *.tsbuildinfo
 *.db
 *.db-journal
+/data/
 .DS_Store
 .idea/
 .vscode/

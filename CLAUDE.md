@@ -30,6 +30,7 @@ Multi-agent research assistant. Pipeline: **Planner → parallel (Searcher → P
 - **Client-visible error text is generic by design.** `run.error`/SSE error events carry `"The research run failed. (ref: <run_id>)"`; validator fail-open reasons say only `"validator unavailable"`. Tracebacks/exception text stay in server logs. Don't "improve" client messages with `str(exc)`.
 - **`ENVIRONMENT=prod` refuses dev fallbacks** (`Settings.validate_for_environment`): empty `LLM_API_KEY` or sqlite `DATABASE_URL` aborts startup.
 - **Bus queues are bounded (2048, drop-oldest).** A normal run emits ~1.1k events, so the bound must stay above that. A drop only degrades a stuck consumer's live view — the snapshot seed restores on refresh.
+- **Never add `rehype-raw` to the report renderer.** Report text is LLM/web-derived; react-markdown v9 escapes raw HTML by default and that default is the XSS policy.
 
 ## Planner validation loop
 
@@ -60,6 +61,7 @@ The planner does not pass garbage downstream. Per sub-query, `search_one()` in `
 
 - ~30 req/min on `llama-3.3-70b-versatile`. One run ≈ 1 planner + N searchers + N–3N validations + 1 synth + 1 critic calls (validation calls are small, `max_tokens=400`) — the validation loop makes runs noticeably heavier than the pre-validation pipeline, so keep `max_parallel_searchers=3` and the sub_queries cap of 3 (pydantic schema).
 - `LLM_MAX_RETRIES=5` (the config default) lets the SDK absorb 429s with exponential backoff. A dozen 429s in a single run is normal operation, not an error.
+- **The binding budget is tokens/day, not req/min**: 100k TPD on the free tier, and a measured full run costs ~12.5k tokens (2026-06-07: 8 runs exhausted the day). `global_daily_run_cap=10` is derived from that math — don't raise it without a paid tier. TPD exhaustion mid-run surfaces as `openai.RateLimitError` → the run fails with the sanitized message (correct behavior, verified live).
 
 ## Migrations
 
@@ -67,7 +69,7 @@ The planner does not pass garbage downstream. Per sub-query, `search_one()` in `
 
 ## Tests
 
-`make test` (runs pytest inside the backend container; dev deps may need `pip install -e ".[dev]"` in the container after a rebuild). `backend/tests/conftest.py` forces a throwaway sqlite DB and unroutable LLM env **before any app import** — tests never touch postgres or the network; all agents are faked. `tests/__init__.py` must exist (cross-module fake imports).
+`make test` (runs pytest inside the backend container; dev deps are baked into the Dockerfile `dev` target). `backend/tests/conftest.py` forces a throwaway sqlite DB and unroutable LLM env **before any app import** — tests never touch postgres or the network; all agents are faked. It also resets the in-memory rate-limiter storage per test (module-global; shared per-IP windows otherwise leak across tests). `tests/__init__.py` must exist (cross-module fake imports).
 
 ## Running
 
@@ -77,3 +79,11 @@ make up
 ```
 
 Frontend on :3000, backend on :8000/docs. Remember: after editing `.env`, `docker compose up -d --force-recreate backend` (restart won't re-read it).
+
+## Prod stack (local or box)
+
+`make prod-up` / `prod-down` / `prod-logs` — `docker-compose.prod.yml` under project name `researcherx-prod`, so it coexists with the dev stack. Requires `POSTGRES_PASSWORD`, `LLM_API_KEY`, `OWNER_API_KEY` exported (SSM on the box). Caddy on :80 is the only published port (`/v1/*` → backend with `flush_interval -1` for SSE, rest → frontend). Dockerfiles are multi-target: dev compose builds `target: dev` (root, reload, dev deps); prod builds the default target (non-root, no source mounts, backend `--workers 1` — **load-bearing**, see security.py docstring). The prod frontend image inlines `NEXT_PUBLIC_API_BASE=""` at build → same-origin `/v1/...` URLs through Caddy, domain-agnostic.
+
+## Rate limits / auth (D3)
+
+`app/core/security.py`: per-IP moving windows (`rate_limit_runs` 3/hour;10/day on POST, `rate_limit_reads` on GETs) keyed on first `X-Forwarded-For` hop; global daily cap = count of today's `research_runs` rows (DB is the counter — restart-proof, no extra table); `X-API-Key` == `owner_api_key` bypasses all (constant-time). Built on `limits` directly, NOT slowapi — slowapi's `exempt_when` takes no request argument, so an owner bypass can't be expressed through it. In-memory limiter storage is valid ONLY because the backend is single-worker.
