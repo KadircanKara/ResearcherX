@@ -14,12 +14,17 @@ from app.schemas.research import (
     FindingValidation,
     ResearchPlan,
     SearchFinding,
+    SourceSummary,
 )
 from app.services.research_service import ResearchService
 
 
 def good_finding(query: str) -> SearchFinding:
-    return SearchFinding(query=query, summary=f"useful summary for {query}", sources=["https://s"])
+    return SearchFinding(
+        query=query,
+        summary=f"useful summary for {query}",
+        sources=[SourceSummary(url="https://s", summary=f"source for {query}")],
+    )
 
 
 def empty_finding(query: str) -> SearchFinding:

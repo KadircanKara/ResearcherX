@@ -252,14 +252,27 @@ export function RunStream({ runId }: Props) {
                   )}
                 <p className="mt-2 text-sm">{f.summary}</p>
                 {f.sources.length > 0 && (
-                  <ul className="mt-2 text-xs font-mono text-ink/60 list-disc pl-5">
-                    {f.sources.map((s, j) => (
-                      <li key={j}>
-                        <a href={s} target="_blank" rel="noreferrer" className="underline">
-                          {s}
-                        </a>
-                      </li>
-                    ))}
+                  <ul className="mt-2 text-xs font-mono text-ink/60 list-disc pl-5 space-y-1">
+                    {f.sources.map((s, j) => {
+                      // Tolerate old runs where sources were plain URL strings.
+                      const url = typeof s === "string" ? s : s.url;
+                      const summary = typeof s === "string" ? "" : s.summary;
+                      return (
+                        <li key={j}>
+                          <a
+                            href={url}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="underline"
+                          >
+                            {url}
+                          </a>
+                          {summary && (
+                            <span className="block text-ink/50 not-italic">{summary}</span>
+                          )}
+                        </li>
+                      );
+                    })}
                   </ul>
                 )}
               </details>
