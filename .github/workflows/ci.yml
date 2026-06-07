@@ -1,6 +1,4 @@
-# CI stub (deployment Phase 0) — backend lint only.
-# Phase 1 expands this with: backend pytest job; frontend npm ci + lint +
-# typecheck + build (node 22). Keep this green — it gates every phase after.
+# CI (deployment Phase 1) — gates every phase after it. Keep green.
 name: CI
 
 on:
@@ -9,7 +7,7 @@ on:
   pull_request:
 
 jobs:
-  backend-lint:
+  backend:
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -19,7 +17,30 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      # Pin to the minor version verified locally so format rules don't drift.
+          cache: pip
+          cache-dependency-path: backend/pyproject.toml
+      # Pin ruff to the minor version verified locally so format rules don't drift.
       - run: pip install "ruff~=0.12.0"
       - run: ruff check .
       - run: ruff format --check .
+      - run: pip install -e ".[dev]"
+      # Tests force their own sqlite DATABASE_URL and fake all agents — no
+      # services, no network, no secrets needed here.
+      - run: pytest -q
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm run build

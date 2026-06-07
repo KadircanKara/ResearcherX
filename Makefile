@@ -12,8 +12,13 @@ logs:
 build:
 	docker compose build
 
+# Migrations run automatically at backend startup; this is the manual
+# escape hatch (e.g. against a stopped app).
 migrate:
 	docker compose exec backend alembic upgrade head
+
+test:
+	docker compose exec backend pytest -q
 
 revision:
 	docker compose exec backend alembic revision --autogenerate -m "$(m)"
