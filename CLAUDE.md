@@ -25,6 +25,11 @@ Multi-agent research assistant. Pipeline: **Planner → parallel (Searcher → P
 - **New SSE event types must be registered in TWO places in `frontend/src/components/run-stream.tsx`**: the `switch` AND the `addEventListener` kind list. `EventSource` only fires listeners for named events — an unlisted type is silently dropped.
 - **`StepKind`/`RunStatus` are Python-side `StrEnum`s over `String(16)` columns** — adding a member (e.g. `VALIDATE = "validate"`) needs **no alembic migration**; autogenerate will correctly produce an empty diff.
 - **The event bus has no replay — two orderings make the UI lossless anyway.** Service: `_record_step` BEFORE `bus.publish` (every published event is already persisted). UI (`run-stream.tsx`): subscribe to SSE FIRST, then GET the snapshot and seed state from `run.steps`, buffering live events until the seed lands. An event is therefore either in the snapshot or received live; GET-then-subscribe loses fast events (the plan lands <1s after run creation — found by e2e, plan section missing). Preserve both orderings. Related: the accepted search step's output is re-written post-validation (`_update_step_output`) so seeded findings carry final `validated`/`accepted_degraded` flags.
+- **Run tasks are registered, not fire-and-forget** (`services/task_registry.py`). The registry + bus are in-process — **uvicorn must run a single worker**. SSE disconnect cancels an unwatched run only after a **10s grace window** (`UNWATCHED_CANCEL_GRACE_S` in `api/v1/research.py`): a page refresh closes the old EventSource before the new one connects, so zero-grace cancellation kills runs on every reload.
+- **Startup auto-migrates and reaps orphans** (lifespan in `main.py`): programmatic `alembic upgrade head` (`db/migrate.py` — Config built WITHOUT alembic.ini on purpose; passing the ini makes env.py run `fileConfig`, which silences uvicorn's loggers), then PENDING/RUNNING runs are marked FAILED "interrupted by restart". Shutdown cancels registered tasks BEFORE disposing the engine — the CancelledError handlers still write final statuses.
+- **Client-visible error text is generic by design.** `run.error`/SSE error events carry `"The research run failed. (ref: <run_id>)"`; validator fail-open reasons say only `"validator unavailable"`. Tracebacks/exception text stay in server logs. Don't "improve" client messages with `str(exc)`.
+- **`ENVIRONMENT=prod` refuses dev fallbacks** (`Settings.validate_for_environment`): empty `LLM_API_KEY` or sqlite `DATABASE_URL` aborts startup.
+- **Bus queues are bounded (2048, drop-oldest).** A normal run emits ~1.1k events, so the bound must stay above that. A drop only degrades a stuck consumer's live view — the snapshot seed restores on refresh.
 
 ## Planner validation loop
 
@@ -58,14 +63,17 @@ The planner does not pass garbage downstream. Per sub-query, `search_one()` in `
 
 ## Migrations
 
-`make revision m="msg"` then `make migrate`. Initial revision is in `alembic/versions/`. If models change, autogenerate picks it up.
+`make revision m="msg"` to autogenerate. Migrations apply automatically at backend startup; `make migrate` remains as a manual escape hatch. Initial revision is in `alembic/versions/`.
+
+## Tests
+
+`make test` (runs pytest inside the backend container; dev deps may need `pip install -e ".[dev]"` in the container after a rebuild). `backend/tests/conftest.py` forces a throwaway sqlite DB and unroutable LLM env **before any app import** — tests never touch postgres or the network; all agents are faked. `tests/__init__.py` must exist (cross-module fake imports).
 
 ## Running
 
 ```bash
 cp .env.example .env  # set LLM_API_KEY (free key: https://console.groq.com/keys)
 make up
-make migrate          # first time only
 ```
 
 Frontend on :3000, backend on :8000/docs. Remember: after editing `.env`, `docker compose up -d --force-recreate backend` (restart won't re-read it).
