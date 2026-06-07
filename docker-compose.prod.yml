@@ -38,6 +38,8 @@ services:
       LLM_API_KEY: ${LLM_API_KEY:?LLM_API_KEY is required}
       LLM_MODEL: ${LLM_MODEL:-llama-3.3-70b-versatile}
       LLM_MAX_RETRIES: ${LLM_MAX_RETRIES:-5}
+      # Optional JSON list of failover providers (see .env.example).
+      LLM_FALLBACKS: ${LLM_FALLBACKS:-[]}
       OWNER_API_KEY: ${OWNER_API_KEY:?OWNER_API_KEY is required}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}

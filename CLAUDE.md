@@ -51,11 +51,13 @@ The planner does not pass garbage downstream. Per sub-query, `search_one()` in `
 
 `app/agents/searcher.py` degrades gracefully: if `parse_structured` raises, it returns a `SearchFinding` built from raw DDG snippets. Preserve this — one flaky response shouldn't fail the whole run.
 
-## Provider swap
+## Provider swap / failover
 
-- Groq is the only configured provider (dev + prod); `config.py` defaults match `.env.example`. The client is the plain OpenAI SDK, so flipping to any OpenAI-compatible endpoint is **env-only** (`LLM_BASE_URL`/`LLM_API_KEY`/`LLM_MODEL`) — no code changes. To go to a non-OpenAI SDK, rewrite `app/llm/client.py` (and `structured.py` if needed); agent and service code does not change.
+- Groq is the primary provider (dev + prod); `config.py` defaults match `.env.example`. The client is the plain OpenAI SDK, so flipping the primary to any OpenAI-compatible endpoint is **env-only** (`LLM_BASE_URL`/`LLM_API_KEY`/`LLM_MODEL`) — no code changes. To go to a non-OpenAI SDK, rewrite `app/llm/client.py` (and `structured.py` if needed); agent and service code does not change.
+- **Daily-quota failover** (`app/llm/client.py::ProviderPool`): `LLM_FALLBACKS` (JSON list) adds alternate endpoints; every LLM call goes through `create_chat_completion`, which injects the active provider's model and rotates on `RateLimitError` *after* SDK retries (per-minute bursts are absorbed by backoff; only sustained exhaustion fails over). The index is sticky module state — single-worker assumption, reset on restart (= every reload in dev). `structured.py` tracks `response_format` support **per provider**. Don't bypass the wrapper with raw `client.chat.completions.create`.
+- Recommended fallback: **Gemini Flash** via Google's OpenAI-compat endpoint (`https://generativelanguage.googleapis.com/v1beta/openai/`, model `gemini-2.0-flash`) — generous free RPD, supports JSON mode + system messages.
 - Local Ollama was the dev default until 2026-06, then removed entirely (no usable GPU on the dev machine; CPU inference is too slow for the multi-call pipeline). Don't reintroduce local-model scaffolding — no Ollama compose service, no `extra_hosts`, no local-model env blocks.
-- **OpenRouter is not viable on the free tier for this app.** 50 req/day on unverified accounts; one full run is 5+ requests. `openrouter/free` also routes to models that reject `system` messages and `response_format`. We evaluated and rejected.
+- **OpenRouter is not viable as a PRIMARY on the free tier** (50 req/day unverified; one run is 5+ requests) and `openrouter/free` auto-routing picks models that reject `system` messages and `response_format` — evaluated and rejected 2026-06. As a *terminal fallback* with a **pinned** `:free` model it adds ~2-3 runs/day of headroom; never the auto-router.
 
 ## Rate-limit budget (Groq free tier)
 
