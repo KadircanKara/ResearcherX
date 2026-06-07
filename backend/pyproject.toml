@@ -21,6 +21,17 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["ruff>=0.7", "pytest>=8.3", "pytest-asyncio>=0.24"]
 
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
