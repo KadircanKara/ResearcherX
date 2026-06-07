@@ -65,6 +65,11 @@ export function RunStream({ runId }: Props) {
         case "report_delta":
           setReport((prev) => prev + data.text);
           break;
+        case "report_reset":
+          // Synthesis stream died mid-flight and is restarting on another
+          // provider — discard the partial draft.
+          setReport("");
+          break;
         case "critique":
           setCritique(data.critique);
           break;
@@ -107,6 +112,7 @@ export function RunStream({ runId }: Props) {
         "validation",
         "search_retry",
         "report_delta",
+        "report_reset",
         "critique",
         "error",
       ]) {
@@ -147,7 +153,9 @@ export function RunStream({ runId }: Props) {
               ...prev,
               [query]: { ...v, query, attempt },
             }));
-          } else if (s.kind === "critique") {
+          } else if (s.kind === "critique" && "overall" in s.output) {
+            // A critique step without a verdict means the critic failed
+            // open ({"unavailable": true}) — show no critique section.
             setCritique(s.output as unknown as Critique);
           }
         }
