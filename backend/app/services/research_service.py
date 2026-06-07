@@ -14,8 +14,41 @@ from app.core.logging import log
 from app.db.models import AgentStep, ResearchRun, RunStatus, StepKind
 from app.db.session import SessionLocal
 from app.llm.client import rotate_current
-from app.schemas.research import FindingValidation, SearchFinding
+from app.schemas.research import FindingValidation, NumberedSource, SearchFinding
 from app.services.event_bus import bus
+
+
+def _norm_url(url: str) -> str:
+    """Normalize for dedup: drop scheme, leading www., trailing slash, case."""
+    u = url.strip().lower().split("://", 1)[-1]
+    if u.startswith("www."):
+        u = u[4:]
+    return u.rstrip("/")
+
+
+def build_source_catalog(findings: list[SearchFinding]) -> list[NumberedSource]:
+    """Dedupe sources across findings and assign stable [n] numbers.
+
+    First-seen order across findings fixes the numbering before the
+    synthesizer ever sees it, so the model cannot reshuffle the
+    number↔url binding. Duplicate URLs (same link from two sub-queries)
+    collapse to one entry, merging their per-source summaries.
+    """
+    catalog: list[NumberedSource] = []
+    by_url: dict[str, NumberedSource] = {}
+    for finding in findings:
+        for src in finding.sources:
+            key = _norm_url(src.url)
+            if not key:
+                continue
+            existing = by_url.get(key)
+            if existing is None:
+                ns = NumberedSource(n=len(catalog) + 1, url=src.url, summary=src.summary)
+                by_url[key] = ns
+                catalog.append(ns)
+            elif src.summary and src.summary not in existing.summary:
+                existing.summary = f"{existing.summary} {src.summary}".strip()
+    return catalog
 
 
 class ResearchService:
@@ -174,12 +207,18 @@ class ResearchService:
 
         findings = await asyncio.gather(*(search_one(q) for q in plan.sub_queries))
 
+        # Deduped, stably-numbered source catalog: assigning [n] in code is
+        # what stops the synthesizer from shuffling the number↔url mapping.
+        catalog = build_source_catalog(findings)
+
         # 3. Synthesize (streamed). A stream can die MID-flight (observed on
         # OpenRouter free models: 200 on the request, APIError partway) —
         # create_chat_completion can't failover after the request succeeded,
         # so retry the whole step once on the next provider. report_reset
         # tells live viewers to discard the partial draft.
-        synth_input = SynthesizerInput(question=question, findings=findings)
+        synth_input = SynthesizerInput(
+            question=question, sub_queries=plan.sub_queries, sources=catalog
+        )
         chunks: list[str] = []
         for synth_attempt in (1, 2):
             await bus.publish(run_id, {"type": "agent_start", "agent": "synthesizer"})
@@ -218,7 +257,7 @@ class ResearchService:
         await bus.publish(run_id, {"type": "agent_start", "agent": "critic"})
         try:
             critique = await self._critic.run(
-                CriticInput(question=question, draft_report=draft, findings=findings)
+                CriticInput(question=question, draft_report=draft, sources=catalog)
             )
         except Exception as exc:  # noqa: BLE001
             log.warning("critique_degraded", run_id=run_id, error=str(exc)[:200])

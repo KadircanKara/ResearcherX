@@ -52,7 +52,7 @@ class PlannerAgent:
             f"Sub-query searched: {inp.sub_query}\n\n"
             f"Finding summary:\n{inp.finding.summary}\n\n"
             f"Sources ({len(inp.finding.sources)}): "
-            f"{', '.join(inp.finding.sources) or '(none)'}"
+            f"{', '.join(s.url for s in inp.finding.sources) or '(none)'}"
         )
         return await parse_structured(
             system=VALIDATE_SYSTEM,
