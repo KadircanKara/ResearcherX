@@ -1,5 +1,6 @@
 import asyncio
 
+from openai import APIError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -12,6 +13,7 @@ from app.core.config import settings
 from app.core.logging import log
 from app.db.models import AgentStep, ResearchRun, RunStatus, StepKind
 from app.db.session import SessionLocal
+from app.llm.client import rotate_current
 from app.schemas.research import FindingValidation, SearchFinding
 from app.services.event_bus import bus
 
@@ -172,35 +174,62 @@ class ResearchService:
 
         findings = await asyncio.gather(*(search_one(q) for q in plan.sub_queries))
 
-        # 3. Synthesize (streamed)
-        await bus.publish(run_id, {"type": "agent_start", "agent": "synthesizer"})
+        # 3. Synthesize (streamed). A stream can die MID-flight (observed on
+        # OpenRouter free models: 200 on the request, APIError partway) —
+        # create_chat_completion can't failover after the request succeeded,
+        # so retry the whole step once on the next provider. report_reset
+        # tells live viewers to discard the partial draft.
+        synth_input = SynthesizerInput(question=question, findings=findings)
         chunks: list[str] = []
-        async for chunk in self._synthesizer.stream(
-            SynthesizerInput(question=question, findings=findings)
-        ):
-            chunks.append(chunk)
-            await bus.publish(run_id, {"type": "report_delta", "text": chunk})
+        for synth_attempt in (1, 2):
+            await bus.publish(run_id, {"type": "agent_start", "agent": "synthesizer"})
+            chunks = []
+            try:
+                async for chunk in self._synthesizer.stream(synth_input):
+                    chunks.append(chunk)
+                    await bus.publish(run_id, {"type": "report_delta", "text": chunk})
+                break
+            except APIError as exc:
+                if synth_attempt == 2:
+                    raise
+                log.warning(
+                    "synthesis_stream_failed_retrying",
+                    run_id=run_id,
+                    error=str(exc)[:200],
+                    provider=rotate_current().base_url,
+                )
+                await bus.publish(run_id, {"type": "report_reset"})
         draft = "".join(chunks)
         await self._record_step(
             run_id, StepKind.SYNTHESIZE, "synthesizer", {"question": question}, {"report": draft}
         )
 
-        # 4. Critique
-        await bus.publish(run_id, {"type": "agent_start", "agent": "critic"})
-        critique = await self._critic.run(
-            CriticInput(question=question, draft_report=draft, findings=findings)
-        )
-        await self._record_step(
-            run_id, StepKind.CRITIQUE, "critic", {"draft": draft}, critique.model_dump()
-        )
-        await bus.publish(run_id, {"type": "critique", "critique": critique.model_dump()})
-
-        # 5. Persist final report
+        # 4. Persist the report BEFORE critique. The report is the product;
+        # a flaky critic must not lose it (observed: OpenRouter free returned
+        # malformed JSON on the critique call after a fully-streamed report).
         async with SessionLocal() as db:
             run = await db.get(ResearchRun, run_id)
             if run:
                 run.report = draft
                 await db.commit()
+
+        # 5. Critique — advisory, so it fails open like the validator: the
+        # run still completes, the UI simply shows no critique section.
+        await bus.publish(run_id, {"type": "agent_start", "agent": "critic"})
+        try:
+            critique = await self._critic.run(
+                CriticInput(question=question, draft_report=draft, findings=findings)
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("critique_degraded", run_id=run_id, error=str(exc)[:200])
+            await self._record_step(
+                run_id, StepKind.CRITIQUE, "critic", {"draft": draft}, {"unavailable": True}
+            )
+        else:
+            await self._record_step(
+                run_id, StepKind.CRITIQUE, "critic", {"draft": draft}, critique.model_dump()
+            )
+            await bus.publish(run_id, {"type": "critique", "critique": critique.model_dump()})
 
     async def _validate_finding(
         self,

@@ -31,6 +31,8 @@ Multi-agent research assistant. Pipeline: **Planner → parallel (Searcher → P
 - **`ENVIRONMENT=prod` refuses dev fallbacks** (`Settings.validate_for_environment`): empty `LLM_API_KEY` or sqlite `DATABASE_URL` aborts startup.
 - **Bus queues are bounded (2048, drop-oldest).** A normal run emits ~1.1k events, so the bound must stay above that. A drop only degrades a stuck consumer's live view — the snapshot seed restores on refresh.
 - **Never add `rehype-raw` to the report renderer.** Report text is LLM/web-derived; react-markdown v9 escapes raw HTML by default and that default is the XSS policy.
+- **`run.report` is persisted BEFORE the critique, and the critic fails open.** A flaky critic call must never lose a finished report (observed live: OpenRouter free returned 200-with-garbage on the critique after a fully-streamed report). Degraded critique records step output `{"unavailable": true}` and publishes no event; the UI seed only renders critique steps that have `overall`.
+- **A synthesis stream can die mid-flight** (free-tier upstreams) — `create_chat_completion` can only failover the initial request. The service retries the whole synthesis once on the next provider (`rotate_current()`) and publishes `report_reset` so live viewers drop the partial draft. `report_reset` is registered in both run-stream.tsx places like every event type.
 
 ## Planner validation loop
 
@@ -51,11 +53,13 @@ The planner does not pass garbage downstream. Per sub-query, `search_one()` in `
 
 `app/agents/searcher.py` degrades gracefully: if `parse_structured` raises, it returns a `SearchFinding` built from raw DDG snippets. Preserve this — one flaky response shouldn't fail the whole run.
 
-## Provider swap
+## Provider swap / failover
 
-- Groq is the only configured provider (dev + prod); `config.py` defaults match `.env.example`. The client is the plain OpenAI SDK, so flipping to any OpenAI-compatible endpoint is **env-only** (`LLM_BASE_URL`/`LLM_API_KEY`/`LLM_MODEL`) — no code changes. To go to a non-OpenAI SDK, rewrite `app/llm/client.py` (and `structured.py` if needed); agent and service code does not change.
+- Groq is the primary provider (dev + prod); `config.py` defaults match `.env.example`. The client is the plain OpenAI SDK, so flipping the primary to any OpenAI-compatible endpoint is **env-only** (`LLM_BASE_URL`/`LLM_API_KEY`/`LLM_MODEL`) — no code changes. To go to a non-OpenAI SDK, rewrite `app/llm/client.py` (and `structured.py` if needed); agent and service code does not change.
+- **Daily-quota failover** (`app/llm/client.py::ProviderPool`): `LLM_FALLBACKS` (JSON list) adds alternate endpoints; every LLM call goes through `create_chat_completion`, which injects the active provider's model and rotates on `RateLimitError` *after* SDK retries (per-minute bursts are absorbed by backoff; only sustained exhaustion fails over). The index is sticky module state — single-worker assumption, reset on restart (= every reload in dev). `structured.py` tracks `response_format` support **per provider**. Don't bypass the wrapper with raw `client.chat.completions.create`.
+- Recommended fallback: **Gemini Flash** via Google's OpenAI-compat endpoint (`https://generativelanguage.googleapis.com/v1beta/openai/`, model `gemini-2.0-flash`) — generous free RPD, supports JSON mode + system messages.
 - Local Ollama was the dev default until 2026-06, then removed entirely (no usable GPU on the dev machine; CPU inference is too slow for the multi-call pipeline). Don't reintroduce local-model scaffolding — no Ollama compose service, no `extra_hosts`, no local-model env blocks.
-- **OpenRouter is not viable on the free tier for this app.** 50 req/day on unverified accounts; one full run is 5+ requests. `openrouter/free` also routes to models that reject `system` messages and `response_format`. We evaluated and rejected.
+- **OpenRouter is not viable as a PRIMARY on the free tier** (50 req/day unverified; one run is 5+ requests) and `openrouter/free` auto-routing picks models that reject `system` messages and `response_format` — evaluated and rejected 2026-06. As a *terminal fallback* with a **pinned** `:free` model it adds ~2-3 runs/day of headroom; never the auto-router.
 
 ## Rate-limit budget (Groq free tier)
 

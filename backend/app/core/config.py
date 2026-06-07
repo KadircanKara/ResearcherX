@@ -1,7 +1,15 @@
 from typing import Annotated
 
-from pydantic import Field, field_validator
+from pydantic import BaseModel, Field, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+
+
+class LLMFallback(BaseModel):
+    """One alternate OpenAI-compatible endpoint for daily-quota failover."""
+
+    base_url: str
+    api_key: str
+    model: str
 
 
 class Settings(BaseSettings):
@@ -21,6 +29,13 @@ class Settings(BaseSettings):
     # SDK client retries — the 429-backoff budget for Groq's free-tier rate
     # limits (~30 req/min; one run fires a dozen-plus calls).
     llm_max_retries: int = 5
+
+    # Alternate providers for daily-quota failover, as a JSON list:
+    # LLM_FALLBACKS='[{"base_url":"...","api_key":"...","model":"..."}]'
+    # When the active provider keeps 429ing after SDK retries (e.g. Groq's
+    # 100k tokens/day exhausted), calls rotate to the next entry. Empty
+    # list = single-provider behavior.
+    llm_fallbacks: list[LLMFallback] = Field(default_factory=list)
 
     # Abuse limits (decision D3): anonymous per-IP quotas + a global daily
     # cap; the owner API key (X-API-Key header) bypasses both. The cap is

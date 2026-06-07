@@ -21,6 +21,7 @@ from app.core.security import _storage as limiter_storage  # noqa: E402
 from app.db import models  # noqa: F401, E402 — register models on metadata
 from app.db.base import Base  # noqa: E402
 from app.db.session import engine  # noqa: E402
+from app.llm.client import reset_pool  # noqa: E402
 
 
 @pytest_asyncio.fixture(autouse=True)
@@ -32,6 +33,7 @@ async def fresh_db():
     3/hour limits in unrelated tests.
     """
     limiter_storage.reset()
+    reset_pool()  # provider failover index is sticky module state
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.drop_all)
         await conn.run_sync(Base.metadata.create_all)

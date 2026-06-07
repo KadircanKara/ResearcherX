@@ -65,5 +65,6 @@ export type RunEvent =
       max_attempts: number;
     }
   | { type: "report_delta"; text: string }
+  | { type: "report_reset" }
   | { type: "critique"; critique: Critique }
   | { type: "error"; message: string };
