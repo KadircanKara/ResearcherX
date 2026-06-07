@@ -100,6 +100,29 @@ async def test_non_rate_errors_propagate_without_rotation(pool_of_three):
     assert clients["http://b"].chat.completions.calls == []
 
 
+async def test_concurrent_failures_advance_only_once(pool_of_three):
+    """Two parallel calls failing on the same provider must not double-advance.
+
+    Observed live: simultaneous Gemini 429s each advanced the index,
+    skipping past healthy OpenRouter back onto exhausted Groq.
+    """
+    import asyncio
+
+    pool, clients = pool_of_three(
+        {
+            "http://a": [rate_limit_error(), rate_limit_error()],  # both calls fail here
+            "http://b": ["one", "two"],  # both must be rescued HERE
+            "http://c": ["never"],
+        }
+    )
+    results = await asyncio.gather(
+        create_chat_completion(messages=[]), create_chat_completion(messages=[])
+    )
+    assert sorted(results) == ["one", "two"]
+    assert pool.current.base_url == "http://b"  # not double-advanced to c
+    assert clients["http://c"].chat.completions.calls == []
+
+
 def test_pool_built_from_settings(monkeypatch):
     monkeypatch.setattr(
         settings,

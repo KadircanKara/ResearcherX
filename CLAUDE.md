@@ -31,6 +31,8 @@ Multi-agent research assistant. Pipeline: **Planner → parallel (Searcher → P
 - **`ENVIRONMENT=prod` refuses dev fallbacks** (`Settings.validate_for_environment`): empty `LLM_API_KEY` or sqlite `DATABASE_URL` aborts startup.
 - **Bus queues are bounded (2048, drop-oldest).** A normal run emits ~1.1k events, so the bound must stay above that. A drop only degrades a stuck consumer's live view — the snapshot seed restores on refresh.
 - **Never add `rehype-raw` to the report renderer.** Report text is LLM/web-derived; react-markdown v9 escapes raw HTML by default and that default is the XSS policy.
+- **`run.report` is persisted BEFORE the critique, and the critic fails open.** A flaky critic call must never lose a finished report (observed live: OpenRouter free returned 200-with-garbage on the critique after a fully-streamed report). Degraded critique records step output `{"unavailable": true}` and publishes no event; the UI seed only renders critique steps that have `overall`.
+- **A synthesis stream can die mid-flight** (free-tier upstreams) — `create_chat_completion` can only failover the initial request. The service retries the whole synthesis once on the next provider (`rotate_current()`) and publishes `report_reset` so live viewers drop the partial draft. `report_reset` is registered in both run-stream.tsx places like every event type.
 
 ## Planner validation loop
 

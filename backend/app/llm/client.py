@@ -41,12 +41,20 @@ class ProviderPool:
     def current(self) -> Provider:
         return self._providers[self._idx]
 
-    def advance(self) -> Provider:
-        """Move to the next provider (wraps) and return it."""
-        self._idx = (self._idx + 1) % len(self._providers)
-        nxt = self.current
-        log.warning("llm_provider_failover", to=nxt.base_url, model=nxt.model)
-        return nxt
+    def advance_from(self, failed: Provider) -> Provider:
+        """Move past `failed` — but only if it is still the active provider.
+
+        Parallel calls can fail on the same provider concurrently; without
+        the guard each failure advances the index, skipping straight past
+        the healthy provider (observed live: two simultaneous Gemini 429s
+        hopped the pool back onto exhausted Groq). Single event loop and no
+        awaits here, so check-then-set is atomic.
+        """
+        if self.current is failed:
+            self._idx = (self._idx + 1) % len(self._providers)
+            nxt = self.current
+            log.warning("llm_provider_failover", to=nxt.base_url, model=nxt.model)
+        return self.current
 
     def client(self, provider: Provider) -> AsyncOpenAI:
         return _client_for(provider.base_url, provider.api_key)
@@ -92,6 +100,15 @@ def current_provider() -> Provider:
     return get_pool().current
 
 
+def rotate_current() -> Provider:
+    """Force failover past the active provider (mid-stream failures: the
+    initial request succeeded, so create_chat_completion couldn't rotate).
+    Only safe where no concurrent LLM calls are in flight — synthesis runs
+    sequentially after the search gather, so its caller qualifies."""
+    pool = get_pool()
+    return pool.advance_from(pool.current)
+
+
 async def create_chat_completion(**kwargs):
     """chat.completions.create against the active provider, with failover.
 
@@ -118,6 +135,6 @@ async def create_chat_completion(**kwargs):
                 error=str(exc)[:200],
             )
             last_exc = exc
-            pool.advance()
+            pool.advance_from(provider)
     assert last_exc is not None
     raise last_exc
