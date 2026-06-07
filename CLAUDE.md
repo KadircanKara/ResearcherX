@@ -24,6 +24,7 @@ Multi-agent research assistant. Pipeline: **Planner → parallel (Searcher → P
 - **DB port is intentionally not published** in `docker-compose.yml` — the dev host typically has its own Postgres on 5432. Backend reaches db via the docker network.
 - **New SSE event types must be registered in TWO places in `frontend/src/components/run-stream.tsx`**: the `switch` AND the `addEventListener` kind list. `EventSource` only fires listeners for named events — an unlisted type is silently dropped.
 - **`StepKind`/`RunStatus` are Python-side `StrEnum`s over `String(16)` columns** — adding a member (e.g. `VALIDATE = "validate"`) needs **no alembic migration**; autogenerate will correctly produce an empty diff.
+- **The event bus has no replay — two orderings make the UI lossless anyway.** Service: `_record_step` BEFORE `bus.publish` (every published event is already persisted). UI (`run-stream.tsx`): subscribe to SSE FIRST, then GET the snapshot and seed state from `run.steps`, buffering live events until the seed lands. An event is therefore either in the snapshot or received live; GET-then-subscribe loses fast events (the plan lands <1s after run creation — found by e2e, plan section missing). Preserve both orderings. Related: the accepted search step's output is re-written post-validation (`_update_step_output`) so seeded findings carry final `validated`/`accepted_degraded` flags.
 
 ## Planner validation loop
 

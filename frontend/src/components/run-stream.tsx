@@ -27,7 +27,103 @@ export function RunStream({ runId }: Props) {
   useEffect(() => {
     let cancelled = false;
 
+    // Findings can arrive twice (snapshot seed + buffered live event) —
+    // dedupe by (query, attempts), which uniquely identifies an attempt.
+    const addFinding = (f: Finding) =>
+      setFindings((prev) =>
+        prev.some(
+          (p) => p.query === f.query && (p.attempts ?? 1) === (f.attempts ?? 1),
+        )
+          ? prev
+          : [...prev, f],
+      );
+
+    function apply(data: RunEvent) {
+      switch (data.type) {
+        case "status":
+          setStatus(data.status);
+          break;
+        case "agent_start":
+          setActive(data.query ? `${data.agent} → ${data.query}` : data.agent);
+          break;
+        case "plan":
+          setPlan(data.plan);
+          break;
+        case "finding":
+          addFinding(data.finding);
+          break;
+        case "validation":
+          setValidations((prev) => ({ ...prev, [data.query]: data }));
+          setActive(`planner validation: ${data.verdict} — ${data.query}`);
+          break;
+        case "search_retry":
+          setActive(
+            `planner revising query (${data.attempt}/${data.max_attempts}): ` +
+              `${data.old_query} → ${data.new_query}`,
+          );
+          break;
+        case "report_delta":
+          setReport((prev) => prev + data.text);
+          break;
+        case "critique":
+          setCritique(data.critique);
+          break;
+        case "error":
+          setErr(data.message);
+          break;
+      }
+    }
+
     async function init() {
+      // Subscribe BEFORE fetching the snapshot. The backend records each
+      // step before publishing its event, so every event published before
+      // our subscription opened is guaranteed to be in the snapshot's
+      // `steps` — and everything after it arrives live. Events are buffered
+      // until the seed is applied, then replayed (dedupe makes the overlap
+      // harmless). GET-then-subscribe has a gap that loses fast events:
+      // the plan lands <1s after run creation.
+      const src = new EventSource(eventsUrl(runId));
+      sourceRef.current = src;
+      const buffer: RunEvent[] = [];
+      let live = false;
+
+      function handle(ev: MessageEvent) {
+        try {
+          const data = JSON.parse(ev.data) as RunEvent;
+          if (live) apply(data);
+          else buffer.push(data);
+        } catch {
+          // ignore malformed
+        }
+      }
+
+      // Every backend event type must be listed here — EventSource only
+      // fires listeners for named events, so unlisted types are dropped.
+      for (const kind of [
+        "status",
+        "agent_start",
+        "plan",
+        "finding",
+        "validation",
+        "search_retry",
+        "report_delta",
+        "critique",
+        "error",
+      ]) {
+        src.addEventListener(kind, handle);
+      }
+      src.addEventListener("end", () => {
+        src.close();
+        sourceRef.current = null;
+      });
+
+      // Wait until the subscription is open (or errors — then the snapshot
+      // alone is still rendered) before taking the snapshot.
+      await new Promise<void>((resolve) => {
+        src.addEventListener("open", () => resolve(), { once: true });
+        src.addEventListener("error", () => resolve(), { once: true });
+      });
+
       try {
         const run = await getRun(runId);
         if (cancelled) return;
@@ -35,79 +131,42 @@ export function RunStream({ runId }: Props) {
         setStatus(run.status);
         setReport(run.report ?? "");
         setErr(run.error ?? null);
+
+        // Seed agent state from recorded steps — SSE is live-update only.
+        for (const s of run.steps) {
+          if (s.kind === "plan") {
+            setPlan(s.output as unknown as Plan);
+          } else if (s.kind === "search") {
+            const f = s.output as unknown as Finding;
+            if (f.validated || f.accepted_degraded) addFinding(f);
+          } else if (s.kind === "validate") {
+            const v = s.output as unknown as Omit<Validation, "query" | "attempt">;
+            const query = String(s.input.sub_query ?? "");
+            const attempt = Number(s.input.attempt ?? 1);
+            setValidations((prev) => ({
+              ...prev,
+              [query]: { ...v, query, attempt },
+            }));
+          } else if (s.kind === "critique") {
+            setCritique(s.output as unknown as Critique);
+          }
+        }
         setLoaded(true);
 
         if (run.status === "completed" || run.status === "failed") {
+          src.close();
+          sourceRef.current = null;
           return;
         }
 
-        const src = new EventSource(eventsUrl(runId));
-        sourceRef.current = src;
-
-        function handle(ev: MessageEvent) {
-          try {
-            const data = JSON.parse(ev.data) as RunEvent;
-            switch (data.type) {
-              case "status":
-                setStatus(data.status);
-                break;
-              case "agent_start":
-                setActive(data.query ? `${data.agent} → ${data.query}` : data.agent);
-                break;
-              case "plan":
-                setPlan(data.plan);
-                break;
-              case "finding":
-                setFindings((prev) => [...prev, data.finding]);
-                break;
-              case "validation":
-                setValidations((prev) => ({ ...prev, [data.query]: data }));
-                setActive(`planner validation: ${data.verdict} — ${data.query}`);
-                break;
-              case "search_retry":
-                setActive(
-                  `planner revising query (${data.attempt}/${data.max_attempts}): ` +
-                    `${data.old_query} → ${data.new_query}`,
-                );
-                break;
-              case "report_delta":
-                setReport((prev) => prev + data.text);
-                break;
-              case "critique":
-                setCritique(data.critique);
-                break;
-              case "error":
-                setErr(data.message);
-                break;
-            }
-          } catch {
-            // ignore malformed
-          }
-        }
-
-        // Every backend event type must be listed here — EventSource only
-        // fires listeners for named events, so unlisted types are dropped.
-        for (const kind of [
-          "status",
-          "agent_start",
-          "plan",
-          "finding",
-          "validation",
-          "search_retry",
-          "report_delta",
-          "critique",
-          "error",
-        ]) {
-          src.addEventListener(kind, handle);
-        }
-        src.addEventListener("end", () => {
-          src.close();
-          sourceRef.current = null;
-        });
+        for (const ev of buffer) apply(ev);
+        live = true;
       } catch (e) {
         if (!cancelled) {
           setLoadError(e instanceof Error ? e.message : "Failed to load run.");
         }
+        src.close();
+        sourceRef.current = null;
       }
     }
 
