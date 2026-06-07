@@ -16,7 +16,9 @@ services:
       retries: 10
 
   backend:
-    build: ./backend
+    build:
+      context: ./backend
+      target: dev
     env_file: .env
     environment:
       DATABASE_URL: postgresql+asyncpg://researcherx:researcherx@db:5432/researcherx
@@ -30,7 +32,9 @@ services:
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
   frontend:
-    build: ./frontend
+    build:
+      context: ./frontend
+      target: dev
     environment:
       NEXT_PUBLIC_API_BASE: http://localhost:8000
     depends_on:
