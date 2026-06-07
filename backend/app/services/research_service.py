@@ -93,6 +93,7 @@ class ResearchService:
             async with sem:
                 current_query = q
                 best: SearchFinding | None = None
+                best_step_id: str | None = None
                 for attempt in range(1, max_attempts + 1):
                     await bus.publish(
                         run_id,
@@ -101,7 +102,7 @@ class ResearchService:
                     agent = SearcherAgent()
                     finding = await agent.run(SearcherInput(query=current_query))
                     finding.attempts = attempt
-                    await self._record_step(
+                    step_id = await self._record_step(
                         run_id,
                         StepKind.SEARCH,
                         "searcher",
@@ -109,6 +110,7 @@ class ResearchService:
                         finding.model_dump(),
                     )
                     best = finding
+                    best_step_id = step_id
 
                     validation = await self._validate_finding(
                         run_id,
@@ -121,6 +123,7 @@ class ResearchService:
 
                     if validation.verdict == "valid":
                         finding.validated = True
+                        await self._update_step_output(step_id, finding.model_dump())
                         await bus.publish(
                             run_id, {"type": "finding", "finding": finding.model_dump()}
                         )
@@ -148,8 +151,9 @@ class ResearchService:
 
                 # One hopeless sub-query shouldn't fail the whole run: keep
                 # the best attempt, but mark it so downstream/UI can tell.
-                assert best is not None
+                assert best is not None and best_step_id is not None
                 best.accepted_degraded = True
+                await self._update_step_output(best_step_id, best.model_dump())
                 await bus.publish(run_id, {"type": "finding", "finding": best.model_dump()})
                 return best
 
@@ -246,7 +250,7 @@ class ResearchService:
         agent_name: str,
         input_: dict,
         output: dict,
-    ) -> None:
+    ) -> str:
         async with SessionLocal() as db:
             step = AgentStep(
                 run_id=run_id,
@@ -257,3 +261,17 @@ class ResearchService:
             )
             db.add(step)
             await db.commit()
+            return step.id
+
+    async def _update_step_output(self, step_id: str, output: dict) -> None:
+        """Finalize a recorded step's output after the fact.
+
+        Search steps are recorded before validation, so the accepted step's
+        validated/accepted_degraded flags are only known later — and the UI
+        seeds its findings from recorded steps, so they must end up accurate.
+        """
+        async with SessionLocal() as db:
+            step = await db.get(AgentStep, step_id)
+            if step:
+                step.output = output
+                await db.commit()
