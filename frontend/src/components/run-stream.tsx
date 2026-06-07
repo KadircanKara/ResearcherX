@@ -292,6 +292,8 @@ export function RunStream({ runId }: Props) {
           </div>
           {reportView === "rendered" ? (
             <article className="prose prose-sm max-w-none bg-white rounded border border-ink/10 p-5">
+              {/* Security: report text is LLM/web-derived. react-markdown v9
+                  escapes raw HTML by default — never add rehype-raw here. */}
               <ReactMarkdown>{report}</ReactMarkdown>
             </article>
           ) : (

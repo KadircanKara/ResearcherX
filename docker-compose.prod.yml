@@ -1,0 +1,77 @@
+# Production compose. NO credentials in this file — POSTGRES_PASSWORD,
+# LLM_API_KEY and OWNER_API_KEY come from the shell environment (sourced
+# from SSM Parameter Store at deploy; exported inline for local testing).
+#
+# Run via `make prod-up` (uses its own compose project name so it can
+# coexist with the dev stack). Only Caddy publishes ports: 80/443.
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: researcherx
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_DB: researcherx
+    volumes:
+      # On the box this is the EBS mount (e.g. /srv/researcherx/postgres);
+      # locally it defaults to a gitignored dir.
+      - ${PGDATA_DIR:-./data/postgres}:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U researcherx"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  backend:
+    # Phase 3 sets BACKEND_IMAGE to the ECR URI (box pulls, never builds);
+    # locally the build block produces the same image.
+    image: ${BACKEND_IMAGE:-researcherx-backend:prod}
+    build:
+      context: ./backend
+      target: prod
+    restart: unless-stopped
+    environment:
+      ENVIRONMENT: prod
+      DATABASE_URL: postgresql+asyncpg://researcherx:${POSTGRES_PASSWORD}@db:5432/researcherx
+      LLM_BASE_URL: ${LLM_BASE_URL:-https://api.groq.com/openai/v1}
+      LLM_API_KEY: ${LLM_API_KEY:?LLM_API_KEY is required}
+      LLM_MODEL: ${LLM_MODEL:-llama-3.3-70b-versatile}
+      LLM_MAX_RETRIES: ${LLM_MAX_RETRIES:-5}
+      OWNER_API_KEY: ${OWNER_API_KEY:?OWNER_API_KEY is required}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      # Abuse-limit tunables (defaults in config.py; override without edits).
+      GLOBAL_DAILY_RUN_CAP: ${GLOBAL_DAILY_RUN_CAP:-10}
+      RATE_LIMIT_RUNS: ${RATE_LIMIT_RUNS:-3/hour;10/day}
+    depends_on:
+      db:
+        condition: service_healthy
+    # No ports: only reachable through Caddy on the compose network.
+
+  frontend:
+    image: ${FRONTEND_IMAGE:-researcherx-frontend:prod}
+    build:
+      context: ./frontend
+      # API base is inlined at build time; the default empty string means
+      # same-origin "/v1/..." URLs, proxied by Caddy — domain-agnostic image.
+    restart: unless-stopped
+    depends_on:
+      - backend
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Cert + config storage must persist or Let's Encrypt re-issues on
+      # every restart (rate-limited!). Inert until Phase 5 adds the domain.
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  caddy_data:
+  caddy_config:
