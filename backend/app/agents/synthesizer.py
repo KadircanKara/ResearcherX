@@ -2,8 +2,7 @@ from collections.abc import AsyncIterator
 
 from pydantic import BaseModel
 
-from app.core.config import settings
-from app.llm.client import get_client
+from app.llm.client import create_chat_completion
 from app.schemas.research import SearchFinding
 
 SYSTEM = (
@@ -27,9 +26,9 @@ class SynthesizerAgent:
             f"### Sub-query: {f.query}\n{f.summary}\nSources: {', '.join(f.sources)}"
             for f in inp.findings
         )
-        client = get_client()
-        stream = await client.chat.completions.create(
-            model=settings.llm_model,
+        # Failover-aware: only the initial request can 429 — the pool rotates
+        # there; an already-started stream never needs rescuing.
+        stream = await create_chat_completion(
             max_tokens=4000,
             stream=True,
             messages=[

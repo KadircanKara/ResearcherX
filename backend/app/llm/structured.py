@@ -5,9 +5,8 @@ from typing import TypeVar
 from openai import BadRequestError
 from pydantic import BaseModel, ValidationError
 
-from app.core.config import settings
 from app.core.logging import log
-from app.llm.client import get_client
+from app.llm.client import create_chat_completion, current_provider
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -60,8 +59,9 @@ def _extract_json(text: str) -> str:
 
 # Some OpenAI-compatible endpoints reject response_format. JSON mode is only
 # a hint (the schema-in-prompt is the real guarantor), so fall back without
-# it — and remember, to skip the doomed attempt next time.
-_response_format_supported = True
+# it — and remember PER PROVIDER (failover can land on an endpoint with
+# different support than the one that started the run).
+_response_format_unsupported: set[str] = set()
 
 
 async def _one_shot(
@@ -70,26 +70,27 @@ async def _one_shot(
     user: str,
     max_tokens: int,
 ) -> str:
-    global _response_format_supported
-    client = get_client()
     base: dict = {
-        "model": settings.llm_model,
         "max_tokens": max_tokens,
         "messages": [
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ],
     }
-    if _response_format_supported:
+    if current_provider().base_url not in _response_format_unsupported:
         try:
-            response = await client.chat.completions.create(
-                **base, response_format={"type": "json_object"}
-            )
+            response = await create_chat_completion(**base, response_format={"type": "json_object"})
             return response.choices[0].message.content or ""
         except BadRequestError as exc:
-            log.warning("response_format_unsupported", error=str(exc))
-            _response_format_supported = False
-    response = await client.chat.completions.create(**base)
+            # Attribute to whichever provider actually served the call
+            # (create_chat_completion may have rotated mid-flight).
+            log.warning(
+                "response_format_unsupported",
+                base_url=current_provider().base_url,
+                error=str(exc),
+            )
+            _response_format_unsupported.add(current_provider().base_url)
+    response = await create_chat_completion(**base)
     return response.choices[0].message.content or ""
 
 
