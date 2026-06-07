@@ -55,15 +55,12 @@ make up
 
 Frontend: http://localhost:3000 — Backend: http://localhost:8000/docs
 
-First run needs DB migrations:
-
-```bash
-make migrate
-```
+Migrations run automatically at backend startup — a fresh database needs no
+manual step. Run the backend test suite with `make test`.
 
 ## Scaling notes
 
 This scaffold is single-process. Two natural upgrade points:
 
 1. **Run dispatch** — the per-run event queue is in-process (`services/event_bus.py`). For multi-replica deploy, swap for Redis pub/sub.
-2. **Agent work** — orchestration runs inline on the request task. For heavy concurrency, move `research_service.run()` into an Arq/Celery worker and have the SSE endpoint subscribe instead of orchestrate.
+2. **Agent work** — runs execute as in-process asyncio tasks (tracked in `services/task_registry.py`, cancelled on viewer disconnect and graceful shutdown). For heavy concurrency or multiple replicas, move them into an Arq/Celery worker and have the SSE endpoint subscribe instead of orchestrate. Until then the backend must run as a **single uvicorn worker**.
