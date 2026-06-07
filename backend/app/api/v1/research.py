@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sse_starlette.sse import EventSourceResponse
 
 from app.core.logging import log
+from app.core.security import enforce_read_limits, enforce_run_quotas
 from app.db.session import get_session
 from app.schemas.research import ResearchRequest, RunOut
 from app.services.event_bus import bus
@@ -38,7 +39,12 @@ def _watch_unwatched(run_id: str) -> None:
     watcher.add_done_callback(_watchers.discard)
 
 
-@router.post("", response_model=RunOut, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "",
+    response_model=RunOut,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(enforce_run_quotas)],
+)
 async def create_run(
     payload: ResearchRequest,
     db: AsyncSession = Depends(get_session),
@@ -58,7 +64,7 @@ async def create_run(
     )
 
 
-@router.get("/{run_id}", response_model=RunOut)
+@router.get("/{run_id}", response_model=RunOut, dependencies=[Depends(enforce_read_limits)])
 async def get_run(run_id: str, db: AsyncSession = Depends(get_session)) -> RunOut:
     run = await service.get(db, run_id)
     if run is None:
@@ -66,7 +72,7 @@ async def get_run(run_id: str, db: AsyncSession = Depends(get_session)) -> RunOu
     return RunOut.model_validate(run)
 
 
-@router.get("/{run_id}/events")
+@router.get("/{run_id}/events", dependencies=[Depends(enforce_read_limits)])
 async def stream_events(run_id: str, request: Request) -> EventSourceResponse:
     queue = bus.subscribe(run_id)
 
