@@ -105,6 +105,7 @@ def harness(monkeypatch):
             steps = sorted(refreshed.steps, key=lambda s: s.created_at)
             return refreshed, steps, searcher_cls
 
+        run_it.service = service  # for tests that swap individual agents
         return run_it, recorder
 
     return build
@@ -234,6 +235,75 @@ async def test_validator_error_fails_open_without_leaking(harness):
     # The exception text must not reach anything client-visible.
     all_visible = repr([s.output for s in steps]) + repr(recorder.events)
     assert "secret provider detail" not in all_visible
+
+
+async def test_synthesis_stream_retries_on_next_provider(harness, monkeypatch):
+    """Mid-stream APIError → report_reset + one retry; second attempt wins."""
+    import httpx
+    from openai import APIError
+
+    import app.services.research_service as rs_module
+
+    planner = FakePlanner(["q1"], [FindingValidation(verdict="valid")])
+    run_it, recorder = harness(planner, [good_finding("q1")])
+
+    class FlakySynth:
+        attempts = 0
+
+        async def stream(self, inp):
+            FlakySynth.attempts += 1
+            if FlakySynth.attempts == 1:
+                yield "partial "
+                raise APIError(
+                    "Provider returned error",
+                    request=httpx.Request("POST", "http://x"),
+                    body=None,
+                )
+            yield "clean "
+            yield "report"
+
+    rotations = []
+
+    def fake_rotate():
+        rotations.append(1)
+        return type("P", (), {"base_url": "http://next"})()
+
+    monkeypatch.setattr(rs_module, "rotate_current", fake_rotate)
+    run_it.service._synthesizer = FlakySynth()
+
+    run, steps, searcher = await run_it()
+
+    assert str(run.status) == "completed"
+    assert run.report == "clean report"  # partial draft discarded
+    assert FlakySynth.attempts == 2
+    assert rotations == [1]  # failed over before the retry
+    types = [e.get("type") for e in recorder.events if e]
+    assert "report_reset" in types
+    # Deltas: 1 from the failed attempt + 2 from the clean attempt.
+    assert types.count("report_delta") == 3
+    reset_idx = types.index("report_reset")
+    assert types.index("critique") > reset_idx
+
+
+async def test_critic_failure_does_not_fail_run(harness):
+    """Critic is advisory: it fails open, and the report survives it."""
+    planner = FakePlanner(["q1"], [FindingValidation(verdict="valid")])
+    run_it, recorder = harness(planner, [good_finding("q1")])
+
+    class ExplodingCritic:
+        async def run(self, inp):
+            raise RuntimeError("malformed JSON from free-tier provider")
+
+    run_it.service._critic = ExplodingCritic()
+
+    run, steps, searcher = await run_it()
+
+    assert str(run.status) == "completed"
+    assert run.report == "part1 part2"  # persisted BEFORE critique ran
+    assert recorder.of_type("critique") == []  # no fabricated verdict
+    crit_steps = steps_of(steps, "critique")
+    assert crit_steps[0].output == {"unavailable": True}
+    assert "malformed JSON" not in repr(recorder.events)  # nothing leaked
 
 
 async def test_pipeline_failure_is_sanitized(harness):
