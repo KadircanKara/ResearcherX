@@ -7,7 +7,7 @@ The planner doesn't pass garbage downstream: it validates every searcher result 
 ## Stack
 
 - **Backend:** FastAPI (async) + SQLAlchemy 2.0 async + Alembic + Postgres
-- **LLM:** [Groq](https://groq.com) free tier (`llama-3.3-70b-versatile`) through its OpenAI-compatible API. Provider layer is a single file — any OpenAI-compatible endpoint works by re-pointing `LLM_*` env vars, including local models via [Ollama](https://ollama.com) on GPU-capable machines.
+- **LLM:** [Groq](https://groq.com) free tier (`llama-3.3-70b-versatile`) through its OpenAI-compatible API. Provider layer is a single file — any OpenAI-compatible endpoint works by re-pointing `LLM_*` env vars.
 - **Search:** DuckDuckGo via `ddgs` (no API key)
 - **Frontend:** Next.js 15 (App Router) + TypeScript + Tailwind
 - **Infra:** Docker Compose
@@ -52,10 +52,6 @@ cp .env.example .env
 # edit .env and set LLM_API_KEY (free key: https://console.groq.com/keys)
 make up
 ```
-
-Prefer local models? Re-point the `LLM_*` vars at a host-run
-[Ollama](https://ollama.com) — see the commented block in `.env.example`
-(GPU strongly recommended).
 
 Frontend: http://localhost:3000 — Backend: http://localhost:8000/docs
 

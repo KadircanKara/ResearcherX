@@ -19,10 +19,10 @@ _THINK_BLOCK = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
 def _extract_json(text: str) -> str:
     """Best-effort JSON extraction from LLM output.
 
-    Local models are noisy: they sometimes wrap JSON in fences, prepend
-    reasoning, or append trailing prose. Reasoning models (deepseek-r1 etc.)
-    additionally emit `<think>...</think>` blocks before the answer. Strip
-    think blocks, then fences, then slice to the first balanced object.
+    LLM output is noisy: models sometimes wrap JSON in fences, prepend
+    reasoning, or append trailing prose. Reasoning models additionally emit
+    `<think>...</think>` blocks before the answer. Strip think blocks, then
+    fences, then slice to the first balanced object.
     """
     text = _THINK_BLOCK.sub("", text)
     if "</think>" in text:
@@ -58,9 +58,9 @@ def _extract_json(text: str) -> str:
     return text[start:]
 
 
-# Some Ollama versions/models reject response_format via the OpenAI-compat
-# layer. JSON mode is only a hint (the schema-in-prompt is the real guarantor),
-# so fall back without it — and remember, to skip the doomed attempt next time.
+# Some OpenAI-compatible endpoints reject response_format. JSON mode is only
+# a hint (the schema-in-prompt is the real guarantor), so fall back without
+# it — and remember, to skip the doomed attempt next time.
 _response_format_supported = True
 
 
@@ -102,10 +102,9 @@ async def parse_structured(
 ) -> T:
     """Request a JSON object matching output_model's schema and parse it.
 
-    Local models are inconsistent — they sometimes emit empty content, add
-    reasoning prose (deepseek-r1's <think> blocks), or ignore the
-    response_format hint. We retry once with a stricter prompt when the
-    first attempt fails to parse.
+    Models sometimes emit empty content, add reasoning prose (<think>
+    blocks), or ignore the response_format hint. We retry once with a
+    stricter prompt when the first attempt fails to parse.
     """
     schema = output_model.model_json_schema()
     schema_block = (
