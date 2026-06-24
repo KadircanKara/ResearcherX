@@ -1,8 +1,8 @@
 "use client"
 
-import { Users, Share2 } from "lucide-react"
+import { Users } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
-import { Button } from "@/components/ui/button"
+import { ShareDialog } from "@/components/share-dialog"
 import type { ProjectDetail } from "@/lib/types"
 
 interface ProjectHeaderProps {
@@ -37,11 +37,7 @@ export function ProjectHeader({ detail }: ProjectHeaderProps) {
               <Users className="size-4" />
               {members.length} {members.length === 1 ? "member" : "members"}
             </span>
-            {/* TODO F4: wire to real share dialog */}
-            <Button variant="outline" size="sm" onClick={() => {}}>
-              <Share2 className="size-3.5" />
-              Share
-            </Button>
+            <ShareDialog project={project} initialMembers={members} />
           </div>
         </div>
       </div>
