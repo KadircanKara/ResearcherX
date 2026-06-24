@@ -3,6 +3,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
+from app.core.logging import log
 from app.db.models import User
 from app.db.session import get_session
 
@@ -26,5 +27,6 @@ async def get_current_user(request: Request, db: AsyncSession = Depends(get_sess
         await db.execute(select(User).where(User.email == DEFAULT_USER_EMAIL))
     ).scalar_one_or_none()
     if user is None:
-        raise HTTPException(status_code=500, detail="identity seed not initialized")
+        log.error("identity_seed_missing")
+        raise HTTPException(status_code=500, detail="internal server error")
     return user
