@@ -1,5 +1,7 @@
 export type RunStatus = "pending" | "running" | "completed" | "failed";
 
+export type User = { id: string; email: string; name: string; avatar_color: string };
+
 export interface Plan {
   sub_queries: string[];
   rationale: string;

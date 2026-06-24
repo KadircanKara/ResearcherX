@@ -22,3 +22,14 @@ export async function getRun(id: string): Promise<Run> {
 export function eventsUrl(id: string): string {
   return `${API_BASE}/v1/research/${id}/events`;
 }
+
+let devUserId: string | null = null;
+export const setDevUserId = (id: string | null) => { devUserId = id; };
+
+export async function apiGet<T>(path: string): Promise<T> {
+  const headers: Record<string, string> = {};
+  if (devUserId) headers["X-Dev-User-Id"] = devUserId;
+  const r = await fetch(`${API_BASE}/v1${path}`, { headers, cache: "no-store" });
+  if (!r.ok) throw new Error(`GET ${path} -> ${r.status}`);
+  return (await r.json()) as T;
+}
