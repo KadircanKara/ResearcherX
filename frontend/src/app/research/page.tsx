@@ -46,11 +46,11 @@ export default function ResearchPage() {
     : projects
 
   return (
-    <div className="mx-auto w-full max-w-5xl px-4 py-10">
+    <div className="mx-auto w-full max-w-6xl px-4 py-12">
       {/* Header */}
       <div className="flex items-start justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight text-foreground">
+          <h1 className="text-3xl font-semibold tracking-tight text-foreground">
             Research projects
           </h1>
           <p className="mt-1 text-sm text-muted-foreground">
@@ -74,11 +74,11 @@ export default function ResearchPage() {
       {/* Content */}
       <div className="mt-6">
         {loading ? (
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3">
             {Array.from({ length: 3 }).map((_, i) => (
               <div
                 key={i}
-                className="h-48 animate-pulse rounded-xl bg-muted"
+                className="h-56 animate-pulse rounded-xl bg-muted"
               />
             ))}
           </div>
@@ -107,7 +107,7 @@ export default function ResearchPage() {
             )}
           </div>
         ) : (
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3">
             {filtered.map((project) => (
               <ProjectCard key={project.id} project={project} />
             ))}

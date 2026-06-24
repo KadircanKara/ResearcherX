@@ -4,7 +4,6 @@ import { usePathname } from "next/navigation";
 import { Network, Brain, Compass } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { ThemeToggle } from "@/components/theme-toggle";
-import { DensityToggle } from "@/components/density-toggle";
 import { UserMenu } from "@/components/user-menu";
 
 const NAV_LINKS = [
@@ -58,7 +57,6 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           {/* Right controls */}
           <div className="flex items-center gap-1">
             <ThemeToggle />
-            <DensityToggle />
             <div className="ml-1">
               <UserMenu />
             </div>
