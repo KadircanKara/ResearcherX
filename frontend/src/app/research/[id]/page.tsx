@@ -1,10 +1,10 @@
-import { RunStream } from "@/components/run-stream";
+import { redirect } from "next/navigation"
 
 interface Params {
-  params: Promise<{ id: string }>;
+  params: Promise<{ id: string }>
 }
 
-export default async function RunPage({ params }: Params) {
-  const { id } = await params;
-  return <RunStream runId={id} />;
+export default async function ProjectPage({ params }: Params) {
+  const { id } = await params
+  redirect(`/research/${id}/chat`)
 }
