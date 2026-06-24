@@ -2,6 +2,34 @@ export type RunStatus = "pending" | "running" | "completed" | "failed";
 
 export type User = { id: string; email: string; name: string; avatar_color: string };
 
+export type Role = "owner" | "editor" | "commenter" | "viewer";
+
+export interface Project {
+  id: string;
+  title: string;
+  description: string | null;
+  topic_keywords: string[];
+  my_role: Role;
+  counts: {
+    members: number;
+    papers: number;
+    chats: number;
+  };
+  created_at: string;
+  updated_at: string;
+}
+
+export interface Member {
+  user: User;
+  role: Role;
+}
+
+export interface ProjectDetail {
+  project: Project;
+  members: Member[];
+  my_role: Role;
+}
+
 export interface Plan {
   sub_queries: string[];
   rationale: string;

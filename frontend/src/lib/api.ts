@@ -33,3 +33,21 @@ export async function apiGet<T>(path: string): Promise<T> {
   if (!r.ok) throw new Error(`GET ${path} -> ${r.status}`);
   return (await r.json()) as T;
 }
+
+export async function apiSend<T>(
+  method: string,
+  path: string,
+  body?: unknown
+): Promise<T | undefined> {
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (devUserId) headers["X-Dev-User-Id"] = devUserId;
+  const r = await fetch(`${API_BASE}/v1${path}`, {
+    method,
+    headers,
+    cache: "no-store",
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (!r.ok) throw new Error(`${method} ${path} -> ${r.status}`);
+  if (r.status === 204) return undefined;
+  return (await r.json()) as T;
+}
