@@ -102,24 +102,18 @@ async def list_members(
     return [await _member_out(m, db) for m in members]
 
 
-@router.post(
-    "/projects/{project_id}/members", response_model=MemberOut, status_code=201
-)
+@router.post("/projects/{project_id}/members", response_model=MemberOut, status_code=201)
 async def add_member(
     project_id: str,
     data: MemberCreate,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_session),
 ) -> MemberOut:
-    membership = await project_service.add_member(
-        db, user, project_id, data.user_id, data.role
-    )
+    membership = await project_service.add_member(db, user, project_id, data.user_id, data.role)
     return await _member_out(membership, db)
 
 
-@router.patch(
-    "/projects/{project_id}/members/{target_user_id}", response_model=MemberOut
-)
+@router.patch("/projects/{project_id}/members/{target_user_id}", response_model=MemberOut)
 async def update_member_role(
     project_id: str,
     target_user_id: str,
@@ -133,9 +127,7 @@ async def update_member_role(
     return await _member_out(membership, db)
 
 
-@router.delete(
-    "/projects/{project_id}/members/{target_user_id}", status_code=204
-)
+@router.delete("/projects/{project_id}/members/{target_user_id}", status_code=204)
 async def remove_member(
     project_id: str,
     target_user_id: str,

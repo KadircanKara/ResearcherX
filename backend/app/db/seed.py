@@ -23,8 +23,7 @@ SEED_PROJECTS = [
     {
         "title": "Multi-UAV Coordination",
         "description": (
-            "Survey of decentralized control and learning approaches"
-            " for cooperative drone swarms."
+            "Survey of decentralized control and learning approaches for cooperative drone swarms."
         ),
         "topic_keywords": [
             "decentralized coordination",
@@ -40,8 +39,7 @@ SEED_PROJECTS = [
     {
         "title": "Aerial Computer Vision",
         "description": (
-            "Object detection and semantic segmentation for aerial and"
-            " satellite imagery."
+            "Object detection and semantic segmentation for aerial and satellite imagery."
         ),
         "topic_keywords": [
             "aerial image segmentation",
@@ -86,9 +84,7 @@ async def seed_projects(db: AsyncSession) -> None:
         if spec["title"] in existing_titles:
             continue
 
-        owner_email = next(
-            m["email"] for m in spec["members"] if m["role"] == Role.OWNER
-        )
+        owner_email = next(m["email"] for m in spec["members"] if m["role"] == Role.OWNER)
         project = Project(
             owner_id=user_map[owner_email],
             title=spec["title"],

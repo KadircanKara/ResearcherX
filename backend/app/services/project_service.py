@@ -19,9 +19,7 @@ from app.schemas.project import ProjectCreate, ProjectUpdate
 # ── internal helpers ────────────────────────────────────────────────────────
 
 
-async def _get_membership(
-    db: AsyncSession, project_id: str, user_id: str
-) -> ProjectMember | None:
+async def _get_membership(db: AsyncSession, project_id: str, user_id: str) -> ProjectMember | None:
     result = await db.execute(
         select(ProjectMember).where(
             ProjectMember.project_id == project_id,
@@ -52,9 +50,7 @@ async def _get_project_or_404(db: AsyncSession, project_id: str) -> Project:
 
 
 async def _get_members(db: AsyncSession, project_id: str) -> list[ProjectMember]:
-    result = await db.execute(
-        select(ProjectMember).where(ProjectMember.project_id == project_id)
-    )
+    result = await db.execute(select(ProjectMember).where(ProjectMember.project_id == project_id))
     return list(result.scalars().all())
 
 
@@ -208,9 +204,7 @@ async def remove_member(
         members = await _get_members(db, project_id)
         owner_count = sum(1 for m in members if m.role == "owner")
         if owner_count <= 1:
-            raise HTTPException(
-                status_code=400, detail="Cannot remove the last owner"
-            )
+            raise HTTPException(status_code=400, detail="Cannot remove the last owner")
 
     await db.delete(target)
     await db.commit()

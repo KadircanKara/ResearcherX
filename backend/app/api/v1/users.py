@@ -7,7 +7,7 @@ from app.db.models import User
 from app.db.session import get_session
 from app.schemas.user import UserOut
 
-router = APIRouter(tags=["users"])   # no prefix -> mounted under /v1
+router = APIRouter(tags=["users"])  # no prefix -> mounted under /v1
 
 
 @router.get("/me", response_model=UserOut)
