@@ -61,3 +61,15 @@ class AgentStep(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
     run: Mapped[ResearchRun] = relationship(back_populates="steps")
+
+
+class User(Base):
+    __tablename__ = "users"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    email: Mapped[str] = mapped_column(String(320), unique=True, index=True)
+    name: Mapped[str] = mapped_column(String(120))
+    # Auth deferred: nullable now so the auth phase is purely additive.
+    password_hash: Mapped[str | None] = mapped_column(String(255), default=None)
+    avatar_color: Mapped[str] = mapped_column(String(9), default="#2D3FE0")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
