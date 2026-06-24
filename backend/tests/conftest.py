@@ -38,3 +38,22 @@ async def fresh_db():
         await conn.run_sync(Base.metadata.drop_all)
         await conn.run_sync(Base.metadata.create_all)
     yield
+
+
+import httpx  # noqa: E402
+
+from app.db.session import SessionLocal  # noqa: E402
+from app.main import app  # noqa: E402
+
+
+@pytest_asyncio.fixture
+async def db_session():
+    async with SessionLocal() as session:
+        yield session
+
+
+@pytest_asyncio.fixture
+async def client():
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        yield c
