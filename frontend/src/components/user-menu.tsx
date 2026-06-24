@@ -76,9 +76,8 @@ export function UserMenu() {
 
         <DropdownMenuSeparator />
 
-        <DropdownMenuLabel>Acting as</DropdownMenuLabel>
-
         <DropdownMenuGroup>
+          <DropdownMenuLabel>Acting as</DropdownMenuLabel>
           {users.map((u, i) => {
             const label = i === 0 ? `You (${u.name})` : u.name;
             const isCurrent = u.id === currentActingId;
