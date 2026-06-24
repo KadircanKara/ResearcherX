@@ -41,8 +41,13 @@ async def test_owner_creates_project(client, users):
     assert r.status_code == 201
     data = r.json()
     assert data["title"] == "Quantum Gravity"
-    assert data["owner_id"] == you.id
     assert "id" in data
+    assert data["my_role"] == "owner"
+    assert data["counts"]["members"] == 1
+    assert data["counts"]["papers"] == 0
+    assert data["counts"]["chats"] == 0
+    assert "created_at" in data
+    assert "updated_at" in data
 
 
 # ── list: other user does not see it ────────────────────────────────────────
@@ -89,12 +94,18 @@ async def test_owner_adds_viewer_sees_project(client, users):
     assert member_data["role"] == "viewer"
     assert member_data["user"]["id"] == amelia.id
 
-    # amelia lists — sees the project
+    # amelia lists — sees the project with all required fields
     list_r = await client.get("/v1/projects", headers={"X-Dev-User-Id": amelia.id})
     assert list_r.status_code == 200
     projects = list_r.json()
     assert len(projects) == 1
     assert projects[0]["id"] == project_id
+    assert projects[0]["my_role"] == "viewer"
+    assert projects[0]["counts"]["members"] == 2
+    assert projects[0]["counts"]["papers"] == 0
+    assert projects[0]["counts"]["chats"] == 0
+    assert "created_at" in projects[0]
+    assert "updated_at" in projects[0]
 
     # amelia gets detail — my_role=viewer
     detail_r = await client.get(

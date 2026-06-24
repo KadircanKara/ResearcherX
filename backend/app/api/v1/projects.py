@@ -9,6 +9,7 @@ from app.core.identity import get_current_user
 from app.db.models import ProjectMember, User
 from app.db.session import get_session
 from app.schemas.project import (
+    Counts,
     MemberCreate,
     MemberOut,
     MemberRoleUpdate,
@@ -31,6 +32,19 @@ async def _member_out(membership: ProjectMember, db: AsyncSession) -> MemberOut:
     return MemberOut(user=UserOut.model_validate(user), role=membership.role)
 
 
+def _project_out(project, my_role: str, members_count: int) -> ProjectOut:
+    return ProjectOut(
+        id=project.id,
+        title=project.title,
+        description=project.description,
+        topic_keywords=project.topic_keywords,
+        my_role=my_role,
+        counts=Counts(members=members_count, papers=0, chats=0),
+        created_at=project.created_at,
+        updated_at=project.updated_at,
+    )
+
+
 # ── projects ─────────────────────────────────────────────────────────────────
 
 
@@ -40,7 +54,7 @@ async def list_projects(
     db: AsyncSession = Depends(get_session),
 ) -> list[ProjectOut]:
     rows = await project_service.list_projects(db, user)
-    return [ProjectOut.model_validate(row["project"]) for row in rows]
+    return [_project_out(row["project"], row["my_role"], row["counts"]["members"]) for row in rows]
 
 
 @router.post("/projects", response_model=ProjectOut, status_code=201)
@@ -50,7 +64,7 @@ async def create_project(
     db: AsyncSession = Depends(get_session),
 ) -> ProjectOut:
     project = await project_service.create_project(db, user, data)
-    return ProjectOut.model_validate(project)
+    return _project_out(project, "owner", 1)
 
 
 @router.get("/projects/{project_id}", response_model=ProjectDetailOut)
@@ -62,7 +76,7 @@ async def get_project(
     project, members, my_role = await project_service.get_project(db, user, project_id)
     member_outs = [await _member_out(m, db) for m in members]
     return ProjectDetailOut(
-        project=ProjectOut.model_validate(project),
+        project=_project_out(project, my_role, len(members)),
         members=member_outs,
         my_role=my_role,
     )
@@ -75,8 +89,9 @@ async def update_project(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_session),
 ) -> ProjectOut:
+    project, members, my_role = await project_service.get_project(db, user, project_id)
     project = await project_service.update_project(db, user, project_id, data)
-    return ProjectOut.model_validate(project)
+    return _project_out(project, my_role, len(members))
 
 
 @router.delete("/projects/{project_id}", status_code=204)

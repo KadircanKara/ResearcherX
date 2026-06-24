@@ -63,6 +63,7 @@ async def list_projects(db: AsyncSession, user: User) -> list[dict]:
         select(ProjectMember, Project)
         .join(Project, ProjectMember.project_id == Project.id)
         .where(ProjectMember.user_id == user.id)
+        .order_by(Project.created_at)
     )
     rows = result.all()
 

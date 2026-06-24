@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -34,12 +35,21 @@ class MemberOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class Counts(BaseModel):
+    members: int
+    papers: int
+    chats: int
+
+
 class ProjectOut(BaseModel):
     id: str
-    owner_id: str
     title: str
     description: str | None
     topic_keywords: list[str]
+    my_role: str
+    counts: Counts
+    created_at: datetime
+    updated_at: datetime
     model_config = {"from_attributes": True}
 
 
