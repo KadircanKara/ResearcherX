@@ -9,7 +9,7 @@ from app.core.config import settings
 from app.core.logging import configure_logging, log
 from app.db.migrate import run_migrations
 from app.db.models import ResearchRun, RunStatus
-from app.db.seed import seed_users
+from app.db.seed import seed_projects, seed_users
 from app.db.session import SessionLocal, engine
 from app.services.task_registry import registry
 
@@ -40,6 +40,7 @@ async def lifespan(app: FastAPI):
     await _fail_orphaned_runs()
     async with SessionLocal() as db:
         await seed_users(db)
+        await seed_projects(db)
         await db.commit()
     yield
     # Cancel in-flight runs first (their CancelledError handlers write final
