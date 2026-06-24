@@ -45,7 +45,7 @@ export async function apiSend<T>(
     method,
     headers,
     cache: "no-store",
-    body: body ? JSON.stringify(body) : undefined,
+    body: body !== undefined ? JSON.stringify(body) : undefined,
   });
   if (!r.ok) throw new Error(`${method} ${path} -> ${r.status}`);
   if (r.status === 204) return undefined;

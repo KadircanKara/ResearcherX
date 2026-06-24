@@ -25,7 +25,7 @@ export async function updateProject(
     topic_keywords?: string[];
   }
 ): Promise<Project> {
-  return (await apiSend<Project>("PUT", `/projects/${id}`, body)) as Project;
+  return (await apiSend<Project>("PATCH", `/projects/${id}`, body)) as Project;
 }
 
 export async function deleteProject(id: string): Promise<void> {
@@ -48,7 +48,7 @@ export async function updateMemberRole(
   userId: string,
   body: { role: Role }
 ): Promise<Member> {
-  return (await apiSend<Member>("PUT", `/projects/${id}/members/${userId}`, body)) as Member;
+  return (await apiSend<Member>("PATCH", `/projects/${id}/members/${userId}`, body)) as Member;
 }
 
 export async function removeMember(id: string, userId: string): Promise<void> {
