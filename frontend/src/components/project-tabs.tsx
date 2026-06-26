@@ -20,31 +20,30 @@ export function ProjectTabs({ projectId }: ProjectTabsProps) {
   const pathname = usePathname()
 
   return (
-    <div className="border-b border-border bg-background">
-      <div className="mx-auto max-w-6xl px-4">
-        <nav className="flex items-center gap-1" aria-label="Project tabs">
-          {TABS.map(({ slug, label, icon: Icon }) => {
-            const href = `/research/${projectId}/${slug}`
-            const active = pathname === href || pathname.startsWith(href + "/")
-            return (
-              <Link
-                key={slug}
-                href={href}
-                className={cn(
-                  "flex items-center gap-1.5 rounded-md px-2.5 py-2 text-sm transition-colors",
-                  active
-                    ? "bg-muted text-primary font-medium"
-                    : "text-muted-foreground hover:text-foreground hover:bg-muted"
-                )}
-                aria-current={active ? "page" : undefined}
-              >
-                <Icon className="size-3.5" />
-                {label}
-              </Link>
-            )
-          })}
-        </nav>
-      </div>
-    </div>
+    <nav
+      className="inline-flex items-center gap-0.5 rounded-md bg-muted p-0.5"
+      aria-label="Project tabs"
+    >
+      {TABS.map(({ slug, label, icon: Icon }) => {
+        const href = `/research/${projectId}/${slug}`
+        const active = pathname === href || pathname.startsWith(href + "/")
+        return (
+          <Link
+            key={slug}
+            href={href}
+            className={cn(
+              "flex items-center gap-1.5 rounded-[5px] px-3 py-1.5 text-sm font-medium transition-colors",
+              active
+                ? "bg-card text-accent-foreground shadow-sm dark:bg-secondary dark:text-foreground"
+                : "text-muted-foreground hover:text-foreground"
+            )}
+            aria-current={active ? "page" : undefined}
+          >
+            <Icon className="size-3.5" />
+            {label}
+          </Link>
+        )
+      })}
+    </nav>
   )
 }

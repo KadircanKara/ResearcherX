@@ -34,7 +34,7 @@ export default function ProjectLayout({ children }: { children: React.ReactNode 
 
   if (loading) {
     return (
-      <div className="mx-auto max-w-6xl px-4 py-10">
+      <div className="mx-auto w-full max-w-5xl px-6 py-10">
         <div className="h-24 animate-pulse rounded-xl bg-muted" />
         <div className="mt-2 h-10 animate-pulse rounded-xl bg-muted" />
       </div>
@@ -43,20 +43,24 @@ export default function ProjectLayout({ children }: { children: React.ReactNode 
 
   if (notFound || !detail) {
     return (
-      <div className="flex flex-col items-center gap-3 py-32 text-center">
-        <p className="text-base font-medium text-foreground">Project not found</p>
-        <p className="text-sm text-muted-foreground">
-          This project may have been deleted or you may not have access.
-        </p>
+      <div className="mx-auto w-full max-w-5xl px-6 py-10">
+        <div className="flex flex-col items-center gap-3 py-32 text-center">
+          <p className="text-base font-medium text-foreground">Project not found</p>
+          <p className="text-sm text-muted-foreground">
+            This project may have been deleted or you may not have access.
+          </p>
+        </div>
       </div>
     )
   }
 
   return (
-    <div className="flex min-h-full flex-col">
+    <div className="mx-auto w-full max-w-5xl px-6 py-8">
       <ProjectHeader detail={detail} />
-      <ProjectTabs projectId={id} />
-      <div className="flex-1">{children}</div>
+      <div className="mt-5">
+        <ProjectTabs projectId={id} />
+      </div>
+      <div className="mt-6">{children}</div>
     </div>
   )
 }

@@ -159,15 +159,18 @@ export function ShareDialog({ project, initialMembers }: ShareDialogProps) {
                 key={member.user.id}
                 className="flex items-center gap-3 rounded-lg py-1.5"
               >
-                {/* Avatar */}
-                <Avatar size="sm">
-                  <AvatarFallback
-                    style={{ backgroundColor: member.user.avatar_color }}
-                    className="text-white"
-                  >
-                    {initials(member.user.name)}
-                  </AvatarFallback>
-                </Avatar>
+                {/* Avatar + presence dot (decorative) */}
+                <span className="relative shrink-0">
+                  <Avatar size="sm">
+                    <AvatarFallback
+                      style={{ backgroundColor: member.user.avatar_color }}
+                      className="text-white"
+                    >
+                      {initials(member.user.name)}
+                    </AvatarFallback>
+                  </Avatar>
+                  <span className="absolute -bottom-0.5 -right-0.5 size-2.5 rounded-full border-2 border-card bg-emerald-500" />
+                </span>
 
                 {/* Name + email */}
                 <div className="min-w-0 flex-1">
@@ -191,7 +194,7 @@ export function ShareDialog({ project, initialMembers }: ShareDialogProps) {
                     onChange={(e) =>
                       handleRoleChange(member.user.id, e.target.value as Role)
                     }
-                    className="shrink-0 rounded-md border border-border bg-background px-2 py-1 text-xs text-foreground focus:outline-none focus:ring-2 focus:ring-ring/50"
+                    className="shrink-0 rounded-md border border-border bg-background px-2.5 py-1 text-xs text-foreground focus:outline-none focus:ring-2 focus:ring-ring/50"
                   >
                     {EDITABLE_ROLES.map((r) => (
                       <option key={r} value={r}>
@@ -215,7 +218,7 @@ export function ShareDialog({ project, initialMembers }: ShareDialogProps) {
                     type="button"
                     aria-label={`Remove ${member.user.name}`}
                     onClick={() => handleRemove(member.user.id)}
-                    className="ml-1 shrink-0 rounded p-0.5 text-muted-foreground hover:text-destructive focus:outline-none focus:ring-2 focus:ring-ring/50"
+                    className="ml-1 shrink-0 rounded p-0.5 text-muted-foreground transition-colors hover:text-destructive focus:outline-none focus:ring-2 focus:ring-ring/50"
                   >
                     <XIcon className="size-3.5" />
                   </button>
