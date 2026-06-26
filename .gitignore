@@ -23,3 +23,6 @@ build/
 
 # Local working docs (deployment plan lives outside the public repo)
 HANDOFF.md
+
+# MCP server config (contains API keys — keep local)
+.mcp.json
