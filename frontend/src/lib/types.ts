@@ -82,6 +82,7 @@ export interface Run {
   status: RunStatus;
   report: string | null;
   error: string | null;
+  project_id: string | null;
   created_at: string;
   steps: Step[];
 }

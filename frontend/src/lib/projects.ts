@@ -1,5 +1,5 @@
 import { apiGet, apiSend } from "./api";
-import type { Project, ProjectDetail, Member, Role } from "./types";
+import type { Project, ProjectDetail, Member, Role, Run } from "./types";
 
 export async function listProjects(): Promise<Project[]> {
   return apiGet<Project[]>("/projects");
@@ -53,4 +53,12 @@ export async function updateMemberRole(
 
 export async function removeMember(id: string, userId: string): Promise<void> {
   await apiSend<void>("DELETE", `/projects/${id}/members/${userId}`);
+}
+
+export async function listProjectRuns(
+  projectId: string,
+  limit = 20,
+  offset = 0,
+): Promise<Run[]> {
+  return apiGet<Run[]>(`/projects/${projectId}/runs?limit=${limit}&offset=${offset}`);
 }
