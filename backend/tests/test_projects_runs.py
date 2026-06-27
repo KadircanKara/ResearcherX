@@ -1,6 +1,7 @@
 """Tests for research runs ↔ project binding (L1)."""
 
 import pytest_asyncio
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import Project, ProjectMember, ResearchRun, User
@@ -18,17 +19,8 @@ async def seeded(db_session: AsyncSession):
 
 @pytest_asyncio.fixture
 async def you(db_session: AsyncSession, seeded):
-    from sqlalchemy import select
     return (
         await db_session.execute(select(User).where(User.email == "you@researcherx.dev"))
-    ).scalar_one()
-
-
-@pytest_asyncio.fixture
-async def amelia(db_session: AsyncSession, seeded):
-    from sqlalchemy import select
-    return (
-        await db_session.execute(select(User).where(User.email == "amelia@lab.io"))
     ).scalar_one()
 
 
