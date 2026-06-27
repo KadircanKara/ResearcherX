@@ -2,18 +2,20 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Query, Response
+from fastapi import APIRouter, Depends, Query, Request, Response
 from sqlalchemy import desc, select as sa_select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.identity import get_current_user
-from app.db.models import ProjectMember, ResearchRun, User
+from app.db.models import Paper, ProjectMember, ResearchRun, User
 from app.db.session import get_session
 from app.schemas.project import (
     Counts,
     MemberCreate,
     MemberOut,
     MemberRoleUpdate,
+    PaperCreate,
+    PaperOut,
     ProjectCreate,
     ProjectDetailOut,
     ProjectOut,
@@ -136,6 +138,61 @@ async def list_project_runs(
         )
         for r in runs
     ]
+
+
+# ── papers ───────────────────────────────────────────────────────────────────
+
+
+@router.post("/projects/{project_id}/papers", response_model=PaperOut, status_code=201)
+async def create_paper(
+    project_id: str,
+    data: PaperCreate,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
+) -> PaperOut:
+    await project_service.require_member(db, project_id, user.id, "editor")
+    paper = Paper(
+        project_id=project_id,
+        title=data.title,
+        abstract=data.abstract,
+        pdf_url=data.pdf_url,
+    )
+    db.add(paper)
+    await db.commit()
+    await db.refresh(paper)
+    return PaperOut.model_validate(paper)
+
+
+@router.get("/projects/{project_id}/papers", response_model=list[PaperOut])
+async def list_papers(
+    project_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
+) -> list[PaperOut]:
+    await project_service.require_member(db, project_id, user.id, "viewer")
+    result = await db.execute(
+        sa_select(Paper).where(Paper.project_id == project_id).order_by(Paper.created_at)
+    )
+    return [PaperOut.model_validate(p) for p in result.scalars().all()]
+
+
+@router.post("/projects/{project_id}/papers/{paper_id}/ingest")
+async def ingest_paper(
+    project_id: str,
+    paper_id: str,
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
+) -> dict:
+    await project_service.require_member(db, project_id, user.id, "editor")
+    paper = await db.get(Paper, paper_id)
+    if paper is None or paper.project_id != project_id:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="Paper not found")
+    pdf_bytes = await request.body()
+    from app.services.paper_ingest_service import ingest
+    n = await ingest(db, paper_id, pdf_bytes)
+    return {"chunks_stored": n}
 
 
 # ── members ──────────────────────────────────────────────────────────────────

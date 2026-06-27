@@ -5,6 +5,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+
 from app.schemas.user import UserOut
 
 
@@ -57,4 +58,20 @@ class ProjectDetailOut(BaseModel):
     project: ProjectOut
     members: list[MemberOut]
     my_role: str
+    model_config = {"from_attributes": True}
+
+
+class PaperCreate(BaseModel):
+    title: str = Field(min_length=1, max_length=512)
+    abstract: str | None = None
+    pdf_url: str | None = None
+
+
+class PaperOut(BaseModel):
+    id: str
+    project_id: str
+    title: str
+    abstract: str | None
+    pdf_url: str | None
+    created_at: datetime
     model_config = {"from_attributes": True}
