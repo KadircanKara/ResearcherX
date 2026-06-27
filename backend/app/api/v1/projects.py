@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Response
+from fastapi import APIRouter, Depends, Query, Response
+from sqlalchemy import desc, select as sa_select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.identity import get_current_user
-from app.db.models import ProjectMember, User
+from app.db.models import ProjectMember, ResearchRun, User
 from app.db.session import get_session
 from app.schemas.project import (
     Counts,
@@ -18,6 +19,7 @@ from app.schemas.project import (
     ProjectOut,
     ProjectUpdate,
 )
+from app.schemas.research import RunOut
 from app.schemas.user import UserOut
 from app.services import project_service
 
@@ -102,6 +104,38 @@ async def delete_project(
 ) -> Response:
     await project_service.delete_project(db, user, project_id)
     return Response(status_code=204)
+
+
+@router.get("/projects/{project_id}/runs", response_model=list[RunOut])
+async def list_project_runs(
+    project_id: str,
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
+) -> list[RunOut]:
+    await project_service.require_member(db, project_id, user.id, "viewer")
+    result = await db.execute(
+        sa_select(ResearchRun)
+        .where(ResearchRun.project_id == project_id)
+        .order_by(desc(ResearchRun.created_at))
+        .limit(limit)
+        .offset(offset)
+    )
+    runs = result.scalars().all()
+    return [
+        RunOut(
+            id=r.id,
+            question=r.question,
+            status=str(r.status),
+            report=r.report,
+            error=r.error,
+            project_id=r.project_id,
+            created_at=r.created_at,
+            steps=[],
+        )
+        for r in runs
+    ]
 
 
 # ── members ──────────────────────────────────────────────────────────────────

@@ -140,3 +140,83 @@ async def test_create_run_with_project_id_non_member(client, amelia: User, proje
         headers={"X-Dev-User-Id": amelia.id},
     )
     assert r.status_code == 404
+
+
+# ── Task 4: GET /v1/projects/{id}/runs ───────────────────────────────────────
+
+
+async def test_list_project_runs(client, you: User, project: Project, db_session: AsyncSession):
+    from datetime import timedelta, timezone
+    from datetime import datetime as dt
+
+    base = dt.now(timezone.utc)
+    db_session.add(
+        ResearchRun(
+            question="older question here",
+            project_id=project.id,
+            created_at=base - timedelta(hours=1),
+        )
+    )
+    db_session.add(
+        ResearchRun(
+            question="newer question here",
+            project_id=project.id,
+            created_at=base,
+        )
+    )
+    await db_session.commit()
+
+    r = await client.get(
+        f"/v1/projects/{project.id}/runs",
+        headers={"X-Dev-User-Id": you.id},
+    )
+    assert r.status_code == 200
+    data = r.json()
+    assert len(data) == 2
+    assert data[0]["question"] == "newer question here"
+    assert data[1]["question"] == "older question here"
+    assert data[0]["project_id"] == project.id
+
+
+async def test_list_project_runs_excludes_other_projects(
+    client, you: User, project: Project, db_session: AsyncSession
+):
+    other = Project(owner_id=you.id, title="Other", topic_keywords=[])
+    db_session.add(other)
+    await db_session.flush()
+    db_session.add(ProjectMember(project_id=other.id, user_id=you.id, role="owner"))
+    db_session.add(ResearchRun(question="belongs to other project", project_id=other.id))
+    db_session.add(ResearchRun(question="belongs to this project", project_id=project.id))
+    await db_session.commit()
+
+    r = await client.get(
+        f"/v1/projects/{project.id}/runs",
+        headers={"X-Dev-User-Id": you.id},
+    )
+    assert r.status_code == 200
+    data = r.json()
+    assert len(data) == 1
+    assert data[0]["question"] == "belongs to this project"
+
+
+async def test_list_project_runs_non_member(client, amelia: User, project: Project):
+    r = await client.get(
+        f"/v1/projects/{project.id}/runs",
+        headers={"X-Dev-User-Id": amelia.id},
+    )
+    assert r.status_code == 404
+
+
+async def test_viewer_can_list_runs(
+    client, amelia: User, project: Project, db_session: AsyncSession
+):
+    db_session.add(ProjectMember(project_id=project.id, user_id=amelia.id, role="viewer"))
+    db_session.add(ResearchRun(question="viewer can see this run", project_id=project.id))
+    await db_session.commit()
+
+    r = await client.get(
+        f"/v1/projects/{project.id}/runs",
+        headers={"X-Dev-User-Id": amelia.id},
+    )
+    assert r.status_code == 200
+    assert len(r.json()) == 1
