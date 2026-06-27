@@ -125,14 +125,14 @@ class ChatService:
 
             def _clean_citations(text_str: str) -> str:
                 return _CITATION_RE.sub(
-                    lambda m: m.group(0) if int(m.group(1)) <= max_n else "[source unavailable]",
+                    lambda m: m.group(0) if 0 < int(m.group(1)) <= max_n else "[source unavailable]",
                     text_str,
                 )
 
             clean_response = _clean_citations(response_text)
 
             # Build citation objects for 'done' event
-            cited_ns = {int(m) for m in _CITATION_RE.findall(clean_response) if int(m) <= max_n}
+            cited_ns = {int(m) for m in _CITATION_RE.findall(clean_response) if 0 < int(m) <= max_n}
             citations = [
                 {
                     "n": c.n,
@@ -153,7 +153,7 @@ class ChatService:
 
             yield {"event": "done", "data": json.dumps({"citations": citations})}
 
-        except Exception as exc:
+        except Exception:
             log.exception("chat_service_error", conversation_id=conversation_id)
             yield {"event": "error", "data": json.dumps({"message": "Chat failed. Please try again."})}
 
