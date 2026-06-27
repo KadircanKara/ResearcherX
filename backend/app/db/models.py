@@ -175,6 +175,9 @@ class ChatMessage(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
     conversation: Mapped[ChatConversation] = relationship(back_populates="messages")
+    embedding: Mapped["ConversationMessageEmbedding | None"] = relationship(
+        back_populates="message", cascade="all, delete-orphan", uselist=False
+    )
 
 
 class PaperChunkEmbedding(Base):
@@ -208,3 +211,5 @@ class ConversationMessageEmbedding(Base):
     # Same TEXT/vector pattern as PaperChunkEmbedding.
     embedding: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+    message: Mapped[ChatMessage] = relationship(back_populates="embedding")

@@ -37,6 +37,12 @@ class Settings(BaseSettings):
     # list = single-provider behavior.
     llm_fallbacks: list[LLMFallback] = Field(default_factory=list)
 
+    # Embedding provider — Gemini text-embedding-004 via Google's OpenAI-compat
+    # endpoint. EMBEDDING_API_KEY defaults to LLM_API_KEY if not set separately.
+    embedding_base_url: str = "https://generativelanguage.googleapis.com/v1beta/openai/"
+    embedding_api_key: str = ""      # set in .env; falls back to llm_api_key if empty
+    embedding_model: str = "text-embedding-004"
+
     # Abuse limits (decision D3): anonymous per-IP quotas + a global daily
     # cap; the owner API key (X-API-Key header) bypasses both. The cap is
     # the real DoS backstop for the Groq quota.
@@ -89,6 +95,11 @@ class Settings(BaseSettings):
             problems.append("OWNER_API_KEY is empty (required for quota bypass)")
         if problems:
             raise RuntimeError(f"refusing to start with ENVIRONMENT=prod: {'; '.join(problems)}")
+
+    @property
+    def resolved_embedding_api_key(self) -> str:
+        """Use dedicated embedding key or fall back to the LLM key."""
+        return self.embedding_api_key or self.llm_api_key
 
 
 settings = Settings()  # type: ignore[call-arg]
