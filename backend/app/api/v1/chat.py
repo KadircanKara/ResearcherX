@@ -1,7 +1,6 @@
 """Chat conversations router."""
 from __future__ import annotations
 
-import json
 from collections.abc import AsyncGenerator
 
 from fastapi import APIRouter, Depends, HTTPException, Response

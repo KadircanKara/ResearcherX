@@ -121,16 +121,16 @@ async def test_send_message_requires_auth(client: AsyncClient, project: Project,
     amelia = (await db_session.execute(
         select(User).where(User.email == "amelia@lab.io")
     )).scalar_one_or_none()
-    if amelia:
-        other_proj = Project(owner_id=amelia.id, title="Other", topic_keywords=[])
-        db_session.add(other_proj)
-        await db_session.flush()
-        other_conv = ChatConversation(project_id=other_proj.id, title="t", created_by=amelia.id)
-        db_session.add(other_conv)
-        await db_session.commit()
-        # seed user "you" is NOT a member of other_proj → 404
-        resp = await client.post(
-            f"/v1/projects/{other_proj.id}/conversations/{other_conv.id}/messages",
-            json={"content": "snoop"},
-        )
-        assert resp.status_code == 404
+    assert amelia is not None
+    other_proj = Project(owner_id=amelia.id, title="Other", topic_keywords=[])
+    db_session.add(other_proj)
+    await db_session.flush()
+    other_conv = ChatConversation(project_id=other_proj.id, title="t", created_by=amelia.id)
+    db_session.add(other_conv)
+    await db_session.commit()
+    # seed user "you" is NOT a member of other_proj → 404
+    resp = await client.post(
+        f"/v1/projects/{other_proj.id}/conversations/{other_conv.id}/messages",
+        json={"content": "snoop"},
+    )
+    assert resp.status_code == 404
