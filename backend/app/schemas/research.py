@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 
 class ResearchRequest(BaseModel):
     question: str = Field(min_length=5, max_length=1000)
+    project_id: str | None = None
 
 
 class StepOut(BaseModel):
@@ -25,6 +26,7 @@ class RunOut(BaseModel):
     status: str
     report: str | None
     error: str | None
+    project_id: str | None
     created_at: datetime
     steps: list[StepOut] = []
 

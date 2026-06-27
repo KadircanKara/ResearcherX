@@ -52,3 +52,42 @@ async def test_run_project_id_nullable(db_session: AsyncSession):
     await db_session.commit()
     await db_session.refresh(run)
     assert run.project_id is None
+
+
+# ── Task 2: schemas + service ────────────────────────────────────────────────
+
+
+async def test_run_out_includes_project_id(db_session: AsyncSession, project: Project):
+    from app.schemas.research import RunOut
+
+    run = ResearchRun(question="schema test question", project_id=project.id)
+    db_session.add(run)
+    await db_session.commit()
+    await db_session.refresh(run)
+    out = RunOut(
+        id=run.id,
+        question=run.question,
+        status=str(run.status),
+        report=run.report,
+        error=run.error,
+        project_id=run.project_id,
+        created_at=run.created_at,
+        steps=[],
+    )
+    assert out.project_id == project.id
+
+
+async def test_service_create_with_project_id(db_session: AsyncSession, project: Project):
+    from app.services.research_service import ResearchService
+
+    svc = ResearchService()
+    run = await svc.create(db_session, "what is machine learning here", project.id)
+    assert run.project_id == project.id
+
+
+async def test_service_create_without_project_id(db_session: AsyncSession):
+    from app.services.research_service import ResearchService
+
+    svc = ResearchService()
+    run = await svc.create(db_session, "what is machine learning here")
+    assert run.project_id is None

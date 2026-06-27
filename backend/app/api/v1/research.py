@@ -49,7 +49,7 @@ async def create_run(
     payload: ResearchRequest,
     db: AsyncSession = Depends(get_session),
 ) -> RunOut:
-    run = await service.create(db, payload.question)
+    run = await service.create(db, payload.question, payload.project_id)
     # In-process pipeline task, tracked in the registry so disconnects and
     # shutdown can cancel it (single-worker constraint — see task_registry).
     registry.register(run.id, asyncio.create_task(service.run_async(run.id)))
@@ -59,6 +59,7 @@ async def create_run(
         status=str(run.status),
         report=run.report,
         error=run.error,
+        project_id=run.project_id,
         created_at=run.created_at,
         steps=[],
     )
