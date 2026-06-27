@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { useParams } from "next/navigation";
+import { useParams, useSearchParams } from "next/navigation";
 import { ArrowLeft, Send } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ChatStream } from "@/components/chat-stream";
@@ -11,11 +11,15 @@ import type { ChatConversationDetail } from "@/lib/types";
 
 export default function ConversationPage() {
   const { id: projectId, cid } = useParams<{ id: string; cid: string }>();
+  const searchParams = useSearchParams();
 
   const [detail, setDetail] = useState<ChatConversationDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [input, setInput] = useState("");
-  const [pendingContent, setPendingContent] = useState<string | undefined>(undefined);
+  // ?q= carries the initial question from the new-chat form.
+  const [pendingContent, setPendingContent] = useState<string | undefined>(
+    searchParams.get("q") ?? undefined
+  );
 
   useEffect(() => {
     getConversation(projectId, cid)

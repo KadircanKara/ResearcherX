@@ -39,7 +39,7 @@ export default function ChatPage() {
     try {
       const conv = await createConversation(projectId, q);
       setSubmitting(false);
-      router.push(`/research/${projectId}/chat/${conv.id}`);
+      router.push(`/research/${projectId}/chat/${conv.id}?q=${encodeURIComponent(q)}`);
     } catch {
       setSubmitError("Failed to start chat. Please try again.");
       setSubmitting(false);

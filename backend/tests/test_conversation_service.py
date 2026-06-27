@@ -71,4 +71,4 @@ async def test_save_message_and_get_conversation(
 
     fetched = await svc.get_conversation(db_session, conv.id)
     assert fetched is not None
-    assert len(fetched.messages) == 2   # user message + assistant message
+    assert len(fetched.messages) == 1   # only the assistant message (conversation creation no longer stores first message)

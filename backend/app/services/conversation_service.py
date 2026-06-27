@@ -39,21 +39,13 @@ class ConversationService:
         db: AsyncSession,
         project_id: str,
         user_id: str,
-        first_message_text: str,
+        title: str,
     ) -> ChatConversation:
-        """Create a conversation and its first user message in one operation."""
-        title = first_message_text[:200]   # truncate for title
-        conv = ChatConversation(project_id=project_id, title=title, created_by=user_id)
+        """Create an empty conversation. First message is sent via save_message."""
+        conv = ChatConversation(project_id=project_id, title=title[:200], created_by=user_id)
         db.add(conv)
-        await db.flush()
-
-        msg = ChatMessage(conversation_id=conv.id, role="user", content=first_message_text)
-        db.add(msg)
         await db.commit()
         await db.refresh(conv)
-        await db.refresh(msg)
-
-        asyncio.create_task(_embed_message(msg.id, first_message_text, self._embedding_svc))
         return conv
 
     async def list_conversations(

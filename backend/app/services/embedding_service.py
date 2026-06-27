@@ -39,7 +39,6 @@ class EmbeddingService:
             response = await self._client.embeddings.create(
                 model=settings.embedding_model,
                 input=texts,
-                extra_body={"task_type": task_type},
             )
         except Exception as exc:
             log.error("embedding_failed", error=str(exc)[:200], n_texts=len(texts))
