@@ -9,8 +9,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from sqlalchemy import text
+
 from app.core.logging import log
-from app.db.models import ChatConversation, ChatMessage, ConversationMessageEmbedding
+from app.db.models import ChatConversation, ChatMessage, ConversationMessageEmbedding, _now
 from app.db.session import SessionLocal
 from app.services.embedding_service import EmbeddingService
 
@@ -19,12 +21,15 @@ async def _embed_message(message_id: str, content: str, svc: EmbeddingService) -
     """Embed one message and persist. Runs in background — never raises to caller."""
     try:
         embedding = await svc.embed(content, task_type="RETRIEVAL_DOCUMENT")
+        vec_str = "[" + ",".join(str(x) for x in embedding) + "]"
         async with SessionLocal() as db:
-            emb = ConversationMessageEmbedding(
-                message_id=message_id,
-                embedding=str(embedding),
-            )
-            db.add(emb)
+            import uuid
+            await db.execute(text("""
+                INSERT INTO conversation_message_embeddings (id, message_id, embedding, created_at)
+                VALUES (:id, :message_id, CAST(:emb AS vector), :now)
+                ON CONFLICT (message_id) DO UPDATE SET embedding = EXCLUDED.embedding
+            """), {"id": str(uuid.uuid4()), "message_id": message_id,
+                   "emb": vec_str, "now": _now()})
             await db.commit()
     except Exception as exc:
         log.warning("message_embedding_failed", message_id=message_id, error=str(exc)[:200])

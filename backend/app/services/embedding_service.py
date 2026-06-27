@@ -36,10 +36,10 @@ class EmbeddingService:
         if not texts:
             return []
         try:
-            response = await self._client.embeddings.create(
-                model=settings.embedding_model,
-                input=texts,
-            )
+            create_kwargs: dict = {"model": settings.embedding_model, "input": texts}
+            if settings.embedding_dimensions:
+                create_kwargs["dimensions"] = settings.embedding_dimensions
+            response = await self._client.embeddings.create(**create_kwargs)
         except Exception as exc:
             log.error("embedding_failed", error=str(exc)[:200], n_texts=len(texts))
             raise
