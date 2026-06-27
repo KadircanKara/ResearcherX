@@ -15,6 +15,8 @@ os.environ["ENVIRONMENT"] = "dev"
 os.environ["LLM_API_KEY"] = "test-key-never-used"
 os.environ["LLM_BASE_URL"] = "http://localhost:1/v1"  # unroutable: fail fast if hit
 
+import asyncio  # noqa: E402
+
 import pytest_asyncio  # noqa: E402
 
 from app.core.security import _storage as limiter_storage  # noqa: E402
@@ -33,20 +35,26 @@ async def fresh_db():
     API-level tests share per-IP budgets across the session and trip
     3/hour limits in unrelated tests.
 
-    cancel_all() before drop_all: tests that use the `client` fixture start
-    background asyncio tasks (run_async) that hold open aiosqlite connections.
-    With NullPool every session is a separate file handle; SQLite's writer
-    lock blocks DROP TABLE until all handles close.  Cancelling the tasks and
-    awaiting their completion lets their ``finally`` blocks close those handles
-    before the next test's drop_all runs.
+    cancel_all() runs in the teardown (after yield) so it executes in the
+    SAME event loop that spawned the background tasks. pytest-asyncio uses
+    a per-function event loop by default; cancelling from a different loop
+    (setup of the next test) is a no-op and the aiosqlite file handle stays
+    open, causing DROP TABLE to deadlock. Teardown-placement guarantees
+    same-loop cancellation, so the next test's drop_all sees no open handles.
     """
-    await registry.cancel_all()
     limiter_storage.reset()
     reset_pool()  # provider failover index is sticky module state
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.drop_all)
         await conn.run_sync(Base.metadata.create_all)
     yield
+    await registry.cancel_all()
+    # Give aiosqlite worker threads time to drain after task cancellation.
+    # asyncio.gather returns once the coroutine is done, but the underlying
+    # SQLite thread may still be finishing its last operation + closing the
+    # file handle.  A brief sleep lets those threads exit before the next
+    # test's drop_all acquires the writer lock.
+    await asyncio.sleep(0.05)
 
 
 import httpx  # noqa: E402
