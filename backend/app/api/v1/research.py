@@ -6,10 +6,13 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sse_starlette.sse import EventSourceResponse
 
+from app.core.identity import get_current_user_optional
 from app.core.logging import log
 from app.core.security import enforce_read_limits, enforce_run_quotas
+from app.db.models import User
 from app.db.session import get_session
 from app.schemas.research import ResearchRequest, RunOut
+from app.services import project_service
 from app.services.event_bus import bus
 from app.services.research_service import ResearchService
 from app.services.task_registry import registry
@@ -48,7 +51,13 @@ def _watch_unwatched(run_id: str) -> None:
 async def create_run(
     payload: ResearchRequest,
     db: AsyncSession = Depends(get_session),
+    user: User | None = Depends(get_current_user_optional),
 ) -> RunOut:
+    if payload.project_id is not None:
+        if user is None:
+            raise HTTPException(status_code=401, detail="Authentication required")
+        await project_service.require_member(db, payload.project_id, user.id, "viewer")
+
     run = await service.create(db, payload.question, payload.project_id)
     # In-process pipeline task, tracked in the registry so disconnects and
     # shutdown can cancel it (single-worker constraint — see task_registry).

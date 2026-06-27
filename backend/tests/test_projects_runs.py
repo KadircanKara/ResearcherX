@@ -25,6 +25,13 @@ async def you(db_session: AsyncSession, seeded):
 
 
 @pytest_asyncio.fixture
+async def amelia(db_session: AsyncSession, seeded):
+    return (
+        await db_session.execute(select(User).where(User.email == "amelia@lab.io"))
+    ).scalar_one()
+
+
+@pytest_asyncio.fixture
 async def project(db_session: AsyncSession, you: User) -> Project:
     p = Project(owner_id=you.id, title="Test Project", topic_keywords=[])
     db_session.add(p)
@@ -91,3 +98,45 @@ async def test_service_create_without_project_id(db_session: AsyncSession):
     svc = ResearchService()
     run = await svc.create(db_session, "what is machine learning here")
     assert run.project_id is None
+
+
+# ── Task 3: POST /research project guard ─────────────────────────────────────
+
+
+async def test_create_run_with_project_id_as_member(client, you: User, project: Project):
+    r = await client.post(
+        "/v1/research",
+        json={"question": "what is quantum computing", "project_id": project.id},
+        headers={"X-Dev-User-Id": you.id},
+    )
+    assert r.status_code == 201
+    data = r.json()
+    assert data["project_id"] == project.id
+
+
+async def test_create_run_without_project_id_is_anonymous(client):
+    r = await client.post(
+        "/v1/research",
+        json={"question": "what is quantum computing"},
+    )
+    assert r.status_code == 201
+    assert r.json()["project_id"] is None
+
+
+async def test_create_run_with_project_id_no_identity(client, project: Project):
+    # No X-Dev-User-Id header → get_current_user_optional returns None → 401
+    r = await client.post(
+        "/v1/research",
+        json={"question": "what is quantum computing", "project_id": project.id},
+    )
+    assert r.status_code == 401
+
+
+async def test_create_run_with_project_id_non_member(client, amelia: User, project: Project):
+    # amelia is not in the project
+    r = await client.post(
+        "/v1/research",
+        json={"question": "what is quantum computing", "project_id": project.id},
+        headers={"X-Dev-User-Id": amelia.id},
+    )
+    assert r.status_code == 404

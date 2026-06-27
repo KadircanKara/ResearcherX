@@ -22,6 +22,7 @@ from app.db import models  # noqa: F401, E402 — register models on metadata
 from app.db.base import Base  # noqa: E402
 from app.db.session import engine  # noqa: E402
 from app.llm.client import reset_pool  # noqa: E402
+from app.services.task_registry import registry  # noqa: E402
 
 
 @pytest_asyncio.fixture(autouse=True)
@@ -31,7 +32,15 @@ async def fresh_db():
     The rate limiter is in-memory and module-global: without the reset,
     API-level tests share per-IP budgets across the session and trip
     3/hour limits in unrelated tests.
+
+    cancel_all() before drop_all: tests that use the `client` fixture start
+    background asyncio tasks (run_async) that hold open aiosqlite connections.
+    With NullPool every session is a separate file handle; SQLite's writer
+    lock blocks DROP TABLE until all handles close.  Cancelling the tasks and
+    awaiting their completion lets their ``finally`` blocks close those handles
+    before the next test's drop_all runs.
     """
+    await registry.cancel_all()
     limiter_storage.reset()
     reset_pool()  # provider failover index is sticky module state
     async with engine.begin() as conn:
