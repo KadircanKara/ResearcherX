@@ -4,6 +4,8 @@ import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { ChatCitation, ChatEvent, ChatMessage } from "@/lib/types";
+import { chatMessagesUrl, getConversation } from "@/lib/chat";
+import { getDevUserId } from "@/lib/api";
 
 interface Props {
   projectId: string;
@@ -51,78 +53,74 @@ export function ChatStream({
     setStatus("thinking");
     setError(null);
 
-    // Import here to avoid circular dep; chatMessagesUrl is a plain function
-    import("@/lib/chat").then(({ chatMessagesUrl }) => {
-      const url = chatMessagesUrl(projectId, conversationId);
-      // POST via fetch (EventSource doesn't support POST), then read as SSE
-      fetch(url, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          ...(typeof localStorage !== "undefined" && localStorage.getItem("devUserId")
-            ? { "X-Dev-User-Id": localStorage.getItem("devUserId")! }
-            : {}),
-        },
-        body: JSON.stringify({ content: pendingContent }),
-      }).then(async (res) => {
-        if (!res.ok || !res.body) {
-          setError("Request failed.");
-          setStatus("idle");
-          return;
-        }
-        const reader = res.body.getReader();
-        const decoder = new TextDecoder();
-        let buf = "";
+    const controller = new AbortController();
+    const url = chatMessagesUrl(projectId, conversationId);
+    const uid = getDevUserId();
+    // POST via fetch (EventSource doesn't support POST), then read as SSE
+    fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(uid ? { "X-Dev-User-Id": uid } : {}),
+      },
+      body: JSON.stringify({ content: pendingContent }),
+      signal: controller.signal,
+    }).then(async (res) => {
+      if (!res.ok || !res.body) {
+        setError("Request failed.");
+        setStatus("idle");
+        return;
+      }
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
 
-        while (!cancelled) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          buf += decoder.decode(value, { stream: true });
-          const parts = buf.split("\n\n");
-          buf = parts.pop() ?? "";
-          for (const part of parts) {
-            const eventLine = part.match(/^event: (.+)$/m)?.[1];
-            const dataLine = part.match(/^data: (.+)$/m)?.[1];
-            if (!eventLine || !dataLine) continue;
-            try {
-              const payload = JSON.parse(dataLine) as object;
-              const ev = { type: eventLine, ...payload } as ChatEvent;
-              if (ev.type === "thinking") {
-                setStatus("thinking");
-              } else if (ev.type === "retrieving") {
-                setStatus("retrieving");
-                setRetrievingInfo({ paper_count: ev.paper_count, history_hits: ev.history_hits });
-              } else if (ev.type === "delta") {
-                setStatus("streaming");
-                setStreamingText((prev) => prev + ev.text);
-              } else if (ev.type === "done") {
-                setStatus("idle");
-                setStreamingText("");
-                // Refresh messages from snapshot
-                import("@/lib/chat").then(({ getConversation }) => {
-                  getConversation(projectId, conversationId)
-                    .then((detail) => setMessages(detail.messages))
-                    .catch(() => {});
-                });
-                onDone?.(ev.citations);
-              } else if (ev.type === "error") {
-                setError(ev.message);
-                setStatus("idle");
-              }
-            } catch {
-              // ignore malformed SSE
+      while (!cancelled) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        const parts = buf.split("\n\n");
+        buf = parts.pop() ?? "";
+        for (const part of parts) {
+          const eventLine = part.match(/^event: (.+)$/m)?.[1];
+          const dataLine = part.match(/^data: (.+)$/m)?.[1];
+          if (!eventLine || !dataLine) continue;
+          try {
+            const payload = JSON.parse(dataLine) as object;
+            const ev = { type: eventLine, ...payload } as ChatEvent;
+            if (ev.type === "thinking") {
+              setStatus("thinking");
+            } else if (ev.type === "retrieving") {
+              setStatus("retrieving");
+              setRetrievingInfo({ paper_count: ev.paper_count, history_hits: ev.history_hits });
+            } else if (ev.type === "delta") {
+              setStatus("streaming");
+              setStreamingText((prev) => prev + ev.text);
+            } else if (ev.type === "done") {
+              setStatus("idle");
+              setStreamingText("");
+              // Refresh messages from snapshot
+              getConversation(projectId, conversationId)
+                .then((detail) => setMessages(detail.messages))
+                .catch(() => {});
+              onDone?.(ev.citations);
+            } else if (ev.type === "error") {
+              setError(ev.message);
+              setStatus("idle");
             }
+          } catch {
+            // ignore malformed SSE
           }
         }
-      }).catch(() => {
-        if (!cancelled) {
-          setError("Connection error. Please try again.");
-          setStatus("idle");
-        }
-      });
+      }
+    }).catch(() => {
+      if (!cancelled) {
+        setError("Connection error. Please try again.");
+        setStatus("idle");
+      }
     });
 
-    return () => { cancelled = true; };
+    return () => { cancelled = true; controller.abort(); };
   }, [pendingContent, projectId, conversationId]);
 
   return (
@@ -186,10 +184,9 @@ export function ChatStream({
         <div className="flex justify-start">
           <div className="rounded-2xl bg-muted px-4 py-3 text-xs text-muted-foreground">
             {status === "thinking" && "Analyzing…"}
-            {status === "retrieving" &&
-              retrievingInfo
+            {status === "retrieving" && (retrievingInfo
               ? `Retrieving from ${retrievingInfo.paper_count} paper${retrievingInfo.paper_count !== 1 ? "s" : ""}…`
-              : "Retrieving…"}
+              : "Retrieving…")}
           </div>
         </div>
       )}

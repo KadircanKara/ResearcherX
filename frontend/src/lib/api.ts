@@ -24,6 +24,7 @@ export function eventsUrl(id: string): string {
 
 let devUserId: string | null = null;
 export const setDevUserId = (id: string | null) => { devUserId = id; };
+export const getDevUserId = () => devUserId;
 
 export async function apiGet<T>(path: string): Promise<T> {
   const headers: Record<string, string> = {};
