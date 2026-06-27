@@ -50,6 +50,7 @@ export default function ChatPage() {
     setSubmitError(null);
     try {
       const run = await createRun(q, projectId);
+      setSubmitting(false);
       router.push(`/research/${projectId}/chat/${run.id}`);
     } catch {
       setSubmitError("Failed to start research. Please try again.");

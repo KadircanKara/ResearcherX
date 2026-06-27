@@ -4,10 +4,12 @@ export const API_BASE =
   process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8000";
 
 export async function createRun(question: string, projectId?: string): Promise<Run> {
-  return (await apiSend<Run>("POST", "/research", {
+  const run = await apiSend<Run>("POST", "/research", {
     question,
     project_id: projectId ?? null,
-  })) as Run;
+  });
+  if (!run) throw new Error("create failed: no body");
+  return run;
 }
 
 export async function getRun(id: string): Promise<Run> {

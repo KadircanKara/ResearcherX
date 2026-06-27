@@ -56,7 +56,7 @@ async def create_run(
     if payload.project_id is not None:
         if user is None:
             raise HTTPException(status_code=401, detail="Authentication required")
-        await project_service.require_member(db, payload.project_id, user.id, "viewer")
+        await project_service.require_member(db, payload.project_id, user.id, "editor")
 
     run = await service.create(db, payload.question, payload.project_id)
     # In-process pipeline task, tracked in the registry so disconnects and

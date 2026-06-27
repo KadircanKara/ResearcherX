@@ -54,7 +54,7 @@ async def fresh_db():
     # SQLite thread may still be finishing its last operation + closing the
     # file handle.  A brief sleep lets those threads exit before the next
     # test's drop_all acquires the writer lock.
-    await asyncio.sleep(0.05)
+    await asyncio.sleep(0.1)  # give aiosqlite threads time to release file handle
 
 
 import httpx  # noqa: E402

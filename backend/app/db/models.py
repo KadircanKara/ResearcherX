@@ -40,7 +40,7 @@ class ResearchRun(Base):
     report: Mapped[str | None] = mapped_column(Text, default=None)
     error: Mapped[str | None] = mapped_column(Text, default=None)
     project_id: Mapped[str | None] = mapped_column(
-        ForeignKey("projects.id", ondelete="SET NULL"),
+        ForeignKey("projects.id", ondelete="SET NULL", name="fk_research_runs_project_id"),
         nullable=True,
         default=None,
         index=True,
