@@ -14,6 +14,8 @@ interface Props {
   initialMessages: ChatMessage[];
   /** Called after the assistant message is confirmed (done event). */
   onDone?: (citations: ChatCitation[]) => void;
+  /** Called when the stream fails — parent should unblock the input. */
+  onError?: (message: string) => void;
   /** Content of the message that was just submitted (optimistic display). */
   pendingContent?: string;
 }
@@ -23,6 +25,7 @@ export function ChatStream({
   conversationId,
   initialMessages,
   onDone,
+  onError,
   pendingContent,
 }: Props) {
   const [messages, setMessages] = useState<ChatMessage[]>(initialMessages);
@@ -67,8 +70,11 @@ export function ChatStream({
       signal: controller.signal,
     }).then(async (res) => {
       if (!res.ok || !res.body) {
-        setError("Request failed.");
+        const msg = "Request failed.";
+        setError(msg);
         setStatus("idle");
+        onError?.(msg);
+        onDone?.([]);
         return;
       }
       const reader = res.body.getReader();
@@ -107,6 +113,8 @@ export function ChatStream({
             } else if (ev.type === "error") {
               setError(ev.message);
               setStatus("idle");
+              onError?.(ev.message);
+              onDone?.([]);
             }
           } catch {
             // ignore malformed SSE
@@ -115,8 +123,11 @@ export function ChatStream({
       }
     }).catch(() => {
       if (!cancelled) {
-        setError("Connection error. Please try again.");
+        const msg = "Connection error. Please try again.";
+        setError(msg);
         setStatus("idle");
+        onError?.(msg);
+        onDone?.([]);
       }
     });
 

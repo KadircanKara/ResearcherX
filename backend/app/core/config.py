@@ -93,6 +93,8 @@ class Settings(BaseSettings):
             problems.append("DATABASE_URL points at sqlite")
         if not self.owner_api_key:
             problems.append("OWNER_API_KEY is empty (required for quota bypass)")
+        if not self.resolved_embedding_api_key:
+            problems.append("EMBEDDING_API_KEY (or LLM_API_KEY fallback) is empty")
         if problems:
             raise RuntimeError(f"refusing to start with ENVIRONMENT=prod: {'; '.join(problems)}")
 
