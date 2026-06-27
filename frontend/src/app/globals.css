@@ -1,3 +1,5 @@
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
@@ -6,10 +8,8 @@
   color-scheme: light;
 }
 
-html,
-body {
-  background-color: #f7f7f5;
-  color: #0f1115;
+.dark {
+  color-scheme: dark;
 }
 
 .prose {
@@ -117,4 +117,128 @@ body {
 .prose pre code {
   background: transparent;
   padding: 0;
+}
+
+@layer base {
+  :root {
+    color-scheme: light;
+    /* shadcn neutral (zinc) base + Cobalt accent */
+    --background: 0.9851 0.0000 89.88;          /* #FAFAFA */
+    --foreground: 0.1408 0.0044 285.82;         /* #09090B */
+    --card: 1.0000 0.0000 89.88;                /* #FFFFFF */
+    --card-foreground: 0.1408 0.0044 285.82;    /* #09090B */
+    --popover: 1.0000 0.0000 89.88;             /* #FFFFFF */
+    --popover-foreground: 0.1408 0.0044 285.82; /* #09090B */
+    --primary: 0.6231 0.1880 259.81;            /* #3B82F6 cobalt */
+    --primary-foreground: 1.0000 0.0000 89.88;  /* #FFFFFF */
+    --secondary: 0.9674 0.0013 286.38;          /* #F4F4F5 zinc-100 */
+    --secondary-foreground: 0.2103 0.0059 285.89; /* #18181B */
+    --muted: 0.9674 0.0013 286.38;              /* #F4F4F5 */
+    --muted-foreground: 0.5517 0.0138 285.94;   /* #71717A zinc-500 */
+    --accent: 0.9525 0.0212 259.19;             /* #E7F0FE cobalt tint */
+    --accent-foreground: 0.4882 0.2172 264.38;  /* #1D4ED8 blue-700 */
+    --destructive: 0.5771 0.2152 27.33;         /* #DC2626 */
+    --border: 0.9197 0.0040 286.32;             /* #E4E4E7 zinc-200 */
+    --input: 0.9197 0.0040 286.32;              /* #E4E4E7 */
+    --ring: 0.6231 0.1880 259.81;               /* #3B82F6 */
+    --positive: 0.6271 0.1699 149.21;           /* #16A34A */
+    --radius: 0.5rem;
+    /* brand gradient (raw hex — used only inside linear-gradient/color-mix) */
+    --grad-a: #3B82F6;
+    --grad-b: #06B6D4;
+    --font-serif: ui-serif,"New York",Georgia,"Times New Roman",serif;
+    --font-mono: ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+    --chart-1: 0.6231 0.1880 259.81;
+    --chart-2: 0.6889 0.1322 200.50;
+    --chart-3: 0.6271 0.1699 149.21;
+    --chart-4: 0.7686 0.1647 70.08;
+    --chart-5: 0.6368 0.2078 25.33;
+    --sidebar: 0.9851 0.0000 89.88;             /* #FAFAFA */
+    --sidebar-foreground: 0.2103 0.0059 285.89; /* #18181B */
+    --sidebar-primary: 0.6231 0.1880 259.81;    /* #3B82F6 */
+    --sidebar-primary-foreground: 1.0000 0.0000 89.88;
+    --sidebar-accent: 0.9525 0.0212 259.19;     /* #E7F0FE */
+    --sidebar-accent-foreground: 0.4882 0.2172 264.38; /* #1D4ED8 */
+    --sidebar-border: 0.9197 0.0040 286.32;     /* #E4E4E7 */
+    --sidebar-ring: 0.6231 0.1880 259.81;
+  }
+  .dark {
+    color-scheme: dark;
+    --background: 0.1408 0.0044 285.82;         /* #09090B zinc-950 */
+    --foreground: 0.9851 0.0000 89.88;          /* #FAFAFA */
+    --card: 0.2011 0.0039 286.04;               /* #161618 */
+    --card-foreground: 0.9851 0.0000 89.88;     /* #FAFAFA */
+    --popover: 0.2011 0.0039 286.04;            /* #161618 */
+    --popover-foreground: 0.9851 0.0000 89.88;  /* #FAFAFA */
+    --primary: 0.6231 0.1880 259.81;            /* #3B82F6 */
+    --primary-foreground: 1.0000 0.0000 89.88;  /* #FFFFFF */
+    --secondary: 0.2739 0.0055 286.03;          /* #27272A zinc-800 */
+    --secondary-foreground: 0.9851 0.0000 89.88;
+    --muted: 0.2739 0.0055 286.03;              /* #27272A */
+    --muted-foreground: 0.7118 0.0129 286.07;   /* #A1A1AA zinc-400 */
+    --accent: 0.2703 0.0589 260.47;             /* #152643 cobalt-on-dark */
+    --accent-foreground: 0.8091 0.0956 251.81;  /* #93C5FD blue-300 */
+    --destructive: 0.7106 0.1661 22.22;         /* #F87171 */
+    --border: 0.2739 0.0055 286.03;             /* #27272A */
+    --input: 0.2739 0.0055 286.03;              /* #27272A */
+    --ring: 0.7137 0.1434 254.62;               /* #60A5FA */
+    --positive: 0.7227 0.1920 149.58;           /* #22C55E */
+    --grad-a: #3B82F6;
+    --grad-b: #22D3EE;
+    --chart-1: 0.7137 0.1434 254.62;
+    --chart-2: 0.7889 0.1322 200.50;
+    --chart-3: 0.7227 0.1920 149.58;
+    --chart-4: 0.8186 0.1647 70.08;
+    --chart-5: 0.7368 0.2078 25.33;
+    --sidebar: 0.1408 0.0044 285.82;            /* #09090B */
+    --sidebar-foreground: 0.9851 0.0000 89.88;  /* #FAFAFA */
+    --sidebar-primary: 0.6231 0.1880 259.81;    /* #3B82F6 */
+    --sidebar-primary-foreground: 1.0000 0.0000 89.88;
+    --sidebar-accent: 0.2703 0.0589 260.47;     /* #152643 */
+    --sidebar-accent-foreground: 0.8091 0.0956 251.81; /* #93C5FD */
+    --sidebar-border: 0.2739 0.0055 286.03;     /* #27272A */
+    --sidebar-ring: 0.7137 0.1434 254.62;       /* #60A5FA */
+  }
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+  html {
+    @apply font-sans;
+  }
+}
+
+/* ── Brand gradient + glow utilities (cobalt → cyan) ───────────────────
+   --grad-a / --grad-b are raw hex so they work inside linear-gradient()
+   and color-mix(); the semantic tokens above are oklch channels for
+   Tailwind's `oklch(var(--token) / <alpha>)` wrapping. */
+.gradient-brand {
+  background-image: linear-gradient(135deg, var(--grad-a), var(--grad-b));
+}
+.gradient-edge,
+.gradient-bar {
+  background-image: linear-gradient(90deg, var(--grad-a), var(--grad-b));
+}
+.text-gradient {
+  background-image: linear-gradient(120deg, var(--grad-a), var(--grad-b));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.shadow-glow {
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--grad-a) 30%, transparent),
+    0 8px 24px -6px color-mix(in srgb, var(--grad-a) 38%, transparent);
+}
+.shadow-lift {
+  box-shadow:
+    0 20px 30px -12px color-mix(in srgb, var(--grad-a) 26%, transparent),
+    0 8px 16px -8px rgba(0, 0, 0, 0.12);
+}
+.dark .shadow-lift {
+  box-shadow:
+    0 20px 30px -12px color-mix(in srgb, var(--grad-a) 40%, transparent),
+    0 8px 16px -8px rgba(0, 0, 0, 0.5);
 }

@@ -1,6 +1,14 @@
 import type { Metadata } from "next";
-import Link from "next/link";
+import { Inter } from "next/font/google";
 import "./globals.css";
+import { ThemeProvider } from "@/components/theme-provider";
+import { IdentityProvider } from "@/lib/identity";
+import { AppShell } from "@/components/app-shell";
+
+const inter = Inter({
+  subsets: ["latin"],
+  variable: "--font-inter",
+});
 
 export const metadata: Metadata = {
   title: "ResearcherX",
@@ -9,17 +17,13 @@ export const metadata: Metadata = {
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en">
+    <html lang="en" suppressHydrationWarning className={inter.variable}>
       <body className="min-h-screen font-sans">
-        <header className="border-b border-ink/10">
-          <div className="mx-auto max-w-4xl px-6 py-4 flex items-center justify-between">
-            <Link href="/" className="font-mono text-lg font-semibold tracking-tight">
-              researcher<span className="text-ink/40">x</span>
-            </Link>
-            <span className="text-xs text-ink/50 font-mono">multi-agent research</span>
-          </div>
-        </header>
-        <main className="mx-auto max-w-4xl px-6 py-10">{children}</main>
+        <ThemeProvider>
+          <IdentityProvider>
+            <AppShell>{children}</AppShell>
+          </IdentityProvider>
+        </ThemeProvider>
       </body>
     </html>
   );
