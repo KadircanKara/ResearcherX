@@ -64,45 +64,53 @@ class ChatService:
                     for m in conv.messages[:-1]   # exclude the last (just-saved user msg)
                 ]
 
-            # Embed the query
-            query_embedding = await self._embedding_svc.embed(user_content, task_type="RETRIEVAL_QUERY")
+            # Embed the query — fail-open: if embedding unavailable, skip retrieval
+            history_hits: list[dict] = []
+            paper_chunks: list = []
+            query_embedding: list[float] | None = None
 
-            # Retrieve relevant history (semantic search over conversation messages)
-            async with SessionLocal() as db:
-                history_hits = await self._retrieve_history(db, conversation_id, query_embedding)
-
-            yield {"event": "retrieving", "data": json.dumps({
-                "paper_count": len(paper_rows),
-                "history_hits": len(history_hits),
-            })}
+            try:
+                query_embedding = await self._embedding_svc.embed(user_content, task_type="RETRIEVAL_QUERY")
+            except Exception:
+                log.warning("chat_embedding_unavailable_fallback", conversation_id=conversation_id)
 
             # Retrieval plan
             paper_infos = [
                 PaperInfo(paper_id=p.id, title=p.title, abstract=p.abstract or "")
                 for p in paper_rows
             ]
-            if len(paper_infos) >= _PLANNER_MIN_PAPERS:
-                plan = await self._planner.run(PlannerInput(
-                    query=user_content,
-                    paper_list=paper_infos,
-                    prior_messages=prior_messages + history_hits,
-                ))
-                retrieval_query = plan.reformulated_query or user_content
-                per_paper_map = {alloc.paper_id: alloc.chunks for alloc in plan.per_paper}
-            else:
-                retrieval_query = user_content
-                per_paper_map = {p.id: 2 for p in paper_rows}
 
-            # Embed the (possibly reformulated) retrieval query
-            retrieval_embedding = await self._embedding_svc.embed(
-                retrieval_query, task_type="RETRIEVAL_QUERY"
-            ) if retrieval_query != user_content else query_embedding
+            if query_embedding is not None:
+                # Retrieve relevant history
+                async with SessionLocal() as db:
+                    history_hits = await self._retrieve_history(db, conversation_id, query_embedding)
 
-            # Retrieve paper chunks
-            async with SessionLocal() as db:
-                paper_chunks = await self._retrieve_paper_chunks(
-                    db, paper_infos, per_paper_map, retrieval_embedding
-                )
+                if paper_infos:
+                    if len(paper_infos) >= _PLANNER_MIN_PAPERS:
+                        plan = await self._planner.run(PlannerInput(
+                            query=user_content,
+                            paper_list=paper_infos,
+                            prior_messages=prior_messages + history_hits,
+                        ))
+                        retrieval_query = plan.reformulated_query or user_content
+                        per_paper_map = {alloc.paper_id: alloc.chunks for alloc in plan.per_paper}
+                    else:
+                        retrieval_query = user_content
+                        per_paper_map = {p.id: 2 for p in paper_rows}
+
+                    retrieval_embedding = await self._embedding_svc.embed(
+                        retrieval_query, task_type="RETRIEVAL_QUERY"
+                    ) if retrieval_query != user_content else query_embedding
+
+                    async with SessionLocal() as db:
+                        paper_chunks = await self._retrieve_paper_chunks(
+                            db, paper_infos, per_paper_map, retrieval_embedding
+                        )
+
+            yield {"event": "retrieving", "data": json.dumps({
+                "paper_count": len(paper_rows),
+                "history_hits": len(history_hits),
+            })}
 
             # Build context for ChatAgent
             all_prior = prior_messages + history_hits   # conversation context

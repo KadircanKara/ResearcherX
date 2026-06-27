@@ -85,11 +85,11 @@ export function ChatStream({
         const { done, value } = await reader.read();
         if (done) break;
         buf += decoder.decode(value, { stream: true });
-        const parts = buf.split("\n\n");
+        const parts = buf.split(/\r\n\r\n|\n\n/);
         buf = parts.pop() ?? "";
         for (const part of parts) {
-          const eventLine = part.match(/^event: (.+)$/m)?.[1];
-          const dataLine = part.match(/^data: (.+)$/m)?.[1];
+          const eventLine = part.match(/^event: ([^\r\n]+)/m)?.[1];
+          const dataLine = part.match(/^data: ([^\r\n]+)/m)?.[1];
           if (!eventLine || !dataLine) continue;
           try {
             const payload = JSON.parse(dataLine) as object;
