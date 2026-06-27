@@ -1,0 +1,204 @@
+"use client";
+
+import { useEffect, useRef, useState } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import type { ChatCitation, ChatEvent, ChatMessage } from "@/lib/types";
+
+interface Props {
+  projectId: string;
+  conversationId: string;
+  /** Initial messages seeded from the snapshot GET. */
+  initialMessages: ChatMessage[];
+  /** Called after the assistant message is confirmed (done event). */
+  onDone?: (citations: ChatCitation[]) => void;
+  /** Content of the message that was just submitted (optimistic display). */
+  pendingContent?: string;
+}
+
+export function ChatStream({
+  projectId,
+  conversationId,
+  initialMessages,
+  onDone,
+  pendingContent,
+}: Props) {
+  const [messages, setMessages] = useState<ChatMessage[]>(initialMessages);
+  const [streamingText, setStreamingText] = useState("");
+  const [status, setStatus] = useState<"idle" | "thinking" | "retrieving" | "streaming">("idle");
+  const [retrievingInfo, setRetrievingInfo] = useState<{ paper_count: number; history_hits: number } | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const bottomRef = useRef<HTMLDivElement>(null);
+
+  // Re-seed messages if initialMessages prop changes (navigating between convs)
+  useEffect(() => {
+    setMessages(initialMessages);
+    setStreamingText("");
+    setStatus("idle");
+    setError(null);
+  }, [conversationId]);
+
+  // Auto-scroll
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages, streamingText]);
+
+  useEffect(() => {
+    if (!pendingContent) return;
+    // Start SSE stream for the pending message
+    let cancelled = false;
+    setStreamingText("");
+    setStatus("thinking");
+    setError(null);
+
+    // Import here to avoid circular dep; chatMessagesUrl is a plain function
+    import("@/lib/chat").then(({ chatMessagesUrl }) => {
+      const url = chatMessagesUrl(projectId, conversationId);
+      // POST via fetch (EventSource doesn't support POST), then read as SSE
+      fetch(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(typeof localStorage !== "undefined" && localStorage.getItem("devUserId")
+            ? { "X-Dev-User-Id": localStorage.getItem("devUserId")! }
+            : {}),
+        },
+        body: JSON.stringify({ content: pendingContent }),
+      }).then(async (res) => {
+        if (!res.ok || !res.body) {
+          setError("Request failed.");
+          setStatus("idle");
+          return;
+        }
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buf = "";
+
+        while (!cancelled) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buf += decoder.decode(value, { stream: true });
+          const parts = buf.split("\n\n");
+          buf = parts.pop() ?? "";
+          for (const part of parts) {
+            const eventLine = part.match(/^event: (.+)$/m)?.[1];
+            const dataLine = part.match(/^data: (.+)$/m)?.[1];
+            if (!eventLine || !dataLine) continue;
+            try {
+              const payload = JSON.parse(dataLine) as object;
+              const ev = { type: eventLine, ...payload } as ChatEvent;
+              if (ev.type === "thinking") {
+                setStatus("thinking");
+              } else if (ev.type === "retrieving") {
+                setStatus("retrieving");
+                setRetrievingInfo({ paper_count: ev.paper_count, history_hits: ev.history_hits });
+              } else if (ev.type === "delta") {
+                setStatus("streaming");
+                setStreamingText((prev) => prev + ev.text);
+              } else if (ev.type === "done") {
+                setStatus("idle");
+                setStreamingText("");
+                // Refresh messages from snapshot
+                import("@/lib/chat").then(({ getConversation }) => {
+                  getConversation(projectId, conversationId)
+                    .then((detail) => setMessages(detail.messages))
+                    .catch(() => {});
+                });
+                onDone?.(ev.citations);
+              } else if (ev.type === "error") {
+                setError(ev.message);
+                setStatus("idle");
+              }
+            } catch {
+              // ignore malformed SSE
+            }
+          }
+        }
+      }).catch(() => {
+        if (!cancelled) {
+          setError("Connection error. Please try again.");
+          setStatus("idle");
+        }
+      });
+    });
+
+    return () => { cancelled = true; };
+  }, [pendingContent, projectId, conversationId]);
+
+  return (
+    <div className="flex flex-col gap-4 py-4">
+      {messages.map((msg) => (
+        <div
+          key={msg.id}
+          className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}
+        >
+          <div
+            className={`max-w-[80%] rounded-2xl px-4 py-3 text-sm ${
+              msg.role === "user"
+                ? "bg-primary text-primary-foreground"
+                : "bg-muted text-foreground"
+            }`}
+          >
+            {msg.role === "assistant" ? (
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                {msg.content}
+              </ReactMarkdown>
+            ) : (
+              <p>{msg.content}</p>
+            )}
+            {msg.role === "assistant" && msg.citations.length > 0 && (
+              <div className="mt-2 flex flex-wrap gap-1">
+                {msg.citations.map((c) => (
+                  <span
+                    key={c.n}
+                    title={`${c.title} — ${c.snippet}`}
+                    className="cursor-help rounded bg-background/50 px-1.5 py-0.5 text-xs text-muted-foreground hover:bg-background"
+                  >
+                    [{c.n}]
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      ))}
+
+      {/* Optimistic user bubble */}
+      {pendingContent && status !== "idle" && (
+        <div className="flex justify-end">
+          <div className="max-w-[80%] rounded-2xl bg-primary px-4 py-3 text-sm text-primary-foreground">
+            {pendingContent}
+          </div>
+        </div>
+      )}
+
+      {/* Streaming assistant bubble */}
+      {streamingText && (
+        <div className="flex justify-start">
+          <div className="max-w-[80%] rounded-2xl bg-muted px-4 py-3 text-sm text-foreground">
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{streamingText}</ReactMarkdown>
+          </div>
+        </div>
+      )}
+
+      {/* Status indicator */}
+      {status !== "idle" && !streamingText && (
+        <div className="flex justify-start">
+          <div className="rounded-2xl bg-muted px-4 py-3 text-xs text-muted-foreground">
+            {status === "thinking" && "Analyzing…"}
+            {status === "retrieving" &&
+              retrievingInfo
+              ? `Retrieving from ${retrievingInfo.paper_count} paper${retrievingInfo.paper_count !== 1 ? "s" : ""}…`
+              : "Retrieving…"}
+          </div>
+        </div>
+      )}
+
+      {error && (
+        <p className="text-center text-xs text-destructive">{error}</p>
+      )}
+
+      <div ref={bottomRef} />
+    </div>
+  );
+}
