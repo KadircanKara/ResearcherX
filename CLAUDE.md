@@ -1,5 +1,22 @@
 # ResearcherX — notes for Claude
 
+## Git identity — ALWAYS enforce at session start
+
+**Active GitHub account: `KadircanKara`** — all git commits, PRs, and `gh` CLI actions must be made as this user.
+
+Before any git/gh action each session:
+1. Verify `git config user.name` = `KadircanKara` and `git config user.email` = `kadircann.kara@gmail.com`.
+2. Verify `gh auth status` shows `KadircanKara` as the active account. If `oktaydbk54` is active, run `gh auth switch --user KadircanKara` first.
+3. Never push, open PRs, or merge as `oktaydbk54`.
+
+## Branch + PR workflow
+
+One feature branch per phase → PR into `main` → merge. Branch names:
+- `feat/l1-runs-projects`, `feat/l2-paper-discovery`, `feat/l3-citation-graph`, `feat/l4-latex-editor`, `feat/l5-auth`
+- `feat/p1-aws-deploy`, `feat/p2-terraform`, `feat/p3-domain-tls`, `feat/p4-monitoring`, `feat/p5-launch-polish`
+
+---
+
 Multi-agent research assistant. Pipeline: **Planner → parallel (Searcher → Planner-validation → retry) loops → Synthesizer (streamed) → Critic**. Orchestrated in `app/services/research_service.py`.
 
 ## Stack
