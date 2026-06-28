@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { Check, Copy } from "lucide-react";
 import { addEntry, subscribe, type LogEntry, type DebugStep } from "@/lib/debug-store";
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -45,9 +46,9 @@ function CopyBtn({
   return (
     <button
       onClick={handle}
-      className="ml-1 shrink-0 rounded px-1.5 py-0.5 font-mono text-[9px] text-muted-foreground/50 hover:bg-accent hover:text-foreground"
+      className="ml-1 shrink-0 rounded p-0.5 text-muted-foreground/50 hover:bg-accent hover:text-foreground"
     >
-      {copied ? "✓" : "copy"}
+      {copied ? <Check className="size-3" /> : <Copy className="size-3" />}
     </button>
   );
 }
