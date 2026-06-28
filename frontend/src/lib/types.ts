@@ -140,3 +140,12 @@ export type ChatEvent =
   | { type: "delta"; text: string }
   | { type: "done"; citations: ChatCitation[] }
   | { type: "error"; message: string };
+
+export interface Paper {
+  id: string;
+  project_id: string;
+  title: string;
+  abstract: string | null;
+  pdf_url: string | null;
+  created_at: string;
+}
