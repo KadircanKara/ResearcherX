@@ -1,7 +1,8 @@
-"""Extract paper titles from PDFs via Crossref (DOI) or LLM fallback."""
+"""Extract paper titles: Crossref (DOI), HTML meta tags, or LLM on PDF text."""
 
 from __future__ import annotations
 
+import html as _html_module
 import re
 
 import httpx
@@ -59,6 +60,66 @@ async def extract_title_via_llm(text: str) -> str | None:
             return title[:300]
     except Exception as exc:
         log.debug("llm_title_extraction_failed", error=str(exc))
+    return None
+
+
+def _meta_content(html: str, attr: str, val: str) -> str | None:
+    """Extract content= from <meta {attr}="{val}" content="..."> regardless of attr order."""
+    v = re.escape(val)
+    for pattern in (
+        rf'<meta\b[^>]+\b{attr}=["\']' + v + r'["\'][^>]+\bcontent=["\']([^"\'<>]+)["\']',
+        r'<meta\b[^>]+\bcontent=["\']([^"\'<>]+)["\'][^>]+\b' + attr + r'=["\']' + v + r'["\']',
+    ):
+        m = re.search(pattern, html, re.IGNORECASE)
+        if m:
+            return _html_module.unescape(m.group(1).strip())
+    return None
+
+
+_PUBLISHER_SUFFIX = re.compile(
+    r"\s*[\|\-–]\s*(?:ScienceDirect|Elsevier|IEEE\s*Xplore|ACM\s*Digital\s*Library"
+    r"|Springer(?:Link)?|Nature|Wiley|Taylor\s*&\s*Francis|MDPI|PubMed"
+    r"|arXiv|ResearchGate|Semantic\s*Scholar).*$",
+    re.IGNORECASE,
+)
+
+
+async def extract_title_from_page(url: str) -> str | None:
+    """Fetch the web page and extract title from academic meta tags.
+
+    Priority:
+    1. <meta name="citation_title"> — Google Scholar standard; all major publishers
+    2. <meta property="og:title">
+    3. <title> tag with common publisher suffixes stripped
+
+    Only reads the first 40 KB (head section always comes first).
+    """
+    try:
+        async with httpx.AsyncClient(
+            timeout=_CROSSREF_TIMEOUT, headers=_UA, follow_redirects=True
+        ) as client:
+            r = await client.get(url)
+            if r.status_code != 200:
+                log.debug("page_title_fetch_failed", url=url, status=r.status_code)
+                return None
+            snippet = r.text[:40_000]
+
+        title = (
+            _meta_content(snippet, "name", "citation_title")
+            or _meta_content(snippet, "property", "og:title")
+        )
+        if title:
+            return title[:300]
+
+        # Fallback: <title> tag, strip " - ScienceDirect" style suffixes
+        m = re.search(r"<title[^>]*>([^<]+)</title>", snippet, re.IGNORECASE)
+        if m:
+            title = _html_module.unescape(m.group(1).strip())
+            title = _PUBLISHER_SUFFIX.sub("", title).strip()
+            if title:
+                return title[:300]
+    except Exception as exc:
+        log.debug("page_title_extraction_failed", url=url, error=str(exc))
     return None
 
 

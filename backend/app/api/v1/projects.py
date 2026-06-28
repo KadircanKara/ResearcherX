@@ -210,29 +210,28 @@ async def suggest_paper_title_from_url(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_session),
 ) -> SuggestTitleFromUrlResponse:
-    """Extract title via DOI→Crossref, then PDF→LLM. Returns requires_manual=True if both fail."""
+    """Extract title via DOI→Crossref, then HTML meta tags. Returns requires_manual=True if both fail."""
     await project_service.require_member(db, project_id, user.id, "viewer")
-    from app.services.paper_fetch_service import PaywallError, fetch_pdf
     from app.services.title_extraction_service import (
         extract_doi,
         extract_title_from_doi,
-        extract_title_from_pdf,
+        extract_title_from_page,
     )
 
+    # 1. DOI → Crossref (most authoritative)
     doi = extract_doi(body.url)
     if doi:
         title = await extract_title_from_doi(doi)
         if title:
             return SuggestTitleFromUrlResponse(title=title, requires_manual=False)
 
-    try:
-        pdf_bytes = await fetch_pdf(body.url)
-        title = await extract_title_from_pdf(pdf_bytes)
-        return SuggestTitleFromUrlResponse(title=title, requires_manual=title is None)
-    except PaywallError:
-        return SuggestTitleFromUrlResponse(title=None, requires_manual=True)
-    except Exception:
-        return SuggestTitleFromUrlResponse(title=None, requires_manual=True)
+    # 2. HTML meta tags (citation_title / og:title / <title>)
+    #    Works for ScienceDirect, IEEE, ACM, Springer, Nature, ArXiv, etc.
+    title = await extract_title_from_page(body.url)
+    if title:
+        return SuggestTitleFromUrlResponse(title=title, requires_manual=False)
+
+    return SuggestTitleFromUrlResponse(title=None, requires_manual=True)
 
 
 @router.post("/projects/{project_id}/papers/{paper_id}/ingest")
