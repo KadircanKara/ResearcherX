@@ -57,8 +57,10 @@ class ResearchService:
         self._synthesizer = SynthesizerAgent()
         self._critic = CriticAgent()
 
-    async def create(self, db: AsyncSession, question: str) -> ResearchRun:
-        run = ResearchRun(question=question)
+    async def create(
+        self, db: AsyncSession, question: str, project_id: str | None = None
+    ) -> ResearchRun:
+        run = ResearchRun(question=question, project_id=project_id)
         db.add(run)
         await db.commit()
         await db.refresh(run)

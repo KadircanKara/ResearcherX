@@ -21,8 +21,12 @@ build/
 .idea/
 .vscode/
 
-# Local working docs (deployment plan lives outside the public repo)
+# Local working docs
 HANDOFF.md
+CLAUDE.md
+.claude/
+docs/superpowers/
 
 # MCP server config (contains API keys — keep local)
 .mcp.json
+backend/stub-papers/

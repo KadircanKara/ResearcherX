@@ -41,6 +41,13 @@ async def _require_member(
     return membership
 
 
+async def require_member(
+    db: AsyncSession, project_id: str, user_id: str, need: str = "viewer"
+) -> ProjectMember:
+    """Public wrapper around _require_member for use outside this module."""
+    return await _require_member(db, project_id, user_id, need)
+
+
 async def _get_project_or_404(db: AsyncSession, project_id: str) -> Project:
     result = await db.execute(select(Project).where(Project.id == project_id))
     project = result.scalar_one_or_none()

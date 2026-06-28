@@ -82,6 +82,7 @@ export interface Run {
   status: RunStatus;
   report: string | null;
   error: string | null;
+  project_id: string | null;
   created_at: string;
   steps: Step[];
 }
@@ -102,4 +103,40 @@ export type RunEvent =
   | { type: "report_delta"; text: string }
   | { type: "report_reset" }
   | { type: "critique"; critique: Critique }
+  | { type: "error"; message: string };
+
+export interface ChatConversation {
+  id: string;
+  project_id: string;
+  title: string;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ChatCitation {
+  n: number;
+  paper_id: string;
+  title: string;
+  chunk_index: number;
+  snippet: string;
+}
+
+export interface ChatMessage {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  citations: ChatCitation[];
+  created_at: string;
+}
+
+export interface ChatConversationDetail extends ChatConversation {
+  messages: ChatMessage[];
+}
+
+export type ChatEvent =
+  | { type: "thinking" }
+  | { type: "retrieving"; paper_count: number; history_hits: number }
+  | { type: "delta"; text: string }
+  | { type: "done"; citations: ChatCitation[] }
   | { type: "error"; message: string };

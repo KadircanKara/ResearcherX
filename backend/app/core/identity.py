@@ -10,6 +10,24 @@ from app.db.session import get_session
 DEFAULT_USER_EMAIL = "you@researcherx.dev"
 
 
+async def get_current_user_optional(
+    request: Request, db: AsyncSession = Depends(get_session)
+) -> User | None:
+    """Resolve identity only when an explicit identity header is present.
+
+    Returns None when no identity is provided — callers decide whether to
+    require it. Does NOT fall back to the default dev user; that fallback
+    is only in get_current_user.
+    """
+    if settings.environment == "dev":
+        dev_id = request.headers.get("X-Dev-User-Id")
+        if dev_id:
+            user = await db.get(User, dev_id)
+            if user is not None:
+                return user
+    return None
+
+
 async def get_current_user(request: Request, db: AsyncSession = Depends(get_session)) -> User:
     """Resolve the acting principal. Auth is deferred.
 

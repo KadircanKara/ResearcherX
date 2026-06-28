@@ -3,14 +3,13 @@ import type { Run } from "./types";
 export const API_BASE =
   process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8000";
 
-export async function createRun(question: string): Promise<Run> {
-  const res = await fetch(`${API_BASE}/v1/research`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ question }),
+export async function createRun(question: string, projectId?: string): Promise<Run> {
+  const run = await apiSend<Run>("POST", "/research", {
+    question,
+    project_id: projectId ?? null,
   });
-  if (!res.ok) throw new Error(`create failed: ${res.status}`);
-  return res.json();
+  if (!run) throw new Error("create failed: no body");
+  return run;
 }
 
 export async function getRun(id: string): Promise<Run> {
@@ -25,6 +24,7 @@ export function eventsUrl(id: string): string {
 
 let devUserId: string | null = null;
 export const setDevUserId = (id: string | null) => { devUserId = id; };
+export const getDevUserId = () => devUserId;
 
 export async function apiGet<T>(path: string): Promise<T> {
   const headers: Record<string, string> = {};
