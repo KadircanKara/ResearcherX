@@ -6,11 +6,11 @@ import { addEntry, subscribe, type LogEntry, type DebugStep } from "@/lib/debug-
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 function statusColor(status?: number, ok?: boolean, networkError?: string) {
-  if (networkError) return "text-red-400";
-  if (!status) return "text-gray-400";
-  if (ok) return "text-green-400";
-  if (status >= 500) return "text-red-400";
-  return "text-amber-400";
+  if (networkError) return "text-destructive";
+  if (!status) return "text-muted-foreground";
+  if (ok) return "text-green-600 dark:text-green-400";
+  if (status >= 500) return "text-destructive";
+  return "text-amber-600 dark:text-amber-400";
 }
 
 function safeJson(val: unknown): string {
@@ -45,7 +45,7 @@ function CopyBtn({
   return (
     <button
       onClick={handle}
-      className="ml-1 shrink-0 rounded px-1.5 py-0.5 font-mono text-[9px] text-gray-600 hover:bg-gray-700 hover:text-gray-200"
+      className="ml-1 shrink-0 rounded px-1.5 py-0.5 font-mono text-[9px] text-muted-foreground/50 hover:bg-accent hover:text-foreground"
     >
       {copied ? "✓" : "copy"}
     </button>
@@ -60,7 +60,7 @@ function StepRow({ step }: { step: DebugStep }) {
   const isError = !!error;
 
   return (
-    <div className="ml-2 border-l border-gray-700 pl-2">
+    <div className="ml-2 border-l border-border/50 pl-2">
       {/* header */}
       <div
         className="flex cursor-pointer items-center py-0.5"
@@ -68,18 +68,18 @@ function StepRow({ step }: { step: DebugStep }) {
       >
         <span
           className={`select-none font-mono text-[10px] ${
-            isError ? "text-red-400" : "text-gray-300"
+            isError ? "text-destructive" : "text-foreground"
           }`}
         >
           {open ? "▾" : "▸"} {fn}
-          {isError && <span className="ml-2 text-red-400">✕</span>}
+          {isError && <span className="ml-2 text-destructive">✕</span>}
         </span>
         <CopyBtn value={step} />
       </div>
 
       {/* expanded content */}
       {open && (
-        <pre className="mb-1 whitespace-pre-wrap break-all text-[10px] text-gray-400">
+        <pre className="mb-1 whitespace-pre-wrap break-all text-[10px] text-muted-foreground">
           {safeJson({ error, ...rest })}
         </pre>
       )}
@@ -107,7 +107,7 @@ function Section({
   return (
     <div>
       <div
-        className="flex cursor-pointer items-center"
+        className="flex cursor-pointer items-center hover:opacity-80"
         onClick={() => setOpen((v) => !v)}
       >
         <span className={`select-none text-[10px] ${labelColor}`}>
@@ -139,24 +139,23 @@ function EntryRow({ entry }: { entry: LogEntry }) {
   const color = statusColor(status, ok, networkError);
 
   return (
-    <div className="border-b border-gray-800">
+    <div className="border-b border-border">
       {/* header row */}
       <div
-        className="flex cursor-pointer items-center gap-1 px-2 py-1.5 hover:bg-gray-800"
+        className="flex cursor-pointer items-center gap-1 px-2 py-1.5 hover:bg-muted"
         onClick={() => setOpen((v) => !v)}
       >
-        <span className="shrink-0 font-mono text-[10px] text-gray-500">{method}</span>
-        <span className="min-w-0 flex-1 truncate font-mono text-[10px] text-gray-300">
+        <span className="shrink-0 font-mono text-[10px] text-muted-foreground">{method}</span>
+        <span className="min-w-0 flex-1 truncate font-mono text-[10px] text-foreground">
           {shortUrl}
         </span>
         {status && (
           <span className={`shrink-0 font-mono text-[10px] ${color}`}>{status}</span>
         )}
         {networkError && (
-          <span className="shrink-0 text-[10px] text-red-400">ERR</span>
+          <span className="shrink-0 text-[10px] text-destructive">ERR</span>
         )}
-        <span className="shrink-0 text-[10px] text-gray-600">{durationMs}ms</span>
-        {/* copy full entry */}
+        <span className="shrink-0 text-[10px] text-muted-foreground/50">{durationMs}ms</span>
         <CopyBtn value={entry} />
       </div>
 
@@ -164,8 +163,8 @@ function EntryRow({ entry }: { entry: LogEntry }) {
       {open && (
         <div className="space-y-2 px-2 pb-2 pt-1">
           {requestBody !== undefined && (
-            <Section label="Request body" copyValue={requestBody}>
-              <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-all text-[10px] text-gray-400">
+            <Section label="Request body" copyValue={requestBody} labelColor="text-muted-foreground">
+              <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-all text-[10px] text-muted-foreground">
                 {safeJson(requestBody)}
               </pre>
             </Section>
@@ -175,7 +174,7 @@ function EntryRow({ entry }: { entry: LogEntry }) {
             <Section
               label={`Backend steps (${steps.length})`}
               copyValue={steps}
-              labelColor="text-indigo-400"
+              labelColor="text-primary"
               defaultOpen
             >
               <div className="space-y-0.5">
@@ -190,16 +189,16 @@ function EntryRow({ entry }: { entry: LogEntry }) {
             <Section
               label={ok === false ? "Response (error)" : "Response body"}
               copyValue={responseBody}
-              labelColor={ok === false ? "text-red-400" : "text-gray-500"}
+              labelColor={ok === false ? "text-destructive" : "text-muted-foreground"}
             >
-              <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-all text-[10px] text-gray-400">
+              <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-all text-[10px] text-muted-foreground">
                 {safeJson(responseBody)}
               </pre>
             </Section>
           )}
 
           {networkError && (
-            <p className="text-[10px] text-red-400">{networkError}</p>
+            <p className="text-[10px] text-destructive">{networkError}</p>
           )}
         </div>
       )}
@@ -310,22 +309,22 @@ export function DebugPanel() {
     <>
       <button
         onClick={() => setOpen((v) => !v)}
-        className="fixed bottom-4 right-4 z-50 rounded-full bg-gray-900 px-3 py-1.5 font-mono text-xs text-gray-300 shadow-lg ring-1 ring-gray-700 hover:bg-gray-800"
+        className="fixed bottom-4 right-4 z-50 rounded-full bg-background px-3 py-1.5 font-mono text-xs text-foreground shadow-lg ring-1 ring-border hover:bg-muted"
       >
         {open ? "✕ log" : `⬡ log${entries.length ? ` (${entries.length})` : ""}`}
       </button>
 
       {open && (
-        <div className="fixed right-0 top-0 z-40 flex h-screen w-[420px] flex-col bg-gray-950 shadow-2xl ring-1 ring-gray-800">
-          <div className="flex items-center justify-between border-b border-gray-800 px-3 py-2">
-            <span className="font-mono text-xs text-gray-400">
+        <div className="fixed right-0 top-0 z-40 flex h-screen w-[420px] flex-col bg-background shadow-2xl ring-1 ring-border">
+          <div className="flex items-center justify-between border-b border-border px-3 py-2">
+            <span className="font-mono text-xs text-muted-foreground">
               Debug log — {entries.length} request{entries.length !== 1 ? "s" : ""}
             </span>
             <div className="flex items-center gap-2">
               <CopyBtn value={entries} />
               <button
                 onClick={() => setEntries([])}
-                className="text-[10px] text-gray-600 hover:text-gray-400"
+                className="text-[10px] text-muted-foreground/50 hover:text-muted-foreground"
               >
                 clear
               </button>
@@ -333,7 +332,7 @@ export function DebugPanel() {
           </div>
           <div className="flex-1 overflow-y-auto">
             {entries.length === 0 ? (
-              <p className="p-4 text-center text-[10px] text-gray-600">
+              <p className="p-4 text-center text-[10px] text-muted-foreground/50">
                 No requests yet — click something.
               </p>
             ) : (
