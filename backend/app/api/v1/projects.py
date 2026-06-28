@@ -21,6 +21,8 @@ from app.schemas.project import (
     ProjectDetailOut,
     ProjectOut,
     ProjectUpdate,
+    SuggestTitleFromUrlResponse,
+    SuggestTitleResponse,
 )
 from app.schemas.research import RunOut
 from app.schemas.user import UserOut
@@ -175,6 +177,62 @@ async def list_papers(
         sa_select(Paper).where(Paper.project_id == project_id).order_by(Paper.created_at)
     )
     return [PaperOut.model_validate(p) for p in result.scalars().all()]
+
+
+@router.post(
+    "/projects/{project_id}/papers/suggest-title",
+    response_model=SuggestTitleResponse,
+)
+async def suggest_paper_title(
+    project_id: str,
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
+) -> SuggestTitleResponse:
+    """Extract title from PDF bytes via LLM. Fails open (returns null on error)."""
+    await project_service.require_member(db, project_id, user.id, "viewer")
+    pdf_bytes = await request.body()
+    if not pdf_bytes:
+        return SuggestTitleResponse(title=None)
+    from app.services.title_extraction_service import extract_title_from_pdf
+
+    title = await extract_title_from_pdf(pdf_bytes)
+    return SuggestTitleResponse(title=title)
+
+
+@router.post(
+    "/projects/{project_id}/papers/suggest-title-from-url",
+    response_model=SuggestTitleFromUrlResponse,
+)
+async def suggest_paper_title_from_url(
+    project_id: str,
+    body: PaperIngestUrlRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
+) -> SuggestTitleFromUrlResponse:
+    """Extract title via DOI→Crossref, then PDF→LLM. Returns requires_manual=True if both fail."""
+    await project_service.require_member(db, project_id, user.id, "viewer")
+    from app.services.paper_fetch_service import PaywallError, fetch_pdf
+    from app.services.title_extraction_service import (
+        extract_doi,
+        extract_title_from_doi,
+        extract_title_from_pdf,
+    )
+
+    doi = extract_doi(body.url)
+    if doi:
+        title = await extract_title_from_doi(doi)
+        if title:
+            return SuggestTitleFromUrlResponse(title=title, requires_manual=False)
+
+    try:
+        pdf_bytes = await fetch_pdf(body.url)
+        title = await extract_title_from_pdf(pdf_bytes)
+        return SuggestTitleFromUrlResponse(title=title, requires_manual=title is None)
+    except PaywallError:
+        return SuggestTitleFromUrlResponse(title=None, requires_manual=True)
+    except Exception:
+        return SuggestTitleFromUrlResponse(title=None, requires_manual=True)
 
 
 @router.post("/projects/{project_id}/papers/{paper_id}/ingest")

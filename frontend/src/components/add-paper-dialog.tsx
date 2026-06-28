@@ -16,6 +16,8 @@ import {
   createPaper,
   ingestPaper,
   ingestPaperFromUrl,
+  suggestTitle,
+  suggestTitleFromUrl,
 } from "@/lib/projects";
 
 interface AddPaperDialogProps {
@@ -35,11 +37,15 @@ export function AddPaperDialog({
   // PDF tab
   const [file, setFile] = useState<File | null>(null);
   const [pdfTitle, setPdfTitle] = useState("");
+  const [extractingPdfTitle, setExtractingPdfTitle] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
 
   // URL tab
   const [url, setUrl] = useState("");
   const [urlTitle, setUrlTitle] = useState("");
+  const [urlTitleMode, setUrlTitleMode] = useState<
+    "idle" | "extracting" | "extracted" | "requires_manual"
+  >("idle");
 
   // Shared
   const [submitting, setSubmitting] = useState(false);
@@ -49,12 +55,44 @@ export function AddPaperDialog({
   function reset() {
     setFile(null);
     setPdfTitle("");
+    setExtractingPdfTitle(false);
     setUrl("");
     setUrlTitle("");
+    setUrlTitleMode("idle");
     setError(null);
     setPaywalled(false);
     setTab("pdf");
     if (fileRef.current) fileRef.current.value = "";
+  }
+
+  async function extractPdfTitle(f: File) {
+    setExtractingPdfTitle(true);
+    try {
+      const bytes = await f.arrayBuffer();
+      const { title } = await suggestTitle(projectId, bytes);
+      if (title) setPdfTitle(title.slice(0, 150));
+    } catch {
+      // fail-open: title stays as filename
+    } finally {
+      setExtractingPdfTitle(false);
+    }
+  }
+
+  async function extractUrlTitle(urlValue: string) {
+    if (!urlValue.trim()) return;
+    setUrlTitleMode("extracting");
+    setUrlTitle("");
+    try {
+      const { title, requires_manual } = await suggestTitleFromUrl(projectId, urlValue.trim());
+      if (requires_manual || !title) {
+        setUrlTitleMode("requires_manual");
+      } else {
+        setUrlTitle(title.slice(0, 150));
+        setUrlTitleMode("extracted");
+      }
+    } catch {
+      setUrlTitleMode("requires_manual");
+    }
   }
 
   async function handlePdfSubmit() {
@@ -76,7 +114,7 @@ export function AddPaperDialog({
   }
 
   async function handleUrlSubmit() {
-    if (!url.trim() || !urlTitle.trim() || submitting) return;
+    if (!url.trim() || !urlTitle.trim() || submitting || urlTitleMode === "extracting") return;
     setSubmitting(true);
     setError(null);
     setPaywalled(false);
@@ -149,8 +187,11 @@ export function AddPaperDialog({
               onChange={(e) => {
                 const f = e.target.files?.[0] ?? null;
                 setFile(f);
-                if (f)
-                  setPdfTitle(f.name.replace(/\.pdf$/i, "").slice(0, 150));
+                if (f) {
+                  const fallback = f.name.replace(/\.pdf$/i, "").slice(0, 150);
+                  setPdfTitle(fallback);
+                  extractPdfTitle(f);
+                }
               }}
             />
             <Button
@@ -163,9 +204,10 @@ export function AddPaperDialog({
             </Button>
             <div className="space-y-1">
               <Input
-                placeholder="Paper title"
+                placeholder={extractingPdfTitle ? "Extracting title…" : "Paper title"}
                 value={pdfTitle}
                 maxLength={150}
+                disabled={extractingPdfTitle}
                 onChange={(e) => setPdfTitle(e.target.value)}
               />
               {pdfTitle.length > 120 && (
@@ -181,7 +223,7 @@ export function AddPaperDialog({
               <Button
                 className="flex-1"
                 onClick={handlePdfSubmit}
-                disabled={!file || !pdfTitle.trim() || submitting}
+                disabled={!file || !pdfTitle.trim() || submitting || extractingPdfTitle}
               >
                 {submitting ? "Uploading…" : "Upload & Index"}
               </Button>
@@ -199,24 +241,43 @@ export function AddPaperDialog({
 
           {/* ── URL tab ── */}
           <TabsContent value="url" className="mt-4 space-y-3">
-            <div className="space-y-1">
-              <Input
-                placeholder="Paper title"
-                value={urlTitle}
-                maxLength={150}
-                onChange={(e) => setUrlTitle(e.target.value)}
-              />
-              {urlTitle.length > 120 && (
-                <p className="text-right text-xs text-muted-foreground">
-                  {150 - urlTitle.length} chars left
-                </p>
-              )}
-            </div>
             <Input
               placeholder="https://ieeexplore.ieee.org/…"
               value={url}
-              onChange={(e) => setUrl(e.target.value)}
+              onChange={(e) => {
+                setUrl(e.target.value);
+                setUrlTitleMode("idle");
+                setUrlTitle("");
+              }}
+              onBlur={() => extractUrlTitle(url)}
             />
+            {urlTitleMode !== "idle" && (
+              <div className="space-y-1">
+                <Input
+                  placeholder={
+                    urlTitleMode === "extracting"
+                      ? "Extracting title…"
+                      : urlTitleMode === "requires_manual"
+                      ? "Enter title manually"
+                      : "Paper title"
+                  }
+                  value={urlTitle}
+                  maxLength={150}
+                  disabled={urlTitleMode === "extracting"}
+                  onChange={(e) => setUrlTitle(e.target.value)}
+                />
+                {urlTitleMode === "requires_manual" && (
+                  <p className="text-xs text-amber-600">
+                    Couldn&apos;t extract title — enter it manually.
+                  </p>
+                )}
+                {urlTitle.length > 120 && (
+                  <p className="text-right text-xs text-muted-foreground">
+                    {150 - urlTitle.length} chars left
+                  </p>
+                )}
+              </div>
+            )}
             {paywalled && (
               <div className="rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-sm">
                 <p className="font-medium text-destructive">
@@ -255,7 +316,12 @@ export function AddPaperDialog({
                 <Button
                   className="flex-1"
                   onClick={handleUrlSubmit}
-                  disabled={!url.trim() || !urlTitle.trim() || submitting}
+                  disabled={
+                    !url.trim() ||
+                    !urlTitle.trim() ||
+                    submitting ||
+                    urlTitleMode === "extracting"
+                  }
                 >
                   {submitting ? "Fetching…" : "Fetch & Index"}
                 </Button>

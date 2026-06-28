@@ -79,3 +79,12 @@ class PaperOut(BaseModel):
 
 class PaperIngestUrlRequest(BaseModel):
     url: str = Field(min_length=1)
+
+
+class SuggestTitleResponse(BaseModel):
+    title: str | None
+
+
+class SuggestTitleFromUrlResponse(BaseModel):
+    title: str | None
+    requires_manual: bool
