@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { Check, Copy } from "lucide-react";
-import { addEntry, subscribe, type LogEntry, type DebugStep } from "@/lib/debug-store";
+import { addEntry, clearEntries, subscribe, type LogEntry, type DebugStep } from "@/lib/debug-store";
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -324,7 +324,7 @@ export function DebugPanel() {
             <div className="flex items-center gap-2">
               <CopyBtn value={entries} />
               <button
-                onClick={() => setEntries([])}
+                onClick={clearEntries}
                 className="text-[10px] text-muted-foreground/50 hover:text-muted-foreground"
               >
                 clear

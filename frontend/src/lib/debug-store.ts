@@ -27,6 +27,11 @@ export function addEntry(entry: LogEntry) {
   listeners.forEach((fn) => fn(snapshot));
 }
 
+export function clearEntries() {
+  entries.length = 0;
+  listeners.forEach((fn) => fn([]));
+}
+
 export function subscribe(fn: (entries: LogEntry[]) => void) {
   listeners.add(fn);
   fn([...entries]);
