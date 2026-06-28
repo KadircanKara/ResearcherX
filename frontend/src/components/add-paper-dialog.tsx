@@ -224,6 +224,8 @@ export function AddPaperDialog({ projectId, onAdded, children }: AddPaperDialogP
             </div>
           </div>
 
+          <hr className="border-border" />
+
           {/* Fields */}
           <div className="space-y-1">
             <FieldLabel label="Title" />
