@@ -117,27 +117,6 @@ _PUBLISHER_SUFFIX = re.compile(
 )
 
 
-async def extract_title_from_semantic_scholar(url: str) -> str | None:
-    """Look up a paper by its landing page URL via Semantic Scholar's public API."""
-    debug_log.step("extract_title_from_semantic_scholar", url=url)
-    try:
-        async with httpx.AsyncClient(timeout=_CROSSREF_TIMEOUT, headers=_API_HEADERS) as client:
-            r = await client.get(
-                f"https://api.semanticscholar.org/graph/v1/paper/URL:{url}",
-                params={"fields": "title"},
-            )
-            debug_log.step("semantic_scholar_response", status=r.status_code)
-            if r.status_code == 200:
-                title = r.json().get("title")
-                if title:
-                    debug_log.step("semantic_scholar_title_found", title=title)
-                    return title[:300]
-            debug_log.step("semantic_scholar_no_title", status=r.status_code)
-    except Exception as exc:
-        log.debug("semantic_scholar_title_failed", url=url, error=str(exc))
-        debug_log.step("semantic_scholar_error", error=str(exc))
-    return None
-
 
 async def extract_title_from_page(url: str) -> str | None:
     """Fetch the web page and extract title from academic meta tags.
