@@ -21,7 +21,7 @@ import {
 interface AddPaperDialogProps {
   projectId: string;
   onAdded: () => void;
-  children: React.ReactNode;
+  children: React.ReactElement;
 }
 
 export function AddPaperDialog({
@@ -93,6 +93,7 @@ export function AddPaperDialog({
       } catch (e) {
         if (e instanceof Error && (e as Error & { paywalled?: boolean }).paywalled) {
           setPaywalled(true);
+          onAdded();   // paper record exists; refresh list now
         } else {
           setError("Failed to fetch paper. Please try again.");
         }
@@ -218,6 +219,14 @@ export function AddPaperDialog({
                   }}
                 >
                   Upload PDF instead
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="mt-1"
+                  onClick={() => { setOpen(false); reset(); }}
+                >
+                  Cancel
                 </Button>
               </div>
             )}
