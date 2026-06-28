@@ -144,7 +144,7 @@ export function AddPaperDialog({
               ref={fileRef}
               type="file"
               accept=".pdf"
-              className="hidden"
+              hidden
               onChange={(e) => {
                 const f = e.target.files?.[0] ?? null;
                 setFile(f);
