@@ -10,7 +10,7 @@ import os
 import tempfile
 
 _TMPDIR = tempfile.mkdtemp(prefix="rx-tests-")
-os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{_TMPDIR}/test.db"
+os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{_TMPDIR}/test.db?timeout=30"
 os.environ["ENVIRONMENT"] = "dev"
 os.environ["LLM_API_KEY"] = "test-key-never-used"
 os.environ["LLM_BASE_URL"] = "http://localhost:1/v1"  # unroutable: fail fast if hit
