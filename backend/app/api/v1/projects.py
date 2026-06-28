@@ -15,6 +15,7 @@ from app.schemas.project import (
     MemberOut,
     MemberRoleUpdate,
     PaperCreate,
+    PaperIngestUrlRequest,
     PaperOut,
     ProjectCreate,
     ProjectDetailOut,
@@ -191,6 +192,37 @@ async def ingest_paper(
         raise HTTPException(status_code=404, detail="Paper not found")
     pdf_bytes = await request.body()
     from app.services.paper_ingest_service import ingest
+    n = await ingest(db, paper_id, pdf_bytes)
+    return {"chunks_stored": n}
+
+
+@router.post("/projects/{project_id}/papers/{paper_id}/ingest-from-url")
+async def ingest_paper_from_url(
+    project_id: str,
+    paper_id: str,
+    body: PaperIngestUrlRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
+) -> dict:
+    await project_service.require_member(db, project_id, user.id, "editor")
+    paper = await db.get(Paper, paper_id)
+    if paper is None or paper.project_id != project_id:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="Paper not found")
+
+    from app.services.paper_fetch_service import fetch_pdf, PaywallError
+    from app.services.paper_ingest_service import ingest
+    try:
+        pdf_bytes = await fetch_pdf(body.url)
+    except PaywallError:
+        from fastapi import HTTPException
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "paywalled",
+                "message": "No open-access version found. Upload the PDF directly.",
+            },
+        )
     n = await ingest(db, paper_id, pdf_bytes)
     return {"chunks_stored": n}
 

@@ -75,3 +75,7 @@ class PaperOut(BaseModel):
     pdf_url: str | None
     created_at: datetime
     model_config = {"from_attributes": True}
+
+
+class PaperIngestUrlRequest(BaseModel):
+    url: str = Field(min_length=1)
