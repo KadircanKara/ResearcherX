@@ -114,7 +114,7 @@ export function AddPaperDialog({
       }}
     >
       <DialogTrigger render={children as React.ReactElement}></DialogTrigger>
-      <DialogContent className="sm:max-w-md">
+      <DialogContent className="sm:max-w-lg">
         <DialogHeader>
           <DialogTitle>Add Paper</DialogTitle>
         </DialogHeader>
@@ -149,7 +149,7 @@ export function AddPaperDialog({
                 const f = e.target.files?.[0] ?? null;
                 setFile(f);
                 if (f && !pdfTitle)
-                  setPdfTitle(f.name.replace(/\.pdf$/i, ""));
+                  setPdfTitle(f.name.replace(/\.pdf$/i, "").slice(0, 150));
               }}
             />
             <Button
@@ -160,11 +160,19 @@ export function AddPaperDialog({
             >
               {file ? file.name : "Choose PDF file…"}
             </Button>
-            <Input
-              placeholder="Paper title"
-              value={pdfTitle}
-              onChange={(e) => setPdfTitle(e.target.value)}
-            />
+            <div className="space-y-1">
+              <Input
+                placeholder="Paper title"
+                value={pdfTitle}
+                maxLength={150}
+                onChange={(e) => setPdfTitle(e.target.value)}
+              />
+              {pdfTitle.length > 120 && (
+                <p className="text-right text-xs text-muted-foreground">
+                  {150 - pdfTitle.length} chars left
+                </p>
+              )}
+            </div>
             {error && (
               <p className="text-xs text-destructive">{error}</p>
             )}
@@ -190,11 +198,19 @@ export function AddPaperDialog({
 
           {/* ── URL tab ── */}
           <TabsContent value="url" className="mt-4 space-y-3">
-            <Input
-              placeholder="Paper title"
-              value={urlTitle}
-              onChange={(e) => setUrlTitle(e.target.value)}
-            />
+            <div className="space-y-1">
+              <Input
+                placeholder="Paper title"
+                value={urlTitle}
+                maxLength={150}
+                onChange={(e) => setUrlTitle(e.target.value)}
+              />
+              {urlTitle.length > 120 && (
+                <p className="text-right text-xs text-muted-foreground">
+                  {150 - urlTitle.length} chars left
+                </p>
+              )}
+            </div>
             <Input
               placeholder="https://ieeexplore.ieee.org/…"
               value={url}
