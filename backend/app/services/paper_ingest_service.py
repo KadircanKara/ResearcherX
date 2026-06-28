@@ -17,10 +17,37 @@ _OVERLAP_WORDS = 48
 _embedding_svc = EmbeddingService()
 
 
+def _extract_page_text(page: fitz.Page) -> str:
+    """Extract text from one page with column-aware ordering.
+
+    Detects multi-column layout by checking whether text blocks span less than
+    60 % of the page width (a full-width block = single column or header/footer).
+    For multi-column pages the page is split at the horizontal midpoint; blocks
+    in each column are sorted top-to-bottom independently, left column first.
+    Falls back to fitz sort=True for single-column or ambiguous pages.
+    """
+    blocks = page.get_text("blocks")  # (x0, y0, x1, y1, text, block_no, type)
+    text_blocks = [b for b in blocks if b[6] == 0 and b[4].strip()]  # type 0 = text
+
+    if not text_blocks:
+        return ""
+
+    page_w = page.rect.width
+    max_block_w = max(b[2] - b[0] for b in text_blocks)
+
+    # If any block is wider than 60 % of page → treat as single column
+    if max_block_w > page_w * 0.60:
+        return page.get_text("text", sort=True)
+
+    midpoint = page_w / 2
+    left = sorted([b for b in text_blocks if b[0] < midpoint], key=lambda b: b[1])
+    right = sorted([b for b in text_blocks if b[0] >= midpoint], key=lambda b: b[1])
+    return "\n".join(b[4] for b in left + right)
+
+
 def _extract_text(pdf_bytes: bytes) -> str:
-    """Extract text from PDF bytes. sort=True handles IEEE double-column layout."""
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    pages = [page.get_text("text", sort=True) for page in doc]
+    pages = [_extract_page_text(page) for page in doc]
     doc.close()
     return "\n".join(pages)
 
