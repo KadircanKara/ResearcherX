@@ -12,7 +12,7 @@ from sqlalchemy.orm import selectinload
 from sqlalchemy import text
 
 from app.core.logging import log
-from app.db.models import ChatConversation, ChatMessage, ConversationMessageEmbedding, _now
+from app.db.models import ChatConversation, ChatMessage, _now
 from app.db.session import SessionLocal
 from app.services.embedding_service import EmbeddingService
 

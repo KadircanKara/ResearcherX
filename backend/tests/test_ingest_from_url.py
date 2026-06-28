@@ -1,13 +1,12 @@
 """Tests for POST /projects/{id}/papers/{paper_id}/ingest-from-url."""
 from unittest.mock import AsyncMock, patch
 
-import pytest
 import pytest_asyncio
 from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import Paper, Project, ProjectMember, User
+from app.db.models import Project, ProjectMember, User
 from app.db.seed import seed_users
 from app.services.paper_fetch_service import PaywallError
 

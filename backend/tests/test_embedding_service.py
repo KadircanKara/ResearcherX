@@ -38,6 +38,5 @@ async def test_embed_batch():
 
 
 async def test_embed_batch_empty():
-    svc = EmbeddingService()
     results = await EmbeddingService().embed_batch([], task_type="RETRIEVAL_DOCUMENT")
     assert results == []

@@ -1,12 +1,11 @@
 """ChatService integration test — all external calls mocked."""
-import json
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest_asyncio
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import ChatConversation, ChatMessage, Paper, Project, ProjectMember, User
+from app.db.models import ChatConversation, ChatMessage, Project, ProjectMember, User
 from app.db.seed import seed_users
 
 
@@ -50,7 +49,7 @@ async def test_respond_yields_events(
     db_session: AsyncSession, project: Project, conversation_with_message
 ):
     from app.services.chat_service import ChatService
-    from app.agents.retrieval_planner import RetrievalPlan, PaperAlloc
+    from app.agents.retrieval_planner import RetrievalPlan
 
     conv = conversation_with_message
 

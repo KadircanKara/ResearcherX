@@ -5,7 +5,7 @@ import pytest_asyncio
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import ChatConversation, ChatMessage, Project, ProjectMember, User
+from app.db.models import Project, ProjectMember, User
 from app.db.seed import seed_users
 
 
