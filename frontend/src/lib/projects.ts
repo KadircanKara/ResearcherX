@@ -69,7 +69,7 @@ export async function listPapers(projectId: string): Promise<Paper[]> {
 
 export async function createPaper(
   projectId: string,
-  data: { title: string; abstract?: string | null; pdf_url?: string | null }
+  data: { title: string; abstract?: string | null; body?: string | null; pdf_url?: string | null }
 ): Promise<Paper> {
   return (await apiSend<Paper>("POST", `/projects/${projectId}/papers`, data)) as Paper;
 }
@@ -99,7 +99,7 @@ export async function ingestPaper(
 export async function suggestTitle(
   projectId: string,
   pdfBytes: ArrayBuffer
-): Promise<{ title: string | null }> {
+): Promise<{ title: string | null; abstract: string | null; body: string | null }> {
   const headers: Record<string, string> = {
     "Content-Type": "application/octet-stream",
   };
@@ -109,14 +109,14 @@ export async function suggestTitle(
     `${API_BASE}/v1/projects/${projectId}/papers/suggest-title`,
     { method: "POST", headers, body: pdfBytes, cache: "no-store" }
   );
-  if (!r.ok) return { title: null };
+  if (!r.ok) return { title: null, abstract: null, body: null };
   return r.json();
 }
 
 export async function suggestTitleFromUrl(
   projectId: string,
   url: string
-): Promise<{ title: string | null; requires_manual: boolean }> {
+): Promise<{ title: string | null; abstract: string | null; requires_manual: boolean }> {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   const uid = getDevUserId();
   if (uid) headers["X-Dev-User-Id"] = uid;
@@ -124,7 +124,7 @@ export async function suggestTitleFromUrl(
     `${API_BASE}/v1/projects/${projectId}/papers/suggest-title-from-url`,
     { method: "POST", headers, body: JSON.stringify({ url }), cache: "no-store" }
   );
-  if (!r.ok) return { title: null, requires_manual: true };
+  if (!r.ok) return { title: null, abstract: null, requires_manual: true };
   return r.json();
 }
 

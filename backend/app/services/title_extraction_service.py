@@ -1,4 +1,4 @@
-"""Extract paper titles: Crossref (DOI), HTML meta tags, or LLM on PDF text."""
+"""Extract paper title/abstract/body: Crossref (DOI), HTML meta tags, or LLM on PDF text."""
 
 from __future__ import annotations
 
@@ -6,9 +6,16 @@ import html as _html_module
 import re
 
 import httpx
+from pydantic import BaseModel
 
 from app.core import debug_log
 from app.core.logging import log
+
+
+class _PaperMeta(BaseModel):
+    title: str | None = None
+    abstract: str | None = None
+
 
 _DOI_RE = re.compile(r"10\.\d{4,}/[^\s\"<>]+")
 _ARXIV_PDF_RE = re.compile(r"^(https?://arxiv\.org)/pdf/(.+?)(?:\.pdf)?$", re.IGNORECASE)
@@ -35,11 +42,10 @@ _BROWSER_HEADERS = {
 # Keep the old name so paper_fetch_service.py still works unchanged
 _UA = _API_HEADERS
 
-_SYSTEM_PROMPT = (
-    "You are a research paper title extractor. "
-    "Extract only the title of the paper from the text provided. "
-    "Return ONLY the title — no quotes, no explanation, no punctuation other than what is in the title itself. "
-    "If you cannot determine the title, respond with exactly: UNKNOWN"
+_META_SYSTEM = (
+    "You are a research paper metadata extractor. "
+    "From the provided text (typically from the first page of a paper), extract the title and abstract. "
+    "Return null for any field you cannot determine with confidence."
 )
 
 
@@ -79,27 +85,23 @@ async def extract_title_from_doi(doi: str) -> str | None:
     return None
 
 
-async def extract_title_via_llm(text: str) -> str | None:
-    """Ask the LLM to extract the title from the first ~1500 chars of PDF text."""
-    snippet = text[:1500].strip()
+async def _extract_meta_via_llm(text: str) -> _PaperMeta:
+    """Extract title + abstract from the first ~3000 chars of PDF text via structured LLM call."""
+    snippet = text[:3000].strip()
     if not snippet:
-        return None
+        return _PaperMeta()
     try:
-        from app.llm.client import create_chat_completion
+        from app.llm.structured import parse_structured
 
-        resp = await create_chat_completion(
-            messages=[
-                {"role": "system", "content": _SYSTEM_PROMPT},
-                {"role": "user", "content": f"Text:\n{snippet}"},
-            ],
-            max_tokens=120,
+        return await parse_structured(
+            system=_META_SYSTEM,
+            user=f"Text:\n{snippet}",
+            output_model=_PaperMeta,
+            max_tokens=600,
         )
-        title = resp.choices[0].message.content.strip()
-        if title and title != "UNKNOWN":
-            return title[:300]
     except Exception as exc:
-        log.debug("llm_title_extraction_failed", error=str(exc))
-    return None
+        log.debug("llm_meta_extraction_failed", error=str(exc))
+    return _PaperMeta()
 
 
 def _meta_content(html: str, attr: str, val: str) -> str | None:
@@ -129,20 +131,55 @@ _PUBLISHER_SUFFIX = re.compile(
 )
 
 
-async def extract_title_from_page(url: str) -> str | None:
-    """Fetch a URL and extract the paper title.
+def _extract_title_from_html(snippet: str) -> str | None:
+    citation = _meta_content(snippet, "name", "citation_title")
+    debug_log.step("citation_title_meta", matched=citation is not None, value=citation)
+    if citation:
+        return citation[:300]
 
-    Handles both HTML pages (meta tag extraction) and direct PDF URLs (fitz + LLM).
-    arXiv PDF URLs are normalized to their abs page first — no LLM call needed.
+    og = _meta_content(snippet, "property", "og:title")
+    debug_log.step("og_title_meta", matched=og is not None, value=og)
+    if og:
+        return og[:300]
 
-    HTML priority: citation_title → og:title → <title> tag
+    m = re.search(r"<title[^>]*>([^<]+)</title>", snippet, re.IGNORECASE)
+    if m:
+        title = _html_module.unescape(m.group(1).strip())
+        title = _PUBLISHER_SUFFIX.sub("", title).strip()
+        debug_log.step("title_tag", raw=m.group(1).strip(), cleaned=title)
+        if title:
+            return title[:300]
+    debug_log.step("title_tag", matched=False)
+    return None
+
+
+def _extract_abstract_from_html(snippet: str) -> str | None:
+    # citation_abstract (Google Scholar schema — arXiv, many publishers)
+    ab = _meta_content(snippet, "name", "citation_abstract")
+    if ab:
+        return ab[:4000]
+    # og:description / plain description
+    ab = _meta_content(snippet, "property", "og:description")
+    if ab:
+        return ab[:4000]
+    ab = _meta_content(snippet, "name", "description")
+    if ab:
+        return ab[:4000]
+    return None
+
+
+async def extract_meta_from_page(url: str) -> tuple[str | None, str | None]:
+    """Fetch a URL and return (title, abstract).
+
+    Handles HTML meta tags and direct PDF URLs (via fitz + LLM).
+    arXiv PDF URLs are normalized to their abs page first.
     """
     normalized = normalize_pdf_url(url)
     if normalized != url:
         debug_log.step("url_normalized", original=url, normalized=normalized)
         url = normalized
 
-    debug_log.step("extract_title_from_page", url=url)
+    debug_log.step("extract_meta_from_page", url=url)
     try:
         async with httpx.AsyncClient(
             timeout=_CROSSREF_TIMEOUT, headers=_BROWSER_HEADERS, follow_redirects=True
@@ -150,14 +187,15 @@ async def extract_title_from_page(url: str) -> str | None:
             async with client.stream("GET", url) as r:
                 debug_log.step("page_http_response", url=url, status=r.status_code)
                 if r.status_code != 200:
-                    log.debug("page_title_fetch_failed", url=url, status=r.status_code)
-                    return None
+                    log.debug("page_meta_fetch_failed", url=url, status=r.status_code)
+                    return None, None
 
                 ct = r.headers.get("content-type", "")
                 if "pdf" in ct.lower():
                     debug_log.step("pdf_content_detected", content_type=ct)
                     pdf_bytes = await r.aread()
-                    return await extract_title_from_pdf(pdf_bytes)
+                    meta = await extract_meta_from_pdf(pdf_bytes)
+                    return meta[0], meta[1]
 
                 chunks: list[str] = []
                 total = 0
@@ -170,41 +208,42 @@ async def extract_title_from_page(url: str) -> str | None:
         debug_log.step(
             "page_bytes_read", bytes=total, found_head_close="</head>" in snippet.lower()
         )
-
-        citation = _meta_content(snippet, "name", "citation_title")
-        debug_log.step("citation_title_meta", matched=citation is not None, value=citation)
-        if citation:
-            return citation[:300]
-
-        og = _meta_content(snippet, "property", "og:title")
-        debug_log.step("og_title_meta", matched=og is not None, value=og)
-        if og:
-            return og[:300]
-
-        m = re.search(r"<title[^>]*>([^<]+)</title>", snippet, re.IGNORECASE)
-        if m:
-            title = _html_module.unescape(m.group(1).strip())
-            title = _PUBLISHER_SUFFIX.sub("", title).strip()
-            debug_log.step("title_tag", raw=m.group(1).strip(), cleaned=title)
-            if title:
-                return title[:300]
-        else:
-            debug_log.step("title_tag", matched=False)
+        return _extract_title_from_html(snippet), _extract_abstract_from_html(snippet)
     except Exception as exc:
-        log.debug("page_title_extraction_failed", url=url, error=str(exc))
-        debug_log.step("page_title_error", error=str(exc))
-    return None
+        log.debug("page_meta_extraction_failed", url=url, error=str(exc))
+        debug_log.step("page_meta_error", error=str(exc))
+    return None, None
 
 
-async def extract_title_from_pdf(pdf_bytes: bytes) -> str | None:
-    """Extract text from the first page of a PDF, then ask the LLM for the title."""
+async def extract_title_from_page(url: str) -> str | None:
+    """Backward-compat wrapper — returns only the title."""
+    title, _ = await extract_meta_from_page(url)
+    return title
+
+
+async def extract_meta_from_pdf(
+    pdf_bytes: bytes,
+) -> tuple[str | None, str | None, str | None]:
+    """Extract (title, abstract, body) from a PDF via fitz + structured LLM.
+
+    LLM sees only the first page (for title/abstract); body is plain fitz text of all pages.
+    """
     try:
         import fitz
 
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-        first_page_text = doc[0].get_text("text", sort=True) if len(doc) > 0 else ""
+        pages = [doc[i].get_text("text", sort=True) for i in range(len(doc))]
         doc.close()
-        return await extract_title_via_llm(first_page_text)
+        first_page = pages[0] if pages else ""
+        body = "\n\n".join(p for p in pages if p.strip()) or None
+        meta = await _extract_meta_via_llm(first_page)
+        return meta.title, meta.abstract, body
     except Exception as exc:
-        log.debug("pdf_title_extraction_failed", error=str(exc))
-    return None
+        log.debug("pdf_meta_extraction_failed", error=str(exc))
+    return None, None, None
+
+
+async def extract_title_from_pdf(pdf_bytes: bytes) -> str | None:
+    """Backward-compat wrapper — returns only the title."""
+    title, _, _ = await extract_meta_from_pdf(pdf_bytes)
+    return title

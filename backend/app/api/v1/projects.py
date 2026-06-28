@@ -21,8 +21,8 @@ from app.schemas.project import (
     ProjectDetailOut,
     ProjectOut,
     ProjectUpdate,
+    SuggestMetaResponse,
     SuggestTitleFromUrlResponse,
-    SuggestTitleResponse,
 )
 from app.schemas.research import RunOut
 from app.schemas.user import UserOut
@@ -158,6 +158,7 @@ async def create_paper(
         project_id=project_id,
         title=data.title,
         abstract=data.abstract,
+        body=data.body,
         pdf_url=data.pdf_url,
     )
     db.add(paper)
@@ -197,23 +198,23 @@ async def list_papers(
 
 @router.post(
     "/projects/{project_id}/papers/suggest-title",
-    response_model=SuggestTitleResponse,
+    response_model=SuggestMetaResponse,
 )
 async def suggest_paper_title(
     project_id: str,
     request: Request,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_session),
-) -> SuggestTitleResponse:
-    """Extract title from PDF bytes via LLM. Fails open (returns null on error)."""
+) -> SuggestMetaResponse:
+    """Extract title, abstract, and body from PDF bytes via LLM. Fails open."""
     await project_service.require_member(db, project_id, user.id, "viewer")
     pdf_bytes = await request.body()
     if not pdf_bytes:
-        return SuggestTitleResponse(title=None)
-    from app.services.title_extraction_service import extract_title_from_pdf
+        return SuggestMetaResponse(title=None, abstract=None, body=None)
+    from app.services.title_extraction_service import extract_meta_from_pdf
 
-    title = await extract_title_from_pdf(pdf_bytes)
-    return SuggestTitleResponse(title=title)
+    title, abstract, body = await extract_meta_from_pdf(pdf_bytes)
+    return SuggestMetaResponse(title=title, abstract=abstract, body=body)
 
 
 @router.post(
@@ -226,27 +227,26 @@ async def suggest_paper_title_from_url(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_session),
 ) -> SuggestTitleFromUrlResponse:
-    """Extract title via DOI→Crossref → HTML meta tags. Returns requires_manual=True if both fail."""
+    """Extract title + abstract via DOI→Crossref → HTML meta tags."""
     await project_service.require_member(db, project_id, user.id, "viewer")
     from app.services.title_extraction_service import (
         extract_doi,
+        extract_meta_from_page,
         extract_title_from_doi,
-        extract_title_from_page,
     )
 
-    # 1. DOI → Crossref (most authoritative)
     doi = extract_doi(body.url)
+    crossref_title: str | None = None
     if doi:
-        title = await extract_title_from_doi(doi)
-        if title:
-            return SuggestTitleFromUrlResponse(title=title, requires_manual=False)
+        crossref_title = await extract_title_from_doi(doi)
 
-    # 2. HTML meta tags (citation_title / og:title / <title>) with browser headers
-    title = await extract_title_from_page(body.url)
+    page_title, page_abstract = await extract_meta_from_page(body.url)
+
+    title = crossref_title or page_title
+    abstract = page_abstract
     if title:
-        return SuggestTitleFromUrlResponse(title=title, requires_manual=False)
-
-    return SuggestTitleFromUrlResponse(title=None, requires_manual=True)
+        return SuggestTitleFromUrlResponse(title=title, abstract=abstract, requires_manual=False)
+    return SuggestTitleFromUrlResponse(title=None, abstract=None, requires_manual=True)
 
 
 @router.post("/projects/{project_id}/papers/{paper_id}/ingest")

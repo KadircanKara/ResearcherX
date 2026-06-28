@@ -129,6 +129,7 @@ class Paper(Base):
     )
     title: Mapped[str] = mapped_column(String(512))
     abstract: Mapped[str | None] = mapped_column(Text, default=None)
+    body: Mapped[str | None] = mapped_column(Text, default=None)
     pdf_url: Mapped[str | None] = mapped_column(Text, default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
