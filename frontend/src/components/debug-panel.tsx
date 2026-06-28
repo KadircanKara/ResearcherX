@@ -3,6 +3,8 @@
 import { useEffect, useRef, useState } from "react";
 import { addEntry, subscribe, type LogEntry, type DebugStep } from "@/lib/debug-store";
 
+// ── helpers ───────────────────────────────────────────────────────────────────
+
 function statusColor(status?: number, ok?: boolean, networkError?: string) {
   if (networkError) return "text-red-400";
   if (!status) return "text-gray-400";
@@ -19,98 +21,198 @@ function safeJson(val: unknown): string {
   }
 }
 
-function StepRow({ step }: { step: DebugStep }) {
-  const { fn, error, ...rest } = step;
-  const isError = !!error;
+// ── CopyBtn ───────────────────────────────────────────────────────────────────
+
+function CopyBtn({
+  value,
+  onCopy,
+}: {
+  value: unknown;
+  onCopy?: (e: React.MouseEvent) => void;
+}) {
+  const [copied, setCopied] = useState(false);
+
+  function handle(e: React.MouseEvent) {
+    e.stopPropagation();
+    onCopy?.(e);
+    const text = typeof value === "string" ? value : safeJson(value);
+    navigator.clipboard.writeText(text).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1400);
+    });
+  }
+
   return (
-    <details className="ml-2 border-l border-gray-700 pl-2">
-      <summary
-        className={`cursor-pointer select-none py-0.5 font-mono text-[10px] ${
-          isError ? "text-red-400" : "text-gray-300"
-        }`}
-      >
-        {fn}
-        {isError && <span className="ml-2 text-red-400">✕ {String(error)}</span>}
-      </summary>
-      <pre className="mt-1 whitespace-pre-wrap break-all text-[10px] text-gray-400">
-        {safeJson(rest)}
-      </pre>
-    </details>
+    <button
+      onClick={handle}
+      className="ml-1 shrink-0 rounded px-1.5 py-0.5 font-mono text-[9px] text-gray-600 hover:bg-gray-700 hover:text-gray-200"
+    >
+      {copied ? "✓" : "copy"}
+    </button>
   );
 }
 
+// ── StepRow ───────────────────────────────────────────────────────────────────
+
+function StepRow({ step }: { step: DebugStep }) {
+  const [open, setOpen] = useState(false);
+  const { fn, error, ...rest } = step;
+  const isError = !!error;
+
+  return (
+    <div className="ml-2 border-l border-gray-700 pl-2">
+      {/* header */}
+      <div
+        className="flex cursor-pointer items-center py-0.5"
+        onClick={() => setOpen((v) => !v)}
+      >
+        <span
+          className={`select-none font-mono text-[10px] ${
+            isError ? "text-red-400" : "text-gray-300"
+          }`}
+        >
+          {open ? "▾" : "▸"} {fn}
+          {isError && <span className="ml-2 text-red-400">✕</span>}
+        </span>
+        <CopyBtn value={step} />
+      </div>
+
+      {/* expanded content */}
+      {open && (
+        <pre className="mb-1 whitespace-pre-wrap break-all text-[10px] text-gray-400">
+          {safeJson({ error, ...rest })}
+        </pre>
+      )}
+    </div>
+  );
+}
+
+// ── Section ───────────────────────────────────────────────────────────────────
+// Generic collapsible section with a copy button in the header.
+
+function Section({
+  label,
+  copyValue,
+  labelColor = "text-gray-500",
+  defaultOpen = false,
+  children,
+}: {
+  label: string;
+  copyValue: unknown;
+  labelColor?: string;
+  defaultOpen?: boolean;
+  children: React.ReactNode;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <div>
+      <div
+        className="flex cursor-pointer items-center"
+        onClick={() => setOpen((v) => !v)}
+      >
+        <span className={`select-none text-[10px] ${labelColor}`}>
+          {open ? "▾" : "▸"} {label}
+        </span>
+        <CopyBtn value={copyValue} />
+      </div>
+      {open && <div className="mt-1">{children}</div>}
+    </div>
+  );
+}
+
+// ── EntryRow ──────────────────────────────────────────────────────────────────
+
 function EntryRow({ entry }: { entry: LogEntry }) {
-  const { method, url, status, ok, durationMs, requestBody, responseBody, steps, networkError } =
-    entry;
+  const [open, setOpen] = useState(false);
+  const {
+    method,
+    url,
+    status,
+    ok,
+    durationMs,
+    requestBody,
+    responseBody,
+    steps,
+    networkError,
+  } = entry;
   const shortUrl = url.replace(/^https?:\/\/[^/]+/, "");
   const color = statusColor(status, ok, networkError);
 
   return (
-    <details className="border-b border-gray-800">
-      <summary className="cursor-pointer select-none px-2 py-1.5 hover:bg-gray-800">
-        <span className="font-mono text-[10px] text-gray-500">{method} </span>
-        <span className="font-mono text-[10px] text-gray-300">{shortUrl}</span>
+    <div className="border-b border-gray-800">
+      {/* header row */}
+      <div
+        className="flex cursor-pointer items-center gap-1 px-2 py-1.5 hover:bg-gray-800"
+        onClick={() => setOpen((v) => !v)}
+      >
+        <span className="shrink-0 font-mono text-[10px] text-gray-500">{method}</span>
+        <span className="min-w-0 flex-1 truncate font-mono text-[10px] text-gray-300">
+          {shortUrl}
+        </span>
         {status && (
-          <span className={`ml-2 font-mono text-[10px] ${color}`}>{status}</span>
+          <span className={`shrink-0 font-mono text-[10px] ${color}`}>{status}</span>
         )}
-        {networkError && <span className="ml-2 text-[10px] text-red-400">ERR</span>}
-        <span className="ml-2 text-[10px] text-gray-600">{durationMs}ms</span>
-      </summary>
-
-      <div className="space-y-2 px-2 pb-2 pt-1">
-        {/* Request body */}
-        {requestBody !== undefined && (
-          <details>
-            <summary className="cursor-pointer select-none text-[10px] text-gray-500">
-              Request body
-            </summary>
-            <pre className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap break-all text-[10px] text-gray-400">
-              {safeJson(requestBody)}
-            </pre>
-          </details>
-        )}
-
-        {/* Backend debug steps */}
-        {steps && steps.length > 0 && (
-          <details open>
-            <summary className="cursor-pointer select-none text-[10px] text-indigo-400">
-              Backend steps ({steps.length})
-            </summary>
-            <div className="mt-1 space-y-0.5">
-              {steps.map((s, i) => (
-                <StepRow key={i} step={s} />
-              ))}
-            </div>
-          </details>
-        )}
-
-        {/* Response body */}
-        {responseBody !== undefined && (
-          <details>
-            <summary
-              className={`cursor-pointer select-none text-[10px] ${
-                ok === false ? "text-red-400" : "text-gray-500"
-              }`}
-            >
-              Response {ok === false ? "(error)" : "body"}
-            </summary>
-            <pre className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap break-all text-[10px] text-gray-400">
-              {safeJson(responseBody)}
-            </pre>
-          </details>
-        )}
-
         {networkError && (
-          <p className="text-[10px] text-red-400">{networkError}</p>
+          <span className="shrink-0 text-[10px] text-red-400">ERR</span>
         )}
+        <span className="shrink-0 text-[10px] text-gray-600">{durationMs}ms</span>
+        {/* copy full entry */}
+        <CopyBtn value={entry} />
       </div>
-    </details>
+
+      {/* expanded */}
+      {open && (
+        <div className="space-y-2 px-2 pb-2 pt-1">
+          {requestBody !== undefined && (
+            <Section label="Request body" copyValue={requestBody}>
+              <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-all text-[10px] text-gray-400">
+                {safeJson(requestBody)}
+              </pre>
+            </Section>
+          )}
+
+          {steps && steps.length > 0 && (
+            <Section
+              label={`Backend steps (${steps.length})`}
+              copyValue={steps}
+              labelColor="text-indigo-400"
+              defaultOpen
+            >
+              <div className="space-y-0.5">
+                {steps.map((s, i) => (
+                  <StepRow key={i} step={s} />
+                ))}
+              </div>
+            </Section>
+          )}
+
+          {responseBody !== undefined && (
+            <Section
+              label={ok === false ? "Response (error)" : "Response body"}
+              copyValue={responseBody}
+              labelColor={ok === false ? "text-red-400" : "text-gray-500"}
+            >
+              <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-all text-[10px] text-gray-400">
+                {safeJson(responseBody)}
+              </pre>
+            </Section>
+          )}
+
+          {networkError && (
+            <p className="text-[10px] text-red-400">{networkError}</p>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
+
+// ── DebugPanel ────────────────────────────────────────────────────────────────
 
 export function DebugPanel() {
   const [entries, setEntries] = useState<LogEntry[]>([]);
   const [open, setOpen] = useState(false);
+  const patchedRef = useRef(false);
 
   useEffect(() => {
     document.documentElement.style.setProperty(
@@ -118,9 +220,8 @@ export function DebugPanel() {
       open ? "420px" : "0px"
     );
   }, [open]);
-  const patchedRef = useRef(false);
 
-  // Monkey-patch fetch once to capture all requests
+  // Monkey-patch fetch once
   useEffect(() => {
     if (patchedRef.current) return;
     patchedRef.current = true;
@@ -203,12 +304,10 @@ export function DebugPanel() {
     };
   }, []);
 
-  // Subscribe to store updates
   useEffect(() => subscribe(setEntries), []);
 
   return (
     <>
-      {/* Toggle button */}
       <button
         onClick={() => setOpen((v) => !v)}
         className="fixed bottom-4 right-4 z-50 rounded-full bg-gray-900 px-3 py-1.5 font-mono text-xs text-gray-300 shadow-lg ring-1 ring-gray-700 hover:bg-gray-800"
@@ -216,22 +315,21 @@ export function DebugPanel() {
         {open ? "✕ log" : `⬡ log${entries.length ? ` (${entries.length})` : ""}`}
       </button>
 
-      {/* Panel */}
       {open && (
         <div className="fixed right-0 top-0 z-40 flex h-screen w-[420px] flex-col bg-gray-950 shadow-2xl ring-1 ring-gray-800">
           <div className="flex items-center justify-between border-b border-gray-800 px-3 py-2">
             <span className="font-mono text-xs text-gray-400">
               Debug log — {entries.length} request{entries.length !== 1 ? "s" : ""}
             </span>
-            <button
-              onClick={() => {
-                entries.length = 0; // clear visible state
-                setEntries([]);
-              }}
-              className="text-[10px] text-gray-600 hover:text-gray-400"
-            >
-              clear
-            </button>
+            <div className="flex items-center gap-2">
+              <CopyBtn value={entries} />
+              <button
+                onClick={() => setEntries([])}
+                className="text-[10px] text-gray-600 hover:text-gray-400"
+              >
+                clear
+              </button>
+            </div>
           </div>
           <div className="flex-1 overflow-y-auto">
             {entries.length === 0 ? (
