@@ -91,15 +91,14 @@ async def test_ingest_from_url_paywalled(client: AsyncClient, you: User, project
     assert "Upload the PDF directly" in detail["message"]
 
 
-async def test_ingest_from_url_requires_editor(client: AsyncClient, project: Project, db_session: AsyncSession, seeded):
+async def test_ingest_from_url_requires_membership(client: AsyncClient, project: Project, db_session: AsyncSession, seeded):
     viewer = (
         await db_session.execute(select(User).where(User.email == "marco@lab.io"))
     ).scalar_one()
     # marco is not a member — expect 404 (require_member raises 404 for non-members)
-    with patch("app.services.paper_fetch_service.fetch_pdf", new=AsyncMock(return_value=_FAKE_PDF)):
-        resp = await client.post(
-            f"/v1/projects/{project.id}/papers/fake-id/ingest-from-url",
-            json={"url": "https://example.com/paper.pdf"},
-            headers={"X-Dev-User-Id": viewer.id},
-        )
+    resp = await client.post(
+        f"/v1/projects/{project.id}/papers/fake-id/ingest-from-url",
+        json={"url": "https://example.com/paper.pdf"},
+        headers={"X-Dev-User-Id": viewer.id},
+    )
     assert resp.status_code == 404

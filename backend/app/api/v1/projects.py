@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Query, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from sqlalchemy import desc, select as sa_select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -188,7 +188,6 @@ async def ingest_paper(
     await project_service.require_member(db, project_id, user.id, "editor")
     paper = await db.get(Paper, paper_id)
     if paper is None or paper.project_id != project_id:
-        from fastapi import HTTPException
         raise HTTPException(status_code=404, detail="Paper not found")
     pdf_bytes = await request.body()
     from app.services.paper_ingest_service import ingest
@@ -207,7 +206,6 @@ async def ingest_paper_from_url(
     await project_service.require_member(db, project_id, user.id, "editor")
     paper = await db.get(Paper, paper_id)
     if paper is None or paper.project_id != project_id:
-        from fastapi import HTTPException
         raise HTTPException(status_code=404, detail="Paper not found")
 
     from app.services.paper_fetch_service import fetch_pdf, PaywallError
@@ -215,7 +213,6 @@ async def ingest_paper_from_url(
     try:
         pdf_bytes = await fetch_pdf(body.url)
     except PaywallError:
-        from fastapi import HTTPException
         raise HTTPException(
             status_code=422,
             detail={
