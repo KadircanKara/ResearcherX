@@ -1,4 +1,5 @@
 """Paper ingest: PDF bytes → text chunks → embeddings → DB rows."""
+
 import fitz  # pymupdf
 import uuid
 
@@ -48,9 +49,8 @@ async def ingest(db: AsyncSession, paper_id: str, pdf_bytes: bytes) -> int:
     Idempotent: deletes existing chunks for this paper before re-inserting.
     """
     from sqlalchemy import delete
-    await db.execute(
-        delete(PaperChunkEmbedding).where(PaperChunkEmbedding.paper_id == paper_id)
-    )
+
+    await db.execute(delete(PaperChunkEmbedding).where(PaperChunkEmbedding.paper_id == paper_id))
 
     doc_text = _extract_text(pdf_bytes)
     chunks = _chunk_text(doc_text)
@@ -66,15 +66,24 @@ async def ingest(db: AsyncSession, paper_id: str, pdf_bytes: bytes) -> int:
     n_chunks = len(chunks)
     for i, (chunk, emb) in enumerate(zip(chunks, embeddings)):
         vec_str = "[" + ",".join(str(x) for x in emb) + "]"
-        await db.execute(text("""
+        await db.execute(
+            text("""
             INSERT INTO paper_chunk_embeddings
                 (id, paper_id, chunk_index, text, embedding, created_at)
             VALUES
                 (:id, :paper_id, :chunk_index, :text, CAST(:emb AS vector), :now)
             ON CONFLICT (paper_id, chunk_index) DO UPDATE
                 SET text = EXCLUDED.text, embedding = EXCLUDED.embedding
-        """), {"id": str(uuid.uuid4()), "paper_id": paper_id,
-               "chunk_index": i, "text": chunk, "emb": vec_str, "now": now})
+        """),
+            {
+                "id": str(uuid.uuid4()),
+                "paper_id": paper_id,
+                "chunk_index": i,
+                "text": chunk,
+                "emb": vec_str,
+                "now": now,
+            },
+        )
     await db.commit()
     log.info("paper_ingest_done", paper_id=paper_id, chunks=n_chunks)
     return n_chunks

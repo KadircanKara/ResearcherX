@@ -4,6 +4,7 @@ Fail-open: on any error, returns mode=broad with 2 chunks per paper and
 the original query unchanged. This keeps the chat pipeline robust against
 flaky structured-output calls.
 """
+
 from pydantic import BaseModel, Field
 
 from app.core.logging import log
@@ -34,7 +35,7 @@ class PaperInfo(BaseModel):
 class PlannerInput(BaseModel):
     query: str
     paper_list: list[PaperInfo | dict]
-    prior_messages: list[dict]   # [{"role": "user"|"assistant", "content": "..."}]
+    prior_messages: list[dict]  # [{"role": "user"|"assistant", "content": "..."}]
 
 
 class PaperAlloc(BaseModel):
@@ -52,18 +53,17 @@ class RetrievalPlannerAgent:
     name = "retrieval_planner"
 
     async def run(self, inp: PlannerInput) -> RetrievalPlan:
-        paper_list = [
-            p if isinstance(p, PaperInfo) else PaperInfo(**p)
-            for p in inp.paper_list
-        ]
+        paper_list = [p if isinstance(p, PaperInfo) else PaperInfo(**p) for p in inp.paper_list]
         paper_block = "\n".join(
-            f"[{p.paper_id}] {p.title}\nAbstract: {(p.abstract or '')[:300]}"
-            for p in paper_list
+            f"[{p.paper_id}] {p.title}\nAbstract: {(p.abstract or '')[:300]}" for p in paper_list
         )
-        history_block = "\n".join(
-            f"[{m['role'].upper()}]: {m['content'][:300]}"
-            for m in inp.prior_messages[-6:]     # last 6 messages max
-        ) or "(no prior conversation)"
+        history_block = (
+            "\n".join(
+                f"[{m['role'].upper()}]: {m['content'][:300]}"
+                for m in inp.prior_messages[-6:]  # last 6 messages max
+            )
+            or "(no prior conversation)"
+        )
 
         user = (
             f"USER QUERY: {inp.query}\n\n"

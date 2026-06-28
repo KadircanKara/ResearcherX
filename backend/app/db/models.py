@@ -155,7 +155,8 @@ class ChatConversation(Base):
     )
 
     messages: Mapped[list["ChatMessage"]] = relationship(
-        back_populates="conversation", cascade="all, delete-orphan",
+        back_populates="conversation",
+        cascade="all, delete-orphan",
         order_by="ChatMessage.created_at",
     )
 
@@ -165,11 +166,12 @@ class ChatMessage(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     conversation_id: Mapped[str] = mapped_column(
-        ForeignKey("chat_conversations.id", ondelete="CASCADE",
-                   name="fk_chat_messages_conversation_id"),
+        ForeignKey(
+            "chat_conversations.id", ondelete="CASCADE", name="fk_chat_messages_conversation_id"
+        ),
         index=True,
     )
-    role: Mapped[str] = mapped_column(String(16))          # "user" | "assistant"
+    role: Mapped[str] = mapped_column(String(16))  # "user" | "assistant"
     content: Mapped[str] = mapped_column(Text)
     citations: Mapped[list] = mapped_column(JSON, default=list)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
@@ -204,9 +206,10 @@ class ConversationMessageEmbedding(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     message_id: Mapped[str] = mapped_column(
-        ForeignKey("chat_messages.id", ondelete="CASCADE",
-                   name="fk_conv_msg_embeddings_message_id"),
-        unique=True,     # one embedding per message
+        ForeignKey(
+            "chat_messages.id", ondelete="CASCADE", name="fk_conv_msg_embeddings_message_id"
+        ),
+        unique=True,  # one embedding per message
     )
     # Same TEXT/vector pattern as PaperChunkEmbedding.
     embedding: Mapped[str] = mapped_column(Text)

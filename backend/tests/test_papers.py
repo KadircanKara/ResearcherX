@@ -1,4 +1,5 @@
 """Paper CRUD + ingest endpoint tests."""
+
 from unittest.mock import AsyncMock, patch
 
 import pytest_asyncio
@@ -18,9 +19,9 @@ async def seeded(db_session: AsyncSession):
 
 @pytest_asyncio.fixture
 async def you(db_session: AsyncSession, seeded):
-    return (await db_session.execute(
-        select(User).where(User.email == "you@researcherx.dev")
-    )).scalar_one()
+    return (
+        await db_session.execute(select(User).where(User.email == "you@researcherx.dev"))
+    ).scalar_one()
 
 
 @pytest_asyncio.fixture
@@ -60,7 +61,9 @@ async def test_list_papers(client: AsyncClient, you: User, project: Project):
     assert len(resp.json()) == 1
 
 
-async def test_ingest_paper(client: AsyncClient, you: User, project: Project, db_session: AsyncSession):
+async def test_ingest_paper(
+    client: AsyncClient, you: User, project: Project, db_session: AsyncSession
+):
     # Create the paper first
     r = await client.post(
         f"/v1/projects/{project.id}/papers",
@@ -91,18 +94,23 @@ async def test_ingest_paper(client: AsyncClient, you: User, project: Project, db
 
     # Verify chunks stored in DB
     from app.db.models import PaperChunkEmbedding
-    chunks = (await db_session.execute(
-        select(PaperChunkEmbedding).where(PaperChunkEmbedding.paper_id == paper_id)
-    )).scalars().all()
+
+    chunks = (
+        (
+            await db_session.execute(
+                select(PaperChunkEmbedding).where(PaperChunkEmbedding.paper_id == paper_id)
+            )
+        )
+        .scalars()
+        .all()
+    )
     assert len(chunks) == data["chunks_stored"]
 
 
 @pytest_asyncio.fixture
 async def non_member(db_session: AsyncSession, seeded) -> User:
     """A seeded user who is NOT added to the project."""
-    return (await db_session.execute(
-        select(User).where(User.email == "marco@lab.io")
-    )).scalar_one()
+    return (await db_session.execute(select(User).where(User.email == "marco@lab.io"))).scalar_one()
 
 
 async def test_paper_requires_member(client: AsyncClient, project: Project, non_member: User):

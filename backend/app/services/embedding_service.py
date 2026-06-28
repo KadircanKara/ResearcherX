@@ -1,4 +1,5 @@
 """Embedding service — Gemini text-embedding-004 via OpenAI-compat SDK."""
+
 from functools import lru_cache
 
 from openai import AsyncOpenAI

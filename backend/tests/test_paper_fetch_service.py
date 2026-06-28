@@ -1,5 +1,6 @@
 # backend/tests/test_paper_fetch_service.py
 """Tests for paper_fetch_service: DOI extraction + PDF fetch with OA fallback."""
+
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -43,22 +44,26 @@ async def test_fetch_pdf_paywalled_fallback_via_oa():
     async def mock_get(url: str) -> bytes | None:
         return call_results.pop(0)
 
-    with patch("app.services.paper_fetch_service._get_pdf_bytes", side_effect=mock_get), \
-         patch(
-             "app.services.paper_fetch_service._resolve_oa_url",
-             new=AsyncMock(return_value="https://oa.example.com/paper.pdf"),
-         ):
+    with (
+        patch("app.services.paper_fetch_service._get_pdf_bytes", side_effect=mock_get),
+        patch(
+            "app.services.paper_fetch_service._resolve_oa_url",
+            new=AsyncMock(return_value="https://oa.example.com/paper.pdf"),
+        ),
+    ):
         result = await fetch_pdf("https://doi.org/10.1234/test")
     assert result == oa_pdf
 
 
 @pytest.mark.asyncio
 async def test_fetch_pdf_raises_paywall_error_when_all_fail():
-    with patch("app.services.paper_fetch_service._get_pdf_bytes", new=AsyncMock(return_value=None)), \
-         patch(
-             "app.services.paper_fetch_service._resolve_oa_url",
-             new=AsyncMock(return_value=None),
-         ):
+    with (
+        patch("app.services.paper_fetch_service._get_pdf_bytes", new=AsyncMock(return_value=None)),
+        patch(
+            "app.services.paper_fetch_service._resolve_oa_url",
+            new=AsyncMock(return_value=None),
+        ),
+    ):
         with pytest.raises(PaywallError):
             await fetch_pdf("https://doi.org/10.1234/blocked")
 

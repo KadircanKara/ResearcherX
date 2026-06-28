@@ -1,4 +1,5 @@
 """ChatService integration test — all external calls mocked."""
+
 from unittest.mock import AsyncMock, patch
 
 import pytest_asyncio
@@ -17,9 +18,9 @@ async def seeded(db_session: AsyncSession):
 
 @pytest_asyncio.fixture
 async def you(db_session: AsyncSession, seeded):
-    return (await db_session.execute(
-        select(User).where(User.email == "you@researcherx.dev")
-    )).scalar_one()
+    return (
+        await db_session.execute(select(User).where(User.email == "you@researcherx.dev"))
+    ).scalar_one()
 
 
 @pytest_asyncio.fixture
@@ -71,10 +72,18 @@ async def test_respond_yields_events(
         patch.object(svc._planner, "run", AsyncMock(return_value=fake_plan)),
         patch.object(svc, "_retrieve_paper_chunks", AsyncMock(return_value=[])),
         patch.object(svc._chat_agent, "stream", return_value=fake_stream()),
-        patch.object(svc._conv_svc, "save_message", AsyncMock(
-            return_value=ChatMessage(conversation_id=conv.id, role="assistant",
-                                     content="answer token two", citations=[])
-        )),
+        patch.object(
+            svc._conv_svc,
+            "save_message",
+            AsyncMock(
+                return_value=ChatMessage(
+                    conversation_id=conv.id,
+                    role="assistant",
+                    content="answer token two",
+                    citations=[],
+                )
+            ),
+        ),
     ):
         events = []
         async for event in svc.respond(conv.id, "Test question"):

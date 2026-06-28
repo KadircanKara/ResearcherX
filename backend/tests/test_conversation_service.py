@@ -1,4 +1,5 @@
 """ConversationService unit tests."""
+
 from unittest.mock import AsyncMock, patch
 
 import pytest_asyncio
@@ -17,9 +18,9 @@ async def seeded(db_session: AsyncSession):
 
 @pytest_asyncio.fixture
 async def you(db_session: AsyncSession, seeded):
-    return (await db_session.execute(
-        select(User).where(User.email == "you@researcherx.dev")
-    )).scalar_one()
+    return (
+        await db_session.execute(select(User).where(User.email == "you@researcherx.dev"))
+    ).scalar_one()
 
 
 @pytest_asyncio.fixture
@@ -35,6 +36,7 @@ async def project(db_session: AsyncSession, you: User) -> Project:
 
 async def test_create_conversation(db_session: AsyncSession, project: Project, you: User):
     from app.services.conversation_service import ConversationService
+
     svc = ConversationService()
     with patch(
         "app.services.conversation_service._embed_message",
@@ -47,6 +49,7 @@ async def test_create_conversation(db_session: AsyncSession, project: Project, y
 
 async def test_list_conversations(db_session: AsyncSession, project: Project, you: User):
     from app.services.conversation_service import ConversationService
+
     svc = ConversationService()
     with patch("app.services.conversation_service._embed_message", new=AsyncMock()):
         await svc.create_conversation(db_session, project.id, you.id, "First")
@@ -59,16 +62,22 @@ async def test_save_message_and_get_conversation(
     db_session: AsyncSession, project: Project, you: User
 ):
     from app.services.conversation_service import ConversationService
+
     svc = ConversationService()
     with patch("app.services.conversation_service._embed_message", new=AsyncMock()):
         conv = await svc.create_conversation(db_session, project.id, you.id, "What is MTSP?")
         msg = await svc.save_message(
-            db_session, conv.id, "assistant",
-            "MTSP stands for...", citations=[{"n": 1, "paper_id": "x"}]
+            db_session,
+            conv.id,
+            "assistant",
+            "MTSP stands for...",
+            citations=[{"n": 1, "paper_id": "x"}],
         )
     assert msg.role == "assistant"
     assert msg.citations[0]["n"] == 1
 
     fetched = await svc.get_conversation(db_session, conv.id)
     assert fetched is not None
-    assert len(fetched.messages) == 1   # only the assistant message (conversation creation no longer stores first message)
+    assert (
+        len(fetched.messages) == 1
+    )  # only the assistant message (conversation creation no longer stores first message)

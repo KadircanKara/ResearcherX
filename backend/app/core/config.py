@@ -40,9 +40,9 @@ class Settings(BaseSettings):
     # Embedding provider — Gemini text-embedding-004 via Google's OpenAI-compat
     # endpoint. EMBEDDING_API_KEY defaults to LLM_API_KEY if not set separately.
     embedding_base_url: str = "https://generativelanguage.googleapis.com/v1beta/openai/"
-    embedding_api_key: str = ""      # set in .env; falls back to llm_api_key if empty
+    embedding_api_key: str = ""  # set in .env; falls back to llm_api_key if empty
     embedding_model: str = "gemini-embedding-001"
-    embedding_dimensions: int = 768   # must match vector(N) in schema
+    embedding_dimensions: int = 768  # must match vector(N) in schema
 
     # Abuse limits (decision D3): anonymous per-IP quotas + a global daily
     # cap; the owner API key (X-API-Key header) bypasses both. The cap is

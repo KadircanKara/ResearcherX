@@ -1,4 +1,5 @@
 """ChatAgent — streams a grounded response from paper chunks + conversation history."""
+
 from collections.abc import AsyncIterator
 
 from pydantic import BaseModel
@@ -19,7 +20,7 @@ SYSTEM = (
 
 
 class ChunkContext(BaseModel):
-    n: int             # citation number shown to user, e.g. [1]
+    n: int  # citation number shown to user, e.g. [1]
     paper_id: str
     title: str
     chunk_index: int
@@ -28,7 +29,7 @@ class ChunkContext(BaseModel):
 
 class ChatAgentInput(BaseModel):
     query: str
-    prior_messages: list[dict]    # [{"role": "user"|"assistant", "content": "..."}]
+    prior_messages: list[dict]  # [{"role": "user"|"assistant", "content": "..."}]
     paper_chunks: list[ChunkContext]
 
 
@@ -43,16 +44,20 @@ class ChatAgent:
             )
             context_block = f"EXCERPT CATALOG:\n{catalog}"
         else:
-            context_block = "EXCERPT CATALOG: (no excerpts retrieved — answer from general knowledge)"
+            context_block = (
+                "EXCERPT CATALOG: (no excerpts retrieved — answer from general knowledge)"
+            )
 
         # Build conversation history for multi-turn context
         messages = [{"role": "system", "content": SYSTEM}]
         for m in inp.prior_messages:
             messages.append({"role": m["role"], "content": m["content"]})
-        messages.append({
-            "role": "user",
-            "content": f"{context_block}\n\nQUESTION: {inp.query}",
-        })
+        messages.append(
+            {
+                "role": "user",
+                "content": f"{context_block}\n\nQUESTION: {inp.query}",
+            }
+        )
 
         stream = await create_chat_completion(
             max_tokens=2000,

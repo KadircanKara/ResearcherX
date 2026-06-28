@@ -1,4 +1,5 @@
 """RetrievalPlannerAgent and ChatAgent unit tests — LLM mocked."""
+
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from app.agents.retrieval_planner import PlannerInput, RetrievalPlan, RetrievalPlannerAgent
@@ -18,14 +19,16 @@ async def test_retrieval_planner_returns_plan():
         "app.agents.retrieval_planner.parse_structured",
         new=AsyncMock(return_value=FAKE_PLAN),
     ):
-        plan = await agent.run(PlannerInput(
-            query="Compare methods in both papers",
-            paper_list=[
-                {"paper_id": "p1", "title": "Paper A", "abstract": "Abstract A"},
-                {"paper_id": "p2", "title": "Paper B", "abstract": "Abstract B"},
-            ],
-            prior_messages=[],
-        ))
+        plan = await agent.run(
+            PlannerInput(
+                query="Compare methods in both papers",
+                paper_list=[
+                    {"paper_id": "p1", "title": "Paper A", "abstract": "Abstract A"},
+                    {"paper_id": "p2", "title": "Paper B", "abstract": "Abstract B"},
+                ],
+                prior_messages=[],
+            )
+        )
     assert plan.mode == "comparative"
     assert len(plan.per_paper) == 2
 
@@ -37,13 +40,15 @@ async def test_retrieval_planner_fail_open():
         "app.agents.retrieval_planner.parse_structured",
         new=AsyncMock(side_effect=ValueError("llm down")),
     ):
-        plan = await agent.run(PlannerInput(
-            query="Any question",
-            paper_list=[
-                {"paper_id": "px", "title": "X", "abstract": "x"},
-            ],
-            prior_messages=[],
-        ))
+        plan = await agent.run(
+            PlannerInput(
+                query="Any question",
+                paper_list=[
+                    {"paper_id": "px", "title": "X", "abstract": "x"},
+                ],
+                prior_messages=[],
+            )
+        )
     assert plan.mode == "broad"
     assert plan.per_paper[0].chunks == 2
 
@@ -64,10 +69,14 @@ async def test_chat_agent_streams_tokens():
         new=AsyncMock(return_value=fake_stream),
     ):
         tokens = []
-        async for token in agent.stream(ChatAgentInput(
-            query="What is the MTSP problem?",
-            prior_messages=[],
-            paper_chunks=[ChunkContext(n=1, paper_id="p1", title="Paper", chunk_index=0, text="MTSP text")],
-        )):
+        async for token in agent.stream(
+            ChatAgentInput(
+                query="What is the MTSP problem?",
+                prior_messages=[],
+                paper_chunks=[
+                    ChunkContext(n=1, paper_id="p1", title="Paper", chunk_index=0, text="MTSP text")
+                ],
+            )
+        ):
             tokens.append(token)
     assert "hello " in tokens

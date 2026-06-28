@@ -1,10 +1,16 @@
 """Smoke tests: all new RAG models create/read round-trip in SQLite."""
+
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.models import (
-    ChatConversation, ChatMessage, Paper,
-    PaperChunkEmbedding, ConversationMessageEmbedding,
-    User, Project, ProjectMember,
+    ChatConversation,
+    ChatMessage,
+    Paper,
+    PaperChunkEmbedding,
+    ConversationMessageEmbedding,
+    User,
+    Project,
+    ProjectMember,
 )
 from app.db.seed import seed_users
 
@@ -18,9 +24,10 @@ async def _seed(db_session: AsyncSession):
 @pytest.fixture
 async def you(db_session: AsyncSession):
     from sqlalchemy import select
-    return (await db_session.execute(
-        select(User).where(User.email == "you@researcherx.dev")
-    )).scalar_one()
+
+    return (
+        await db_session.execute(select(User).where(User.email == "you@researcherx.dev"))
+    ).scalar_one()
 
 
 @pytest.fixture
@@ -68,9 +75,10 @@ async def test_paper_chunk_embedding_creates(db_session: AsyncSession, project: 
     db_session.add(paper)
     await db_session.flush()
     chunk = PaperChunkEmbedding(
-        paper_id=paper.id, chunk_index=0,
+        paper_id=paper.id,
+        chunk_index=0,
         text="sample chunk text",
-        embedding="[0.1,0.2,0.3]",   # TEXT column in SQLite test DB
+        embedding="[0.1,0.2,0.3]",  # TEXT column in SQLite test DB
     )
     db_session.add(chunk)
     await db_session.commit()

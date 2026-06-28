@@ -1,5 +1,6 @@
 # backend/app/services/paper_fetch_service.py
 """Fetch PDF bytes from a URL, with Unpaywall and Semantic Scholar OA fallback."""
+
 from __future__ import annotations
 
 import re

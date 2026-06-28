@@ -3,6 +3,7 @@
 Message embedding is fire-and-forget (asyncio.create_task): it must not
 block the SSE stream. Background tasks create their own DB sessions.
 """
+
 import asyncio
 
 from sqlalchemy import select
@@ -24,12 +25,15 @@ async def _embed_message(message_id: str, content: str, svc: EmbeddingService) -
         vec_str = "[" + ",".join(str(x) for x in embedding) + "]"
         async with SessionLocal() as db:
             import uuid
-            await db.execute(text("""
+
+            await db.execute(
+                text("""
                 INSERT INTO conversation_message_embeddings (id, message_id, embedding, created_at)
                 VALUES (:id, :message_id, CAST(:emb AS vector), :now)
                 ON CONFLICT (message_id) DO UPDATE SET embedding = EXCLUDED.embedding
-            """), {"id": str(uuid.uuid4()), "message_id": message_id,
-                   "emb": vec_str, "now": _now()})
+            """),
+                {"id": str(uuid.uuid4()), "message_id": message_id, "emb": vec_str, "now": _now()},
+            )
             await db.commit()
     except Exception as exc:
         log.warning("message_embedding_failed", message_id=message_id, error=str(exc)[:200])
@@ -53,9 +57,7 @@ class ConversationService:
         await db.refresh(conv)
         return conv
 
-    async def list_conversations(
-        self, db: AsyncSession, project_id: str
-    ) -> list[ChatConversation]:
+    async def list_conversations(self, db: AsyncSession, project_id: str) -> list[ChatConversation]:
         result = await db.execute(
             select(ChatConversation)
             .where(ChatConversation.project_id == project_id)
@@ -92,6 +94,7 @@ class ConversationService:
         conv = await db.get(ChatConversation, conversation_id)
         if conv:
             from app.db.models import _now
+
             conv.updated_at = _now()
         await db.commit()
         await db.refresh(msg)

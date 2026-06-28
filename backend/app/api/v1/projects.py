@@ -191,6 +191,7 @@ async def ingest_paper(
         raise HTTPException(status_code=404, detail="Paper not found")
     pdf_bytes = await request.body()
     from app.services.paper_ingest_service import ingest
+
     n = await ingest(db, paper_id, pdf_bytes)
     return {"chunks_stored": n}
 
@@ -210,6 +211,7 @@ async def ingest_paper_from_url(
 
     from app.services.paper_fetch_service import fetch_pdf, PaywallError
     from app.services.paper_ingest_service import ingest
+
     try:
         pdf_bytes = await fetch_pdf(body.url)
     except PaywallError:

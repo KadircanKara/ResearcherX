@@ -1,4 +1,5 @@
 """Tests for POST /projects/{id}/papers/{paper_id}/ingest-from-url."""
+
 from unittest.mock import AsyncMock, patch
 
 import pytest_asyncio
@@ -57,13 +58,18 @@ async def paper(client: AsyncClient, you: User, project: Project) -> dict:
     return r.json()
 
 
-async def test_ingest_from_url_success(client: AsyncClient, you: User, project: Project, paper: dict):
-    with patch(
-        "app.services.paper_fetch_service.fetch_pdf",
-        new=AsyncMock(return_value=_FAKE_PDF),
-    ), patch(
-        "app.services.paper_ingest_service.EmbeddingService.embed_batch",
-        new=AsyncMock(return_value=[[0.0] * 768]),
+async def test_ingest_from_url_success(
+    client: AsyncClient, you: User, project: Project, paper: dict
+):
+    with (
+        patch(
+            "app.services.paper_fetch_service.fetch_pdf",
+            new=AsyncMock(return_value=_FAKE_PDF),
+        ),
+        patch(
+            "app.services.paper_ingest_service.EmbeddingService.embed_batch",
+            new=AsyncMock(return_value=[[0.0] * 768]),
+        ),
     ):
         resp = await client.post(
             f"/v1/projects/{project.id}/papers/{paper['id']}/ingest-from-url",
@@ -74,7 +80,9 @@ async def test_ingest_from_url_success(client: AsyncClient, you: User, project: 
     assert resp.json()["chunks_stored"] >= 1
 
 
-async def test_ingest_from_url_paywalled(client: AsyncClient, you: User, project: Project, paper: dict):
+async def test_ingest_from_url_paywalled(
+    client: AsyncClient, you: User, project: Project, paper: dict
+):
     with patch(
         "app.services.paper_fetch_service.fetch_pdf",
         new=AsyncMock(side_effect=PaywallError("blocked")),
@@ -90,7 +98,9 @@ async def test_ingest_from_url_paywalled(client: AsyncClient, you: User, project
     assert "Upload the PDF directly" in detail["message"]
 
 
-async def test_ingest_from_url_requires_membership(client: AsyncClient, project: Project, db_session: AsyncSession, seeded):
+async def test_ingest_from_url_requires_membership(
+    client: AsyncClient, project: Project, db_session: AsyncSession, seeded
+):
     viewer = (
         await db_session.execute(select(User).where(User.email == "marco@lab.io"))
     ).scalar_one()
