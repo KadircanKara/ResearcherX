@@ -213,18 +213,19 @@ export function AddPaperDialog({ projectId, onAdded, children }: AddPaperDialogP
                 onKeyDown={(e) => { if (e.key === "Enter") extractFromUrl(); }}
                 className="flex-1 pr-32"
               />
-              <button
-                type="button"
-                disabled={!url.trim() || extracting}
-                onClick={extractFromUrl}
-                className="absolute right-1 rounded px-2 py-1 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
-              >
-                {extracting ? "Extracting…" : "Extract Fields"}
-              </button>
+              <div className="absolute right-0 flex h-full items-center">
+                <div className="h-4 w-px bg-zinc-300 dark:bg-zinc-600" />
+                <button
+                  type="button"
+                  disabled={!url.trim() || extracting}
+                  onClick={extractFromUrl}
+                  className="rounded px-3 py-1 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
+                >
+                  {extracting ? "Extracting…" : "Extract Fields"}
+                </button>
+              </div>
             </div>
           </div>
-
-          <div className="h-px bg-zinc-300 dark:bg-zinc-600" />
 
           {/* Fields */}
           <div className="space-y-1">
