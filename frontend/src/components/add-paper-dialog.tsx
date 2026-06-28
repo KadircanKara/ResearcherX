@@ -205,23 +205,22 @@ export function AddPaperDialog({ projectId, onAdded, children }: AddPaperDialogP
               <span className="truncate">{file ? file.name : "Upload PDF"}</span>
             </Button>
 
-            <div className="flex flex-1 items-center gap-1">
+            <div className="relative flex flex-1 items-center">
               <Input
                 placeholder="https://arxiv.org/abs/…"
                 value={url}
                 onChange={(e) => setUrl(e.target.value)}
                 onKeyDown={(e) => { if (e.key === "Enter") extractFromUrl(); }}
-                className="flex-1"
+                className="flex-1 pr-32"
               />
-              <Button
+              <button
                 type="button"
-                variant="outline"
                 disabled={!url.trim() || extracting}
                 onClick={extractFromUrl}
-                className="shrink-0 text-xs"
+                className="absolute right-1 rounded px-2 py-1 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
               >
                 {extracting ? "Extracting…" : "Extract Fields"}
-              </Button>
+              </button>
             </div>
           </div>
 
