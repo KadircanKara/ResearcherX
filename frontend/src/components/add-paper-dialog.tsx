@@ -224,7 +224,7 @@ export function AddPaperDialog({ projectId, onAdded, children }: AddPaperDialogP
             </div>
           </div>
 
-          <div className="h-px bg-border" />
+          <div className="h-px bg-zinc-300 dark:bg-zinc-600" />
 
           {/* Fields */}
           <div className="space-y-1">
