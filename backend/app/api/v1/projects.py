@@ -166,6 +166,22 @@ async def create_paper(
     return PaperOut.model_validate(paper)
 
 
+@router.delete("/projects/{project_id}/papers/{paper_id}", status_code=204)
+async def delete_paper(
+    project_id: str,
+    paper_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
+) -> Response:
+    await project_service.require_member(db, project_id, user.id, "editor")
+    paper = await db.get(Paper, paper_id)
+    if paper is None or paper.project_id != project_id:
+        raise HTTPException(status_code=404, detail="Paper not found")
+    await db.delete(paper)
+    await db.commit()
+    return Response(status_code=204)
+
+
 @router.get("/projects/{project_id}/papers", response_model=list[PaperOut])
 async def list_papers(
     project_id: str,

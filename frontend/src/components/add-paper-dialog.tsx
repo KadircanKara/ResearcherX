@@ -14,6 +14,7 @@ import { Input } from "@/components/ui/input";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   createPaper,
+  deletePaper,
   ingestPaper,
   ingestPaperFromUrl,
   suggestTitle,
@@ -100,12 +101,17 @@ export function AddPaperDialog({
     setSubmitting(true);
     setError(null);
     try {
-      const paper = await createPaper(projectId, { title: pdfTitle.trim() });
       const bytes = await file.arrayBuffer();
-      await ingestPaper(projectId, paper.id, bytes);
-      setOpen(false);
-      reset();
-      onAdded();
+      const paper = await createPaper(projectId, { title: pdfTitle.trim() });
+      try {
+        await ingestPaper(projectId, paper.id, bytes);
+        setOpen(false);
+        reset();
+        onAdded();
+      } catch {
+        await deletePaper(projectId, paper.id).catch(() => {});
+        setError("Upload failed. Please try again.");
+      }
     } catch {
       setError("Upload failed. Please try again.");
     } finally {
@@ -129,9 +135,9 @@ export function AddPaperDialog({
         reset();
         onAdded();
       } catch (e) {
+        await deletePaper(projectId, paper.id).catch(() => {});
         if (e instanceof Error && (e as Error & { paywalled?: boolean }).paywalled) {
           setPaywalled(true);
-          onAdded();   // paper record exists; refresh list now
         } else {
           setError("Failed to fetch paper. Please try again.");
         }

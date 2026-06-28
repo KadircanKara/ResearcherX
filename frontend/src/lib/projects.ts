@@ -74,6 +74,10 @@ export async function createPaper(
   return (await apiSend<Paper>("POST", `/projects/${projectId}/papers`, data)) as Paper;
 }
 
+export async function deletePaper(projectId: string, paperId: string): Promise<void> {
+  await apiSend("DELETE", `/projects/${projectId}/papers/${paperId}`);
+}
+
 export async function ingestPaper(
   projectId: string,
   paperId: string,
