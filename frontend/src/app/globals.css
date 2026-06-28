@@ -6,6 +6,12 @@
 
 :root {
   color-scheme: light;
+  --debug-panel-w: 0px;
+}
+
+body {
+  padding-right: var(--debug-panel-w);
+  transition: padding-right 0.15s ease;
 }
 
 .dark {

@@ -111,6 +111,13 @@ function EntryRow({ entry }: { entry: LogEntry }) {
 export function DebugPanel() {
   const [entries, setEntries] = useState<LogEntry[]>([]);
   const [open, setOpen] = useState(false);
+
+  useEffect(() => {
+    document.documentElement.style.setProperty(
+      "--debug-panel-w",
+      open ? "420px" : "0px"
+    );
+  }, [open]);
   const patchedRef = useRef(false);
 
   // Monkey-patch fetch once to capture all requests
