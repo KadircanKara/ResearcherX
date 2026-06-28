@@ -1,7 +1,7 @@
 "use client";
 
 import { useRef, useState } from "react";
-import { Upload, Wand2 } from "lucide-react";
+import { Upload } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -215,14 +215,12 @@ export function AddPaperDialog({ projectId, onAdded, children }: AddPaperDialogP
               />
               <Button
                 type="button"
-                variant="ghost"
-                size="icon"
+                variant="outline"
                 disabled={!url.trim() || extracting}
                 onClick={extractFromUrl}
-                title="Extract metadata from URL"
-                className="shrink-0"
+                className="shrink-0 text-xs"
               >
-                <Wand2 className="size-4" />
+                {extracting ? "Extracting…" : "Extract Fields"}
               </Button>
             </div>
           </div>
@@ -231,7 +229,7 @@ export function AddPaperDialog({ projectId, onAdded, children }: AddPaperDialogP
           <div className="space-y-1">
             <FieldLabel label="Title" />
             <Input
-              placeholder={extracting ? "Extracting…" : "Paper title"}
+              placeholder="Paper title"
               value={title}
               maxLength={TITLE_MAX}
               disabled={extracting}
@@ -245,7 +243,7 @@ export function AddPaperDialog({ projectId, onAdded, children }: AddPaperDialogP
             <textarea
               value={abstract}
               onChange={(e) => setAbstract(e.target.value)}
-              placeholder={extracting ? "Extracting…" : "Abstract…"}
+              placeholder="Abstract…"
               disabled={extracting}
               rows={3}
               className="w-full resize-y rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
@@ -257,7 +255,7 @@ export function AddPaperDialog({ projectId, onAdded, children }: AddPaperDialogP
             <textarea
               value={body}
               onChange={(e) => setBody(e.target.value)}
-              placeholder={extracting ? "Extracting…" : "Paper body text…"}
+              placeholder="Paper body text…"
               disabled={extracting}
               rows={6}
               className="w-full resize-y rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
