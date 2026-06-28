@@ -64,11 +64,17 @@ async def extract_title_via_llm(text: str) -> str | None:
 
 
 def _meta_content(html: str, attr: str, val: str) -> str | None:
-    """Extract content= from <meta {attr}="{val}" content="..."> regardless of attr order."""
+    """Extract content= from a <meta> tag regardless of attribute order or quoting.
+
+    Handles both quoted (`property="og:title"`) and unquoted (`property=og:title`) attrs.
+    """
     v = re.escape(val)
+    q = r'["\']?'  # optional quote — some publishers (ScienceDirect) omit them
     for pattern in (
-        rf'<meta\b[^>]+\b{attr}=["\']' + v + r'["\'][^>]+\bcontent=["\']([^"\'<>]+)["\']',
-        r'<meta\b[^>]+\bcontent=["\']([^"\'<>]+)["\'][^>]+\b' + attr + r'=["\']' + v + r'["\']',
+        # attr=val ... content="..."
+        rf'<meta\b[^>]+\b{attr}={q}' + v + q + r'[^>]+\bcontent=["\']([^"\'<>]+)["\']',
+        # content="..." ... attr=val
+        r'<meta\b[^>]+\bcontent=["\']([^"\'<>]+)["\'][^>]+\b' + attr + r'=' + q + v + q,
     ):
         m = re.search(pattern, html, re.IGNORECASE)
         if m:
@@ -98,11 +104,19 @@ async def extract_title_from_page(url: str) -> str | None:
         async with httpx.AsyncClient(
             timeout=_CROSSREF_TIMEOUT, headers=_UA, follow_redirects=True
         ) as client:
-            r = await client.get(url)
-            if r.status_code != 200:
-                log.debug("page_title_fetch_failed", url=url, status=r.status_code)
-                return None
-            snippet = r.text[:40_000]
+            async with client.stream("GET", url) as r:
+                if r.status_code != 200:
+                    log.debug("page_title_fetch_failed", url=url, status=r.status_code)
+                    return None
+                chunks: list[str] = []
+                total = 0
+                async for chunk in r.aiter_text():
+                    chunks.append(chunk)
+                    total += len(chunk)
+                    # Stop once we've passed </head> — meta tags are always in <head>
+                    if "</head>" in chunk.lower() or total >= 200_000:
+                        break
+            snippet = "".join(chunks)
 
         title = (
             _meta_content(snippet, "name", "citation_title")
