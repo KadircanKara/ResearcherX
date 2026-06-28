@@ -11,6 +11,7 @@ from app.core import debug_log
 from app.core.logging import log
 
 _DOI_RE = re.compile(r"10\.\d{4,}/[^\s\"<>]+")
+_ARXIV_PDF_RE = re.compile(r"^(https?://arxiv\.org)/pdf/(.+?)(?:\.pdf)?$", re.IGNORECASE)
 _CROSSREF_TIMEOUT = httpx.Timeout(8.0)
 
 # Sent to academic APIs (Crossref, Semantic Scholar, Unpaywall)
@@ -45,6 +46,17 @@ _SYSTEM_PROMPT = (
 def extract_doi(url: str) -> str | None:
     m = _DOI_RE.search(url)
     return m.group(0) if m else None
+
+
+def normalize_pdf_url(url: str) -> str:
+    """Convert known PDF-view URLs to their HTML metadata equivalents.
+
+    arXiv pdf URLs have a citation_title meta tag on the abs page — no LLM needed.
+    """
+    m = _ARXIV_PDF_RE.match(url)
+    if m:
+        return f"{m.group(1)}/abs/{m.group(2)}"
+    return url
 
 
 async def extract_title_from_doi(doi: str) -> str | None:
@@ -99,9 +111,9 @@ def _meta_content(html: str, attr: str, val: str) -> str | None:
     q = r'["\']?'  # optional quote — some publishers (ScienceDirect) omit them
     for pattern in (
         # attr=val ... content="..."
-        rf'<meta\b[^>]+\b{attr}={q}' + v + q + r'[^>]+\bcontent=["\']([^"\'<>]+)["\']',
+        rf"<meta\b[^>]+\b{attr}={q}" + v + q + r'[^>]+\bcontent=["\']([^"\'<>]+)["\']',
         # content="..." ... attr=val
-        r'<meta\b[^>]+\bcontent=["\']([^"\'<>]+)["\'][^>]+\b' + attr + r'=' + q + v + q,
+        r'<meta\b[^>]+\bcontent=["\']([^"\'<>]+)["\'][^>]+\b' + attr + r"=" + q + v + q,
     ):
         m = re.search(pattern, html, re.IGNORECASE)
         if m:
@@ -117,17 +129,19 @@ _PUBLISHER_SUFFIX = re.compile(
 )
 
 
-
 async def extract_title_from_page(url: str) -> str | None:
-    """Fetch the web page and extract title from academic meta tags.
+    """Fetch a URL and extract the paper title.
 
-    Priority:
-    1. <meta name="citation_title"> — Google Scholar standard; all major publishers
-    2. <meta property="og:title">
-    3. <title> tag with common publisher suffixes stripped
+    Handles both HTML pages (meta tag extraction) and direct PDF URLs (fitz + LLM).
+    arXiv PDF URLs are normalized to their abs page first — no LLM call needed.
 
-    Uses browser-like headers to avoid WAF 403s on publisher sites.
+    HTML priority: citation_title → og:title → <title> tag
     """
+    normalized = normalize_pdf_url(url)
+    if normalized != url:
+        debug_log.step("url_normalized", original=url, normalized=normalized)
+        url = normalized
+
     debug_log.step("extract_title_from_page", url=url)
     try:
         async with httpx.AsyncClient(
@@ -138,6 +152,13 @@ async def extract_title_from_page(url: str) -> str | None:
                 if r.status_code != 200:
                     log.debug("page_title_fetch_failed", url=url, status=r.status_code)
                     return None
+
+                ct = r.headers.get("content-type", "")
+                if "pdf" in ct.lower():
+                    debug_log.step("pdf_content_detected", content_type=ct)
+                    pdf_bytes = await r.aread()
+                    return await extract_title_from_pdf(pdf_bytes)
+
                 chunks: list[str] = []
                 total = 0
                 async for chunk in r.aiter_text():
@@ -146,7 +167,9 @@ async def extract_title_from_page(url: str) -> str | None:
                     if "</head>" in chunk.lower() or total >= 200_000:
                         break
         snippet = "".join(chunks)
-        debug_log.step("page_bytes_read", bytes=total, found_head_close="</head>" in snippet.lower())
+        debug_log.step(
+            "page_bytes_read", bytes=total, found_head_close="</head>" in snippet.lower()
+        )
 
         citation = _meta_content(snippet, "name", "citation_title")
         debug_log.step("citation_title_meta", matched=citation is not None, value=citation)
