@@ -210,12 +210,13 @@ async def suggest_paper_title_from_url(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_session),
 ) -> SuggestTitleFromUrlResponse:
-    """Extract title via DOI→Crossref, then HTML meta tags. Returns requires_manual=True if both fail."""
+    """Extract title via DOI→Crossref → HTML meta tags → Semantic Scholar. Returns requires_manual=True if all fail."""
     await project_service.require_member(db, project_id, user.id, "viewer")
     from app.services.title_extraction_service import (
         extract_doi,
         extract_title_from_doi,
         extract_title_from_page,
+        extract_title_from_semantic_scholar,
     )
 
     # 1. DOI → Crossref (most authoritative)
@@ -225,9 +226,13 @@ async def suggest_paper_title_from_url(
         if title:
             return SuggestTitleFromUrlResponse(title=title, requires_manual=False)
 
-    # 2. HTML meta tags (citation_title / og:title / <title>)
-    #    Works for ScienceDirect, IEEE, ACM, Springer, Nature, ArXiv, etc.
+    # 2. HTML meta tags (citation_title / og:title / <title>) with browser headers
     title = await extract_title_from_page(body.url)
+    if title:
+        return SuggestTitleFromUrlResponse(title=title, requires_manual=False)
+
+    # 3. Semantic Scholar URL lookup — handles WAF-blocked publishers (ScienceDirect, etc.)
+    title = await extract_title_from_semantic_scholar(body.url)
     if title:
         return SuggestTitleFromUrlResponse(title=title, requires_manual=False)
 

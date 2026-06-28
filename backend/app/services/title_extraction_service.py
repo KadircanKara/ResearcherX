@@ -12,7 +12,27 @@ from app.core.logging import log
 
 _DOI_RE = re.compile(r"10\.\d{4,}/[^\s\"<>]+")
 _CROSSREF_TIMEOUT = httpx.Timeout(8.0)
-_UA = {"User-Agent": "ResearcherX/1.0 (mailto:researcherx@example.com)"}
+
+# Sent to academic APIs (Crossref, Semantic Scholar, Unpaywall)
+_API_HEADERS = {"User-Agent": "ResearcherX/1.0 (mailto:researcherx@example.com)"}
+
+# Sent when fetching publisher web pages — mimics a real browser to avoid WAF 403s
+_BROWSER_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+}
+
+# Keep the old name so paper_fetch_service.py still works unchanged
+_UA = _API_HEADERS
 
 _SYSTEM_PROMPT = (
     "You are a research paper title extractor. "
@@ -97,6 +117,28 @@ _PUBLISHER_SUFFIX = re.compile(
 )
 
 
+async def extract_title_from_semantic_scholar(url: str) -> str | None:
+    """Look up a paper by its landing page URL via Semantic Scholar's public API."""
+    debug_log.step("extract_title_from_semantic_scholar", url=url)
+    try:
+        async with httpx.AsyncClient(timeout=_CROSSREF_TIMEOUT, headers=_API_HEADERS) as client:
+            r = await client.get(
+                f"https://api.semanticscholar.org/graph/v1/paper/URL:{url}",
+                params={"fields": "title"},
+            )
+            debug_log.step("semantic_scholar_response", status=r.status_code)
+            if r.status_code == 200:
+                title = r.json().get("title")
+                if title:
+                    debug_log.step("semantic_scholar_title_found", title=title)
+                    return title[:300]
+            debug_log.step("semantic_scholar_no_title", status=r.status_code)
+    except Exception as exc:
+        log.debug("semantic_scholar_title_failed", url=url, error=str(exc))
+        debug_log.step("semantic_scholar_error", error=str(exc))
+    return None
+
+
 async def extract_title_from_page(url: str) -> str | None:
     """Fetch the web page and extract title from academic meta tags.
 
@@ -105,12 +147,12 @@ async def extract_title_from_page(url: str) -> str | None:
     2. <meta property="og:title">
     3. <title> tag with common publisher suffixes stripped
 
-    Only reads the first 40 KB (head section always comes first).
+    Uses browser-like headers to avoid WAF 403s on publisher sites.
     """
     debug_log.step("extract_title_from_page", url=url)
     try:
         async with httpx.AsyncClient(
-            timeout=_CROSSREF_TIMEOUT, headers=_UA, follow_redirects=True
+            timeout=_CROSSREF_TIMEOUT, headers=_BROWSER_HEADERS, follow_redirects=True
         ) as client:
             async with client.stream("GET", url) as r:
                 debug_log.step("page_http_response", url=url, status=r.status_code)
