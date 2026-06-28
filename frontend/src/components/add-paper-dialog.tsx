@@ -126,6 +126,7 @@ export function AddPaperDialog({
             setError(null);
             setPaywalled(false);
           }}
+          className="flex-col"
         >
           <TabsList className="w-full">
             <TabsTrigger value="pdf" className="flex-1 gap-1.5">
@@ -148,7 +149,7 @@ export function AddPaperDialog({
               onChange={(e) => {
                 const f = e.target.files?.[0] ?? null;
                 setFile(f);
-                if (f && !pdfTitle)
+                if (f)
                   setPdfTitle(f.name.replace(/\.pdf$/i, "").slice(0, 150));
               }}
             />
