@@ -1,6 +1,7 @@
+import json
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import update
 
@@ -58,7 +59,24 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["X-Debug-Log"],
 )
+
+
+@app.middleware("http")
+async def debug_log_middleware(request: Request, call_next):
+    from app.core import debug_log
+
+    if settings.environment != "prod":
+        debug_log.start()
+    response = await call_next(request)
+    if settings.environment != "prod":
+        entries = debug_log.flush()
+        if entries:
+            payload = json.dumps(entries, default=str)
+            # Hard cap: some proxies reject headers > 8 KB
+            response.headers["X-Debug-Log"] = payload[:8000]
+    return response
 
 app.include_router(api_router)
 

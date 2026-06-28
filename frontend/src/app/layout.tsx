@@ -4,6 +4,7 @@ import "./globals.css";
 import { ThemeProvider } from "@/components/theme-provider";
 import { IdentityProvider } from "@/lib/identity";
 import { AppShell } from "@/components/app-shell";
+import { DebugPanel } from "@/components/debug-panel";
 
 const inter = Inter({
   subsets: ["latin"],
@@ -23,6 +24,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           <IdentityProvider>
             <AppShell>{children}</AppShell>
           </IdentityProvider>
+          {process.env.NODE_ENV !== "production" && <DebugPanel />}
         </ThemeProvider>
       </body>
     </html>

@@ -7,6 +7,7 @@ import re
 
 import httpx
 
+from app.core import debug_log
 from app.core.logging import log
 
 _DOI_RE = re.compile(r"10\.\d{4,}/[^\s\"<>]+")
@@ -28,15 +29,21 @@ def extract_doi(url: str) -> str | None:
 
 async def extract_title_from_doi(doi: str) -> str | None:
     """Query Crossref for the canonical title of a DOI."""
+    debug_log.step("extract_title_from_doi", doi=doi)
     try:
         async with httpx.AsyncClient(timeout=_CROSSREF_TIMEOUT, headers=_UA) as client:
             r = await client.get(f"https://api.crossref.org/works/{doi}")
+            debug_log.step("crossref_response", doi=doi, status=r.status_code)
             if r.status_code == 200:
                 titles = r.json().get("message", {}).get("title", [])
                 if titles and titles[0].strip():
-                    return titles[0].strip()
+                    result = titles[0].strip()
+                    debug_log.step("crossref_title_found", title=result)
+                    return result
+                debug_log.step("crossref_no_title", doi=doi)
     except Exception as exc:
         log.debug("crossref_title_failed", doi=doi, error=str(exc))
+        debug_log.step("crossref_error", doi=doi, error=str(exc))
     return None
 
 
@@ -100,11 +107,13 @@ async def extract_title_from_page(url: str) -> str | None:
 
     Only reads the first 40 KB (head section always comes first).
     """
+    debug_log.step("extract_title_from_page", url=url)
     try:
         async with httpx.AsyncClient(
             timeout=_CROSSREF_TIMEOUT, headers=_UA, follow_redirects=True
         ) as client:
             async with client.stream("GET", url) as r:
+                debug_log.step("page_http_response", url=url, status=r.status_code)
                 if r.status_code != 200:
                     log.debug("page_title_fetch_failed", url=url, status=r.status_code)
                     return None
@@ -113,27 +122,33 @@ async def extract_title_from_page(url: str) -> str | None:
                 async for chunk in r.aiter_text():
                     chunks.append(chunk)
                     total += len(chunk)
-                    # Stop once we've passed </head> — meta tags are always in <head>
                     if "</head>" in chunk.lower() or total >= 200_000:
                         break
-            snippet = "".join(chunks)
+        snippet = "".join(chunks)
+        debug_log.step("page_bytes_read", bytes=total, found_head_close="</head>" in snippet.lower())
 
-        title = (
-            _meta_content(snippet, "name", "citation_title")
-            or _meta_content(snippet, "property", "og:title")
-        )
-        if title:
-            return title[:300]
+        citation = _meta_content(snippet, "name", "citation_title")
+        debug_log.step("citation_title_meta", matched=citation is not None, value=citation)
+        if citation:
+            return citation[:300]
 
-        # Fallback: <title> tag, strip " - ScienceDirect" style suffixes
+        og = _meta_content(snippet, "property", "og:title")
+        debug_log.step("og_title_meta", matched=og is not None, value=og)
+        if og:
+            return og[:300]
+
         m = re.search(r"<title[^>]*>([^<]+)</title>", snippet, re.IGNORECASE)
         if m:
             title = _html_module.unescape(m.group(1).strip())
             title = _PUBLISHER_SUFFIX.sub("", title).strip()
+            debug_log.step("title_tag", raw=m.group(1).strip(), cleaned=title)
             if title:
                 return title[:300]
+        else:
+            debug_log.step("title_tag", matched=False)
     except Exception as exc:
         log.debug("page_title_extraction_failed", url=url, error=str(exc))
+        debug_log.step("page_title_error", error=str(exc))
     return None
 
 
