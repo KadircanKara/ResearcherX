@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams } from "next/navigation";
-import { FileText, Plus, Trash2 } from "lucide-react";
+import { FileText, Pencil, Plus, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { PaperDialog } from "@/components/paper-dialog";
 import { getProject, listPapers, deletePaper } from "@/lib/projects";
@@ -24,6 +24,7 @@ export default function PapersPage() {
   const [myRole, setMyRole] = useState<Role | null>(null);
   const [loading, setLoading] = useState(true);
   const [deleting, setDeleting] = useState<string | null>(null);
+  const [editing, setEditing] = useState<Paper | null>(null);
 
   // `silent` skips the full-page loading skeleton. The skeleton branch below
   // doesn't render <PaperDialog>, so a non-silent reload while the Add Paper
@@ -130,6 +131,15 @@ export default function PapersPage() {
             </div>
             {canAdd && (
               <button
+                onClick={() => setEditing(paper)}
+                className="mt-0.5 shrink-0 rounded p-1 text-muted-foreground/50 transition-colors hover:bg-accent hover:text-foreground"
+                aria-label="Edit paper"
+              >
+                <Pencil className="size-3.5" />
+              </button>
+            )}
+            {canAdd && (
+              <button
                 onClick={() => handleDelete(paper.id)}
                 disabled={deleting === paper.id}
                 className="mt-0.5 shrink-0 rounded p-1 text-muted-foreground/50 transition-colors hover:bg-destructive/10 hover:text-destructive disabled:opacity-40"
@@ -141,6 +151,19 @@ export default function PapersPage() {
           </div>
         ))}
       </div>
+
+      {editing && (
+        <PaperDialog
+          projectId={projectId}
+          paper={editing}
+          open={!!editing}
+          onOpenChange={(o) => !o && setEditing(null)}
+          onSaved={() => {
+            setEditing(null);
+            load();
+          }}
+        />
+      )}
     </div>
   );
 }
