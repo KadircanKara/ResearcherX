@@ -71,8 +71,16 @@ export function PaperDialog({
 }) {
   const isEdit = !!paper;
   const [uncontrolledOpen, setUncontrolledOpen] = useState(false);
-  const open = controlledOpen ?? uncontrolledOpen;
-  const setOpen = onOpenChange ?? setUncontrolledOpen;
+  // One `isControlled` flag drives BOTH the getter and the setter. Falling back
+  // independently (`controlledOpen ?? uncontrolledOpen` paired with
+  // `onOpenChange ?? setUncontrolledOpen`) breaks the half-supplied cases:
+  // `open` alone sticks the dialog open, `onOpenChange` alone never opens it.
+  const isControlled = controlledOpen !== undefined;
+  const open = isControlled ? controlledOpen : uncontrolledOpen;
+  const setOpen = (o: boolean) => {
+    if (!isControlled) setUncontrolledOpen(o);
+    onOpenChange?.(o);
+  };
 
   const [method, setMethod] = useState<PaperMethod>("upload");
   const [fields, setFields] = useState<PaperFields>(EMPTY);
@@ -169,7 +177,7 @@ export function PaperDialog({
               >
                 {submitting ? "Saving…" : isEdit ? "Save Changes" : "Add Paper"}
               </Button>
-              <Button variant="ghost" onClick={() => setOpen(false)}>
+              <Button variant="ghost" onClick={() => setOpen(false)} disabled={submitting}>
                 Cancel
               </Button>
             </div>
