@@ -1,5 +1,5 @@
 import { apiGet, apiSend, getDevUserId, API_BASE } from "./api";
-import type { Project, ProjectDetail, Member, Role, Run, Paper } from "./types";
+import type { Project, ProjectDetail, Member, Role, Run, Paper, PaperSource } from "./types";
 
 export async function listProjects(): Promise<Project[]> {
   return apiGet<Project[]>("/projects");
@@ -69,9 +69,27 @@ export async function listPapers(projectId: string): Promise<Paper[]> {
 
 export async function createPaper(
   projectId: string,
-  data: { title: string; abstract?: string | null; body?: string | null; pdf_url?: string | null }
+  data: {
+    title: string;
+    abstract?: string | null;
+    body?: string | null;
+    pdf_url?: string | null;
+    source: PaperSource;
+  }
 ): Promise<Paper> {
   return (await apiSend<Paper>("POST", `/projects/${projectId}/papers`, data)) as Paper;
+}
+
+export async function patchPaper(
+  projectId: string,
+  paperId: string,
+  data: { title?: string; abstract?: string | null; body?: string | null }
+): Promise<Paper> {
+  return (await apiSend<Paper>(
+    "PATCH",
+    `/projects/${projectId}/papers/${paperId}`,
+    data
+  )) as Paper;
 }
 
 export async function deletePaper(projectId: string, paperId: string): Promise<void> {

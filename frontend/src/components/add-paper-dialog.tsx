@@ -128,6 +128,7 @@ export function AddPaperDialog({ projectId, onAdded, children }: AddPaperDialogP
         abstract: abstract.trim() || null,
         body: body.trim() || null,
         pdf_url: url.trim() || null,
+        source: "manual",
       });
 
       if (useFile) {
