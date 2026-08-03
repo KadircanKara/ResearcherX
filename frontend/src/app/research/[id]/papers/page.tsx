@@ -2,10 +2,10 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { useParams } from "next/navigation";
-import { FileText, Plus } from "lucide-react";
+import { FileText, Plus, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { AddPaperDialog } from "@/components/add-paper-dialog";
-import { getProject, listPapers } from "@/lib/projects";
+import { getProject, listPapers, deletePaper } from "@/lib/projects";
 import type { Paper, Role } from "@/lib/types";
 
 const CAN_ADD: Role[] = ["owner", "editor"];
@@ -23,6 +23,7 @@ export default function PapersPage() {
   const [papers, setPapers] = useState<Paper[]>([]);
   const [myRole, setMyRole] = useState<Role | null>(null);
   const [loading, setLoading] = useState(true);
+  const [deleting, setDeleting] = useState<string | null>(null);
 
   const load = useCallback(() => {
     setLoading(true);
@@ -34,6 +35,18 @@ export default function PapersPage() {
       .catch(() => {})
       .finally(() => setLoading(false));
   }, [projectId]);
+
+  async function handleDelete(paperId: string) {
+    setDeleting(paperId);
+    try {
+      await deletePaper(projectId, paperId);
+      setPapers((prev) => prev.filter((p) => p.id !== paperId));
+    } catch {
+      load();
+    } finally {
+      setDeleting(null);
+    }
+  }
 
   useEffect(() => {
     load();
@@ -84,19 +97,31 @@ export default function PapersPage() {
         {papers.map((paper) => (
           <div
             key={paper.id}
-            className="rounded-xl border border-border bg-card px-4 py-3"
+            className="flex items-start gap-3 rounded-xl border border-border bg-card px-4 py-3"
           >
-            <p className="line-clamp-1 text-sm font-medium text-foreground">
-              {paper.title}
-            </p>
-            {paper.abstract && (
-              <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">
-                {paper.abstract}
+            <div className="min-w-0 flex-1">
+              <p className="line-clamp-1 text-sm font-medium text-foreground">
+                {paper.title}
               </p>
+              {paper.abstract && (
+                <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">
+                  {paper.abstract}
+                </p>
+              )}
+              <p className="mt-1.5 text-xs text-muted-foreground/60">
+                {fmtDate(paper.created_at)}
+              </p>
+            </div>
+            {canAdd && (
+              <button
+                onClick={() => handleDelete(paper.id)}
+                disabled={deleting === paper.id}
+                className="mt-0.5 shrink-0 rounded p-1 text-muted-foreground/50 transition-colors hover:bg-destructive/10 hover:text-destructive disabled:opacity-40"
+                aria-label="Delete paper"
+              >
+                <Trash2 className="size-3.5" />
+              </button>
             )}
-            <p className="mt-1.5 text-xs text-muted-foreground/60">
-              {fmtDate(paper.created_at)}
-            </p>
           </div>
         ))}
       </div>
