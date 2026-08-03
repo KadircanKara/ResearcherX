@@ -88,6 +88,12 @@ class Role(StrEnum):
     VIEWER = "viewer"
 
 
+class PaperSource(StrEnum):
+    UPLOAD = "upload"
+    LINK = "link"
+    MANUAL = "manual"
+
+
 class Project(Base):
     __tablename__ = "projects"
 
@@ -131,6 +137,9 @@ class Paper(Base):
     abstract: Mapped[str | None] = mapped_column(Text, default=None)
     body: Mapped[str | None] = mapped_column(Text, default=None)
     pdf_url: Mapped[str | None] = mapped_column(Text, default=None)
+    source: Mapped[str] = mapped_column(
+        String(16), default=PaperSource.MANUAL, server_default="manual"
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
     chunks: Mapped[list["PaperChunkEmbedding"]] = relationship(

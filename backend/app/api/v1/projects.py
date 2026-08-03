@@ -160,6 +160,7 @@ async def create_paper(
         abstract=data.abstract,
         body=data.body,
         pdf_url=data.pdf_url,
+        source=data.source,
     )
     db.add(paper)
     await db.commit()

@@ -121,3 +121,39 @@ async def test_paper_requires_member(client: AsyncClient, project: Project, non_
         headers={"X-Dev-User-Id": non_member.id},
     )
     assert resp.status_code == 404
+
+
+async def test_create_paper_defaults_source_to_manual(
+    client: AsyncClient, you: User, project: Project
+):
+    resp = await client.post(
+        f"/v1/projects/{project.id}/papers",
+        json={"title": "No Source Given", "abstract": None, "pdf_url": None},
+        headers={"X-Dev-User-Id": you.id},
+    )
+    assert resp.status_code == 201
+    assert resp.json()["source"] == "manual"
+
+
+async def test_create_paper_stores_explicit_source(
+    client: AsyncClient, you: User, project: Project
+):
+    for source in ("upload", "link", "manual"):
+        resp = await client.post(
+            f"/v1/projects/{project.id}/papers",
+            json={"title": f"Paper {source}", "source": source},
+            headers={"X-Dev-User-Id": you.id},
+        )
+        assert resp.status_code == 201, resp.text
+        assert resp.json()["source"] == source
+
+
+async def test_create_paper_rejects_unknown_source(
+    client: AsyncClient, you: User, project: Project
+):
+    resp = await client.post(
+        f"/v1/projects/{project.id}/papers",
+        json={"title": "Bad Source", "source": "carrier-pigeon"},
+        headers={"X-Dev-User-Id": you.id},
+    )
+    assert resp.status_code == 422

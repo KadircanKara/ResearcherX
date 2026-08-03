@@ -6,6 +6,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 
+from app.db.models import PaperSource
 from app.schemas.user import UserOut
 
 
@@ -66,6 +67,7 @@ class PaperCreate(BaseModel):
     abstract: str | None = None
     body: str | None = None
     pdf_url: str | None = None
+    source: PaperSource = PaperSource.MANUAL
 
 
 class PaperOut(BaseModel):
@@ -75,6 +77,7 @@ class PaperOut(BaseModel):
     abstract: str | None
     body: str | None
     pdf_url: str | None
+    source: str
     created_at: datetime
     model_config = {"from_attributes": True}
 
