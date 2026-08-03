@@ -36,11 +36,17 @@ async def project(db_session: AsyncSession, you: User) -> Project:
 
 
 async def test_create_paper(client: AsyncClient, you: User, project: Project):
-    resp = await client.post(
-        f"/v1/projects/{project.id}/papers",
-        json={"title": "Test Paper", "abstract": "An abstract.", "pdf_url": None},
-        headers={"X-Dev-User-Id": you.id},
-    )
+    # Manual source with a non-empty abstract triggers indexing on create; mock
+    # embed_batch so this stays a network-free unit test.
+    with patch(
+        "app.services.paper_ingest_service.EmbeddingService.embed_batch",
+        new=AsyncMock(return_value=[[0.0] * 768]),
+    ):
+        resp = await client.post(
+            f"/v1/projects/{project.id}/papers",
+            json={"title": "Test Paper", "abstract": "An abstract.", "pdf_url": None},
+            headers={"X-Dev-User-Id": you.id},
+        )
     assert resp.status_code == 201
     data = resp.json()
     assert data["title"] == "Test Paper"
@@ -64,14 +70,6 @@ async def test_list_papers(client: AsyncClient, you: User, project: Project):
 async def test_ingest_paper(
     client: AsyncClient, you: User, project: Project, db_session: AsyncSession
 ):
-    # Create the paper first
-    r = await client.post(
-        f"/v1/projects/{project.id}/papers",
-        json={"title": "Ingest Me", "abstract": "x", "pdf_url": None},
-        headers={"X-Dev-User-Id": you.id},
-    )
-    paper_id = r.json()["id"]
-
     # Minimal valid PDF bytes (just enough for fitz to parse + get text)
     # We mock embed_batch so no real HTTP call is made
     fake_pdf = b"%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n3 0 obj<</Type/Page/MediaBox[0 0 612 792]/Parent 2 0 R/Contents 4 0 R>>endobj\n4 0 obj<</Length 44>>stream\nBT /F1 12 Tf 72 720 Td (Hello World) Tj ET\nendstream\nendobj\nxref\n0 5\n0000000000 65535 f \n0000000009 00000 n \n0000000058 00000 n \n0000000115 00000 n \n0000000206 00000 n \ntrailer<</Size 5/Root 1 0 R>>\nstartxref\n300\n%%EOF"
@@ -80,6 +78,15 @@ async def test_ingest_paper(
         "app.services.paper_ingest_service.EmbeddingService.embed_batch",
         new=AsyncMock(return_value=[[0.0] * 768]),
     ):
+        # Create the paper first. Manual source + non-empty abstract also
+        # triggers indexing on create, so this call needs the mock too.
+        r = await client.post(
+            f"/v1/projects/{project.id}/papers",
+            json={"title": "Ingest Me", "abstract": "x", "pdf_url": None},
+            headers={"X-Dev-User-Id": you.id},
+        )
+        paper_id = r.json()["id"]
+
         resp = await client.post(
             f"/v1/projects/{project.id}/papers/{paper_id}/ingest",
             content=fake_pdf,
@@ -157,3 +164,43 @@ async def test_create_paper_rejects_unknown_source(
         headers={"X-Dev-User-Id": you.id},
     )
     assert resp.status_code == 422
+
+
+async def test_create_manual_paper_indexes_abstract(
+    client: AsyncClient, you: User, project: Project, db_session: AsyncSession
+):
+    from app.db.models import PaperChunkEmbedding
+
+    with patch(
+        "app.services.paper_ingest_service.EmbeddingService.embed_batch",
+        new=AsyncMock(return_value=[[0.0] * 768]),
+    ):
+        r = await client.post(
+            f"/v1/projects/{project.id}/papers",
+            json={"title": "Manual", "abstract": "Only an abstract.", "source": "manual"},
+            headers={"X-Dev-User-Id": you.id},
+        )
+    assert r.status_code == 201
+    rows = await db_session.execute(
+        select(PaperChunkEmbedding).where(PaperChunkEmbedding.paper_id == r.json()["id"])
+    )
+    chunks = rows.scalars().all()
+    assert len(chunks) == 1
+    assert chunks[0].text == "Only an abstract."
+
+
+async def test_create_upload_paper_does_not_index(
+    client: AsyncClient, you: User, project: Project, db_session: AsyncSession
+):
+    from app.db.models import PaperChunkEmbedding
+
+    r = await client.post(
+        f"/v1/projects/{project.id}/papers",
+        json={"title": "Upload", "abstract": "Extracted.", "body": "Body.", "source": "upload"},
+        headers={"X-Dev-User-Id": you.id},
+    )
+    assert r.status_code == 201
+    rows = await db_session.execute(
+        select(PaperChunkEmbedding).where(PaperChunkEmbedding.paper_id == r.json()["id"])
+    )
+    assert rows.scalars().all() == []

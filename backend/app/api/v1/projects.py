@@ -7,7 +7,7 @@ from sqlalchemy import desc, select as sa_select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.identity import get_current_user
-from app.db.models import Paper, ProjectMember, ResearchRun, User
+from app.db.models import Paper, PaperSource, ProjectMember, ResearchRun, User
 from app.db.session import get_session
 from app.schemas.project import (
     Counts,
@@ -165,6 +165,12 @@ async def create_paper(
     db.add(paper)
     await db.commit()
     await db.refresh(paper)
+
+    if paper.source == PaperSource.MANUAL and (paper.abstract or paper.body):
+        from app.services.paper_ingest_service import index_manual
+
+        await index_manual(db, paper.id, paper.abstract, paper.body)
+
     return PaperOut.model_validate(paper)
 
 
