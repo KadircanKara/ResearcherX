@@ -20,8 +20,12 @@ const MAX = 50;
 const entries: LogEntry[] = [];
 const listeners = new Set<(entries: LogEntry[]) => void>();
 
-export function addEntry(entry: LogEntry) {
-  entries.unshift(entry);
+// Monotonic counter, not `ts + url` — concurrent fetches to the same URL land
+// in the same millisecond and would collide as React keys.
+let seq = 0;
+
+export function addEntry(entry: Omit<LogEntry, "id">) {
+  entries.unshift({ ...entry, id: `${entry.ts}-${++seq}` });
   if (entries.length > MAX) entries.pop();
   const snapshot = [...entries];
   listeners.forEach((fn) => fn(snapshot));
@@ -35,5 +39,9 @@ export function clearEntries() {
 export function subscribe(fn: (entries: LogEntry[]) => void) {
   listeners.add(fn);
   fn([...entries]);
-  return () => listeners.delete(fn);
+  // Braces matter: Set.delete returns boolean, which is not a valid
+  // useEffect destructor return type.
+  return () => {
+    listeners.delete(fn);
+  };
 }

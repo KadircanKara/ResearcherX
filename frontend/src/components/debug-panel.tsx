@@ -273,7 +273,6 @@ export function DebugPanel() {
         }
 
         addEntry({
-          id: ts + url,
           ts,
           method,
           url,
@@ -287,7 +286,6 @@ export function DebugPanel() {
         return response;
       } catch (err) {
         addEntry({
-          id: ts + url,
           ts,
           method,
           url,
