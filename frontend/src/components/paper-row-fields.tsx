@@ -6,6 +6,19 @@ import { Input } from "@/components/ui/input";
 export const MAX_BATCH = 20;
 export const TITLE_MAX = 150;
 
+// A hung request must never wedge the batch: without a bound, runBatch never
+// resolves, `saving` never clears, and the busy-guard leaves the dialog
+// permanently undismissable. Generous enough for a large PDF upload + ingest.
+export const ITEM_TIMEOUT_MS = 120_000;
+
+export function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout>;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} timed out`)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer)) as Promise<T>;
+}
+
 export type ItemStatus =
   | "pending"
   | "extracting"

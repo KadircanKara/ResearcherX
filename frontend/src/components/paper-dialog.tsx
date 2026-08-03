@@ -9,6 +9,7 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog";
+import { PaperLinkScreen } from "@/components/paper-link-screen";
 import { PaperManualScreen, TITLE_MAX, type PaperFields } from "@/components/paper-manual-screen";
 import { PaperUploadScreen } from "@/components/paper-upload-screen";
 import { createPaper, patchPaper } from "@/lib/projects";
@@ -167,9 +168,12 @@ export function PaperDialog({
         onBusyChange={setScreenBusy}
       />
     ) : (
-      <p className="py-8 text-center text-sm text-muted-foreground">
-        Link screen lands in the next task.
-      </p>
+      <PaperLinkScreen
+        projectId={projectId}
+        onSaved={onSaved}
+        onClose={() => setOpen(false)}
+        onBusyChange={setScreenBusy}
+      />
     );
 
   return (
