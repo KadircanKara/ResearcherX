@@ -1,8 +1,8 @@
 "use client";
 
 import { Input } from "@/components/ui/input";
+import { TITLE_MAX } from "@/components/paper-row-fields";
 
-export const TITLE_MAX = 150;
 const TITLE_WARN = 120;
 
 export type PaperFields = { title: string; abstract: string; body: string };

@@ -118,15 +118,28 @@ export function PaperLinkScreen({
         // Paywalled URLs are a normal outcome here, not a crash — URL rows
         // fail far more often than local files, so surface the specific
         // reason instead of sending the user hunting for a bug that isn't
-        // there.
-        if (paperId) await deletePaper(projectId, paperId).catch(() => {});
+        // there. Cleanup failure is surfaced distinctly too — PATCH 422s
+        // abstract/body on a link paper and there's no re-ingest affordance,
+        // so a leftover scraped-but-unindexed row can only be fixed by
+        // deleting it, and the user needs to know to go find it.
+        let cleanedUp = true;
+        if (paperId) {
+          try {
+            await deletePaper(projectId, paperId);
+          } catch (cleanupErr) {
+            cleanedUp = false;
+            console.error("paper cleanup failed after ingest error", { paperId, cleanupErr });
+          }
+        }
         const paywalled =
           e instanceof Error && (e as Error & { paywalled?: boolean }).paywalled;
         update(item.id, {
           status: "failed",
-          error: paywalled
-            ? "Paywalled — upload the PDF instead."
-            : "Couldn't fetch this paper.",
+          error: !cleanedUp
+            ? "Couldn't fetch this paper, and cleanup failed — check the paper list for a leftover entry."
+            : paywalled
+              ? "Paywalled — upload the PDF instead."
+              : "Couldn't fetch this paper.",
         });
       }
     });

@@ -10,7 +10,8 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog";
 import { PaperLinkScreen } from "@/components/paper-link-screen";
-import { PaperManualScreen, TITLE_MAX, type PaperFields } from "@/components/paper-manual-screen";
+import { PaperManualScreen, type PaperFields } from "@/components/paper-manual-screen";
+import { TITLE_MAX } from "@/components/paper-row-fields";
 import { PaperUploadScreen } from "@/components/paper-upload-screen";
 import { createPaper, patchPaper } from "@/lib/projects";
 import type { Paper } from "@/lib/types";
@@ -84,7 +85,14 @@ export function PaperDialog({
     onOpenChange?.(o);
   };
 
-  const [method, setMethod] = useState<PaperMethod>("upload");
+  // Only meaningful in add-mode; edit-mode always renders the manual form,
+  // derived below rather than synced via effect (a synced value like
+  // `useState("upload")` + `useEffect(() => setMethod("manual"), ...)` is
+  // still "upload" for the render that mounts the dialog, since the effect
+  // runs after that first commit — Edit Paper would flash the upload dropzone
+  // for one frame before flipping to the form).
+  const [methodState, setMethodState] = useState<PaperMethod>("upload");
+  const method: PaperMethod = isEdit ? "manual" : methodState;
   const [fields, setFields] = useState<PaperFields>(EMPTY);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -108,14 +116,13 @@ export function PaperDialog({
   useEffect(() => {
     if (!open) return;
     if (paper) {
-      setMethod("manual");
       setFields({
         title: paper.title,
         abstract: paper.abstract ?? "",
         body: paper.body ?? "",
       });
     } else {
-      setMethod("upload");
+      setMethodState("upload");
       setFields(EMPTY);
     }
     setError(null);
@@ -188,7 +195,7 @@ export function PaperDialog({
           {!isEdit && (
             <MethodSelector
               value={method}
-              onChange={setMethod}
+              onChange={setMethodState}
               disabled={submitting || screenBusy}
             />
           )}
