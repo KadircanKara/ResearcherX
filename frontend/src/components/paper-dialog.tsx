@@ -10,6 +10,7 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog";
 import { PaperManualScreen, TITLE_MAX, type PaperFields } from "@/components/paper-manual-screen";
+import { PaperUploadScreen } from "@/components/paper-upload-screen";
 import { createPaper, patchPaper } from "@/lib/projects";
 import type { Paper } from "@/lib/types";
 
@@ -145,9 +146,15 @@ export function PaperDialog({
         disabled={submitting}
         readOnlyContent={readOnlyContent}
       />
+    ) : method === "upload" ? (
+      <PaperUploadScreen
+        projectId={projectId}
+        onSaved={onSaved}
+        onClose={() => setOpen(false)}
+      />
     ) : (
       <p className="py-8 text-center text-sm text-muted-foreground">
-        {method === "upload" ? "Upload" : "Link"} screen lands in the next task.
+        Link screen lands in the next task.
       </p>
     );
 

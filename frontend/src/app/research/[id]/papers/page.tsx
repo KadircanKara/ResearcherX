@@ -25,8 +25,13 @@ export default function PapersPage() {
   const [loading, setLoading] = useState(true);
   const [deleting, setDeleting] = useState<string | null>(null);
 
-  const load = useCallback(() => {
-    setLoading(true);
+  // `silent` skips the full-page loading skeleton. The skeleton branch below
+  // doesn't render <PaperDialog>, so a non-silent reload while the Add Paper
+  // dialog is open unmounts it out from under the user — e.g. PaperUploadScreen
+  // calls onSaved (this function) mid-batch, and an open dialog would vanish
+  // instead of staying open to show a failed row.
+  const load = useCallback((opts: { silent?: boolean } = {}) => {
+    if (!opts.silent) setLoading(true);
     Promise.all([listPapers(projectId), getProject(projectId)])
       .then(([ps, detail]) => {
         setPapers(ps);
@@ -42,7 +47,7 @@ export default function PapersPage() {
       await deletePaper(projectId, paperId);
       setPapers((prev) => prev.filter((p) => p.id !== paperId));
     } catch {
-      load();
+      load({ silent: true });
     } finally {
       setDeleting(null);
     }
@@ -73,7 +78,7 @@ export default function PapersPage() {
             : `${papers.length} paper${papers.length !== 1 ? "s" : ""}`}
         </p>
         {canAdd && (
-          <PaperDialog projectId={projectId} onSaved={load}>
+          <PaperDialog projectId={projectId} onSaved={() => load({ silent: true })}>
             <Button size="sm">
               <Plus className="mr-1.5 size-3.5" />
               Add Paper
