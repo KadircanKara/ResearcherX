@@ -17,6 +17,7 @@ from app.schemas.project import (
     PaperCreate,
     PaperIngestUrlRequest,
     PaperOut,
+    PaperUpdate,
     ProjectCreate,
     ProjectDetailOut,
     ProjectOut,
@@ -170,6 +171,45 @@ async def create_paper(
         from app.services.paper_ingest_service import index_manual
 
         await index_manual(db, paper.id, paper.abstract, paper.body)
+
+    return PaperOut.model_validate(paper)
+
+
+@router.patch("/projects/{project_id}/papers/{paper_id}", response_model=PaperOut)
+async def update_paper(
+    project_id: str,
+    paper_id: str,
+    data: PaperUpdate,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
+) -> PaperOut:
+    """Update a paper. Extracted content is immutable for upload/link papers."""
+    await project_service.require_member(db, project_id, user.id, "editor")
+    paper = await db.get(Paper, paper_id)
+    if paper is None or paper.project_id != project_id:
+        raise HTTPException(status_code=404, detail="Paper not found")
+
+    fields = data.model_dump(exclude_unset=True)
+
+    if paper.source != PaperSource.MANUAL and ({"abstract", "body"} & fields.keys()):
+        raise HTTPException(
+            status_code=422,
+            detail="Extracted content cannot be edited on an uploaded or linked paper.",
+        )
+
+    text_changed = any(
+        key in fields and fields[key] != getattr(paper, key) for key in ("abstract", "body")
+    )
+    for key, value in fields.items():
+        setattr(paper, key, value)
+    await db.commit()
+    await db.refresh(paper)
+
+    if paper.source == PaperSource.MANUAL and text_changed:
+        from app.services.paper_ingest_service import index_manual
+
+        await index_manual(db, paper.id, paper.abstract, paper.body)
+        await db.refresh(paper)
 
     return PaperOut.model_validate(paper)
 

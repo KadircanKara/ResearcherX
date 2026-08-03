@@ -204,3 +204,132 @@ async def test_create_upload_paper_does_not_index(
         select(PaperChunkEmbedding).where(PaperChunkEmbedding.paper_id == r.json()["id"])
     )
     assert rows.scalars().all() == []
+
+
+async def _make_paper(client: AsyncClient, you: User, project: Project, **fields) -> str:
+    payload = {"title": "Original", **fields}
+    r = await client.post(
+        f"/v1/projects/{project.id}/papers",
+        json=payload,
+        headers={"X-Dev-User-Id": you.id},
+    )
+    assert r.status_code == 201, r.text
+    return r.json()["id"]
+
+
+async def test_patch_title_on_upload_paper_succeeds(
+    client: AsyncClient, you: User, project: Project
+):
+    pid = await _make_paper(client, you, project, source="upload", abstract="Extracted.")
+    r = await client.patch(
+        f"/v1/projects/{project.id}/papers/{pid}",
+        json={"title": "Corrected Title"},
+        headers={"X-Dev-User-Id": you.id},
+    )
+    assert r.status_code == 200
+    assert r.json()["title"] == "Corrected Title"
+
+
+async def test_patch_abstract_on_upload_paper_is_rejected(
+    client: AsyncClient, you: User, project: Project
+):
+    pid = await _make_paper(client, you, project, source="upload", abstract="Extracted.")
+    r = await client.patch(
+        f"/v1/projects/{project.id}/papers/{pid}",
+        json={"abstract": "Tampered."},
+        headers={"X-Dev-User-Id": you.id},
+    )
+    assert r.status_code == 422
+    check = await client.get(f"/v1/projects/{project.id}/papers", headers={"X-Dev-User-Id": you.id})
+    assert [p for p in check.json() if p["id"] == pid][0]["abstract"] == "Extracted."
+
+
+async def test_patch_body_on_link_paper_is_rejected(
+    client: AsyncClient, you: User, project: Project
+):
+    pid = await _make_paper(client, you, project, source="link", body="Fetched body.")
+    r = await client.patch(
+        f"/v1/projects/{project.id}/papers/{pid}",
+        json={"body": "Tampered."},
+        headers={"X-Dev-User-Id": you.id},
+    )
+    assert r.status_code == 422
+
+
+async def test_patch_body_on_manual_paper_reindexes(
+    client: AsyncClient, you: User, project: Project, db_session: AsyncSession
+):
+    from app.db.models import PaperChunkEmbedding
+
+    with patch(
+        "app.services.paper_ingest_service.EmbeddingService.embed_batch",
+        new=AsyncMock(
+            side_effect=lambda texts, task_type="RETRIEVAL_DOCUMENT": [[0.0] * 768 for _ in texts]
+        ),
+    ):
+        pid = await _make_paper(client, you, project, source="manual", body="First body.")
+        r = await client.patch(
+            f"/v1/projects/{project.id}/papers/{pid}",
+            json={"body": "Replacement body text."},
+            headers={"X-Dev-User-Id": you.id},
+        )
+    assert r.status_code == 200
+    rows = await db_session.execute(
+        select(PaperChunkEmbedding).where(PaperChunkEmbedding.paper_id == pid)
+    )
+    texts = [c.text for c in rows.scalars().all()]
+    assert texts == ["Replacement body text."]
+
+
+async def test_patch_unchanged_body_skips_reindex(client: AsyncClient, you: User, project: Project):
+    with patch(
+        "app.services.paper_ingest_service.EmbeddingService.embed_batch",
+        new=AsyncMock(
+            side_effect=lambda texts, task_type="RETRIEVAL_DOCUMENT": [[0.0] * 768 for _ in texts]
+        ),
+    ) as spy:
+        pid = await _make_paper(client, you, project, source="manual", body="Same body.")
+        calls_after_create = spy.call_count
+        r = await client.patch(
+            f"/v1/projects/{project.id}/papers/{pid}",
+            json={"title": "New Title", "body": "Same body."},
+            headers={"X-Dev-User-Id": you.id},
+        )
+        assert r.status_code == 200
+        assert spy.call_count == calls_after_create, "unchanged body must not re-embed"
+
+
+async def test_patch_requires_editor(
+    client: AsyncClient, you: User, project: Project, db_session: AsyncSession
+):
+    pid = await _make_paper(client, you, project, source="manual")
+    viewer = (
+        await db_session.execute(select(User).where(User.email == "amelia@lab.io"))
+    ).scalar_one()
+    db_session.add(ProjectMember(project_id=project.id, user_id=viewer.id, role="viewer"))
+    await db_session.commit()
+
+    r = await client.patch(
+        f"/v1/projects/{project.id}/papers/{pid}",
+        json={"title": "Nope"},
+        headers={"X-Dev-User-Id": viewer.id},
+    )
+    assert r.status_code == 403
+
+
+async def test_patch_paper_from_another_project_404s(
+    client: AsyncClient, you: User, project: Project, db_session: AsyncSession
+):
+    pid = await _make_paper(client, you, project, source="manual")
+    other = Project(owner_id=you.id, title="Other", topic_keywords=[])
+    db_session.add(other)
+    await db_session.flush()
+    db_session.add(ProjectMember(project_id=other.id, user_id=you.id, role="owner"))
+    await db_session.commit()
+
+    r = await client.patch(
+        f"/v1/projects/{other.id}/papers/{pid}",
+        json={"title": "Nope"},
+        headers={"X-Dev-User-Id": you.id},
+    )
+    assert r.status_code == 404

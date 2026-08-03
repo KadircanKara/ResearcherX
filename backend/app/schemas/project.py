@@ -70,6 +70,12 @@ class PaperCreate(BaseModel):
     source: PaperSource = PaperSource.MANUAL
 
 
+class PaperUpdate(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=512)
+    abstract: str | None = None
+    body: str | None = None
+
+
 class PaperOut(BaseModel):
     id: str
     project_id: str
