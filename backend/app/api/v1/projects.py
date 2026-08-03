@@ -164,14 +164,19 @@ async def create_paper(
         source=data.source,
     )
     db.add(paper)
-    await db.commit()
-    await db.refresh(paper)
+    await db.flush()  # assigns paper.id without committing
 
     if paper.source == PaperSource.MANUAL and (paper.abstract or paper.body):
         from app.services.paper_ingest_service import index_manual
 
+        # index_manual commits — the flushed paper rides along in the same
+        # transaction, so an embedding failure rolls back the paper too rather
+        # than leaving a durable row whose chunks never got written.
         await index_manual(db, paper.id, paper.abstract, paper.body)
+    else:
+        await db.commit()
 
+    await db.refresh(paper)
     return PaperOut.model_validate(paper)
 
 
@@ -197,20 +202,24 @@ async def update_paper(
             detail="Extracted content cannot be edited on an uploaded or linked paper.",
         )
 
+    if "title" in fields and fields["title"] is None:
+        raise HTTPException(status_code=422, detail="Title cannot be null.")
+
     text_changed = any(
         key in fields and fields[key] != getattr(paper, key) for key in ("abstract", "body")
     )
     for key, value in fields.items():
         setattr(paper, key, value)
-    await db.commit()
-    await db.refresh(paper)
 
     if paper.source == PaperSource.MANUAL and text_changed:
         from app.services.paper_ingest_service import index_manual
 
+        # Same transaction as the text change — see create_paper.
         await index_manual(db, paper.id, paper.abstract, paper.body)
-        await db.refresh(paper)
+    else:
+        await db.commit()
 
+    await db.refresh(paper)
     return PaperOut.model_validate(paper)
 
 

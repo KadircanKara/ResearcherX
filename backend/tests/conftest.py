@@ -74,6 +74,11 @@ async def db_session():
 
 @pytest_asyncio.fixture
 async def client():
-    transport = httpx.ASGITransport(app=app)
+    # raise_app_exceptions=False: an unhandled exception in a route still gets
+    # Starlette's default 500 response (ServerErrorMiddleware sends it before
+    # re-raising) — without this flag httpx re-raises the exception instead of
+    # returning that response, so tests asserting on `resp.status_code` for a
+    # genuine server error can never see it.
+    transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
         yield c

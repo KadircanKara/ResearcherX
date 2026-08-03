@@ -317,6 +317,47 @@ async def test_patch_requires_editor(
     assert r.status_code == 403
 
 
+async def test_patch_body_rolls_back_when_embedding_fails(
+    client: AsyncClient, you: User, project: Project
+):
+    with patch(
+        "app.services.paper_ingest_service.EmbeddingService.embed_batch",
+        new=AsyncMock(
+            side_effect=lambda texts, task_type="RETRIEVAL_DOCUMENT": [[0.0] * 768 for _ in texts]
+        ),
+    ):
+        pid = await _make_paper(client, you, project, source="manual", body="ORIGINAL BODY")
+
+    with patch(
+        "app.services.paper_ingest_service.EmbeddingService.embed_batch",
+        new=AsyncMock(side_effect=RuntimeError("embedding provider down")),
+    ):
+        resp = await client.patch(
+            f"/v1/projects/{project.id}/papers/{pid}",
+            json={"body": "REPLACEMENT BODY"},
+            headers={"X-Dev-User-Id": you.id},
+        )
+    assert resp.status_code >= 500
+
+    listing = await client.get(
+        f"/v1/projects/{project.id}/papers", headers={"X-Dev-User-Id": you.id}
+    )
+    stored = [p for p in listing.json() if p["id"] == pid][0]
+    assert stored["body"] == "ORIGINAL BODY", "text must not persist when indexing failed"
+
+
+async def test_patch_null_title_is_rejected(client: AsyncClient, you: User, project: Project):
+    pid = await _make_paper(client, you, project, source="manual")
+    r = await client.patch(
+        f"/v1/projects/{project.id}/papers/{pid}",
+        json={"title": None},
+        headers={"X-Dev-User-Id": you.id},
+    )
+    assert r.status_code == 422
+    check = await client.get(f"/v1/projects/{project.id}/papers", headers={"X-Dev-User-Id": you.id})
+    assert [p for p in check.json() if p["id"] == pid][0]["title"] == "Original"
+
+
 async def test_patch_paper_from_another_project_404s(
     client: AsyncClient, you: User, project: Project, db_session: AsyncSession
 ):
