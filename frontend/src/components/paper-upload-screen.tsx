@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Upload } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -16,10 +16,12 @@ export function PaperUploadScreen({
   projectId,
   onSaved,
   onClose,
+  onBusyChange,
 }: {
   projectId: string;
   onSaved: () => void;
   onClose: () => void;
+  onBusyChange?: (busy: boolean) => void;
 }) {
   const [items, setItemsState] = useState<BatchItem[]>([]);
   const [saving, setSaving] = useState(false);
@@ -41,11 +43,16 @@ export function PaperUploadScreen({
 
   async function addFiles(files: File[]) {
     const pdfs = files.filter((f) => f.name.toLowerCase().endsWith(".pdf"));
-    const room = MAX_BATCH - items.length;
+    const nonPdf = files.length - pdfs.length;
+    const room = MAX_BATCH - itemsRef.current.length;
     const accepted = pdfs.slice(0, Math.max(room, 0));
-    if (pdfs.length > accepted.length) {
-      setNotice(`Only ${MAX_BATCH} files at a time — ${pdfs.length - accepted.length} skipped.`);
-    }
+    const overCap = pdfs.length - accepted.length;
+
+    const notes: string[] = [];
+    if (nonPdf > 0) notes.push(`${nonPdf} non-PDF file${nonPdf === 1 ? "" : "s"} skipped.`);
+    if (overCap > 0) notes.push(`Only ${MAX_BATCH} files at a time — ${overCap} skipped.`);
+    setNotice(notes.length ? notes.join(" ") : null);
+
     if (!accepted.length) return;
 
     const fresh: BatchItem[] = accepted.map((f) => ({
@@ -103,9 +110,24 @@ export function PaperUploadScreen({
         await ingestPaper(projectId, paper.id, bytes);
         update(item.id, { status: "done" });
       } catch {
-        // Never leave a paper row without its PDF.
-        if (paperId) await deletePaper(projectId, paperId).catch(() => {});
-        update(item.id, { status: "failed", error: "Couldn't read or index this PDF." });
+        // Never leave a paper row without its PDF. If the compensating delete
+        // also fails, surface that distinctly — a generic "failed" here would
+        // let a retry call createPaper again and compound the orphan.
+        let cleanedUp = true;
+        if (paperId) {
+          try {
+            await deletePaper(projectId, paperId);
+          } catch (cleanupErr) {
+            cleanedUp = false;
+            console.error("paper cleanup failed after ingest error", { paperId, cleanupErr });
+          }
+        }
+        update(item.id, {
+          status: "failed",
+          error: cleanedUp
+            ? "Couldn't read or index this PDF."
+            : "Couldn't index this PDF, and cleanup failed — check the paper list for a leftover entry.",
+        });
       }
     });
 
@@ -120,6 +142,13 @@ export function PaperUploadScreen({
 
   const readyCount = items.filter((it) => it.status === "ready" || it.status === "failed").length;
   const busy = items.some((it) => it.status === "extracting" || it.status === "saving");
+
+  // Report extraction/save activity up so the parent dialog can lock the
+  // method selector and its own close path — this screen can be doing async
+  // work (in-flight uploads/ingest) that the parent has no other visibility into.
+  useEffect(() => {
+    onBusyChange?.(busy || saving);
+  }, [busy, saving, onBusyChange]);
 
   return (
     <div className="flex flex-col gap-3">

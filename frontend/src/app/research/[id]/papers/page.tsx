@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams } from "next/navigation";
 import { FileText, Plus, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -30,15 +30,26 @@ export default function PapersPage() {
   // dialog is open unmounts it out from under the user — e.g. PaperUploadScreen
   // calls onSaved (this function) mid-batch, and an open dialog would vanish
   // instead of staying open to show a failed row.
+  //
+  // `loadSeq` guards against out-of-order resolution: onSaved (batch
+  // completion) and handleDelete's error-path resync can both be in flight at
+  // once, and a slower earlier request resolving after a faster later one
+  // would otherwise overwrite fresher state with stale data.
+  const loadSeq = useRef(0);
+
   const load = useCallback((opts: { silent?: boolean } = {}) => {
+    const seq = ++loadSeq.current;
     if (!opts.silent) setLoading(true);
     Promise.all([listPapers(projectId), getProject(projectId)])
       .then(([ps, detail]) => {
+        if (seq !== loadSeq.current) return; // a newer load already won
         setPapers(ps);
         setMyRole(detail.my_role);
       })
       .catch(() => {})
-      .finally(() => setLoading(false));
+      .finally(() => {
+        if (seq === loadSeq.current) setLoading(false);
+      });
   }, [projectId]);
 
   async function handleDelete(paperId: string) {

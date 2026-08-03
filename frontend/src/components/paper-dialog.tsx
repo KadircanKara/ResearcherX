@@ -87,6 +87,19 @@ export function PaperDialog({
   const [fields, setFields] = useState<PaperFields>(EMPTY);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Mirrors PaperUploadScreen's own extracting/saving state, which the parent
+  // otherwise has no visibility into — used to lock the method selector and
+  // the dialog's own dismiss gestures while a batch is in flight.
+  const [screenBusy, setScreenBusy] = useState(false);
+
+  // Native dismiss gestures (Escape, backdrop click, the built-in close
+  // button) go through here. An in-flight upload batch must not be dismissed
+  // this way — PaperUploadScreen's own Cancel/auto-close paths call
+  // `() => setOpen(false)` directly and stay unguarded.
+  const handleOpenChange = (o: boolean) => {
+    if (!o && screenBusy) return;
+    setOpen(o);
+  };
 
   // Content is only editable on papers the user typed in by hand.
   const readOnlyContent = isEdit && paper!.source !== "manual";
@@ -151,6 +164,7 @@ export function PaperDialog({
         projectId={projectId}
         onSaved={onSaved}
         onClose={() => setOpen(false)}
+        onBusyChange={setScreenBusy}
       />
     ) : (
       <p className="py-8 text-center text-sm text-muted-foreground">
@@ -159,7 +173,7 @@ export function PaperDialog({
     );
 
   return (
-    <Dialog open={open} onOpenChange={setOpen}>
+    <Dialog open={open} onOpenChange={handleOpenChange}>
       {children && <DialogTrigger render={children}></DialogTrigger>}
       <DialogContent className="flex max-h-[90vh] flex-col sm:max-w-xl">
         <DialogHeader>
@@ -168,7 +182,11 @@ export function PaperDialog({
 
         <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto pb-1">
           {!isEdit && (
-            <MethodSelector value={method} onChange={setMethod} disabled={submitting} />
+            <MethodSelector
+              value={method}
+              onChange={setMethod}
+              disabled={submitting || screenBusy}
+            />
           )}
 
           {body}
