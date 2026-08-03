@@ -93,4 +93,9 @@ async def test_index_chunks_empty_clears_existing(db_session: AsyncSession, pape
         await svc.index_chunks(db_session, paper.id, ["one"])
         n = await svc.index_chunks(db_session, paper.id, [])
     assert n == 0
+    # A session sees its own uncommitted writes, so reading straight through
+    # db_session would pass whether or not index_chunks committed the delete.
+    # Roll back first: anything index_chunks did NOT commit is discarded, so
+    # this assertion fails if the commit-on-empty behavior ever regresses.
+    await db_session.rollback()
     assert await _chunks(db_session, paper.id) == []
