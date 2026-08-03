@@ -24,7 +24,8 @@ from app.services.embedding_service import EmbeddingService
 # Chunks with distance > this are excluded (Path B / C logic).
 _SIMILARITY_THRESHOLD = 0.5  # cosine distance ≤ 0.5 means similarity ≥ 0.5
 _HISTORY_TOP_K = 5
-_PLANNER_MIN_PAPERS = 3  # skip planner for ≤2 papers; use broad/2-chunks default
+_PLANNER_MIN_PAPERS = 3  # skip planner for ≤2 papers; use broad default
+_SMALL_LIBRARY_K = 5  # chunks per paper when planner is skipped (few papers → go deeper)
 
 _CITATION_RE = re.compile(r"\[(\d+)\]")
 
@@ -106,7 +107,7 @@ class ChatService:
                         per_paper_map = {alloc.paper_id: alloc.chunks for alloc in plan.per_paper}
                     else:
                         retrieval_query = user_content
-                        per_paper_map = {p.id: 2 for p in paper_rows}
+                        per_paper_map = {p.id: _SMALL_LIBRARY_K for p in paper_rows}
 
                     retrieval_embedding = (
                         await self._embedding_svc.embed(
