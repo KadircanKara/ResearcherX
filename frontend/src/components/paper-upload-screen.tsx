@@ -12,6 +12,19 @@ import {
 import { runBatch } from "@/lib/batch-queue";
 import { createPaper, deletePaper, ingestPaper, suggestTitle } from "@/lib/projects";
 
+// A hung request must never wedge the batch: without a bound, runBatch never
+// resolves, `saving` never clears, and the busy-guard leaves the dialog
+// permanently undismissable. Generous enough for a large PDF upload + ingest.
+const ITEM_TIMEOUT_MS = 120_000;
+
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout>;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} timed out`)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer)) as Promise<T>;
+}
+
 export function PaperUploadScreen({
   projectId,
   onSaved,
@@ -51,7 +64,7 @@ export function PaperUploadScreen({
     const notes: string[] = [];
     if (nonPdf > 0) notes.push(`${nonPdf} non-PDF file${nonPdf === 1 ? "" : "s"} skipped.`);
     if (overCap > 0) notes.push(`Only ${MAX_BATCH} files at a time — ${overCap} skipped.`);
-    setNotice(notes.length ? notes.join(" ") : null);
+    if (notes.length) setNotice(notes.join(" "));
 
     if (!accepted.length) return;
 
@@ -70,7 +83,7 @@ export function PaperUploadScreen({
       update(item.id, { status: "extracting" });
       try {
         const bytes = await (item.source as File).arrayBuffer();
-        const meta = await suggestTitle(projectId, bytes);
+        const meta = await withTimeout(suggestTitle(projectId, bytes), ITEM_TIMEOUT_MS, "suggestTitle");
         update(item.id, {
           status: "ready",
           title: meta.title ? meta.title.slice(0, TITLE_MAX) : item.title,
@@ -99,15 +112,19 @@ export function PaperUploadScreen({
       try {
         // Re-read the title: the user may have edited it while this row queued.
         const live = itemsRef.current.find((c) => c.id === item.id) ?? item;
-        const paper = await createPaper(projectId, {
-          title: live.title.trim() || live.label,
-          abstract: live.abstract,
-          body: live.body,
-          source: "upload",
-        });
+        const paper = await withTimeout(
+          createPaper(projectId, {
+            title: live.title.trim() || live.label,
+            abstract: live.abstract,
+            body: live.body,
+            source: "upload",
+          }),
+          ITEM_TIMEOUT_MS,
+          "createPaper"
+        );
         paperId = paper.id;
         const bytes = await (item.source as File).arrayBuffer();
-        await ingestPaper(projectId, paper.id, bytes);
+        await withTimeout(ingestPaper(projectId, paper.id, bytes), ITEM_TIMEOUT_MS, "ingestPaper");
         update(item.id, { status: "done" });
       } catch {
         // Never leave a paper row without its PDF. If the compensating delete
