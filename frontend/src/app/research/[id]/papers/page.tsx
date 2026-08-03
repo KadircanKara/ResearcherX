@@ -160,7 +160,10 @@ export default function PapersPage() {
           onOpenChange={(o) => !o && setEditing(null)}
           onSaved={() => {
             setEditing(null);
-            load();
+            // Silent: a non-silent load flips `loading` true, and that branch
+            // replaces the whole page with skeletons — flashing the entire list
+            // away for a single-field edit and losing scroll position.
+            load({ silent: true });
           }}
         />
       )}
