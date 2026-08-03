@@ -224,19 +224,20 @@ async def extract_title_from_page(url: str) -> str | None:
 async def extract_meta_from_pdf(
     pdf_bytes: bytes,
 ) -> tuple[str | None, str | None, str | None]:
-    """Extract (title, abstract, body) from a PDF via fitz + structured LLM.
+    """Extract (title, abstract, body) from a PDF via pymupdf4llm + structured LLM.
 
-    LLM sees only the first page (for title/abstract); body is plain fitz text of all pages.
+    Text-only markdown is stored as body — images are not embedded (see
+    `paper_ingest_service._extract_markdown`); figure captions survive.
     """
     try:
         import fitz
+        import pymupdf4llm
 
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-        pages = [doc[i].get_text("text", sort=True) for i in range(len(doc))]
+        body_md = pymupdf4llm.to_markdown(doc)
         doc.close()
-        first_page = pages[0] if pages else ""
-        body = "\n\n".join(p for p in pages if p.strip()) or None
-        meta = await _extract_meta_via_llm(first_page)
+        body = body_md.strip() or None
+        meta = await _extract_meta_via_llm(body_md)
         return meta.title, meta.abstract, body
     except Exception as exc:
         log.debug("pdf_meta_extraction_failed", error=str(exc))

@@ -1,6 +1,8 @@
 """Paper ingest: PDF bytes → text chunks → embeddings → DB rows."""
 
+import re
 import fitz  # pymupdf
+import pymupdf4llm
 import uuid
 
 from sqlalchemy import text
@@ -14,42 +16,32 @@ from app.services.embedding_service import EmbeddingService
 _CHUNK_WORDS = 384
 _OVERLAP_WORDS = 48
 
+# Matches figure captions: "Figure 3." / "Fig. 3:" / "FIGURE 3 —" etc.
+_FIGURE_CAPTION_RE = re.compile(
+    r"(?:Figure|Fig\.?)\s+\d+[\.:\—\-]?\s+\S[^\n]{4,300}",
+    re.IGNORECASE,
+)
+
 _embedding_svc = EmbeddingService()
 
 
-def _extract_page_text(page: fitz.Page) -> str:
-    """Extract text from one page with column-aware ordering.
+def _extract_markdown(pdf_bytes: bytes) -> str:
+    """Convert PDF to text-only markdown.
 
-    Detects multi-column layout by checking whether text blocks span less than
-    60 % of the page width (a full-width block = single column or header/footer).
-    For multi-column pages the page is split at the horizontal midpoint; blocks
-    in each column are sorted top-to-bottom independently, left column first.
-    Falls back to fitz sort=True for single-column or ambiguous pages.
+    Images are deliberately not embedded: `embed_images=True` inlines every
+    figure as a base64 data URI, which bloats the body and the chunks with
+    text nothing downstream reads (we don't analyze images). The default
+    still keeps figure captions, which is the part that carries meaning.
     """
-    blocks = page.get_text("blocks")  # (x0, y0, x1, y1, text, block_no, type)
-    text_blocks = [b for b in blocks if b[6] == 0 and b[4].strip()]  # type 0 = text
-
-    if not text_blocks:
-        return ""
-
-    page_w = page.rect.width
-    max_block_w = max(b[2] - b[0] for b in text_blocks)
-
-    # If any block is wider than 60 % of page → treat as single column
-    if max_block_w > page_w * 0.60:
-        return page.get_text("text", sort=True)
-
-    midpoint = page_w / 2
-    left = sorted([b for b in text_blocks if b[0] < midpoint], key=lambda b: b[1])
-    right = sorted([b for b in text_blocks if b[0] >= midpoint], key=lambda b: b[1])
-    return "\n".join(b[4] for b in left + right)
-
-
-def _extract_text(pdf_bytes: bytes) -> str:
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    pages = [_extract_page_text(page) for page in doc]
+    md = pymupdf4llm.to_markdown(doc)
     doc.close()
-    return "\n".join(pages)
+    return md
+
+
+def _extract_figure_captions(md: str) -> list[str]:
+    """Return each figure caption as a standalone chunk for targeted retrieval."""
+    return [m.group(0).strip() for m in _FIGURE_CAPTION_RE.finditer(md)]
 
 
 def _chunk_text(text: str) -> list[str]:
@@ -74,16 +66,28 @@ async def ingest(db: AsyncSession, paper_id: str, pdf_bytes: bytes) -> int:
     """Extract, chunk, embed, and persist. Returns number of chunks stored.
 
     Idempotent: deletes existing chunks for this paper before re-inserting.
+    Figure captions are added as dedicated chunks after regular text chunks so
+    similarity search on "Figure N" queries hits them directly.
     """
     from sqlalchemy import delete
 
     await db.execute(delete(PaperChunkEmbedding).where(PaperChunkEmbedding.paper_id == paper_id))
 
-    doc_text = _extract_text(pdf_bytes)
-    chunks = _chunk_text(doc_text)
+    md = _extract_markdown(pdf_bytes)
+    figure_chunks = _extract_figure_captions(md)
+    text_chunks = _chunk_text(md)
+    chunks = text_chunks + figure_chunks
+
     if not chunks:
         log.warning("paper_ingest_no_text", paper_id=paper_id)
         return 0
+
+    log.info(
+        "paper_ingest_chunks",
+        paper_id=paper_id,
+        text_chunks=len(text_chunks),
+        figure_chunks=len(figure_chunks),
+    )
 
     embeddings = await _embedding_svc.embed_batch(chunks, task_type="RETRIEVAL_DOCUMENT")
 
