@@ -2,8 +2,9 @@
 
 The env overrides MUST happen before any `app.*` import: settings are read
 at import time, and inside the dev container the process env points at the
-real postgres (and a real LLM key). Tests run on a throwaway sqlite file and
-never touch the network — every agent/LLM/search call is faked.
+real postgres (and real LLM/embedding keys). Tests run on a throwaway sqlite
+file and never touch the network — every agent/LLM/search/embedding call is
+faked.
 """
 
 import os
@@ -14,6 +15,8 @@ os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{_TMPDIR}/test.db?timeout=30"
 os.environ["ENVIRONMENT"] = "dev"
 os.environ["LLM_API_KEY"] = "test-key-never-used"
 os.environ["LLM_BASE_URL"] = "http://localhost:1/v1"  # unroutable: fail fast if hit
+os.environ["EMBEDDING_API_KEY"] = "test-key-never-used"
+os.environ["EMBEDDING_BASE_URL"] = "http://localhost:1/v1"  # unroutable: fail fast if hit
 
 import asyncio  # noqa: E402
 
