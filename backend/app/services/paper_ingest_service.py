@@ -62,32 +62,25 @@ def _chunk_text(text: str) -> list[str]:
     return chunks
 
 
-async def ingest(db: AsyncSession, paper_id: str, pdf_bytes: bytes) -> int:
-    """Extract, chunk, embed, and persist. Returns number of chunks stored.
+def _norm(s: str) -> str:
+    """Collapse whitespace so containment comparison ignores wrapping."""
+    return " ".join(s.split())
 
-    Idempotent: deletes existing chunks for this paper before re-inserting.
-    Figure captions are added as dedicated chunks after regular text chunks so
-    similarity search on "Figure N" queries hits them directly.
+
+async def index_chunks(db: AsyncSession, paper_id: str, chunks: list[str]) -> int:
+    """Embed and persist pre-built chunks. Idempotent — replaces any existing chunks.
+
+    An empty `chunks` list clears the paper's index and commits that removal, so
+    re-indexing a paper whose text was emptied genuinely empties it.
     """
     from sqlalchemy import delete
 
     await db.execute(delete(PaperChunkEmbedding).where(PaperChunkEmbedding.paper_id == paper_id))
 
-    md = _extract_markdown(pdf_bytes)
-    figure_chunks = _extract_figure_captions(md)
-    text_chunks = _chunk_text(md)
-    chunks = text_chunks + figure_chunks
-
     if not chunks:
-        log.warning("paper_ingest_no_text", paper_id=paper_id)
+        await db.commit()
+        log.warning("paper_index_no_text", paper_id=paper_id)
         return 0
-
-    log.info(
-        "paper_ingest_chunks",
-        paper_id=paper_id,
-        text_chunks=len(text_chunks),
-        figure_chunks=len(figure_chunks),
-    )
 
     embeddings = await _embedding_svc.embed_batch(chunks, task_type="RETRIEVAL_DOCUMENT")
 
@@ -116,5 +109,41 @@ async def ingest(db: AsyncSession, paper_id: str, pdf_bytes: bytes) -> int:
             },
         )
     await db.commit()
-    log.info("paper_ingest_done", paper_id=paper_id, chunks=n_chunks)
+    log.info("paper_index_done", paper_id=paper_id, chunks=n_chunks)
     return n_chunks
+
+
+async def ingest(db: AsyncSession, paper_id: str, pdf_bytes: bytes) -> int:
+    """Extract, chunk, embed, and persist a PDF. Returns number of chunks stored.
+
+    Figure captions are appended after regular text chunks so similarity search
+    on "Figure N" queries hits them directly.
+    """
+    md = _extract_markdown(pdf_bytes)
+    text_chunks = _chunk_text(md)
+    figure_chunks = _extract_figure_captions(md)
+    log.info(
+        "paper_ingest_chunks",
+        paper_id=paper_id,
+        text_chunks=len(text_chunks),
+        figure_chunks=len(figure_chunks),
+    )
+    return await index_chunks(db, paper_id, text_chunks + figure_chunks)
+
+
+async def index_manual(
+    db: AsyncSession, paper_id: str, abstract: str | None, body: str | None
+) -> int:
+    """Index hand-entered text: abstract as its own chunk, then body chunks.
+
+    The abstract chunk is skipped when its text already appears in the body —
+    manual entry often means pasting the paper text (abstract included) into the
+    body while also filling the abstract field, and indexing both would put the
+    same text in the index twice.
+    """
+    body = body or ""
+    chunks: list[str] = []
+    if abstract and abstract.strip() and _norm(abstract) not in _norm(body):
+        chunks.append(abstract.strip())
+    chunks += _chunk_text(body)
+    return await index_chunks(db, paper_id, chunks)
