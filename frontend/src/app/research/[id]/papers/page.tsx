@@ -4,7 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useParams } from "next/navigation";
 import { FileText, Plus, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { AddPaperDialog } from "@/components/add-paper-dialog";
+import { PaperDialog } from "@/components/paper-dialog";
 import { getProject, listPapers, deletePaper } from "@/lib/projects";
 import type { Paper, Role } from "@/lib/types";
 
@@ -73,12 +73,12 @@ export default function PapersPage() {
             : `${papers.length} paper${papers.length !== 1 ? "s" : ""}`}
         </p>
         {canAdd && (
-          <AddPaperDialog projectId={projectId} onAdded={load}>
+          <PaperDialog projectId={projectId} onSaved={load}>
             <Button size="sm">
               <Plus className="mr-1.5 size-3.5" />
               Add Paper
             </Button>
-          </AddPaperDialog>
+          </PaperDialog>
         )}
       </div>
 
