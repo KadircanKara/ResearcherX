@@ -6,11 +6,11 @@ whose model already matches are skipped, making this safe to re-run.
 
 import asyncio
 
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 
 from app.core.config import settings
-from app.db.models import _now
 from app.db.session import SessionLocal
+from app.services.conversation_service import _embed_message
 from app.services.embedding_service import EmbeddingService
 
 
@@ -29,27 +29,36 @@ async def main() -> None:
             )
         ).fetchall()
 
-        print(f"re-embedding {len(rows)} messages as {settings.embedding_model}")
-        for row in rows:
-            emb = await svc.embed(row.content, task_type="RETRIEVAL_DOCUMENT")
-            vec_str = "[" + ",".join(str(x) for x in emb) + "]"
-            await db.execute(
-                text("""
-                INSERT INTO conversation_message_embeddings
-                    (id, message_id, embedding, model, created_at)
-                VALUES (gen_random_uuid()::text, :message_id,
-                        CAST(:emb AS vector), :model, :now)
-                ON CONFLICT (message_id) DO UPDATE
-                    SET embedding = EXCLUDED.embedding, model = EXCLUDED.model
-            """),
-                {
-                    "message_id": row.id,
-                    "emb": vec_str,
-                    "model": settings.embedding_model,
-                    "now": _now(),
-                },
-            )
-        await db.commit()
+    total = len(rows)
+    print(f"re-embedding {total} messages as {settings.embedding_model}")
+
+    # One row at a time via _embed_message, not embed_batch(): this is a
+    # recovery script, run precisely when something has already gone wrong
+    # (rate limits, quota exhaustion, a flaky provider). _embed_message opens
+    # its own session and commits per message, so a failure partway through
+    # loses at most one row instead of rolling back every embedding computed
+    # so far in one shared transaction. Don't "optimise" this back into a
+    # batched call — isolation matters more than throughput here.
+    for row in rows:
+        await _embed_message(row.id, row.content, svc)
+
+    # _embed_message swallows errors by design (it's written for a
+    # fire-and-forget background task, so it never raises to the caller) —
+    # the loop above can't tell us what failed. Re-query instead of trusting
+    # it: count how many of the rows we just attempted now sit at the
+    # configured model.
+    done = 0
+    ids = [row.id for row in rows]
+    if ids:
+        async with SessionLocal() as db:
+            query = text("""
+                SELECT count(*) FROM conversation_message_embeddings
+                WHERE message_id IN :ids AND model = :model
+            """).bindparams(bindparam("ids", expanding=True))
+            (done,) = (
+                await db.execute(query, {"ids": ids, "model": settings.embedding_model})
+            ).one()
+    print(f"re-embedded {done} of {total} messages")
     print("done")
 
 
