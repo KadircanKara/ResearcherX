@@ -21,8 +21,9 @@ test:
 	docker compose exec backend pytest -q
 
 # Prod stack (docker-compose.prod.yml) under its own project name so it can
-# coexist with the dev stack. Requires POSTGRES_PASSWORD, LLM_API_KEY and
-# OWNER_API_KEY in the environment (from SSM on the box; export locally).
+# coexist with the dev stack. Requires POSTGRES_PASSWORD, LLM_API_KEY,
+# OWNER_API_KEY and EMBEDDING_API_KEY in the environment (from SSM on the
+# box; export locally).
 prod-up:
 	docker compose -p researcherx-prod -f docker-compose.prod.yml up -d --build
 

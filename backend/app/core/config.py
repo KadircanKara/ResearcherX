@@ -105,7 +105,8 @@ class Settings(BaseSettings):
             problems.append("OWNER_API_KEY is empty (required for quota bypass)")
         if not self.resolved_embedding_api_key:
             problems.append("EMBEDDING_API_KEY (or LLM_API_KEY fallback) is empty")
-        if "ollama" in self.embedding_base_url or "localhost" in self.embedding_base_url:
+        embedding_host = self.embedding_base_url.lower()
+        if "ollama" in embedding_host or "localhost" in embedding_host:
             problems.append(
                 "EMBEDDING_BASE_URL points at a dev host "
                 "(set EMBEDDING_BASE_URL to a hosted embedding endpoint)"

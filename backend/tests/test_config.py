@@ -32,6 +32,19 @@ def test_prod_rejects_localhost_embedding_base_url(monkeypatch):
         settings.validate_for_environment()
 
 
+def test_prod_rejects_dev_host_regardless_of_case(monkeypatch):
+    """Guard against a false negative: the match must not be case-sensitive.
+
+    A false positive here merely refuses to boot with a clear message; a
+    false negative reproduces the original silent-failure-at-runtime bug
+    this guard exists to prevent.
+    """
+    _set_valid_prod(monkeypatch)
+    monkeypatch.setattr(settings, "embedding_base_url", "http://OLLAMA:11434/v1")
+    with pytest.raises(RuntimeError, match="EMBEDDING_BASE_URL"):
+        settings.validate_for_environment()
+
+
 def test_prod_accepts_hosted_embedding_base_url(monkeypatch):
     _set_valid_prod(monkeypatch)
     settings.validate_for_environment()  # must not raise

@@ -1,6 +1,7 @@
 # Production compose. NO credentials in this file — POSTGRES_PASSWORD,
-# LLM_API_KEY and OWNER_API_KEY come from the shell environment (sourced
-# from SSM Parameter Store at deploy; exported inline for local testing).
+# LLM_API_KEY, OWNER_API_KEY and EMBEDDING_API_KEY come from the shell
+# environment (sourced from SSM Parameter Store at deploy; exported inline
+# for local testing).
 #
 # Run via `make prod-up` (uses its own compose project name so it can
 # coexist with the dev stack). Only Caddy publishes ports: 80/443.
