@@ -25,9 +25,7 @@ async def seeded(db_session: AsyncSession):
     await db_session.commit()
 
 
-async def test_unhandled_route_error_returns_500_with_cors_headers(
-    client: AsyncClient, seeded
-):
+async def test_unhandled_route_error_returns_500_with_cors_headers(client: AsyncClient, seeded):
     with patch(
         "app.api.v1.projects.project_service.list_projects",
         new=AsyncMock(side_effect=RuntimeError("boom")),

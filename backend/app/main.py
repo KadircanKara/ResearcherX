@@ -54,6 +54,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="ResearcherX", version="0.1.0", lifespan=lifespan)
 
+
 # Registered BEFORE CORSMiddleware on purpose. `add_middleware` prepends, so
 # the earliest-registered middleware ends up FURTHEST INSIDE the stack, and
 # this one has to sit inside CORS for its response to pick up the CORS headers.
@@ -104,6 +105,7 @@ async def debug_log_middleware(request: Request, call_next):
             # Hard cap: some proxies reject headers > 8 KB
             response.headers["X-Debug-Log"] = payload[:8000]
     return response
+
 
 app.include_router(api_router)
 
