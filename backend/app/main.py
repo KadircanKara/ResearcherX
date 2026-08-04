@@ -34,16 +34,22 @@ async def _fail_orphaned_runs() -> None:
 
 
 async def _warn_stale_embeddings() -> None:
-    """Count embedding rows from a different model than the configured one.
+    """Count embedding rows (both tables) from a different model than the
+    configured one.
 
     Retrieval filters them out (correctly — mixing vector spaces is worse than
-    missing data), so without this they are silently invisible.
+    missing data), so without this they are silently invisible: paper chunks
+    stay unsearchable and conversation history stops surfacing past messages,
+    with no signal anywhere that either happened.
     """
     from sqlalchemy import text as sa_text
 
     async with SessionLocal() as db:
         result = await db.execute(
-            sa_text("SELECT count(*) FROM paper_chunk_embeddings WHERE model <> :model"),
+            sa_text("""
+                SELECT (SELECT count(*) FROM paper_chunk_embeddings WHERE model <> :model)
+                     + (SELECT count(*) FROM conversation_message_embeddings WHERE model <> :model)
+            """),
             {"model": settings.embedding_model},
         )
         stale = result.scalar_one()
@@ -52,7 +58,7 @@ async def _warn_stale_embeddings() -> None:
             "stale_embeddings_ignored",
             count=stale,
             configured_model=settings.embedding_model,
-            hint="re-index these papers or they stay unsearchable",
+            hint="re-index papers and re-embed conversation messages or they stay unsearchable",
         )
 
 
