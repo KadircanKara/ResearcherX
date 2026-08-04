@@ -21,7 +21,8 @@ def _embedding_client() -> AsyncOpenAI:
     )
 
 
-# Gemini embedding API cap per request
+# Conservative floor that satisfies every supported provider's per-request
+# batch cap (Ollama has none; OpenAI's is 2048).
 _EMBED_BATCH_SIZE = 96
 
 
@@ -42,7 +43,10 @@ class EmbeddingService:
         return results[0]
 
     async def _embed_one_batch(self, texts: list[str], task_type: str) -> list[list[float]]:
-        prefix = _prefix_for(task_type)
+        # rstrip guards against a stray trailing space in the configured
+        # prefix (e.g. "search_document: ") producing a double space and a
+        # silently different vector than the intended single-space join.
+        prefix = _prefix_for(task_type).rstrip()
         # Changing a prefix invalidates an existing index exactly as a model
         # change does, but does NOT change the model name recorded per chunk —
         # so a prefix change requires a manual re-index. Treat these values as

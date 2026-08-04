@@ -53,6 +53,19 @@ class Settings(BaseSettings):
     embedding_document_prefix: str = ""
     embedding_query_prefix: str = ""
 
+    # Cosine-distance cutoff for retrieval (chunks with distance ≥ this are
+    # excluded). MODEL-SPECIFIC — the distance distribution depends on the
+    # embedding model, so this must be re-measured whenever the model
+    # changes. 0.75 was chosen by measuring live against nomic-embed-text
+    # (dev): a real question ("Who wrote this?") sat at distance 0.5457 and
+    # was being wrongly dropped by the old hardcoded 0.5 cutoff, while a bare
+    # greeting ("thanks") passed at 0.4352 — the old threshold favored
+    # small-talk over substantive questions. NOT measured for prod's OpenAI
+    # text-embedding-3-small; whoever first runs prod should re-measure
+    # against that model's distance distribution and adjust via the
+    # SIMILARITY_THRESHOLD env var rather than editing this default.
+    similarity_threshold: float = 0.75
+
     # Abuse limits (decision D3): anonymous per-IP quotas + a global daily
     # cap; the owner API key (X-API-Key header) bypasses both. The cap is
     # the real DoS backstop for the Groq quota.

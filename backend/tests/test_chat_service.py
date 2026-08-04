@@ -1,11 +1,12 @@
 """ChatService integration test — all external calls mocked."""
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest_asyncio
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.db.models import ChatConversation, ChatMessage, Project, ProjectMember, User
 from app.db.seed import seed_users
 
@@ -94,3 +95,49 @@ async def test_respond_yields_events(
     assert "retrieving" in event_types
     assert "delta" in event_types
     assert "done" in event_types
+
+
+def _mock_db_returning_no_rows() -> MagicMock:
+    """A fake AsyncSession whose execute() returns an empty result set.
+
+    Real pgvector SQL (`<=>`, `CAST(... AS vector)`) can't run against the
+    sqlite test DB, so these tests mock the session at the execute() level
+    and inspect the params it was called with instead of the result.
+    """
+    mock_result = MagicMock()
+    mock_result.fetchall.return_value = []
+    mock_db = MagicMock()
+    mock_db.execute = AsyncMock(return_value=mock_result)
+    return mock_db
+
+
+async def test_retrieve_history_uses_settings_similarity_threshold():
+    """The threshold must come from settings (live-tunable), not be baked
+    into the query — this is what makes it re-tunable per embedding model
+    without a code change (see config.py)."""
+    from app.services.chat_service import ChatService
+
+    svc = ChatService()
+    mock_db = _mock_db_returning_no_rows()
+
+    with patch.object(settings, "similarity_threshold", 0.42):
+        await svc._retrieve_history(mock_db, "conv-1", [0.0] * 768)
+
+    _, params = mock_db.execute.call_args.args
+    assert params["threshold"] == 0.42
+
+
+async def test_retrieve_paper_chunks_uses_settings_similarity_threshold():
+    """Same wiring check as above, for the per-paper chunk retrieval query."""
+    from app.agents.retrieval_planner import PaperInfo
+    from app.services.chat_service import ChatService
+
+    svc = ChatService()
+    mock_db = _mock_db_returning_no_rows()
+    paper = PaperInfo(paper_id="p1", title="Test Paper", abstract="")
+
+    with patch.object(settings, "similarity_threshold", 0.42):
+        await svc._retrieve_paper_chunks(mock_db, [paper], {"p1": 5}, [0.0] * 768)
+
+    _, params = mock_db.execute.call_args.args
+    assert params["threshold"] == 0.42

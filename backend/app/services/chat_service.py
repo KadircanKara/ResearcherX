@@ -21,9 +21,6 @@ from app.db.session import SessionLocal
 from app.services.conversation_service import ConversationService
 from app.services.embedding_service import EmbeddingService
 
-# Cosine distance threshold: 1 - cosine_similarity.
-# Chunks with distance > this are excluded (Path B / C logic).
-_SIMILARITY_THRESHOLD = 0.5  # cosine distance ≤ 0.5 means similarity ≥ 0.5
 _HISTORY_TOP_K = 5
 _PLANNER_MIN_PAPERS = 3  # skip planner for ≤2 papers; use broad default
 _SMALL_LIBRARY_K = 5  # chunks per paper when planner is skipped (few papers → go deeper)
@@ -216,7 +213,7 @@ class ChatService:
                 "qvec": qvec,
                 "conv_id": conversation_id,
                 "model": settings.embedding_model,
-                "threshold": _SIMILARITY_THRESHOLD,
+                "threshold": settings.similarity_threshold,
                 "top_k": _HISTORY_TOP_K,
             },
         )
@@ -256,7 +253,7 @@ class ChatService:
                     "qvec": qvec,
                     "paper_id": paper.paper_id,
                     "model": settings.embedding_model,
-                    "threshold": _SIMILARITY_THRESHOLD,
+                    "threshold": settings.similarity_threshold,
                     "k": k,
                 },
             )
