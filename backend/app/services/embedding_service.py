@@ -21,6 +21,13 @@ def _embedding_client() -> AsyncOpenAI:
 _EMBED_BATCH_SIZE = 96
 
 
+def _prefix_for(task_type: str) -> str:
+    """Prefix for this task type, or '' when the provider doesn't use prefixes."""
+    if task_type == "RETRIEVAL_QUERY":
+        return settings.embedding_query_prefix
+    return settings.embedding_document_prefix
+
+
 class EmbeddingService:
     def __init__(self) -> None:
         self._client = _embedding_client()
@@ -31,8 +38,14 @@ class EmbeddingService:
         return results[0]
 
     async def _embed_one_batch(self, texts: list[str], task_type: str) -> list[list[float]]:
+        prefix = _prefix_for(task_type)
+        # Changing a prefix invalidates an existing index exactly as a model
+        # change does, but does NOT change the model name recorded per chunk —
+        # so a prefix change requires a manual re-index. Treat these values as
+        # part of the provider contract, not a tuning knob.
+        payload = [f"{prefix} {t}" for t in texts] if prefix else texts
         try:
-            create_kwargs: dict = {"model": settings.embedding_model, "input": texts}
+            create_kwargs: dict = {"model": settings.embedding_model, "input": payload}
             if settings.embedding_dimensions:
                 create_kwargs["dimensions"] = settings.embedding_dimensions
             response = await self._client.embeddings.create(**create_kwargs)

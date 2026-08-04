@@ -44,6 +44,13 @@ class Settings(BaseSettings):
     embedding_model: str = "gemini-embedding-001"
     embedding_dimensions: int = 768  # must match vector(N) in schema
 
+    # Asymmetric-retrieval prefixes. nomic-embed-text distinguishes documents
+    # from queries by prefix, not by an API parameter; OpenAI needs neither, so
+    # the defaults are empty and prod requires no entry for these.
+    # No trailing space — the service inserts the separator.
+    embedding_document_prefix: str = ""
+    embedding_query_prefix: str = ""
+
     # Abuse limits (decision D3): anonymous per-IP quotas + a global daily
     # cap; the owner API key (X-API-Key header) bypasses both. The cap is
     # the real DoS backstop for the Groq quota.

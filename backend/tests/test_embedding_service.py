@@ -38,3 +38,66 @@ async def test_embed_batch():
 async def test_embed_batch_empty():
     results = await EmbeddingService().embed_batch([], task_type="RETRIEVAL_DOCUMENT")
     assert results == []
+
+
+from types import SimpleNamespace
+from unittest.mock import patch
+
+from app.core.config import settings
+from app.services.embedding_service import EmbeddingService
+
+
+class _CaptureEmbeddings:
+    """Stands in for client.embeddings — records the kwargs it was called with."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    async def create(self, **kwargs):
+        self.calls.append(kwargs)
+        n = len(kwargs["input"])
+        return SimpleNamespace(
+            data=[SimpleNamespace(index=i, embedding=[0.0] * 768) for i in range(n)]
+        )
+
+
+class _CaptureClient:
+    def __init__(self) -> None:
+        self.embeddings = _CaptureEmbeddings()
+
+
+async def test_document_prefix_applied_to_chunks():
+    svc = EmbeddingService()
+    client = _CaptureClient()
+    svc._client = client
+    with (
+        patch.object(settings, "embedding_document_prefix", "search_document:"),
+        patch.object(settings, "embedding_query_prefix", "search_query:"),
+    ):
+        await svc.embed_batch(["hello world"], task_type="RETRIEVAL_DOCUMENT")
+    assert client.embeddings.calls[0]["input"] == ["search_document: hello world"]
+
+
+async def test_query_prefix_applied_to_queries():
+    svc = EmbeddingService()
+    client = _CaptureClient()
+    svc._client = client
+    with (
+        patch.object(settings, "embedding_document_prefix", "search_document:"),
+        patch.object(settings, "embedding_query_prefix", "search_query:"),
+    ):
+        await svc.embed("what method is proposed", task_type="RETRIEVAL_QUERY")
+    assert client.embeddings.calls[0]["input"] == ["search_query: what method is proposed"]
+
+
+async def test_empty_prefix_leaves_text_untouched():
+    """Prod/OpenAI path: defaults are empty, so nothing is prepended."""
+    svc = EmbeddingService()
+    client = _CaptureClient()
+    svc._client = client
+    with (
+        patch.object(settings, "embedding_document_prefix", ""),
+        patch.object(settings, "embedding_query_prefix", ""),
+    ):
+        await svc.embed_batch(["untouched"], task_type="RETRIEVAL_DOCUMENT")
+    assert client.embeddings.calls[0]["input"] == ["untouched"]
