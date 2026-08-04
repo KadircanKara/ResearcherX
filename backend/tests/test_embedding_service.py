@@ -41,10 +41,8 @@ async def test_embed_batch_empty():
 
 
 from types import SimpleNamespace
-from unittest.mock import patch
 
 from app.core.config import settings
-from app.services.embedding_service import EmbeddingService
 
 
 class _CaptureEmbeddings:
