@@ -169,6 +169,13 @@ export async function ingestPaperFromUrl(
     err.paywalled = body?.detail?.error === "paywalled";
     throw err;
   }
+  if (r.status === 503) {
+    // The PDF was fetched and parsed — only indexing is down. Distinct from a
+    // fetch failure so the UI doesn't tell the user their link is bad.
+    const err = new Error("ingest-from-url -> 503") as Error & { unavailable?: boolean };
+    err.unavailable = true;
+    throw err;
+  }
   if (!r.ok) throw new Error(`ingest-from-url -> ${r.status}`);
   return r.json();
 }

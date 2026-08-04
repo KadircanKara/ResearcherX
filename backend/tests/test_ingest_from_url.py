@@ -2,8 +2,10 @@
 
 from unittest.mock import AsyncMock, patch
 
+import httpx
 import pytest_asyncio
 from httpx import AsyncClient
+from openai import RateLimitError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -96,6 +98,41 @@ async def test_ingest_from_url_paywalled(
     detail = resp.json()["detail"]
     assert detail["error"] == "paywalled"
     assert "Upload the PDF directly" in detail["message"]
+
+
+async def test_ingest_from_url_embedding_quota_exhausted(
+    client: AsyncClient, you: User, project: Project, paper: dict
+):
+    """A spent embedding quota is an upstream outage, not a 500.
+
+    The PDF fetched and parsed fine — only the embedding call failed, so the
+    user needs to be told to retry later rather than shown a generic failure
+    that reads as "this paper is unreachable".
+    """
+    request = httpx.Request("POST", "http://test/embeddings")
+    response = httpx.Response(429, request=request, json={"error": {"message": "quota"}})
+    quota_error = RateLimitError("quota exhausted", response=response, body=None)
+
+    with (
+        patch(
+            "app.services.paper_fetch_service.fetch_pdf",
+            new=AsyncMock(return_value=_FAKE_PDF),
+        ),
+        patch(
+            "app.services.paper_ingest_service.EmbeddingService.embed_batch",
+            new=AsyncMock(side_effect=quota_error),
+        ),
+    ):
+        resp = await client.post(
+            f"/v1/projects/{project.id}/papers/{paper['id']}/ingest-from-url",
+            json={"url": "https://arxiv.org/pdf/2409.03245"},
+            headers={"X-Dev-User-Id": you.id},
+        )
+
+    assert resp.status_code == 503
+    detail = resp.json()["detail"]
+    assert detail["error"] == "embedding_unavailable"
+    assert "quota exhausted" not in detail["message"]
 
 
 async def test_ingest_from_url_requires_membership(

@@ -133,13 +133,19 @@ export function PaperLinkScreen({
         }
         const paywalled =
           e instanceof Error && (e as Error & { paywalled?: boolean }).paywalled;
+        // Indexing being down is not the link's fault — saying "couldn't fetch"
+        // sends the user to re-check a URL that worked fine.
+        const unavailable =
+          e instanceof Error && (e as Error & { unavailable?: boolean }).unavailable;
         update(item.id, {
           status: "failed",
           error: !cleanedUp
             ? "Couldn't fetch this paper, and cleanup failed — check the paper list for a leftover entry."
             : paywalled
               ? "Paywalled — upload the PDF instead."
-              : "Couldn't fetch this paper.",
+              : unavailable
+                ? "Indexing is temporarily unavailable. Try again later."
+                : "Couldn't fetch this paper.",
         });
       }
     });

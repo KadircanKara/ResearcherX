@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from openai import RateLimitError
 from sqlalchemy import desc, select as sa_select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.identity import get_current_user
+from app.core.logging import log
 from app.db.models import Paper, PaperSource, ProjectMember, ResearchRun, User
 from app.db.session import get_session
 from app.schemas.project import (
@@ -350,7 +352,20 @@ async def ingest_paper_from_url(
                 "message": "No open-access version found. Upload the PDF directly.",
             },
         )
-    n = await ingest(db, paper_id, pdf_bytes)
+    try:
+        n = await ingest(db, paper_id, pdf_bytes)
+    except RateLimitError:
+        # The PDF fetched and parsed fine — only the embedding provider is out
+        # of quota. A 500 here reads to the user as "this paper is unreachable"
+        # and sends them hunting for a problem with the link that isn't there.
+        log.warning("ingest_embedding_quota_exhausted", paper_id=paper_id)
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "embedding_unavailable",
+                "message": "Indexing is temporarily unavailable. Try again later.",
+            },
+        )
     return {"chunks_stored": n}
 
 

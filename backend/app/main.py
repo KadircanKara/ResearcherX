@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from sqlalchemy import update
 
 from app.api.v1.router import api_router
@@ -52,6 +53,32 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="ResearcherX", version="0.1.0", lifespan=lifespan)
+
+# Registered BEFORE CORSMiddleware on purpose. `add_middleware` prepends, so
+# the earliest-registered middleware ends up FURTHEST INSIDE the stack, and
+# this one has to sit inside CORS for its response to pick up the CORS headers.
+@app.middleware("http")
+async def catch_unhandled_errors(request: Request, call_next):
+    """Build the 500 for an unhandled exception inside the CORS layer.
+
+    Starlette's ServerErrorMiddleware is outside every user middleware, so the
+    500 it produces never passes through CORSMiddleware and ships without
+    `access-control-allow-origin`. The browser then discards the response and
+    `fetch` rejects with an opaque `TypeError: Failed to fetch` — the client
+    cannot tell a server error from a dead network, and every unhandled backend
+    error is undebuggable from the UI. Handled errors (HTTPException) already
+    come back as real responses; only genuine crashes reach here.
+
+    Catches `Exception`, not `BaseException`: `asyncio.CancelledError` must keep
+    propagating or SSE disconnects stop cancelling their runs.
+    """
+    try:
+        return await call_next(request)
+    except Exception:
+        # Traceback stays server-side; the client body is generic by design.
+        log.error("unhandled_error", path=request.url.path, exc_info=True)
+        return JSONResponse(status_code=500, content={"detail": "internal server error"})
+
 
 app.add_middleware(
     CORSMiddleware,
