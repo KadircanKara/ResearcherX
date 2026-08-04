@@ -15,6 +15,30 @@ services:
       timeout: 3s
       retries: 10
 
+  ollama:
+    image: ollama/ollama:latest
+    volumes:
+      - ollama_models:/root/.ollama
+    # Healthy only once the MODEL is present, not merely when the server is up —
+    # backend must not start against an Ollama that cannot embed yet.
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list | grep -q nomic-embed-text"]
+      interval: 5s
+      timeout: 3s
+      retries: 60
+    restart: unless-stopped
+
+  # One-shot: Ollama does not auto-pull. Exits once the model is cached in the
+  # shared volume; on-failure restart covers racing the server's startup.
+  ollama-pull:
+    image: ollama/ollama:latest
+    depends_on:
+      - ollama
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+    entrypoint: ["ollama", "pull", "nomic-embed-text"]
+    restart: on-failure
+
   backend:
     build:
       context: ./backend
@@ -24,6 +48,8 @@ services:
       DATABASE_URL: postgresql+asyncpg://researcherx:researcherx@db:5432/researcherx
     depends_on:
       db:
+        condition: service_healthy
+      ollama:
         condition: service_healthy
     ports:
       - "8000:8000"
@@ -49,3 +75,4 @@ services:
 
 volumes:
   db_data:
+  ollama_models:

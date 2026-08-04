@@ -37,11 +37,13 @@ class Settings(BaseSettings):
     # list = single-provider behavior.
     llm_fallbacks: list[LLMFallback] = Field(default_factory=list)
 
-    # Embedding provider — Gemini text-embedding-004 via Google's OpenAI-compat
-    # endpoint. EMBEDDING_API_KEY defaults to LLM_API_KEY if not set separately.
-    embedding_base_url: str = "https://generativelanguage.googleapis.com/v1beta/openai/"
-    embedding_api_key: str = ""  # set in .env; falls back to llm_api_key if empty
-    embedding_model: str = "gemini-embedding-001"
+    # Embedding provider — Ollama (nomic-embed-text) in dev; prod overrides all
+    # four via SSM to OpenAI text-embedding-3-small. EMBEDDING_API_KEY falls
+    # back to LLM_API_KEY only if unset, which would send a Groq key upstream —
+    # always set it explicitly.
+    embedding_base_url: str = "http://ollama:11434/v1"
+    embedding_api_key: str = ""
+    embedding_model: str = "nomic-embed-text"
     embedding_dimensions: int = 768  # must match vector(N) in schema
 
     # Asymmetric-retrieval prefixes. nomic-embed-text distinguishes documents
