@@ -206,6 +206,10 @@ class PaperChunkEmbedding(Base):
     # Declared as Text so SQLite tests (create_all) don't fail on unknown type.
     # The Alembic migration converts this to vector(768) in Postgres.
     embedding: Mapped[str] = mapped_column(Text)
+    # Which embedding model produced this vector. Filtering retrieval on this
+    # prevents a provider switch from silently mixing two vector spaces in one
+    # pgvector index — a failure with no error and no way to detect it after.
+    model: Mapped[str] = mapped_column(String(64), default="", server_default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
     paper: Mapped[Paper] = relationship(back_populates="chunks")
@@ -223,6 +227,10 @@ class ConversationMessageEmbedding(Base):
     )
     # Same TEXT/vector pattern as PaperChunkEmbedding.
     embedding: Mapped[str] = mapped_column(Text)
+    # Which embedding model produced this vector. Filtering retrieval on this
+    # prevents a provider switch from silently mixing two vector spaces in one
+    # pgvector index — a failure with no error and no way to detect it after.
+    model: Mapped[str] = mapped_column(String(64), default="", server_default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
     message: Mapped[ChatMessage] = relationship(back_populates="embedding")

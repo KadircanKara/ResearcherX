@@ -6,6 +6,7 @@ import pytest_asyncio
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.db.models import Paper, PaperChunkEmbedding, Project, ProjectMember, User
 from app.db.seed import seed_users
 from app.services import paper_ingest_service as svc
@@ -99,3 +100,25 @@ async def test_index_chunks_empty_clears_existing(db_session: AsyncSession, pape
     # this assertion fails if the commit-on-empty behavior ever regresses.
     await db_session.rollback()
     assert await _chunks(db_session, paper.id) == []
+
+
+async def test_index_chunks_records_configured_model(db_session: AsyncSession, paper: Paper):
+    """Every row must carry the model that produced it, or a later provider
+    switch silently mixes vector spaces in one index."""
+    with (
+        patch.object(svc._embedding_svc, "embed_batch", _fake_embed()),
+        patch.object(settings, "embedding_model", "nomic-embed-text"),
+    ):
+        await svc.index_chunks(db_session, paper.id, ["chunk one", "chunk two"])
+
+    rows = (
+        (
+            await db_session.execute(
+                select(PaperChunkEmbedding).where(PaperChunkEmbedding.paper_id == paper.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert len(rows) == 2
+    assert {r.model for r in rows} == {"nomic-embed-text"}

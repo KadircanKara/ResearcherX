@@ -8,6 +8,7 @@ import uuid
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.logging import log
 from app.db.models import PaperChunkEmbedding, _now
 from app.services.embedding_service import EmbeddingService
@@ -93,11 +94,13 @@ async def index_chunks(db: AsyncSession, paper_id: str, chunks: list[str]) -> in
         await db.execute(
             text("""
             INSERT INTO paper_chunk_embeddings
-                (id, paper_id, chunk_index, text, embedding, created_at)
+                (id, paper_id, chunk_index, text, embedding, model, created_at)
             VALUES
-                (:id, :paper_id, :chunk_index, :text, CAST(:emb AS vector), :now)
+                (:id, :paper_id, :chunk_index, :text, CAST(:emb AS vector), :model, :now)
             ON CONFLICT (paper_id, chunk_index) DO UPDATE
-                SET text = EXCLUDED.text, embedding = EXCLUDED.embedding
+                SET text = EXCLUDED.text,
+                    embedding = EXCLUDED.embedding,
+                    model = EXCLUDED.model
         """),
             {
                 "id": str(uuid.uuid4()),
@@ -105,6 +108,7 @@ async def index_chunks(db: AsyncSession, paper_id: str, chunks: list[str]) -> in
                 "chunk_index": i,
                 "text": chunk,
                 "emb": vec_str,
+                "model": settings.embedding_model,
                 "now": now,
             },
         )

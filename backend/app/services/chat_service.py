@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.chat_agent import ChatAgent, ChatAgentInput, ChunkContext
 from app.agents.retrieval_planner import PaperInfo, PlannerInput, RetrievalPlannerAgent
+from app.core.config import settings
 from app.core.logging import log
 from app.db.models import Paper
 from app.db.session import SessionLocal
@@ -204,6 +205,7 @@ class ChatService:
             FROM conversation_message_embeddings cme
             JOIN chat_messages cm ON cm.id = cme.message_id
             WHERE cm.conversation_id = :conv_id
+              AND cme.model = :model
               AND (cme.embedding <=> CAST(:qvec AS vector)) < :threshold
             ORDER BY distance ASC
             LIMIT :top_k
@@ -213,6 +215,7 @@ class ChatService:
             {
                 "qvec": qvec,
                 "conv_id": conversation_id,
+                "model": settings.embedding_model,
                 "threshold": _SIMILARITY_THRESHOLD,
                 "top_k": _HISTORY_TOP_K,
             },
@@ -242,6 +245,7 @@ class ChatService:
                        (embedding <=> CAST(:qvec AS vector)) AS distance
                 FROM paper_chunk_embeddings
                 WHERE paper_id = :paper_id
+                  AND model = :model
                   AND (embedding <=> CAST(:qvec AS vector)) < :threshold
                 ORDER BY distance ASC
                 LIMIT :k
@@ -251,6 +255,7 @@ class ChatService:
                 {
                     "qvec": qvec,
                     "paper_id": paper.paper_id,
+                    "model": settings.embedding_model,
                     "threshold": _SIMILARITY_THRESHOLD,
                     "k": k,
                 },

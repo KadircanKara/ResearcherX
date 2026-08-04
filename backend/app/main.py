@@ -33,6 +33,29 @@ async def _fail_orphaned_runs() -> None:
         log.warning("orphaned_runs_marked_failed", count=result.rowcount)
 
 
+async def _warn_stale_embeddings() -> None:
+    """Count embedding rows from a different model than the configured one.
+
+    Retrieval filters them out (correctly — mixing vector spaces is worse than
+    missing data), so without this they are silently invisible.
+    """
+    from sqlalchemy import text as sa_text
+
+    async with SessionLocal() as db:
+        result = await db.execute(
+            sa_text("SELECT count(*) FROM paper_chunk_embeddings WHERE model <> :model"),
+            {"model": settings.embedding_model},
+        )
+        stale = result.scalar_one()
+    if stale:
+        log.warning(
+            "stale_embeddings_ignored",
+            count=stale,
+            configured_model=settings.embedding_model,
+            hint="re-index these papers or they stay unsearchable",
+        )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     configure_logging()
@@ -40,6 +63,7 @@ async def lifespan(app: FastAPI):
     log.info("app_startup", model=settings.llm_model, environment=settings.environment)
     await run_migrations()
     await _fail_orphaned_runs()
+    await _warn_stale_embeddings()
     async with SessionLocal() as db:
         await seed_users(db)
         await seed_projects(db)

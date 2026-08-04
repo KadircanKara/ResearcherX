@@ -12,6 +12,7 @@ from sqlalchemy.orm import selectinload
 
 from sqlalchemy import text
 
+from app.core.config import settings
 from app.core.logging import log
 from app.db.models import ChatConversation, ChatMessage, _now
 from app.db.session import SessionLocal
@@ -28,11 +29,19 @@ async def _embed_message(message_id: str, content: str, svc: EmbeddingService) -
 
             await db.execute(
                 text("""
-                INSERT INTO conversation_message_embeddings (id, message_id, embedding, created_at)
-                VALUES (:id, :message_id, CAST(:emb AS vector), :now)
-                ON CONFLICT (message_id) DO UPDATE SET embedding = EXCLUDED.embedding
+                INSERT INTO conversation_message_embeddings
+                    (id, message_id, embedding, model, created_at)
+                VALUES (:id, :message_id, CAST(:emb AS vector), :model, :now)
+                ON CONFLICT (message_id) DO UPDATE
+                    SET embedding = EXCLUDED.embedding, model = EXCLUDED.model
             """),
-                {"id": str(uuid.uuid4()), "message_id": message_id, "emb": vec_str, "now": _now()},
+                {
+                    "id": str(uuid.uuid4()),
+                    "message_id": message_id,
+                    "emb": vec_str,
+                    "model": settings.embedding_model,
+                    "now": _now(),
+                },
             )
             await db.commit()
     except Exception as exc:
