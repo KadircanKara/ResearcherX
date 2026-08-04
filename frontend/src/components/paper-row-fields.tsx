@@ -9,7 +9,9 @@ export const TITLE_MAX = 150;
 // A hung request must never wedge the batch: without a bound, runBatch never
 // resolves, `saving` never clears, and the busy-guard leaves the dialog
 // permanently undismissable. Generous enough for a large PDF upload + ingest.
-export const ITEM_TIMEOUT_MS = 120_000;
+// Dev embedding runs on CPU in-container (~47s for a 67-chunk paper, measured),
+// and long papers scale past that. 120s left almost no margin.
+export const ITEM_TIMEOUT_MS = 300_000;
 
 export function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
   let timer: ReturnType<typeof setTimeout>;

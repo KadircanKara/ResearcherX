@@ -1,4 +1,8 @@
-"""Embedding service — Gemini text-embedding-004 via OpenAI-compat SDK."""
+"""Embedding service — provider-agnostic via the OpenAI-compatible SDK.
+
+Dev: Ollama nomic-embed-text. Prod: OpenAI text-embedding-3-small at
+dimensions=768. Both produce 768-dim vectors to match vector(768).
+"""
 
 from functools import lru_cache
 
