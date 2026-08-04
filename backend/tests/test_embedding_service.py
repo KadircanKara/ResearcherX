@@ -1,9 +1,11 @@
 """EmbeddingService unit tests — HTTP call mocked."""
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from app.core.config import settings
 from app.services.embedding_service import EmbeddingService
 
 
@@ -38,11 +40,6 @@ async def test_embed_batch():
 async def test_embed_batch_empty():
     results = await EmbeddingService().embed_batch([], task_type="RETRIEVAL_DOCUMENT")
     assert results == []
-
-
-from types import SimpleNamespace
-
-from app.core.config import settings
 
 
 class _CaptureEmbeddings:
