@@ -136,6 +136,11 @@ class Paper(Base):
     title: Mapped[str] = mapped_column(String(512))
     abstract: Mapped[str | None] = mapped_column(Text, default=None)
     body: Mapped[str | None] = mapped_column(Text, default=None)
+    # Markdown extracted from an uploaded/linked PDF. Deliberately separate from
+    # `body`, which carries manual-entry semantics that update_paper enforces
+    # with a 422. Storing it makes a future embedding-model change a pure
+    # re-embed instead of a re-download.
+    extracted_text: Mapped[str | None] = mapped_column(Text, default=None)
     pdf_url: Mapped[str | None] = mapped_column(Text, default=None)
     source: Mapped[str] = mapped_column(
         String(16), default=PaperSource.MANUAL, server_default="manual"

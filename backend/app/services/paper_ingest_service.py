@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.logging import log
-from app.db.models import PaperChunkEmbedding, _now
+from app.db.models import Paper, PaperChunkEmbedding, _now
 from app.services.embedding_service import EmbeddingService
 
 # Simple word-based chunking: ~384 words ≈ 512 tokens, 48-word overlap ≈ 64 tokens
@@ -124,6 +124,14 @@ async def ingest(db: AsyncSession, paper_id: str, pdf_bytes: bytes) -> int:
     on "Figure N" queries hits them directly.
     """
     md = _extract_markdown(pdf_bytes)
+
+    # Assigned before index_chunks so the text and its chunks land in ONE
+    # transaction (index_chunks commits) — an embedding failure must not leave
+    # stored text whose chunks were never written.
+    paper = await db.get(Paper, paper_id)
+    if paper is not None:
+        paper.extracted_text = md
+
     text_chunks = _chunk_text(md)
     figure_chunks = _extract_figure_captions(md)
     log.info(
