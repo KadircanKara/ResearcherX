@@ -8,7 +8,12 @@
 
 services:
   db:
-    image: postgres:16-alpine
+    # Must be the pgvector image, not stock postgres: migration c1d2e3f4a5b6
+    # runs CREATE EXTENSION vector for the RAG schema, and that extension is
+    # not present in postgres:16-alpine. Do not "simplify" this back — it
+    # crash-loops the backend on every fresh boot (run_migrations() lets the
+    # failure raise, and restart: unless-stopped just retries forever).
+    image: pgvector/pgvector:pg16
     restart: unless-stopped
     environment:
       POSTGRES_USER: researcherx
@@ -49,6 +54,11 @@ services:
       EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:?EMBEDDING_API_KEY is required}
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-3-small}
       EMBEDDING_DIMENSIONS: ${EMBEDDING_DIMENSIONS:-768}
+      # Cosine-distance retrieval cutoff — MODEL-SPECIFIC (see config.py).
+      # The 0.75 default was measured against dev's nomic-embed-text only;
+      # it has not been measured for OpenAI text-embedding-3-small. Tune via
+      # this var (no code change) once prod's distance distribution is known.
+      SIMILARITY_THRESHOLD: ${SIMILARITY_THRESHOLD:-0.75}
       OWNER_API_KEY: ${OWNER_API_KEY:?OWNER_API_KEY is required}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}

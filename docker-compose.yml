@@ -26,6 +26,11 @@ services:
       interval: 5s
       timeout: 3s
       retries: 60
+      # ~275 MB model pull can take longer than interval*retries (300s) on a
+      # slow link; failing probes during the pull still count against
+      # retries without this grace window, and depends_on: service_healthy
+      # would fail the whole `up`.
+      start_period: 120s
     restart: unless-stopped
 
   # One-shot: Ollama does not auto-pull. Exits once the model is cached in the
@@ -46,6 +51,13 @@ services:
     env_file: .env
     environment:
       DATABASE_URL: postgresql+asyncpg://researcherx:researcherx@db:5432/researcherx
+      # Pinned here (not just .env.example) so a .env predating this branch
+      # can't silently unset them: nomic-embed-text requires prefixed
+      # documents/queries, and the model name alone can't detect drift.
+      # These override .env's copies for these two keys, which is
+      # intentional — the model and its prefixes must never drift apart.
+      EMBEDDING_DOCUMENT_PREFIX: ${EMBEDDING_DOCUMENT_PREFIX:-search_document:}
+      EMBEDDING_QUERY_PREFIX: ${EMBEDDING_QUERY_PREFIX:-search_query:}
     depends_on:
       db:
         condition: service_healthy
