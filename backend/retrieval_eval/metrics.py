@@ -18,6 +18,7 @@ THRESHOLDS: tuple[float, ...] = tuple(round(0.30 + 0.05 * i, 2) for i in range(1
 
 @dataclass(frozen=True)
 class Scored:
+    paper_id: str
     paper_title: str
     chunk_text: str
     distance: float
@@ -38,7 +39,7 @@ def simulate_retrieval(chunks: list[Scored], k: int) -> list[Scored]:
     """
     by_paper: dict[str, list[Scored]] = {}
     for chunk in sorted(chunks, key=lambda c: c.distance):
-        by_paper.setdefault(chunk.paper_title, []).append(chunk)
+        by_paper.setdefault(chunk.paper_id, []).append(chunk)
     kept = [c for group in by_paper.values() for c in group[:k]]
     return sorted(kept, key=lambda c: c.distance)
 

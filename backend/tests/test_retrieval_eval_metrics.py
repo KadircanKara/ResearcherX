@@ -25,8 +25,11 @@ CASE = Case(
 )
 
 
-def _s(title: str, text: str, dist: float) -> Scored:
-    return Scored(paper_title=title, chunk_text=text, distance=dist)
+def _s(title: str, text: str, dist: float, paper_id: str | None = None) -> Scored:
+    """paper_id defaults to the title so existing per-paper-by-title tests
+    don't need updating; tests that care about id-vs-title pass it
+    explicitly."""
+    return Scored(paper_id=paper_id or title, paper_title=title, chunk_text=text, distance=dist)
 
 
 def test_simulate_retrieval_takes_top_k_per_paper_not_globally():
@@ -46,6 +49,21 @@ def test_simulate_retrieval_takes_top_k_per_paper_not_globally():
 def test_simulate_retrieval_sorts_result_by_distance():
     chunks = [_s("Beta", "b1", 0.20), _s("Alpha", "a1", 0.10)]
     assert [c.chunk_text for c in simulate_retrieval(chunks, k=1)] == ["a1", "b1"]
+
+
+def test_simulate_retrieval_groups_by_paper_id_not_title():
+    """Production keys the per-paper query on paper_id (chat_service.py
+    queries `WHERE paper_id = :paper_id`). Two distinct papers that happen
+    to share a title -- e.g. both have a missing title defaulted to "" --
+    must not collapse into one shared top-k budget."""
+    chunks = [
+        _s("", "p1a", 0.10, paper_id="p1"),
+        _s("", "p1b", 0.11, paper_id="p1"),
+        _s("", "p2a", 0.15, paper_id="p2"),
+        _s("", "p2b", 0.16, paper_id="p2"),
+    ]
+    got = simulate_retrieval(chunks, k=1)
+    assert [c.chunk_text for c in got] == ["p1a", "p2a"]
 
 
 def test_first_satisfying_rank_is_one_based():
