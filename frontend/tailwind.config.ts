@@ -71,9 +71,32 @@ const config: Config = {
         md: "calc(var(--radius) - 2px)",
         sm: "calc(var(--radius) - 4px)",
       },
+      typography: {
+        DEFAULT: {
+          css: {
+            // The plugin wraps inline code in literal backticks via
+            // ::before/::after. We render maths symbols this way (`tau`, `psi`),
+            // so the quotes read as stray punctuation. Drop them and give the
+            // span a faint tint instead — legible in both themes because it
+            // tints the surface rather than hardcoding a colour.
+            "code::before": { content: "none" },
+            "code::after": { content: "none" },
+            code: {
+              backgroundColor: "rgb(128 128 128 / 0.18)",
+              padding: "0.1em 0.35em",
+              borderRadius: "0.25rem",
+              fontWeight: "500",
+            },
+          },
+        },
+      },
     },
   },
-  plugins: [require("tailwindcss-animate")],
+  // typography supplies the `prose` classes. Tailwind's Preflight resets
+  // list-style, heading sizes and table borders, so react-markdown output
+  // renders as flat text without it — chat-stream.tsx and run-stream.tsx both
+  // depend on this.
+  plugins: [require("tailwindcss-animate"), require("@tailwindcss/typography")],
 };
 
 export default config;

@@ -7,6 +7,17 @@ import type { ChatCitation, ChatEvent, ChatMessage } from "@/lib/types";
 import { chatMessagesUrl, getConversation } from "@/lib/chat";
 import { getDevUserId } from "@/lib/api";
 
+// Typography for markdown inside a chat bubble. `prose-invert` under .dark
+// (tailwind darkMode: "class"). max-w-none because the bubble already caps
+// width. The margin overrides matter: default prose spacing is tuned for
+// article bodies and leaves a short answer swimming in padding inside a bubble.
+const PROSE =
+  "prose prose-sm dark:prose-invert max-w-none " +
+  "prose-p:my-1.5 prose-ul:my-1.5 prose-ol:my-1.5 prose-li:my-0.5 " +
+  "prose-headings:mt-3 prose-headings:mb-1.5 prose-pre:my-2 " +
+  "prose-table:my-2 prose-th:px-2 prose-th:py-1 prose-td:px-2 prose-td:py-1 " +
+  "first:prose-p:mt-0 last:prose-p:mb-0";
+
 interface Props {
   projectId: string;
   conversationId: string;
@@ -149,9 +160,11 @@ export function ChatStream({
             }`}
           >
             {msg.role === "assistant" ? (
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                {msg.content}
-              </ReactMarkdown>
+              <div className={PROSE}>
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                  {msg.content}
+                </ReactMarkdown>
+              </div>
             ) : (
               <p>{msg.content}</p>
             )}
@@ -185,7 +198,9 @@ export function ChatStream({
       {streamingText && (
         <div className="flex justify-start">
           <div className="max-w-[80%] rounded-2xl bg-muted px-4 py-3 text-sm text-foreground">
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{streamingText}</ReactMarkdown>
+            <div className={PROSE}>
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>{streamingText}</ReactMarkdown>
+            </div>
           </div>
         </div>
       )}

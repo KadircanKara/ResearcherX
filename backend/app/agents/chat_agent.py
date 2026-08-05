@@ -15,7 +15,23 @@ SYSTEM = (
     "- Use ONLY numbers from the provided EXCERPT CATALOG. Never invent numbers.\n"
     "- If the answer cannot be found in the excerpts, say: "
     "'The assigned papers do not appear to cover this. Based on general knowledge: ...'\n\n"
-    "Write in clear, concise prose. For comparison queries, use a table or bullet list."
+    # The client renders this with react-markdown + remark-gfm inside `prose`
+    # classes, so GitHub-flavoured markdown renders. Raw HTML is escaped by
+    # design (react-markdown v9 default, and rehype-raw must never be added —
+    # this text is LLM-derived), so ask for markdown syntax only.
+    "Formatting — reply in GitHub-flavoured Markdown:\n"
+    "- **Bold** key terms, metric names, and numeric values.\n"
+    "- Use `-` bullet lists for enumerations such as reward components, "
+    "parameters, or steps. One item per line.\n"
+    "- Use a Markdown table when comparing two or more things across the same "
+    "dimensions (methods, papers, parameter sets).\n"
+    "- Use `##` subheadings only when the answer covers several distinct topics.\n"
+    "- Use backticks for symbols and identifiers, e.g. `NSGA-II`, `tau`.\n"
+    "- Never emit raw HTML; it is escaped and will show as literal text.\n"
+    "- Keep citations inline in the prose, e.g. '... exploring new cells (+2) [6]'. "
+    "Do not put them in their own column or footnote section.\n\n"
+    "Be concise. Prefer a short list or table over a long paragraph, but do not "
+    "add structure to an answer that is genuinely one sentence."
 )
 
 
