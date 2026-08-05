@@ -10,16 +10,30 @@ The `-m` form is required: `pyproject.toml` packages only `app*`, so `retrieval_
 isn't installed and running it by file path fails with
 `ModuleNotFoundError: No module named 'app'`.
 
+Flags:
+
+- `--k` — chunks per paper (default: 5). Uniform across every paper; see
+  "What it measures vs. what production does" below for how that differs
+  from production's per-paper allocation.
+- `--set` — path to an alternate golden-set JSON file (default: `golden_set.json`
+  next to this file, same schema as "Adding a case" below).
+- `--json` — also write the full per-case results, threshold-sweep grid, and
+  closed-form separation to this path. See "Reading the output" for the
+  `--json` shape and how it differs from the console report.
+
 ## What it measures vs. what production does
 
 The runner's SQL mirrors production's **distance computation** exactly (same
 `<=>` cosine operator, same `WHERE model = :model` filter) but not its
 **retrieval path**. Production (`chat_service.py`) runs a planning step
 whenever a project has 3+ papers — true of the current dev corpus — which
-embeds a *reformulated* query (not the user's raw question) and allocates a
-different `k` per paper. This harness always embeds the golden-set
-`question` verbatim and applies one uniform `--k` to every paper. That's a
-deliberate simplification for reproducibility, not an oversight — but it
+embeds a *reformulated* query (not the user's raw question, `chat_service.py:104`)
+and allocates a different `k` per paper (1-6 per the planner's schema,
+commonly 2 or 5 in practice; a paper the planner ran but didn't explicitly
+allocate falls back to `k=2`, `chat_service.py:239` — not this harness's
+default of 5). This harness always embeds the golden-set `question` verbatim
+and applies one uniform `--k` to every paper. That's a deliberate
+simplification for reproducibility, not an oversight — but it
 means a threshold calibrated here is calibrated on raw-question distances,
 and production would apply it to reformulated-query distances. Re-validate
 after any change to the planner's reformulation behavior, not just after an
@@ -66,11 +80,37 @@ runner refuses to compute one without usable negatives.
 
 ## Reading the output
 
+- **the per-case table** (`case  kind  rank  best_dist`):
+  - **rank** is the chunk's 1-based position in the *merged, distance-sorted*
+    list `simulate_retrieval` returns — up to `papers × k` chunks, not just
+    `k` — so a legitimate rank can exceed `--k` (e.g. rank 12 at `--k 5` with
+    4 papers). It is **not** a rank within one paper's own budget.
+  - **`-`** means three different things depending on the column and row: for
+    a positive/metadata/figure case, a `-` rank means no satisfying chunk
+    survived this case's own per-paper top-`k` (it may still exist elsewhere
+    in the corpus — see `best_dist` on that same row); for an `off_topic`
+    case, `rank` is always `-` because negatives have no "satisfying chunk"
+    to rank; and `best_dist` is `-` only when a case retrieved zero chunks at
+    all (corpus empty for that model). Don't read a `-` as "zero" or as
+    "identical to the row above" — check which column and which kind.
+  - **best_dist** is the closest distance among *all* chunks in the whole
+    corpus that satisfy the case — **not top-k-aware**. It ignores whether
+    nearer same-paper chunks crowd the satisfying chunk out of the per-paper
+    top-`k` that production (and `rank`) actually use, so it can report a
+    small, encouraging number for a case whose rank is `-`. Do not read a
+    small `best_dist` next to a `-` rank as "so lower the threshold" — that's
+    precisely the inference the closed-form section below refuses to make
+    (see "NO SEPARATION POSSIBLE AT THIS k"). The `--json` dump's per-case
+    `topk_distance` field is the top-k-aware equivalent, and `blocked` says
+    outright whether that number exists.
 - **recall@k** / **MRR** — the retrieval *ceiling*: no distance cutoff is
   applied, only the per-paper top-k. The LLM can ignore an irrelevant chunk
   but cannot use one that never arrived, so this is the metric that matters
   most — but pair it with the closed-form section below for what a real
-  `similarity_threshold` cutoff actually leaves production with.
+  `similarity_threshold` cutoff actually leaves production with, and see the
+  console's own printed caveats (no cutoff; `--k` is uniform here, production
+  allocates per paper; the query is the raw question, not the planner's
+  reformulation).
 - **noise floor** — the closest distance any off-topic question achieved. A
   threshold is only meaningful below this and above the content distances.
 - **threshold sweep grid** — a fixed 0.05-step table, kept as a coarse visual
@@ -78,14 +118,18 @@ runner refuses to compute one without usable negatives.
   separating interval can be narrower than the grid step and fall entirely
   between two sampled points, in which case the grid reports "no row
   achieves separation" even though an exact one exists (this happened on
-  this harness's own first live corpus — see the task report). Read
+  this harness's own first live corpus — see "Findings" below). Read
   "no row in the swept grid achieves separation" as exactly that claim about
   the grid, not as "no absolute cutoff can work for this model" — for that,
-  read the closed-form section.
+  read the closed-form section. In `--json`, this is the `sweep` key, whose
+  `note` field repeats this in-band; `sweep.rows` is the raw grid.
 - **closed-form separating interval** — the exact, authoritative computation
   the grid was only approximating: the precise `(lo, hi]` interval within
   which every threshold achieves full content recall and zero off-topic
-  acceptance, computed directly rather than sampled. Three outcomes:
+  acceptance, computed directly rather than sampled. In `--json`, this is the
+  `separation` key (`lo`, `hi`, `lo_case_id`, `hi_case_id`,
+  `blocked_case_ids`, `k`); it is `null` when there was nothing to diagnose
+  (no usable negatives, or no scored positives). Three outcomes:
   - **NO SEPARATION POSSIBLE AT THIS k** — a positive case's satisfying
     chunk doesn't survive its own paper's top-k at all, for any threshold.
     The fix is `--k` or retrieval ranking, not the threshold.
@@ -94,12 +138,15 @@ runner refuses to compute one without usable negatives.
     off-topic distance). The next lever is reranking or hybrid retrieval,
     not a better constant.
   - **SEPARATION FOUND** — an interval exists. It prints as **PROVISIONAL,
-    DO NOT SHIP** unless there are at least 10 negatives *and* the margin
-    exceeds the spread of the negatives that define it. A narrow interval on
-    a small golden set is usually set by one case on each side (the report
-    shows a leave-one-out check: what the interval becomes if the deciding
-    positive case is dropped) and can evaporate the moment the set grows —
-    the printed order-statistics odds quantify exactly how fragile it is.
+    DO NOT SHIP** unless there are at least 20 positives *and* at least 10
+    negatives *and* the margin exceeds the spread of the negatives that
+    define it. A narrow interval on a small golden set is usually set by one
+    case on each side (the report shows a leave-one-out check: what the
+    interval becomes if the deciding positive case is dropped) and can
+    evaporate the moment the set grows — the printed order-statistics odds
+    quantify exactly how fragile it is. If `--k` isn't production's own
+    operating range, the report also names that divergence explicitly (see
+    "What it measures vs. what production does").
 - **ROBUST FINDING** — the current `similarity_threshold`'s off-topic
   acceptance rate on this set, printed unconditionally. Unlike the
   interval above, this survives resampling: it doesn't depend on finding an
