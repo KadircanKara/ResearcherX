@@ -179,3 +179,19 @@ export async function ingestPaperFromUrl(
   if (!r.ok) throw new Error(`ingest-from-url -> ${r.status}`);
   return r.json();
 }
+
+export interface PaperChunk {
+  chunk_index: number;
+  text: string;
+  paper_title: string;
+}
+
+export async function getPaperChunk(
+  projectId: string,
+  paperId: string,
+  chunkIndex: number
+): Promise<PaperChunk> {
+  return apiGet<PaperChunk>(
+    `/projects/${projectId}/papers/${paperId}/chunks/${chunkIndex}`
+  );
+}
