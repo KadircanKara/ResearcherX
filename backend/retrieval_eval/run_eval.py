@@ -55,6 +55,17 @@ _DEFAULT_SET = Path(__file__).parent / "golden_set.json"
 _MIN_POSITIVES_FOR_CONFIDENCE = 20
 _MIN_NEGATIVES_FOR_CONFIDENCE = 10
 
+# Two production per-paper k values from chat_service.py, duplicated (not
+# imported — they're private module state there) so this harness can name a
+# divergence between its own uniform --k and what production actually uses
+# (see the corpus-note caveats and the closed-form "NOTE" in main()).
+# chat_service._SMALL_LIBRARY_K: every paper gets this when the planner is
+# skipped (<3 papers in the library).
+_SMALL_LIBRARY_K = 5
+# chat_service.py:239 `per_paper_map.get(paper.paper_id, 2)`: fallback k for
+# a paper the planner ran but didn't allocate.
+_UNALLOCATED_PAPER_K = 2
+
 _MODEL_COUNTS_SQL = text("SELECT model, count(*) AS n FROM paper_chunk_embeddings GROUP BY model")
 
 # Mirrors chat_service._retrieve_paper_chunks's DISTANCE COMPUTATION only —
@@ -288,7 +299,16 @@ async def main() -> None:  # noqa: PLR0912, PLR0915 — a report script, not a l
             )
 
     print(f"\ncorpus: {corpus_note}   model: {settings.embedding_model}   k={args.k}")
-    print("(small, thematically clustered corpus — numbers are indicative, not conclusive)\n")
+    print("(small, thematically clustered corpus — numbers are indicative, not conclusive)")
+    print(
+        "(recall/MRR below apply no distance cutoff — they are the retrieval ceiling, not "
+        f"production recall. k is uniform here; production allocates k per paper, falling "
+        f"back to {_UNALLOCATED_PAPER_K} for an unallocated paper, not {_SMALL_LIBRARY_K}.)"
+    )
+    print(
+        "(the question embedded below is the raw question, not the planner's "
+        "reformulated_query — chat_service.py:104.)\n"
+    )
 
     if errors:
         print("ERRORS (golden-set problems, not retrieval failures):")
@@ -424,6 +444,14 @@ async def main() -> None:  # noqa: PLR0912, PLR0915 — a report script, not a l
                 f"    any T in ({lo:.4f}, {hi:.4f}] separates; midpoint {point_display}, "
                 f"margin {margin:.4f}"
             )
+            if args.k != _SMALL_LIBRARY_K:
+                print(
+                    f"    NOTE: this recommendation is at --k {args.k}. Production's "
+                    f"per-paper k is at most {_SMALL_LIBRARY_K} (small-library fallback; "
+                    "the planner's own 'targeted' allocation tops out there too) and "
+                    f"commonly {_UNALLOCATED_PAPER_K} — this may describe an operating "
+                    "point production never reaches."
+                )
 
             if provisional:
                 print()
