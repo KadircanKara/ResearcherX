@@ -7,15 +7,17 @@ from openai import RateLimitError
 from sqlalchemy import desc, select as sa_select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.identity import get_current_user
 from app.core.logging import log
-from app.db.models import Paper, PaperSource, ProjectMember, ResearchRun, User
+from app.db.models import Paper, PaperChunkEmbedding, PaperSource, ProjectMember, ResearchRun, User
 from app.db.session import get_session
 from app.schemas.project import (
     Counts,
     MemberCreate,
     MemberOut,
     MemberRoleUpdate,
+    PaperChunkOut,
     PaperCreate,
     PaperIngestUrlRequest,
     PaperOut,
@@ -252,6 +254,43 @@ async def list_papers(
         sa_select(Paper).where(Paper.project_id == project_id).order_by(Paper.created_at)
     )
     return [PaperOut.model_validate(p) for p in result.scalars().all()]
+
+
+@router.get(
+    "/projects/{project_id}/papers/{paper_id}/chunks/{chunk_index}",
+    response_model=PaperChunkOut,
+)
+async def get_paper_chunk(
+    project_id: str,
+    paper_id: str,
+    chunk_index: int,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
+) -> PaperChunkOut:
+    """Full text of one chunk, for the citation hover card.
+
+    Filters on the configured embedding model: chunk indices are only
+    meaningful within one model's chunking, so a stale row from a previous
+    model must not be served under the same index.
+    """
+    await project_service.require_member(db, project_id, user.id, "viewer")
+    paper = await db.get(Paper, paper_id)
+    if paper is None or paper.project_id != project_id:
+        raise HTTPException(status_code=404, detail="Paper not found")
+
+    chunk = (
+        await db.execute(
+            sa_select(PaperChunkEmbedding).where(
+                PaperChunkEmbedding.paper_id == paper_id,
+                PaperChunkEmbedding.chunk_index == chunk_index,
+                PaperChunkEmbedding.model == settings.embedding_model,
+            )
+        )
+    ).scalar_one_or_none()
+    if chunk is None:
+        raise HTTPException(status_code=404, detail="Chunk not found")
+
+    return PaperChunkOut(chunk_index=chunk.chunk_index, text=chunk.text, paper_title=paper.title)
 
 
 @router.post(

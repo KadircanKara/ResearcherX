@@ -102,3 +102,9 @@ class SuggestTitleFromUrlResponse(BaseModel):
     title: str | None
     abstract: str | None
     requires_manual: bool
+
+
+class PaperChunkOut(BaseModel):
+    chunk_index: int
+    text: str
+    paper_title: str
