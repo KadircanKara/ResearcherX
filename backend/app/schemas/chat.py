@@ -15,7 +15,7 @@ class MessageOut(BaseModel):
     id: str
     role: str
     content: str
-    citations: list[dict]    # raw JSON — CitationOut shape, validated at write time
+    citations: list[dict]  # raw JSON — CitationOut shape, validated at write time
     created_at: datetime
     model_config = {"from_attributes": True}
 

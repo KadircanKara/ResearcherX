@@ -15,6 +15,35 @@ services:
       timeout: 3s
       retries: 10
 
+  ollama:
+    image: ollama/ollama:latest
+    volumes:
+      - ollama_models:/root/.ollama
+    # Healthy only once the MODEL is present, not merely when the server is up —
+    # backend must not start against an Ollama that cannot embed yet.
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list | grep -q nomic-embed-text"]
+      interval: 5s
+      timeout: 3s
+      retries: 60
+      # ~275 MB model pull can take longer than interval*retries (300s) on a
+      # slow link; failing probes during the pull still count against
+      # retries without this grace window, and depends_on: service_healthy
+      # would fail the whole `up`.
+      start_period: 120s
+    restart: unless-stopped
+
+  # One-shot: Ollama does not auto-pull. Exits once the model is cached in the
+  # shared volume; on-failure restart covers racing the server's startup.
+  ollama-pull:
+    image: ollama/ollama:latest
+    depends_on:
+      - ollama
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+    entrypoint: ["ollama", "pull", "nomic-embed-text"]
+    restart: on-failure
+
   backend:
     build:
       context: ./backend
@@ -22,8 +51,17 @@ services:
     env_file: .env
     environment:
       DATABASE_URL: postgresql+asyncpg://researcherx:researcherx@db:5432/researcherx
+      # Pinned here (not just .env.example) so a .env predating this branch
+      # can't silently unset them: nomic-embed-text requires prefixed
+      # documents/queries, and the model name alone can't detect drift.
+      # These override .env's copies for these two keys, which is
+      # intentional — the model and its prefixes must never drift apart.
+      EMBEDDING_DOCUMENT_PREFIX: ${EMBEDDING_DOCUMENT_PREFIX:-search_document:}
+      EMBEDDING_QUERY_PREFIX: ${EMBEDDING_QUERY_PREFIX:-search_query:}
     depends_on:
       db:
+        condition: service_healthy
+      ollama:
         condition: service_healthy
     ports:
       - "8000:8000"
@@ -49,3 +87,4 @@ services:
 
 volumes:
   db_data:
+  ollama_models:

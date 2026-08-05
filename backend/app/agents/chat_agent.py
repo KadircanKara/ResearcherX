@@ -1,4 +1,5 @@
 """ChatAgent — streams a grounded response from paper chunks + conversation history."""
+
 from collections.abc import AsyncIterator
 
 from pydantic import BaseModel
@@ -14,12 +15,28 @@ SYSTEM = (
     "- Use ONLY numbers from the provided EXCERPT CATALOG. Never invent numbers.\n"
     "- If the answer cannot be found in the excerpts, say: "
     "'The assigned papers do not appear to cover this. Based on general knowledge: ...'\n\n"
-    "Write in clear, concise prose. For comparison queries, use a table or bullet list."
+    # The client renders this with react-markdown + remark-gfm inside `prose`
+    # classes, so GitHub-flavoured markdown renders. Raw HTML is escaped by
+    # design (react-markdown v9 default, and rehype-raw must never be added —
+    # this text is LLM-derived), so ask for markdown syntax only.
+    "Formatting — reply in GitHub-flavoured Markdown:\n"
+    "- **Bold** key terms, metric names, and numeric values.\n"
+    "- Use `-` bullet lists for enumerations such as reward components, "
+    "parameters, or steps. One item per line.\n"
+    "- Use a Markdown table when comparing two or more things across the same "
+    "dimensions (methods, papers, parameter sets).\n"
+    "- Use `##` subheadings only when the answer covers several distinct topics.\n"
+    "- Use backticks for symbols and identifiers, e.g. `NSGA-II`, `tau`.\n"
+    "- Never emit raw HTML; it is escaped and will show as literal text.\n"
+    "- Keep citations inline in the prose, e.g. '... exploring new cells (+2) [6]'. "
+    "Do not put them in their own column or footnote section.\n\n"
+    "Be concise. Prefer a short list or table over a long paragraph, but do not "
+    "add structure to an answer that is genuinely one sentence."
 )
 
 
 class ChunkContext(BaseModel):
-    n: int             # citation number shown to user, e.g. [1]
+    n: int  # citation number shown to user, e.g. [1]
     paper_id: str
     title: str
     chunk_index: int
@@ -28,7 +45,7 @@ class ChunkContext(BaseModel):
 
 class ChatAgentInput(BaseModel):
     query: str
-    prior_messages: list[dict]    # [{"role": "user"|"assistant", "content": "..."}]
+    prior_messages: list[dict]  # [{"role": "user"|"assistant", "content": "..."}]
     paper_chunks: list[ChunkContext]
 
 
@@ -43,16 +60,20 @@ class ChatAgent:
             )
             context_block = f"EXCERPT CATALOG:\n{catalog}"
         else:
-            context_block = "EXCERPT CATALOG: (no excerpts retrieved — answer from general knowledge)"
+            context_block = (
+                "EXCERPT CATALOG: (no excerpts retrieved — answer from general knowledge)"
+            )
 
         # Build conversation history for multi-turn context
         messages = [{"role": "system", "content": SYSTEM}]
         for m in inp.prior_messages:
             messages.append({"role": m["role"], "content": m["content"]})
-        messages.append({
-            "role": "user",
-            "content": f"{context_block}\n\nQUESTION: {inp.query}",
-        })
+        messages.append(
+            {
+                "role": "user",
+                "content": f"{context_block}\n\nQUESTION: {inp.query}",
+            }
+        )
 
         stream = await create_chat_completion(
             max_tokens=2000,

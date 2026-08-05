@@ -1,5 +1,8 @@
 """Tests for research runs ↔ project binding (L1)."""
 
+from unittest.mock import AsyncMock, patch
+
+import pytest
 import pytest_asyncio
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -9,6 +12,31 @@ from app.db.seed import seed_users
 
 
 # ── shared fixtures ──────────────────────────────────────────────────────────
+
+
+@pytest.fixture(autouse=True)
+def no_background_pipeline():
+    """Stop POST /v1/research from spawning a real research pipeline.
+
+    These tests assert on the HTTP contract only — 201, and that the run is
+    bound to the right project. They never inspect pipeline output. But the
+    endpoint spawns `service.run_async(run.id)` as a background task, which
+    then grinds through planner/searcher calls against the deliberately
+    unroutable LLM_BASE_URL, retrying with backoff while holding a DB
+    connection.
+
+    That connection kept the sqlite file locked past the end of the test, so
+    the next test's `drop_all` waited out the full `?timeout=30` busy timeout
+    and errored with "database is locked" — 31s in teardown plus 31s in the
+    following setup, and one erroring test per run. It looked like a random
+    flake because which test got hit depended on timing; it failed on CI on
+    both a run and a re-run, and was reproducible here.
+
+    Patching the spawn removes the contention at its source and takes the file
+    from ~63s to under a second.
+    """
+    with patch("app.api.v1.research.service.run_async", new=AsyncMock(return_value=None)):
+        yield
 
 
 @pytest_asyncio.fixture

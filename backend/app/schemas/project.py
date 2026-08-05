@@ -6,6 +6,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 
+from app.db.models import PaperSource
 from app.schemas.user import UserOut
 
 
@@ -64,7 +65,15 @@ class ProjectDetailOut(BaseModel):
 class PaperCreate(BaseModel):
     title: str = Field(min_length=1, max_length=512)
     abstract: str | None = None
+    body: str | None = None
     pdf_url: str | None = None
+    source: PaperSource = PaperSource.MANUAL
+
+
+class PaperUpdate(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=512)
+    abstract: str | None = None
+    body: str | None = None
 
 
 class PaperOut(BaseModel):
@@ -72,6 +81,24 @@ class PaperOut(BaseModel):
     project_id: str
     title: str
     abstract: str | None
+    body: str | None
     pdf_url: str | None
+    source: str
     created_at: datetime
     model_config = {"from_attributes": True}
+
+
+class PaperIngestUrlRequest(BaseModel):
+    url: str = Field(min_length=1)
+
+
+class SuggestMetaResponse(BaseModel):
+    title: str | None
+    abstract: str | None
+    body: str | None
+
+
+class SuggestTitleFromUrlResponse(BaseModel):
+    title: str | None
+    abstract: str | None
+    requires_manual: bool

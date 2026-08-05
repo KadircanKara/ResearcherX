@@ -1,11 +1,15 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
-import { MessageSquarePlus, Plus } from "lucide-react";
+import { MessageSquarePlus, Plus, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { createConversation, listConversations } from "@/lib/chat";
-import type { ChatConversation } from "@/lib/types";
+import { createConversation, deleteConversation, listConversations } from "@/lib/chat";
+import { getProject } from "@/lib/projects";
+import type { ChatConversation, Role } from "@/lib/types";
+
+// Matches the backend: delete_conversation requires require_member(..., "editor").
+const CAN_DELETE: Role[] = ["owner", "editor"];
 
 function fmtDate(iso: string): string {
   return new Date(iso).toLocaleDateString("en-GB", {
@@ -18,18 +22,45 @@ export default function ChatPage() {
   const router = useRouter();
 
   const [conversations, setConversations] = useState<ChatConversation[]>([]);
+  const [myRole, setMyRole] = useState<Role | null>(null);
   const [loading, setLoading] = useState(true);
+  const [deleting, setDeleting] = useState<string | null>(null);
   const [showForm, setShowForm] = useState(false);
   const [content, setContent] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
 
-  useEffect(() => {
-    listConversations(projectId)
-      .then(setConversations)
+  // `silent` skips the loading skeleton — used by handleDelete's error path to
+  // resync without flashing the whole list away under the user.
+  const load = useCallback((opts: { silent?: boolean } = {}) => {
+    if (!opts.silent) setLoading(true);
+    Promise.all([listConversations(projectId), getProject(projectId)])
+      .then(([convs, detail]) => {
+        setConversations(convs);
+        setMyRole(detail.my_role);
+      })
       .catch(() => {})
       .finally(() => setLoading(false));
   }, [projectId]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  // Deletes immediately, no confirmation — deliberate for now, matching the
+  // papers list. Unlike a paper, a deleted conversation cannot be restored from
+  // any source, so this should become a confirm step before production.
+  async function handleDelete(conversationId: string) {
+    setDeleting(conversationId);
+    try {
+      await deleteConversation(projectId, conversationId);
+      setConversations((prev) => prev.filter((c) => c.id !== conversationId));
+    } catch {
+      load({ silent: true });
+    } finally {
+      setDeleting(null);
+    }
+  }
 
   async function handleStart() {
     const q = content.trim();
@@ -113,21 +144,36 @@ export default function ChatPage() {
 
       <div className="space-y-2">
         {conversations.map((conv) => (
-          <button
+          // A div, not a button: the delete control is itself a button and
+          // nesting one inside another is invalid HTML.
+          <div
             key={conv.id}
-            type="button"
-            onClick={() => router.push(`/research/${projectId}/chat/${conv.id}`)}
-            className="group flex w-full items-start rounded-xl border border-border bg-card px-4 py-3 text-left transition-colors hover:bg-muted"
+            className="group flex w-full items-start gap-2 rounded-xl border border-border bg-card px-4 py-3 transition-colors hover:bg-muted"
           >
-            <div className="min-w-0 flex-1">
+            <button
+              type="button"
+              onClick={() => router.push(`/research/${projectId}/chat/${conv.id}`)}
+              className="min-w-0 flex-1 text-left"
+            >
               <p className="line-clamp-2 text-sm font-medium text-foreground">
                 {conv.title}
               </p>
               <p className="mt-0.5 text-xs text-muted-foreground">
                 {fmtDate(conv.updated_at)}
               </p>
-            </div>
-          </button>
+            </button>
+            {myRole && CAN_DELETE.includes(myRole) && (
+              <button
+                type="button"
+                onClick={() => handleDelete(conv.id)}
+                disabled={deleting === conv.id}
+                className="mt-0.5 shrink-0 rounded p-1 text-muted-foreground/50 transition-colors hover:bg-destructive/10 hover:text-destructive disabled:opacity-40"
+                aria-label={`Delete conversation: ${conv.title}`}
+              >
+                <Trash2 className="size-3.5" />
+              </button>
+            )}
+          </div>
         ))}
       </div>
     </div>

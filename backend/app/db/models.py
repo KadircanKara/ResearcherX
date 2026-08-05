@@ -88,6 +88,12 @@ class Role(StrEnum):
     VIEWER = "viewer"
 
 
+class PaperSource(StrEnum):
+    UPLOAD = "upload"
+    LINK = "link"
+    MANUAL = "manual"
+
+
 class Project(Base):
     __tablename__ = "projects"
 
@@ -129,7 +135,16 @@ class Paper(Base):
     )
     title: Mapped[str] = mapped_column(String(512))
     abstract: Mapped[str | None] = mapped_column(Text, default=None)
+    body: Mapped[str | None] = mapped_column(Text, default=None)
+    # Markdown extracted from an uploaded/linked PDF. Deliberately separate from
+    # `body`, which carries manual-entry semantics that update_paper enforces
+    # with a 422. Storing it makes a future embedding-model change a pure
+    # re-embed instead of a re-download.
+    extracted_text: Mapped[str | None] = mapped_column(Text, default=None)
     pdf_url: Mapped[str | None] = mapped_column(Text, default=None)
+    source: Mapped[str] = mapped_column(
+        String(16), default=PaperSource.MANUAL, server_default="manual"
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
     chunks: Mapped[list["PaperChunkEmbedding"]] = relationship(
@@ -155,7 +170,8 @@ class ChatConversation(Base):
     )
 
     messages: Mapped[list["ChatMessage"]] = relationship(
-        back_populates="conversation", cascade="all, delete-orphan",
+        back_populates="conversation",
+        cascade="all, delete-orphan",
         order_by="ChatMessage.created_at",
     )
 
@@ -165,11 +181,12 @@ class ChatMessage(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     conversation_id: Mapped[str] = mapped_column(
-        ForeignKey("chat_conversations.id", ondelete="CASCADE",
-                   name="fk_chat_messages_conversation_id"),
+        ForeignKey(
+            "chat_conversations.id", ondelete="CASCADE", name="fk_chat_messages_conversation_id"
+        ),
         index=True,
     )
-    role: Mapped[str] = mapped_column(String(16))          # "user" | "assistant"
+    role: Mapped[str] = mapped_column(String(16))  # "user" | "assistant"
     content: Mapped[str] = mapped_column(Text)
     citations: Mapped[list] = mapped_column(JSON, default=list)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
@@ -194,6 +211,10 @@ class PaperChunkEmbedding(Base):
     # Declared as Text so SQLite tests (create_all) don't fail on unknown type.
     # The Alembic migration converts this to vector(768) in Postgres.
     embedding: Mapped[str] = mapped_column(Text)
+    # Which embedding model produced this vector. Filtering retrieval on this
+    # prevents a provider switch from silently mixing two vector spaces in one
+    # pgvector index — a failure with no error and no way to detect it after.
+    model: Mapped[str] = mapped_column(String(64), default="", server_default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
     paper: Mapped[Paper] = relationship(back_populates="chunks")
@@ -204,12 +225,17 @@ class ConversationMessageEmbedding(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     message_id: Mapped[str] = mapped_column(
-        ForeignKey("chat_messages.id", ondelete="CASCADE",
-                   name="fk_conv_msg_embeddings_message_id"),
-        unique=True,     # one embedding per message
+        ForeignKey(
+            "chat_messages.id", ondelete="CASCADE", name="fk_conv_msg_embeddings_message_id"
+        ),
+        unique=True,  # one embedding per message
     )
     # Same TEXT/vector pattern as PaperChunkEmbedding.
     embedding: Mapped[str] = mapped_column(Text)
+    # Which embedding model produced this vector. Filtering retrieval on this
+    # prevents a provider switch from silently mixing two vector spaces in one
+    # pgvector index — a failure with no error and no way to detect it after.
+    model: Mapped[str] = mapped_column(String(64), default="", server_default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
     message: Mapped[ChatMessage] = relationship(back_populates="embedding")

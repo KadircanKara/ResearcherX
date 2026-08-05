@@ -37,12 +37,34 @@ class Settings(BaseSettings):
     # list = single-provider behavior.
     llm_fallbacks: list[LLMFallback] = Field(default_factory=list)
 
-    # Embedding provider — Gemini text-embedding-004 via Google's OpenAI-compat
-    # endpoint. EMBEDDING_API_KEY defaults to LLM_API_KEY if not set separately.
-    embedding_base_url: str = "https://generativelanguage.googleapis.com/v1beta/openai/"
-    embedding_api_key: str = ""      # set in .env; falls back to llm_api_key if empty
-    embedding_model: str = "gemini-embedding-001"
-    embedding_dimensions: int = 768   # must match vector(N) in schema
+    # Embedding provider — Ollama (nomic-embed-text) in dev; prod overrides all
+    # four via SSM to OpenAI text-embedding-3-small. EMBEDDING_API_KEY falls
+    # back to LLM_API_KEY only if unset, which would send a Groq key upstream —
+    # always set it explicitly.
+    embedding_base_url: str = "http://ollama:11434/v1"
+    embedding_api_key: str = ""
+    embedding_model: str = "nomic-embed-text"
+    embedding_dimensions: int = 768  # must match vector(N) in schema
+
+    # Asymmetric-retrieval prefixes. nomic-embed-text distinguishes documents
+    # from queries by prefix, not by an API parameter; OpenAI needs neither, so
+    # the defaults are empty and prod requires no entry for these.
+    # No trailing space — the service inserts the separator.
+    embedding_document_prefix: str = ""
+    embedding_query_prefix: str = ""
+
+    # Cosine-distance cutoff for retrieval (chunks with distance ≥ this are
+    # excluded). MODEL-SPECIFIC — the distance distribution depends on the
+    # embedding model, so this must be re-measured whenever the model
+    # changes. 0.75 was chosen by measuring live against nomic-embed-text
+    # (dev): a real question ("Who wrote this?") sat at distance 0.5457 and
+    # was being wrongly dropped by the old hardcoded 0.5 cutoff, while a bare
+    # greeting ("thanks") passed at 0.4352 — the old threshold favored
+    # small-talk over substantive questions. NOT measured for prod's OpenAI
+    # text-embedding-3-small; whoever first runs prod should re-measure
+    # against that model's distance distribution and adjust via the
+    # SIMILARITY_THRESHOLD env var rather than editing this default.
+    similarity_threshold: float = 0.75
 
     # Abuse limits (decision D3): anonymous per-IP quotas + a global daily
     # cap; the owner API key (X-API-Key header) bypasses both. The cap is
@@ -96,6 +118,12 @@ class Settings(BaseSettings):
             problems.append("OWNER_API_KEY is empty (required for quota bypass)")
         if not self.resolved_embedding_api_key:
             problems.append("EMBEDDING_API_KEY (or LLM_API_KEY fallback) is empty")
+        embedding_host = self.embedding_base_url.lower()
+        if "ollama" in embedding_host or "localhost" in embedding_host:
+            problems.append(
+                "EMBEDDING_BASE_URL points at a dev host "
+                "(set EMBEDDING_BASE_URL to a hosted embedding endpoint)"
+            )
         if problems:
             raise RuntimeError(f"refusing to start with ENVIRONMENT=prod: {'; '.join(problems)}")
 

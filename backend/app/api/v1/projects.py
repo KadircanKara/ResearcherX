@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Query, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from openai import RateLimitError
 from sqlalchemy import desc, select as sa_select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.identity import get_current_user
-from app.db.models import Paper, ProjectMember, ResearchRun, User
+from app.core.logging import log
+from app.db.models import Paper, PaperSource, ProjectMember, ResearchRun, User
 from app.db.session import get_session
 from app.schemas.project import (
     Counts,
@@ -15,11 +17,15 @@ from app.schemas.project import (
     MemberOut,
     MemberRoleUpdate,
     PaperCreate,
+    PaperIngestUrlRequest,
     PaperOut,
+    PaperUpdate,
     ProjectCreate,
     ProjectDetailOut,
     ProjectOut,
     ProjectUpdate,
+    SuggestMetaResponse,
+    SuggestTitleFromUrlResponse,
 )
 from app.schemas.research import RunOut
 from app.schemas.user import UserOut
@@ -155,12 +161,84 @@ async def create_paper(
         project_id=project_id,
         title=data.title,
         abstract=data.abstract,
+        body=data.body,
         pdf_url=data.pdf_url,
+        source=data.source,
     )
     db.add(paper)
-    await db.commit()
+    await db.flush()  # assigns paper.id without committing
+
+    if paper.source == PaperSource.MANUAL and (paper.abstract or paper.body):
+        from app.services.paper_ingest_service import index_manual
+
+        # index_manual commits — the flushed paper rides along in the same
+        # transaction, so an embedding failure rolls back the paper too rather
+        # than leaving a durable row whose chunks never got written.
+        await index_manual(db, paper.id, paper.abstract, paper.body)
+    else:
+        await db.commit()
+
     await db.refresh(paper)
     return PaperOut.model_validate(paper)
+
+
+@router.patch("/projects/{project_id}/papers/{paper_id}", response_model=PaperOut)
+async def update_paper(
+    project_id: str,
+    paper_id: str,
+    data: PaperUpdate,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
+) -> PaperOut:
+    """Update a paper. Extracted content is immutable for upload/link papers."""
+    await project_service.require_member(db, project_id, user.id, "editor")
+    paper = await db.get(Paper, paper_id)
+    if paper is None or paper.project_id != project_id:
+        raise HTTPException(status_code=404, detail="Paper not found")
+
+    fields = data.model_dump(exclude_unset=True)
+
+    if paper.source != PaperSource.MANUAL and ({"abstract", "body"} & fields.keys()):
+        raise HTTPException(
+            status_code=422,
+            detail="Extracted content cannot be edited on an uploaded or linked paper.",
+        )
+
+    if "title" in fields and fields["title"] is None:
+        raise HTTPException(status_code=422, detail="Title cannot be null.")
+
+    text_changed = any(
+        key in fields and fields[key] != getattr(paper, key) for key in ("abstract", "body")
+    )
+    for key, value in fields.items():
+        setattr(paper, key, value)
+
+    if paper.source == PaperSource.MANUAL and text_changed:
+        from app.services.paper_ingest_service import index_manual
+
+        # Same transaction as the text change — see create_paper.
+        await index_manual(db, paper.id, paper.abstract, paper.body)
+    else:
+        await db.commit()
+
+    await db.refresh(paper)
+    return PaperOut.model_validate(paper)
+
+
+@router.delete("/projects/{project_id}/papers/{paper_id}", status_code=204)
+async def delete_paper(
+    project_id: str,
+    paper_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
+) -> Response:
+    await project_service.require_member(db, project_id, user.id, "editor")
+    paper = await db.get(Paper, paper_id)
+    if paper is None or paper.project_id != project_id:
+        raise HTTPException(status_code=404, detail="Paper not found")
+    await db.delete(paper)
+    await db.commit()
+    return Response(status_code=204)
 
 
 @router.get("/projects/{project_id}/papers", response_model=list[PaperOut])
@@ -176,6 +254,59 @@ async def list_papers(
     return [PaperOut.model_validate(p) for p in result.scalars().all()]
 
 
+@router.post(
+    "/projects/{project_id}/papers/suggest-title",
+    response_model=SuggestMetaResponse,
+)
+async def suggest_paper_title(
+    project_id: str,
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
+) -> SuggestMetaResponse:
+    """Extract title, abstract, and body from PDF bytes via LLM. Fails open."""
+    await project_service.require_member(db, project_id, user.id, "viewer")
+    pdf_bytes = await request.body()
+    if not pdf_bytes:
+        return SuggestMetaResponse(title=None, abstract=None, body=None)
+    from app.services.title_extraction_service import extract_meta_from_pdf
+
+    title, abstract, body = await extract_meta_from_pdf(pdf_bytes)
+    return SuggestMetaResponse(title=title, abstract=abstract, body=body)
+
+
+@router.post(
+    "/projects/{project_id}/papers/suggest-title-from-url",
+    response_model=SuggestTitleFromUrlResponse,
+)
+async def suggest_paper_title_from_url(
+    project_id: str,
+    body: PaperIngestUrlRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
+) -> SuggestTitleFromUrlResponse:
+    """Extract title + abstract via DOI→Crossref → HTML meta tags."""
+    await project_service.require_member(db, project_id, user.id, "viewer")
+    from app.services.title_extraction_service import (
+        extract_doi,
+        extract_meta_from_page,
+        extract_title_from_doi,
+    )
+
+    doi = extract_doi(body.url)
+    crossref_title: str | None = None
+    if doi:
+        crossref_title = await extract_title_from_doi(doi)
+
+    page_title, page_abstract = await extract_meta_from_page(body.url)
+
+    title = crossref_title or page_title
+    abstract = page_abstract
+    if title:
+        return SuggestTitleFromUrlResponse(title=title, abstract=abstract, requires_manual=False)
+    return SuggestTitleFromUrlResponse(title=None, abstract=None, requires_manual=True)
+
+
 @router.post("/projects/{project_id}/papers/{paper_id}/ingest")
 async def ingest_paper(
     project_id: str,
@@ -187,11 +318,54 @@ async def ingest_paper(
     await project_service.require_member(db, project_id, user.id, "editor")
     paper = await db.get(Paper, paper_id)
     if paper is None or paper.project_id != project_id:
-        from fastapi import HTTPException
         raise HTTPException(status_code=404, detail="Paper not found")
     pdf_bytes = await request.body()
     from app.services.paper_ingest_service import ingest
+
     n = await ingest(db, paper_id, pdf_bytes)
+    return {"chunks_stored": n}
+
+
+@router.post("/projects/{project_id}/papers/{paper_id}/ingest-from-url")
+async def ingest_paper_from_url(
+    project_id: str,
+    paper_id: str,
+    body: PaperIngestUrlRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
+) -> dict:
+    await project_service.require_member(db, project_id, user.id, "editor")
+    paper = await db.get(Paper, paper_id)
+    if paper is None or paper.project_id != project_id:
+        raise HTTPException(status_code=404, detail="Paper not found")
+
+    from app.services.paper_fetch_service import fetch_pdf, PaywallError
+    from app.services.paper_ingest_service import ingest
+
+    try:
+        pdf_bytes = await fetch_pdf(body.url)
+    except PaywallError:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "paywalled",
+                "message": "No open-access version found. Upload the PDF directly.",
+            },
+        )
+    try:
+        n = await ingest(db, paper_id, pdf_bytes)
+    except RateLimitError:
+        # The PDF fetched and parsed fine — only the embedding provider is out
+        # of quota. A 500 here reads to the user as "this paper is unreachable"
+        # and sends them hunting for a problem with the link that isn't there.
+        log.warning("ingest_embedding_quota_exhausted", paper_id=paper_id)
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "embedding_unavailable",
+                "message": "Indexing is temporarily unavailable. Try again later.",
+            },
+        )
     return {"chunks_stored": n}
 
 

@@ -1,4 +1,5 @@
 """Chat API endpoint tests."""
+
 import json
 from unittest.mock import AsyncMock, patch
 
@@ -8,7 +9,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import (
-    ChatConversation, ChatMessage, Project, ProjectMember, User,
+    ChatConversation,
+    ChatMessage,
+    Project,
+    ProjectMember,
+    User,
 )
 from app.db.seed import seed_users
 
@@ -21,9 +26,9 @@ async def seeded(db_session: AsyncSession):
 
 @pytest_asyncio.fixture
 async def you(db_session: AsyncSession, seeded):
-    return (await db_session.execute(
-        select(User).where(User.email == "you@researcherx.dev")
-    )).scalar_one()
+    return (
+        await db_session.execute(select(User).where(User.email == "you@researcherx.dev"))
+    ).scalar_one()
 
 
 @pytest_asyncio.fixture
@@ -68,7 +73,9 @@ async def test_list_conversations(client: AsyncClient, you: User, project: Proje
     assert len(resp.json()) == 1
 
 
-async def test_get_conversation_detail(client: AsyncClient, you: User, project: Project, db_session: AsyncSession):
+async def test_get_conversation_detail(
+    client: AsyncClient, you: User, project: Project, db_session: AsyncSession
+):
     conv = ChatConversation(project_id=project.id, title="Test", created_by=you.id)
     db_session.add(conv)
     await db_session.flush()
@@ -86,7 +93,9 @@ async def test_get_conversation_detail(client: AsyncClient, you: User, project: 
     assert data["messages"][0]["content"] == "Hello?"
 
 
-async def test_send_message_streams(client: AsyncClient, you: User, project: Project, db_session: AsyncSession):
+async def test_send_message_streams(
+    client: AsyncClient, you: User, project: Project, db_session: AsyncSession
+):
     """POST /messages should stream SSE events and return 200."""
     conv = ChatConversation(project_id=project.id, title="Stream test", created_by=you.id)
     db_session.add(conv)
@@ -100,7 +109,9 @@ async def test_send_message_streams(client: AsyncClient, you: User, project: Pro
         yield {"event": "done", "data": json.dumps({"citations": []})}
 
     with patch("app.api.v1.chat.chat_service.respond", new=fake_respond):
-        with patch("app.services.conversation_service._embed_message", new=AsyncMock(return_value=None)):
+        with patch(
+            "app.services.conversation_service._embed_message", new=AsyncMock(return_value=None)
+        ):
             resp = await client.post(
                 f"/v1/projects/{project.id}/conversations/{conv.id}/messages",
                 json={"content": "A question"},
@@ -111,16 +122,18 @@ async def test_send_message_streams(client: AsyncClient, you: User, project: Pro
     assert "text/event-stream" in resp.headers.get("content-type", "")
 
 
-async def test_send_message_requires_auth(client: AsyncClient, project: Project, db_session: AsyncSession):
+async def test_send_message_requires_auth(
+    client: AsyncClient, project: Project, db_session: AsyncSession
+):
     conv = ChatConversation(project_id=project.id, title="Auth test", created_by="x")
     db_session.add(conv)
     await db_session.commit()
     # No X-Dev-User-Id header → get_current_user falls back to default seed user
     # who IS a member, so this should succeed. Test non-member project instead:
     # Create a project owned by someone else
-    amelia = (await db_session.execute(
-        select(User).where(User.email == "amelia@lab.io")
-    )).scalar_one_or_none()
+    amelia = (
+        await db_session.execute(select(User).where(User.email == "amelia@lab.io"))
+    ).scalar_one_or_none()
     assert amelia is not None
     other_proj = Project(owner_id=amelia.id, title="Other", topic_keywords=[])
     db_session.add(other_proj)

@@ -26,6 +26,7 @@ HANDOFF.md
 CLAUDE.md
 .claude/
 docs/superpowers/
+.superpowers/
 
 # MCP server config (contains API keys — keep local)
 .mcp.json
