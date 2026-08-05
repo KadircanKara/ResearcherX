@@ -133,8 +133,17 @@ def separating_threshold(rows: list[SweepRow]) -> float | None:
     None means no cutoff separates the two populations — which is a finding,
     not a failure: it says an absolute cosine cutoff is the wrong instrument
     for this model, and the next lever is reranking or hybrid retrieval.
+
+    Takes the min over all qualifying rows rather than the first one in
+    `rows` — correct regardless of `rows`' order, so a caller passing
+    thresholds in descending order still gets the lowest qualifying cutoff
+    instead of the most permissive one.
     """
-    for row in rows:
-        if row.content_recall == 1.0 and row.off_topic_false_accept == 0.0:
-            return row.threshold
-    return None
+    return min(
+        (
+            row.threshold
+            for row in rows
+            if row.content_recall == 1.0 and row.off_topic_false_accept == 0.0
+        ),
+        default=None,
+    )

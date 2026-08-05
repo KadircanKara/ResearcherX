@@ -138,3 +138,17 @@ def test_separating_threshold_none_when_populations_overlap():
     rejects noise. Must return None rather than a best-effort number."""
     rows = [SweepRow(0.45, 0.0, 0.0), SweepRow(0.55, 0.5, 1.0), SweepRow(0.65, 1.0, 1.0)]
     assert separating_threshold(rows) is None
+
+
+def test_separating_threshold_is_order_independent():
+    """Must return the LOWEST qualifying threshold even when rows aren't
+    ascending -- a first-match-in-iteration-order implementation would
+    return whichever qualifying row happens to come first, which for a
+    descending list is the most permissive (highest) cutoff, not the
+    lowest."""
+    rows = [
+        SweepRow(0.65, 1.0, 0.0),
+        SweepRow(0.55, 1.0, 0.0),
+        SweepRow(0.45, 0.0, 0.0),
+    ]
+    assert separating_threshold(rows) == 0.55
