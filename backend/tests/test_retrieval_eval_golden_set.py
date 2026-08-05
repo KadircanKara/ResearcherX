@@ -237,6 +237,59 @@ def test_rejects_whitespace_only_expect_substrings_element(tmp_path: Path):
         load_golden_set(path)
 
 
+def test_rejects_non_string_expect_substrings_element(tmp_path: Path):
+    """isinstance(sub, str) must actually be exercised, not just eyeballed --
+    an int element (e.g. a stray unquoted number from hand-edited JSON) must
+    raise rather than reach chunk_satisfies, where `sub.lower()` would blow
+    up with an unhandled AttributeError deep inside a scoring run instead of
+    failing loudly at load time."""
+    path = _write(
+        tmp_path,
+        {
+            "version": 1,
+            "cases": [
+                {
+                    "id": "bad",
+                    "kind": "content",
+                    "question": "q",
+                    "paper_title_contains": "X",
+                    "expect_substrings": [123],
+                }
+            ],
+        },
+    )
+    with pytest.raises(GoldenSetError, match=r"expect_substrings\[0\]"):
+        load_golden_set(path)
+
+
+def test_expect_substrings_elements_are_stored_stripped(tmp_path: Path):
+    """Regression test for the stripping decision in _parse_case: a
+    surrounding-whitespace substring must be stored stripped, and must then
+    match chunk text where the phrase sits right at a boundary (nothing
+    after it) -- the case `.strip()` exists to fix. Without the strip, the
+    loaded Case would keep the padding, and chunk_satisfies would look for
+    "  revisit time  " (with padding) inside lowercased chunk text, which a
+    phrase ending a string never contains."""
+    path = _write(
+        tmp_path,
+        {
+            "version": 1,
+            "cases": [
+                {
+                    "id": "c1",
+                    "kind": "content",
+                    "question": "q",
+                    "paper_title_contains": "Joint Optimization",
+                    "expect_substrings": ["  revisit time  "],
+                }
+            ],
+        },
+    )
+    cases = load_golden_set(path)
+    assert cases[0].expect_substrings == ("revisit time",)
+    assert chunk_satisfies(cases[0], "Joint Optimization of X", "we aim to minimize revisit time")
+
+
 def test_loads_a_case_with_multiple_valid_substrings(tmp_path: Path):
     """Both-directions check for the element-validation fix above: a
     legitimate multi-element expect_substrings list must still load."""
