@@ -25,6 +25,7 @@ from retrieval_eval.golden_set import Case, load_golden_set
 from retrieval_eval.metrics import (
     THRESHOLDS,
     Scored,
+    SeparationDiagnosis,
     best_satisfying_distance,
     diagnose_separation,
     first_satisfying_rank,
@@ -37,6 +38,7 @@ from retrieval_eval.metrics import (
     separating_threshold,
     simulate_retrieval,
     sweep,
+    topk_satisfying_distance,
 )
 
 _DEFAULT_SET = Path(__file__).parent / "golden_set.json"
@@ -248,12 +250,24 @@ async def main() -> None:  # noqa: PLR0912, PLR0915 — a report script, not a l
 
             positives.append((case, chunks))
             rank = first_satisfying_rank(case, simulate_retrieval(chunks, args.k))
+            topk_distance = topk_satisfying_distance(case, chunks, args.k)
             per_case.append(
                 {
                     "id": case.id,
                     "kind": case.kind,
                     "rank": rank,
+                    # Globally-nearest satisfying chunk in the WHOLE corpus,
+                    # ignoring per-paper top-k — NOT top-k-aware. Invites the
+                    # wrong "so lower the threshold" inference; see
+                    # README.md's "Reading the output".
                     "best_distance": best_satisfying_distance(case, chunks),
+                    # Top-k-aware: the distance of the satisfying chunk that
+                    # actually survives this case's own per-paper top-k, or
+                    # None when it doesn't (see `blocked` and
+                    # metrics.topk_satisfying_distance). This is the number
+                    # the closed-form separation actually uses.
+                    "topk_distance": topk_distance,
+                    "blocked": topk_distance is None,
                 }
             )
 
@@ -330,6 +344,10 @@ async def main() -> None:  # noqa: PLR0912, PLR0915 — a report script, not a l
             )
 
     # --- closed form: the headline, exact, authoritative -------------------
+    # Populated only in the "both sides present" branch below; stays None
+    # (and so does the "separation" key in --json) when there was nothing to
+    # diagnose — same condition the printed NO RECOMMENDATION branches use.
+    diagnosis: SeparationDiagnosis | None = None
     print(f"\nclosed-form separating interval (k={args.k}, exact):")
     if not usable_negatives:
         print(
@@ -434,6 +452,18 @@ async def main() -> None:  # noqa: PLR0912, PLR0915 — a report script, not a l
     )
 
     if args.json:
+        separation = (
+            None
+            if diagnosis is None
+            else {
+                "lo": diagnosis.lo,
+                "hi": diagnosis.hi,
+                "lo_case_id": diagnosis.lo_case_id,
+                "hi_case_id": diagnosis.hi_case_id,
+                "blocked_case_ids": list(diagnosis.blocked_case_ids),
+                "k": args.k,
+            }
+        )
         args.json.write_text(
             json.dumps(
                 {
@@ -442,7 +472,15 @@ async def main() -> None:  # noqa: PLR0912, PLR0915 — a report script, not a l
                     "corpus": corpus_note,
                     "cases": per_case,
                     "errors": errors,
-                    "sweep": [vars(r) for r in rows],
+                    "sweep": {
+                        "note": (
+                            "coarse cross-check only, NOT the headline — a real separating "
+                            "interval can fall entirely between two grid points; see "
+                            "'separation' for the exact closed-form answer"
+                        ),
+                        "rows": [vars(r) for r in rows],
+                    },
+                    "separation": separation,
                 },
                 indent=2,
             )
