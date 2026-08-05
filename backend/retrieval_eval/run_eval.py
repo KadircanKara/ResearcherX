@@ -159,6 +159,28 @@ def _is_provisional(n_pos: int, n_neg: int, margin: float, neg_spread: float) ->
     )
 
 
+def _off_topic_acceptance_rate(negatives: list[list[Scored]], threshold: float) -> float | None:
+    """Fraction of off_topic cases where at least one retrieved chunk beats
+    `threshold` — the ROBUST FINDING's number.
+
+    None when there is nothing to measure: no off_topic cases at all, or
+    every one of them returned zero chunks. `bool(negatives)` is NOT a safe
+    test for that: the shape `[[], [], []]` (one empty list per off_topic
+    case, e.g. from an empty `paper_chunk_embeddings` table) is truthy, so a
+    naive `if negatives:` would compute `0 accepted / 3 = 0.0` and report
+    "accepts 0% of off-topic questions" — the exact INVERSE of the true,
+    unmeasured situation. Use `any(negatives)`, exactly like `usable_negatives`
+    in `main()` and `sweep`'s own guard in metrics.py — this is the third time
+    this precise shape has produced a false-confident number on this branch.
+    Do not test `negatives` truthiness directly anywhere else in this module;
+    always go through `any(negatives)` (or this function).
+    """
+    if not any(negatives):
+        return None
+    accepted = sum(1 for chunks in negatives if any(c.distance < threshold for c in chunks))
+    return accepted / len(negatives)
+
+
 async def _chunks_for(db, svc: EmbeddingService, case: Case) -> list[Scored]:
     embedding = await svc.embed(case.question, task_type="RETRIEVAL_QUERY")
     rows = (
@@ -399,10 +421,9 @@ async def main() -> None:  # noqa: PLR0912, PLR0915 — a report script, not a l
                 print(f"    Treat {point:.4f} as a hypothesis to test, not a value to configure.")
 
     # --- robust finding: survives any resampling, printed unconditionally --
-    if negatives:
-        current = settings.similarity_threshold
-        accepted = sum(1 for chunks in negatives if any(c.distance < current for c in chunks))
-        rate = accepted / len(negatives)
+    current = settings.similarity_threshold
+    rate = _off_topic_acceptance_rate(negatives, current)
+    if rate is not None:
         print(
             f"\n  ROBUST FINDING: the current similarity_threshold ({current:g}) accepts "
             f"{rate:.0%} of off-topic questions in this set."

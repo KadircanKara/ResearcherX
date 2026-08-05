@@ -17,6 +17,7 @@ from retrieval_eval.run_eval import (
     _MIN_POSITIVES_FOR_CONFIDENCE,
     _is_provisional,
     _model_mismatch_message,
+    _off_topic_acceptance_rate,
     _positive_case_status,
     _positive_int,
 )
@@ -165,3 +166,51 @@ def test_is_provisional_true_when_margin_does_not_clear_negative_spread():
         )
         is True
     )
+
+
+# --- _off_topic_acceptance_rate -------------------------------------------------
+
+
+def test_off_topic_acceptance_rate_none_when_no_negatives():
+    assert _off_topic_acceptance_rate([], threshold=0.75) is None
+
+
+def test_off_topic_acceptance_rate_none_when_every_negative_is_empty():
+    """The exact bug this pins (final whole-branch review, Critical #1):
+    `[[], [], []]` — one empty chunk list per off_topic case, e.g. every
+    case returned zero rows from an empty `paper_chunk_embeddings` table —
+    is truthy under `bool(negatives)`. The old `if negatives:` guard in
+    main() computed `0 accepted / 3 = 0.0` from this shape and printed
+    "accepts 0% of off-topic questions" — the exact INVERSE of the true,
+    unmeasured situation (the real threshold accepts 100% here; see
+    test_off_topic_acceptance_rate_computes_correctly_when_measured below
+    for the live corpus's actual numbers). Must be None ("nothing measured"),
+    never a computed 0.0 for this shape."""
+    assert _off_topic_acceptance_rate([[], [], []], threshold=0.75) is None
+
+
+def test_off_topic_acceptance_rate_computes_correctly_when_measured():
+    negatives = [
+        [_s("Alpha", "junk", 0.80)],  # rejected: 0.80 >= 0.75
+        [_s("Beta", "junk", 0.10)],  # accepted: 0.10 < 0.75
+    ]
+    assert _off_topic_acceptance_rate(negatives, threshold=0.75) == 0.5
+
+
+def test_off_topic_acceptance_rate_is_strict_less_than():
+    """Matches production's `distance < :threshold` (strictly less than,
+    chat_service.py): a chunk sitting exactly ON the threshold must not
+    count as accepted."""
+    negatives = [[_s("Alpha", "junk", 0.75)]]
+    assert _off_topic_acceptance_rate(negatives, threshold=0.75) == 0.0
+
+
+def test_off_topic_acceptance_rate_mixed_empty_and_nonempty_still_measures():
+    """A mix of empty and non-empty per-case chunk lists must still be
+    measured (matching `noise_floor`'s and `sweep`'s treatment of the same
+    shape) — `any(negatives)` is True here, so this must NOT collapse to
+    None just because one case happened to return nothing. The denominator
+    stays the full case count (2), so a naive "only count usable cases" bug
+    would wrongly report 1.0 instead of 0.5."""
+    negatives = [[], [_s("Beta", "junk", 0.10)]]
+    assert _off_topic_acceptance_rate(negatives, threshold=0.75) == 0.5
