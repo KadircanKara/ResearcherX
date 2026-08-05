@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import update
 
+from app.api.v1.research import cancel_watchers
 from app.api.v1.router import api_router
 from app.core.config import settings
 from app.core.logging import configure_logging, log
@@ -76,8 +77,11 @@ async def lifespan(app: FastAPI):
         await db.commit()
     yield
     # Cancel in-flight runs first (their CancelledError handlers write final
-    # statuses to the DB), THEN dispose the engine.
+    # statuses to the DB), then the grace-window watchers — each sleeps and
+    # then touches the DB, so a survivor can write after the engine is gone —
+    # and only THEN dispose the engine.
     await registry.cancel_all()
+    await cancel_watchers()
     await engine.dispose()
     log.info("app_shutdown")
 

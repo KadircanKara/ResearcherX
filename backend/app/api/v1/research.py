@@ -42,6 +42,27 @@ def _watch_unwatched(run_id: str) -> None:
     watcher.add_done_callback(_watchers.discard)
 
 
+async def cancel_watchers() -> None:
+    """Cancel in-flight grace-window watchers and wait for them to unwind.
+
+    Shutdown has to clear these as well as the registered run tasks. A watcher
+    sleeps UNWATCHED_CANCEL_GRACE_S and then touches the DB, so leaving one
+    running means a write can land after the engine is disposed.
+
+    This matters most in tests, where every test is effectively a shutdown: a
+    surviving watcher wakes during a LATER test and holds the sqlite file while
+    that test's fixture drops tables, surfacing as
+    "database is locked ... DROP TABLE". It looked like a random flake because
+    which test got hit depended on when the 10s timer fired.
+    """
+    tasks = [t for t in _watchers if not t.done()]
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+    _watchers.clear()
+
+
 @router.post(
     "",
     response_model=RunOut,

@@ -22,6 +22,7 @@ import asyncio  # noqa: E402
 
 import pytest_asyncio  # noqa: E402
 
+from app.api.v1.research import cancel_watchers  # noqa: E402
 from app.core.security import _storage as limiter_storage  # noqa: E402
 from app.db import models  # noqa: F401, E402 — register models on metadata
 from app.db.base import Base  # noqa: E402
@@ -52,6 +53,7 @@ async def fresh_db():
         await conn.run_sync(Base.metadata.create_all)
     yield
     await registry.cancel_all()
+    await cancel_watchers()  # grace-window watchers aren't in the registry
     # Give aiosqlite worker threads time to drain after task cancellation.
     # asyncio.gather returns once the coroutine is done, but the underlying
     # SQLite thread may still be finishing its last operation + closing the
