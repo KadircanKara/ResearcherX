@@ -1,0 +1,102 @@
+"""Tests for the runner's pure helper functions. No DB, no embeddings.
+
+`main()` itself needs Postgres + a live embedding provider and is exercised
+by actually running the harness (see README.md / task reports), not by
+pytest — but the decision logic it delegates to is pure and unit-tested
+here, same as retrieval_eval.metrics.
+"""
+
+import argparse
+
+import pytest
+
+from retrieval_eval.golden_set import Case
+from retrieval_eval.metrics import Scored
+from retrieval_eval.run_eval import (
+    _model_mismatch_message,
+    _positive_case_status,
+    _positive_int,
+)
+
+
+def _s(title: str, text: str, dist: float, paper_id: str | None = None) -> Scored:
+    return Scored(paper_id=paper_id or title, paper_title=title, chunk_text=text, distance=dist)
+
+
+# --- _positive_int ------------------------------------------------------------
+
+
+def test_positive_int_accepts_positive_values():
+    assert _positive_int("1") == 1
+    assert _positive_int("5") == 5
+
+
+def test_positive_int_rejects_zero_and_negative():
+    """simulate_retrieval's `group[:k]` silently accepts k <= 0 (an empty
+    slice), which would score every case an automatic miss and read as a
+    retrieval failure instead of a usage error — must reject at the CLI
+    boundary instead."""
+    with pytest.raises(argparse.ArgumentTypeError):
+        _positive_int("0")
+    with pytest.raises(argparse.ArgumentTypeError):
+        _positive_int("-3")
+
+
+# --- _model_mismatch_message ---------------------------------------------------
+
+
+def test_model_mismatch_message_none_when_target_model_present():
+    assert _model_mismatch_message({"nomic-embed-text": 122}, "nomic-embed-text") is None
+
+
+def test_model_mismatch_message_none_when_corpus_entirely_empty():
+    """An empty corpus is a different, already-clear situation (the
+    per-case "corpus: 0 chunks" note covers it) — not a model mismatch."""
+    assert _model_mismatch_message({}, "nomic-embed-text") is None
+
+
+def test_model_mismatch_message_names_the_actual_models_present():
+    """The bug this guards against: every case would otherwise report "no
+    paper matching ..." when the real problem is the configured
+    EMBEDDING_MODEL doesn't match what's indexed — the papers ARE there."""
+    msg = _model_mismatch_message({"text-embedding-3-small": 122}, "nomic-embed-text")
+    assert msg is not None
+    assert "nomic-embed-text" in msg
+    assert "text-embedding-3-small" in msg
+
+
+# --- _positive_case_status -----------------------------------------------------
+
+CASE = Case(
+    id="c1",
+    kind="content",
+    question="q",
+    paper_title_contains="Alpha",
+    expect_substrings=("target",),
+)
+
+
+def test_positive_case_status_none_when_winnable():
+    chunks = [_s("Alpha", "the target chunk", 0.2)]
+    assert _positive_case_status(CASE, chunks) is None
+
+
+def test_positive_case_status_reports_missing_paper():
+    """Corpus drift: the paper itself is gone."""
+    chunks = [_s("Beta", "unrelated", 0.2)]
+    status = _positive_case_status(CASE, chunks)
+    assert status is not None
+    assert "no paper matching" in status
+
+
+def test_positive_case_status_reports_unwinnable_substring_not_missing_paper():
+    """The case the review caught live: the paper IS present, but no chunk
+    anywhere in the corpus contains the expected substring. This used to
+    fall through into `positives` and silently drag recall down as an
+    ordinary miss — it must be routed to `errors` with a message that names
+    the real problem (missing substring), not the paper-drift message."""
+    chunks = [_s("Alpha", "no matching content here", 0.2), _s("Alpha", "still nothing", 0.3)]
+    status = _positive_case_status(CASE, chunks)
+    assert status is not None
+    assert "no paper matching" not in status
+    assert "no chunk in the corpus contains" in status

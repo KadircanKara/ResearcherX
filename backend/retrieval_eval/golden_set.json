@@ -13,21 +13,21 @@
       "kind": "content",
       "question": "How is probabilistic occupancy used during cooperative search?",
       "paper_title_contains": "Cooperative Multi-Target",
-      "expect_substrings": ["occupancy"]
+      "expect_substrings": ["probabilistic occupancy updates"]
     },
     {
       "id": "nineveh-case-study",
       "kind": "content",
       "question": "What archaeological region was surveyed with drones?",
       "paper_title_contains": "Nineveh",
-      "expect_substrings": ["Nineveh"]
+      "expect_substrings": ["Nineveh archaeological region"]
     },
     {
       "id": "segmentation-datasets",
       "kind": "content",
       "question": "Which UAV datasets are used for segmentation?",
       "paper_title_contains": "Diverse Applications",
-      "expect_substrings": ["segmentation"]
+      "expect_substrings": ["semantic segmentation in urban scenes"]
     },
     {
       "id": "rotary-wing-types",
@@ -55,7 +55,7 @@
       "kind": "figure",
       "question": "What does the figure showing UAV classification depict?",
       "paper_title_contains": "Nineveh",
-      "expect_substrings": ["Figure"]
+      "expect_substrings": ["Types of drones according to their shapes and type of wings"]
     },
     {
       "id": "offtopic-cake",

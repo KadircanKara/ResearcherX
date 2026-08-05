@@ -26,10 +26,14 @@ from retrieval_eval.metrics import (
     THRESHOLDS,
     Scored,
     best_satisfying_distance,
+    diagnose_separation,
     first_satisfying_rank,
+    leave_one_out_lo,
     mean_reciprocal_rank,
     noise_floor,
+    order_statistic_risk,
     recall_at_k,
+    recommended_point,
     separating_threshold,
     simulate_retrieval,
     sweep,
@@ -37,9 +41,26 @@ from retrieval_eval.metrics import (
 
 _DEFAULT_SET = Path(__file__).parent / "golden_set.json"
 
-# Mirrors chat_service._retrieve_paper_chunks: same <=> operator, same model
-# filter. Deliberately NO distance cutoff and no LIMIT — the sweep needs the
-# full ranking, and the corpus is small enough that this is one cheap query.
+# A printed separating threshold only drops the PROVISIONAL banner when
+# there are enough negatives AND the margin clears the spread of the
+# negatives that define it — see the "closed-form separating interval"
+# section of main() and README.md's "Reading the output".
+_MIN_NEGATIVES_FOR_CONFIDENCE = 10
+
+_MODEL_COUNTS_SQL = text("SELECT model, count(*) AS n FROM paper_chunk_embeddings GROUP BY model")
+
+# Mirrors chat_service._retrieve_paper_chunks's DISTANCE COMPUTATION only —
+# same <=> operator, same model filter. It does NOT mirror the retrieval
+# PATH: production embeds `plan.reformulated_query` (not the raw question)
+# and hands each paper a planner-allocated `k` whenever the library has >=
+# _PLANNER_MIN_PAPERS papers (chat_service.py) — true today, since the dev
+# corpus has 4 papers. This harness embeds the raw golden-set question and
+# applies a single uniform --k instead: a deliberate simplification for
+# reproducibility, not an oversight, but it means a threshold calibrated
+# here is calibrated on raw-question distances, and would be applied in
+# production to reformulated-query distances. Re-validate after any change
+# to the planner's reformulation behavior, not just after an embedding
+# model change.
 _SQL = text("""
     SELECT c.paper_id AS paper_id,
            p.title AS paper_title,
@@ -54,6 +75,61 @@ _SQL = text("""
 
 def _vec(embedding: list[float]) -> str:
     return "[" + ",".join(str(x) for x in embedding) + "]"
+
+
+def _positive_int(raw: str) -> int:
+    """argparse type for --k: must be a positive integer.
+
+    `simulate_retrieval`'s `group[:k]` silently accepts k <= 0 (an empty
+    per-paper slice), which would make every case an automatic miss and read
+    as a retrieval failure instead of the usage error it actually is.
+    """
+    value = int(raw)
+    if value < 1:
+        raise argparse.ArgumentTypeError(f"--k must be >= 1, got {value}")
+    return value
+
+
+def _model_mismatch_message(counts: dict[str, int], target_model: str) -> str | None:
+    """None if `target_model` has at least one chunk (or the corpus is
+    entirely empty — the per-case "corpus: 0 chunks" note already covers
+    that clearly enough on its own). Otherwise a message naming which
+    model(s) DO have chunks, so a real embedding-model/index mismatch reads
+    as what it is instead of misdirecting every single case to "no paper
+    matching ..." — the papers are there; the configured model's embeddings
+    are not.
+    """
+    if not counts or counts.get(target_model, 0) > 0:
+        return None
+    other = ", ".join(f"{m!r} ({n})" for m, n in sorted(counts.items()))
+    return (
+        f"no chunk embeddings found for model {target_model!r}. Papers exist; "
+        f"embeddings exist only for: {other}. Check EMBEDDING_MODEL, or re-index "
+        "the library for this model."
+    )
+
+
+def _positive_case_status(case: Case, chunks: list[Scored]) -> str | None:
+    """None if `case` is winnable in this corpus; otherwise a reason to route
+    it to `errors` instead of `positives`.
+
+    Both causes here are golden-set problems, not retrieval failures: either
+    the paper itself is gone (drift), or — subtler — the paper is still
+    there but no chunk in the ENTIRE corpus contains the expected
+    substring(s). `best_satisfying_distance` returning None proves that
+    outright: `chunks` already holds every chunk in the corpus for this
+    query (the SQL has no LIMIT), so there is nowhere else to look. Scoring
+    that case as a plain retrieval miss would silently drag recall down for
+    a golden-set defect instead of flagging it.
+    """
+    if not any(case.paper_title_contains.lower() in c.paper_title.lower() for c in chunks):
+        return f"no paper matching {case.paper_title_contains!r}"
+    if best_satisfying_distance(case, chunks) is None:
+        return (
+            f"paper matching {case.paper_title_contains!r} found, but no chunk in the "
+            f"corpus contains {list(case.expect_substrings)!r}"
+        )
+    return None
 
 
 async def _chunks_for(db, svc: EmbeddingService, case: Case) -> list[Scored]:
@@ -80,9 +156,9 @@ def _corpus_note(chunks: list[Scored]) -> str:
     return f"{len(chunks)} chunks across {papers} papers"
 
 
-async def main() -> None:
+async def main() -> None:  # noqa: PLR0912, PLR0915 — a report script, not a library API
     parser = argparse.ArgumentParser(description="Measure retrieval quality.")
-    parser.add_argument("--k", type=int, default=5, help="chunks per paper (default: 5)")
+    parser.add_argument("--k", type=_positive_int, default=5, help="chunks per paper (default: 5)")
     parser.add_argument("--set", type=Path, default=_DEFAULT_SET)
     parser.add_argument("--json", type=Path, default=None, help="also dump results here")
     args = parser.parse_args()
@@ -92,10 +168,17 @@ async def main() -> None:
 
     positives: list[tuple[Case, list[Scored]]] = []
     negatives: list[list[Scored]] = []
+    negative_ids: list[str] = []
     errors: list[str] = []
     per_case: list[dict] = []
 
     async with SessionLocal() as db:
+        counts = {r.model: r.n for r in (await db.execute(_MODEL_COUNTS_SQL)).fetchall()}
+        mismatch = _model_mismatch_message(counts, settings.embedding_model)
+        if mismatch:
+            print(f"\nERROR: {mismatch}")
+            return
+
         corpus_note = ""
         for case in cases:
             chunks = await _chunks_for(db, svc, case)
@@ -104,14 +187,14 @@ async def main() -> None:
 
             if case.is_negative:
                 negatives.append(chunks)
+                negative_ids.append(case.id)
                 best = min((c.distance for c in chunks), default=None)
                 per_case.append({"id": case.id, "kind": case.kind, "best_distance": best})
                 continue
 
-            # Corpus drift is an error, not a retrieval failure — distinguish
-            # "the paper is gone" from "retrieval got worse".
-            if not any(case.paper_title_contains.lower() in c.paper_title.lower() for c in chunks):
-                errors.append(f"{case.id}: no paper matching {case.paper_title_contains!r}")
+            status = _positive_case_status(case, chunks)
+            if status is not None:
+                errors.append(f"{case.id}: {status}")
                 continue
 
             positives.append((case, chunks))
@@ -129,15 +212,15 @@ async def main() -> None:
     print("(small, thematically clustered corpus — numbers are indicative, not conclusive)\n")
 
     if errors:
-        print("ERRORS (corpus drift, not retrieval failures):")
+        print("ERRORS (golden-set problems, not retrieval failures):")
         for err in errors:
             print(f"  ! {err}")
         print()
 
     # recall_at_k / mean_reciprocal_rank raise ValueError on an empty case
-    # list. That happens for real when every positive case hit corpus drift
-    # above (golden set references a paper no longer in the library) — report
-    # it plainly instead of letting the ValueError propagate.
+    # list. That happens for real when every positive case hit a golden-set
+    # problem above — report it plainly instead of letting the ValueError
+    # propagate.
     if positives:
         print(
             f"recall@{args.k}: {recall_at_k(positives, args.k):.2f}    "
@@ -147,43 +230,36 @@ async def main() -> None:
         print(f"recall@{args.k}: n/a    MRR: n/a")
         print(
             "  No positive cases could be scored — every content/metadata/figure case "
-            "hit corpus drift (see ERRORS above)."
+            "hit a golden-set problem (see ERRORS above)."
         )
     floor = noise_floor(negatives)
     print(f"noise floor (best off-topic distance): {floor if floor is None else round(floor, 4)}\n")
 
-    print(f"{'case':<28}{'kind':<10}{'rank':>6}{'best_dist':>12}")
+    # Column width derived from the actual ids so a long case id can never
+    # collide with the next column (a fixed 28-char width collided in
+    # review with a 29-char synthetic id).
+    id_col = max(28, max((len(row["id"]) for row in per_case), default=28) + 1)
+    print(f"{'case':<{id_col}}{'kind':<10}{'rank':>6}{'best_dist':>12}")
     for row in per_case:
         rank = row.get("rank")
         dist = row.get("best_distance")
         print(
-            f"{row['id']:<28}{row['kind']:<10}"
+            f"{row['id']:<{id_col}}{row['kind']:<10}"
             f"{'-' if rank is None else rank:>6}"
             f"{'-' if dist is None else round(dist, 4):>12}"
         )
 
-    # sweep() raises ValueError when there are no usable negatives (including
-    # the [[], []] all-empty shape, via `if not any(negatives)`), and even if
-    # it didn't, an all-empty-positives sweep would blow up inside sweep()'s
-    # own recall_at_k call. Decide up front whether the sweep can run at all,
-    # using the same any(negatives) test the metrics module uses so the
-    # runner and the library agree on what "usable" means.
     usable_negatives = any(negatives)
-    print(f"\nthreshold sweep (k={args.k}):")
-    rows = []
+
+    # --- grid sweep: coarse visual aid / cross-check, NOT the headline ----
+    print(
+        f"\nthreshold sweep grid (k={args.k}, step 0.05 — cross-check only, see closed form below):"
+    )
+    rows: list = []
     if not usable_negatives:
-        print("  skipped")
-        print(
-            "\nNO RECOMMENDATION: the golden set has no usable off_topic cases (either "
-            "there are none, or every off_topic case returned zero chunks), so recall "
-            "is trivially maximised by retrieving everything. Add negatives."
-        )
+        print("  skipped — no usable off_topic cases")
     elif not positives:
-        print("  skipped")
-        print(
-            "\nNO RECOMMENDATION: no positive cases were scored (see ERRORS above), so "
-            "content recall cannot be measured at any threshold."
-        )
+        print("  skipped — no positive cases scored")
     else:
         print(f"{'threshold':>10}{'content_recall':>16}{'offtopic_accept':>18}")
         rows = sweep(positives, negatives, args.k, THRESHOLDS)
@@ -191,16 +267,123 @@ async def main() -> None:
             print(
                 f"{row.threshold:>10.2f}{row.content_recall:>16.2f}{row.off_topic_false_accept:>18.2f}"
             )
-
-        best = separating_threshold(rows)
-        if best is None:
-            print("\nNO THRESHOLD SEPARATES CONTENT FROM NOISE.")
-            print("  No cutoff achieves full content recall with zero off-topic acceptance.")
-            print("  An absolute cosine cutoff is the wrong instrument for this model —")
-            print("  the next lever is reranking or hybrid retrieval, not a better constant.")
+        grid_best = separating_threshold(rows)
+        if grid_best is None:
+            print(
+                "  grid cross-check: no row in the swept grid achieves separation (the grid "
+                "is coarse — a real interval can fall entirely between two grid points; see "
+                "the closed form below for the exact answer)"
+            )
         else:
-            print(f"\nRECOMMENDED similarity_threshold: {best:.2f}")
-            print(f"  (currently {settings.similarity_threshold})")
+            print(
+                f"  grid cross-check: grid found threshold {grid_best:.2f} (coarse; see the "
+                "closed form below for the exact interval)"
+            )
+
+    # --- closed form: the headline, exact, authoritative -------------------
+    print(f"\nclosed-form separating interval (k={args.k}, exact):")
+    if not usable_negatives:
+        print(
+            "  NO RECOMMENDATION: the golden set has no usable off_topic cases (either "
+            "there are none, or every off_topic case returned zero chunks), so recall is "
+            "trivially maximised by retrieving everything. Add negatives."
+        )
+    elif not positives:
+        print(
+            "  NO RECOMMENDATION: no positive cases were scored (see ERRORS above), so "
+            "content recall cannot be measured at any threshold."
+        )
+    else:
+        diagnosis = diagnose_separation(positives, list(zip(negative_ids, negatives)), args.k)
+        if diagnosis.blocked_case_ids:
+            print("  NO SEPARATION POSSIBLE AT THIS k.")
+            print(
+                f"  case(s) with no satisfying chunk within their paper's own top-{args.k}: "
+                f"{', '.join(diagnosis.blocked_case_ids)}"
+            )
+            print(
+                "  No threshold recovers this: thresholding only removes competing chunks, "
+                "it can never let a chunk leapfrog nearer same-paper competitors that already "
+                "excluded it. Increase --k or fix retrieval ranking — not the threshold."
+            )
+        elif diagnosis.interval is None:
+            print("  NO THRESHOLD SEPARATES CONTENT FROM NOISE (exact — not a grid artifact).")
+            print(
+                f"  worst content distance {diagnosis.lo:.4f} ({diagnosis.lo_case_id})  >=  "
+                f"closest off-topic {diagnosis.hi:.4f} ({diagnosis.hi_case_id})"
+            )
+            print(
+                "  An absolute cosine cutoff cannot work for this model on this corpus — the "
+                "next lever is reranking or hybrid retrieval, not a better constant."
+            )
+        else:
+            lo, hi = diagnosis.interval.lo, diagnosis.interval.hi
+            margin = hi - lo
+            point = recommended_point(lo, hi)
+            n_pos, n_neg = len(positives), len(negatives)
+            neg_bests = [min(c.distance for c in chunks) for chunks in negatives if chunks]
+            neg_spread = (max(neg_bests) - min(neg_bests)) if len(neg_bests) > 1 else 0.0
+            provisional = not (n_neg >= _MIN_NEGATIVES_FOR_CONFIDENCE and margin > neg_spread)
+
+            header = "SEPARATION FOUND"
+            if provisional:
+                header += " — PROVISIONAL, DO NOT SHIP"
+            print(f"  {header}")
+            print(
+                f"    worst content distance   {lo:.4f}   ({diagnosis.lo_case_id})   "
+                f"n={n_pos} positives"
+            )
+            print(
+                f"    closest off-topic        {hi:.4f}   ({diagnosis.hi_case_id})   "
+                f"n={n_neg} negatives"
+            )
+            print(
+                f"    any T in ({lo:.4f}, {hi:.4f}] separates; midpoint {point:.4f}, "
+                f"margin {margin:.4f}"
+            )
+
+            if provisional:
+                print()
+                alt = leave_one_out_lo(positives, excluding=diagnosis.lo_case_id, k=args.k)
+                print("    This interval is set by ONE positive and ONE negative case.")
+                if alt is None:
+                    print(
+                        f"    (Dropping {diagnosis.lo_case_id} leaves too few positives to "
+                        "check what the interval would become.)"
+                    )
+                elif alt < hi:
+                    print(
+                        f"    Drop {diagnosis.lo_case_id} and it becomes "
+                        f"{recommended_point(alt, hi):.4f}."
+                    )
+                else:
+                    print(
+                        f"    Drop {diagnosis.lo_case_id} and separation no longer holds at "
+                        f"all (next-worst distance {alt:.4f} >= {hi:.4f})."
+                    )
+                p_pos, p_neg, p_either = order_statistic_risk(n_pos, n_neg)
+                print(
+                    f"    On order statistics alone, one more off-topic question (making "
+                    f"{n_neg + 1}) has a 1-in-{n_neg + 1} chance of falling below {hi:.4f}, and "
+                    f"one more positive (making {n_pos + 1}) has a 1-in-{n_pos + 1} chance of "
+                    f"exceeding {lo:.4f} — together ~{p_either:.0%} odds the recommendation is "
+                    "already dead if the set grows by one of each."
+                )
+                print(f"    Treat {point:.4f} as a hypothesis to test, not a value to configure.")
+
+    # --- robust finding: survives any resampling, printed unconditionally --
+    if negatives:
+        current = settings.similarity_threshold
+        accepted = sum(1 for chunks in negatives if any(c.distance < current for c in chunks))
+        rate = accepted / len(negatives)
+        print(
+            f"\n  ROBUST FINDING: the current similarity_threshold ({current:g}) accepts "
+            f"{rate:.0%} of off-topic questions in this set."
+        )
+    print(
+        "  Widen the set (>=20 positives, >=10 negatives, negatives drawn from NEAR-domain "
+        "topics) before trusting any specific number."
+    )
 
     if args.json:
         args.json.write_text(
