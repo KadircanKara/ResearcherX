@@ -154,3 +154,39 @@ runner refuses to compute one without usable negatives.
 
 Results are model-specific. Re-baseline after any change to
 `EMBEDDING_MODEL` or either `EMBEDDING_*_PREFIX`.
+
+## Findings
+
+Dated measurements from the live dev corpus at the time this branch's final
+review was fixed: **2026-08-05**, corpus **122 chunks / 4 papers**, model
+**nomic-embed-text**. Re-baseline (re-run and update this section) after any
+change to `EMBEDDING_MODEL` or either `EMBEDDING_*_PREFIX` — these numbers
+are specific to that embedding space and will not hold after either changes.
+
+- **Per-paper top-k is chunk-count-blind — the biggest finding this harness
+  has produced.** `segmentation-datasets`'s answering chunk sits at distance
+  0.2048 — among the closest in the entire corpus — but at within-paper rank
+  18 of 67, so it never surfaces at `--k` 5, 8, or 12; it needs `--k 20`.
+  Seventeen chunks from its own 67-chunk paper outrank it. A 67-chunk paper
+  and a 12-chunk paper receive the same per-paper budget of `k`, so large
+  papers are starved in proportion to their size. **No threshold can fix
+  this**: threshold-filtering and top-k-selection are both nearest-prefix
+  operations on the same distance-sorted list (see
+  `metrics.topk_satisfying_distance`'s docstring for the proof), so a chunk
+  already excluded from the unfiltered top-k can never be recovered by any
+  threshold. The fix, if one is wanted, is `--k` or retrieval ranking — not
+  `similarity_threshold`.
+- **Robust finding**: `similarity_threshold = 0.75` (the shipped default)
+  accepts **100%** of off-topic questions in the current golden set — the
+  opposite of a working guard rail. Survives resampling in the sense that it
+  doesn't depend on finding an exact separating boundary, only on whether
+  today's threshold already admits noise, which it does for every negative
+  case currently in the set.
+- **Measured baseline** (`--k 5`, this corpus, this model): `recall@5 =
+  0.88`, `MRR = 0.589`, noise floor `0.4749`. Read `recall@5` as the
+  retrieval ceiling (no distance cutoff applied), not as what production
+  actually returns — see "Reading the output" above.
+
+This section records findings; it does not change retrieval behavior. Any
+fix (raising `--k`'s production analogue, retuning `similarity_threshold`,
+reranking) is separate work.
