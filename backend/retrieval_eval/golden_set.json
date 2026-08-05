@@ -1,0 +1,76 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "id": "revisit-time-objective",
+      "kind": "content",
+      "question": "What is achieved by minimizing revisit time in multi-UAV path planning?",
+      "paper_title_contains": "Joint Optimization",
+      "expect_substrings": ["revisit time"]
+    },
+    {
+      "id": "occupancy-updates",
+      "kind": "content",
+      "question": "How is probabilistic occupancy used during cooperative search?",
+      "paper_title_contains": "Cooperative Multi-Target",
+      "expect_substrings": ["occupancy"]
+    },
+    {
+      "id": "nineveh-case-study",
+      "kind": "content",
+      "question": "What archaeological region was surveyed with drones?",
+      "paper_title_contains": "Nineveh",
+      "expect_substrings": ["Nineveh"]
+    },
+    {
+      "id": "segmentation-datasets",
+      "kind": "content",
+      "question": "Which UAV datasets are used for segmentation?",
+      "paper_title_contains": "Diverse Applications",
+      "expect_substrings": ["segmentation"]
+    },
+    {
+      "id": "rotary-wing-types",
+      "kind": "content",
+      "question": "What types of rotary wing drones are described?",
+      "paper_title_contains": "Nineveh",
+      "expect_substrings": ["quadcopter"]
+    },
+    {
+      "id": "authors-of-search-paper",
+      "kind": "metadata",
+      "question": "Who wrote the paper on cooperative multi-target search?",
+      "paper_title_contains": "Cooperative Multi-Target",
+      "expect_substrings": ["Kadircan"]
+    },
+    {
+      "id": "ground-control-station",
+      "kind": "content",
+      "question": "What role does the ground control station play?",
+      "paper_title_contains": "Cooperative Multi-Target",
+      "expect_substrings": ["Ground Control Station"]
+    },
+    {
+      "id": "figure-reference",
+      "kind": "figure",
+      "question": "What does the figure showing UAV classification depict?",
+      "paper_title_contains": "Nineveh",
+      "expect_substrings": ["Figure"]
+    },
+    {
+      "id": "offtopic-cake",
+      "kind": "off_topic",
+      "question": "What is the best recipe for chocolate cake?"
+    },
+    {
+      "id": "offtopic-capital",
+      "kind": "off_topic",
+      "question": "What is the capital of France?"
+    },
+    {
+      "id": "offtopic-gibberish",
+      "kind": "off_topic",
+      "question": "zxqw plorb fnargle wibbet"
+    }
+  ]
+}
