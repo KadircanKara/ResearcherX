@@ -53,7 +53,7 @@ def first_satisfying_rank(case: Case, retrieved: list[Scored]) -> int | None:
 
 def recall_at_k(case_chunks: list[tuple[Case, list[Scored]]], k: int) -> float:
     if not case_chunks:
-        return 0.0
+        raise ValueError("no cases to score")
     hits = sum(
         1
         for case, chunks in case_chunks
@@ -64,7 +64,7 @@ def recall_at_k(case_chunks: list[tuple[Case, list[Scored]]], k: int) -> float:
 
 def mean_reciprocal_rank(case_chunks: list[tuple[Case, list[Scored]]], k: int) -> float:
     if not case_chunks:
-        return 0.0
+        raise ValueError("no cases to score")
     total = 0.0
     for case, chunks in case_chunks:
         rank = first_satisfying_rank(case, simulate_retrieval(chunks, k))
@@ -95,19 +95,30 @@ def sweep(
     k: int,
     thresholds: tuple[float, ...] = THRESHOLDS,
 ) -> list[SweepRow]:
-    """Content recall vs off-topic false-accept at each candidate cutoff."""
+    """Content recall vs off-topic false-accept at each candidate cutoff.
+
+    Raises if no negative case actually contributed a chunk: with none, every
+    threshold reports zero false-accept and `separating_threshold` would
+    return a number that was never measured. `if not negatives` alone would
+    miss the all-empty-sublists shape (off_topic cases that each returned
+    zero chunks) — `noise_floor` already treats that shape as "nothing
+    measured" (it returns None), so this check is made to agree with it via
+    `any(negatives)` rather than a plain truthiness check on the outer list.
+    """
+    if not any(negatives):
+        raise ValueError(
+            "sweep needs off_topic cases: with no negatives every threshold reports "
+            "zero false-accept and separating_threshold returns a number that was "
+            "never measured"
+        )
     rows: list[SweepRow] = []
     for threshold in thresholds:
         kept_pos = [
             (case, [c for c in chunks if c.distance < threshold]) for case, chunks in positives
         ]
         recall = recall_at_k(kept_pos, k)
-
-        if negatives:
-            accepted = sum(1 for chunks in negatives if any(c.distance < threshold for c in chunks))
-            false_accept = accepted / len(negatives)
-        else:
-            false_accept = 0.0
+        accepted = sum(1 for chunks in negatives if any(c.distance < threshold for c in chunks))
+        false_accept = accepted / len(negatives)
         rows.append(
             SweepRow(
                 threshold=threshold, content_recall=recall, off_topic_false_accept=false_accept

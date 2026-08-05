@@ -1,5 +1,7 @@
 """Tests for the eval harness's pure scoring functions. No DB, no embeddings."""
 
+import pytest
+
 from retrieval_eval.golden_set import Case
 from retrieval_eval.metrics import (
     Scored,
@@ -90,6 +92,36 @@ def test_sweep_reports_recall_and_false_accept_per_threshold():
     assert rows[0] == SweepRow(threshold=0.45, content_recall=0.0, off_topic_false_accept=0.0)
     assert rows[1] == SweepRow(threshold=0.55, content_recall=1.0, off_topic_false_accept=0.0)
     assert rows[2] == SweepRow(threshold=0.65, content_recall=1.0, off_topic_false_accept=1.0)
+
+
+def test_sweep_raises_without_negatives():
+    """With no negatives, every threshold would trivially report zero
+    false-accept, letting separating_threshold return a separation that was
+    never measured. Must raise instead of silently fabricating that number."""
+    positives = [(CASE, [_s("Alpha", "the target", 0.50)])]
+    with pytest.raises(ValueError):
+        sweep(positives, [], k=5, thresholds=(0.55, 0.65, 0.75))
+
+
+def test_sweep_raises_when_all_negatives_are_empty():
+    """off_topic cases that each returned zero chunks are indistinguishable
+    from having no negatives at all — a bare `if not negatives` check would
+    miss this shape (the outer list itself is non-empty)."""
+    positives = [(CASE, [_s("Alpha", "the target", 0.50)])]
+    with pytest.raises(ValueError):
+        sweep(positives, [[], []], k=5, thresholds=(0.55, 0.65, 0.75))
+
+
+def test_recall_at_k_raises_on_no_cases():
+    """Zero cases scored is not the same as zero recall — reporting 0.0 would
+    read as 'measured and failed' instead of 'nothing was measured'."""
+    with pytest.raises(ValueError):
+        recall_at_k([], k=5)
+
+
+def test_mrr_raises_on_no_cases():
+    with pytest.raises(ValueError):
+        mean_reciprocal_rank([], k=5)
 
 
 def test_separating_threshold_finds_full_recall_zero_false_accept():
