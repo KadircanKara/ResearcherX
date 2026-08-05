@@ -191,6 +191,86 @@ def test_rejects_whitespace_only_title(tmp_path: Path):
         load_golden_set(path)
 
 
+def test_rejects_empty_string_expect_substrings_element(tmp_path: Path):
+    """An empty-string element is a substring of every chunk, so
+    chunk_satisfies would return True for any chunk from the correct paper
+    regardless of content -- the same silent-false-hit class as the
+    non-list expect_substrings bug, just per-element instead of per-field."""
+    path = _write(
+        tmp_path,
+        {
+            "version": 1,
+            "cases": [
+                {
+                    "id": "bad",
+                    "kind": "content",
+                    "question": "q",
+                    "paper_title_contains": "X",
+                    "expect_substrings": [""],
+                }
+            ],
+        },
+    )
+    with pytest.raises(GoldenSetError, match=r"expect_substrings\[0\]"):
+        load_golden_set(path)
+
+
+def test_rejects_whitespace_only_expect_substrings_element(tmp_path: Path):
+    """Same class as the empty-string element, but whitespace-only -- still
+    a substring of every chunk."""
+    path = _write(
+        tmp_path,
+        {
+            "version": 1,
+            "cases": [
+                {
+                    "id": "bad",
+                    "kind": "content",
+                    "question": "q",
+                    "paper_title_contains": "X",
+                    "expect_substrings": ["revisit time", " "],
+                }
+            ],
+        },
+    )
+    with pytest.raises(GoldenSetError, match=r"expect_substrings\[1\]"):
+        load_golden_set(path)
+
+
+def test_loads_a_case_with_multiple_valid_substrings(tmp_path: Path):
+    """Both-directions check for the element-validation fix above: a
+    legitimate multi-element expect_substrings list must still load."""
+    path = _write(
+        tmp_path,
+        {
+            "version": 1,
+            "cases": [
+                {
+                    "id": "c1",
+                    "kind": "content",
+                    "question": "q",
+                    "paper_title_contains": "Joint Optimization",
+                    "expect_substrings": ["revisit time", "coverage"],
+                }
+            ],
+        },
+    )
+    cases = load_golden_set(path)
+    assert cases[0].expect_substrings == ("revisit time", "coverage")
+
+
+def test_rejects_dict_valued_cases(tmp_path: Path):
+    """'cases' must be a list. A dict (e.g. mistakenly keyed by case id) is
+    truthy but not a list, and must be rejected explicitly -- covers the
+    'cases' must be a list' branch that the non-dict-entry test doesn't."""
+    path = _write(
+        tmp_path,
+        {"version": 1, "cases": {"c1": {"id": "c1", "kind": "content"}}},
+    )
+    with pytest.raises(GoldenSetError, match="'cases' must be a list"):
+        load_golden_set(path)
+
+
 def test_satisfies_requires_all_substrings():
     """All, not any — one common word must not carry a case."""
     case = Case(

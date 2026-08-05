@@ -52,7 +52,15 @@ def _parse_case(raw: dict) -> Case:
         raise GoldenSetError(
             f"case {case_id!r}: expect_substrings must be a list, got {type(raw_subs).__name__}"
         )
-    subs = tuple(raw_subs or ())
+    for i, sub in enumerate(raw_subs or []):
+        if not isinstance(sub, str) or not sub.strip():
+            raise GoldenSetError(
+                f"case {case_id!r}: expect_substrings[{i}] must be a non-empty string"
+            )
+    # Stripped, not just validated: a trailing/leading space copied in from a
+    # source PDF (e.g. "revisit time ") would otherwise silently fail to
+    # match text where the phrase sits at a line or chunk boundary.
+    subs = tuple(sub.strip() for sub in (raw_subs or ()))
 
     if kind == "off_topic":
         if title or subs:
