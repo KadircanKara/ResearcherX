@@ -35,7 +35,8 @@ class Case:
 
 def _parse_case(raw: dict) -> Case:
     for field in ("id", "kind", "question"):
-        if not raw.get(field):
+        value = raw.get(field)
+        if not isinstance(value, str) or not value.strip():
             raise GoldenSetError(f"case is missing required field {field!r}: {raw!r}")
 
     case_id, kind = raw["id"], raw["kind"]
@@ -45,7 +46,13 @@ def _parse_case(raw: dict) -> Case:
         )
 
     title = raw.get("paper_title_contains")
-    subs = tuple(raw.get("expect_substrings") or ())
+
+    raw_subs = raw.get("expect_substrings")
+    if raw_subs is not None and not isinstance(raw_subs, list):
+        raise GoldenSetError(
+            f"case {case_id!r}: expect_substrings must be a list, got {type(raw_subs).__name__}"
+        )
+    subs = tuple(raw_subs or ())
 
     if kind == "off_topic":
         if title or subs:
@@ -54,7 +61,7 @@ def _parse_case(raw: dict) -> Case:
                 "or expect_substrings — they assert that nothing relevant exists"
             )
     else:
-        if not title:
+        if not (title or "").strip():
             raise GoldenSetError(f"case {case_id!r}: {kind} case needs paper_title_contains")
         if not subs:
             raise GoldenSetError(f"case {case_id!r}: {kind} case needs expect_substrings")
@@ -73,6 +80,13 @@ def load_golden_set(path: Path) -> list[Case]:
     raw_cases = payload.get("cases")
     if not raw_cases:
         raise GoldenSetError(f"{path}: no cases defined")
+    if not isinstance(raw_cases, list):
+        raise GoldenSetError(f"{path}: 'cases' must be a list, got {type(raw_cases).__name__}")
+    for raw in raw_cases:
+        if not isinstance(raw, dict):
+            raise GoldenSetError(
+                f"{path}: each case must be an object, got {type(raw).__name__}: {raw!r}"
+            )
 
     cases = [_parse_case(raw) for raw in raw_cases]
 
@@ -88,7 +102,10 @@ def chunk_satisfies(case: Case, paper_title: str, chunk_text: str) -> bool:
     """True when this chunk is a correct hit for the case.
 
     Requires the expected paper AND every expected substring — all, not any,
-    so a single common word can't carry a case.
+    so a single common word can't carry a case. Always returns False for
+    off_topic cases (they have no paper_title_contains to match) — this is
+    intentional, not an oversight: it lets the runner call this uniformly
+    across all kinds without branching on `is_negative`.
     """
     if case.paper_title_contains is None:
         return False

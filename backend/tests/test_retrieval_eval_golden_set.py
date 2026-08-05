@@ -115,16 +115,79 @@ def test_rejects_unknown_kind(tmp_path: Path):
 
 
 def test_rejects_duplicate_ids(tmp_path: Path):
-    """Duplicate ids would make per-case results ambiguous in the report."""
+    """Duplicate ids would make per-case results ambiguous in the report.
+
+    The fixture id and match pattern are chosen so this test proves the
+    offending id actually reaches the error message: "dup" would trivially
+    match because it's a substring of "duplicate", so we use an id that
+    isn't, and match on the full "duplicate case id" phrasing.
+    """
     case = {
-        "id": "dup",
+        "id": "zzz-repeat",
         "kind": "content",
         "question": "q",
         "paper_title_contains": "X",
         "expect_substrings": ["y"],
     }
     path = _write(tmp_path, {"version": 1, "cases": [case, dict(case)]})
-    with pytest.raises(GoldenSetError, match="dup"):
+    with pytest.raises(GoldenSetError, match="duplicate case id 'zzz-repeat'"):
+        load_golden_set(path)
+
+
+def test_rejects_non_list_expect_substrings(tmp_path: Path):
+    """A string instead of a list of substrings would explode into individual
+    characters via tuple(str) — and since chunk_satisfies requires ALL of
+    them, and every letter plus space is present in ordinary prose, the case
+    would silently become a match-anything trap instead of raising."""
+    path = _write(
+        tmp_path,
+        {
+            "version": 1,
+            "cases": [
+                {
+                    "id": "bad",
+                    "kind": "content",
+                    "question": "q",
+                    "paper_title_contains": "X",
+                    "expect_substrings": "revisit time",
+                }
+            ],
+        },
+    )
+    with pytest.raises(GoldenSetError, match="expect_substrings"):
+        load_golden_set(path)
+
+
+def test_rejects_non_dict_case_entries(tmp_path: Path):
+    """A cases list containing a non-dict entry must raise GoldenSetError —
+    not an incidental AttributeError from the parser reaching into it, which
+    would break the documented contract that malformed input always raises
+    GoldenSetError."""
+    path = _write(tmp_path, {"version": 1, "cases": ["oops"]})
+    with pytest.raises(GoldenSetError, match="case"):
+        load_golden_set(path)
+
+
+def test_rejects_whitespace_only_title(tmp_path: Path):
+    """A lone space passes a truthiness check but is a substring of virtually
+    every multi-word title, making the "requires the expected paper" guard
+    vacuous for that case."""
+    path = _write(
+        tmp_path,
+        {
+            "version": 1,
+            "cases": [
+                {
+                    "id": "bad",
+                    "kind": "content",
+                    "question": "q",
+                    "paper_title_contains": "   ",
+                    "expect_substrings": ["y"],
+                }
+            ],
+        },
+    )
+    with pytest.raises(GoldenSetError, match="paper_title_contains"):
         load_golden_set(path)
 
 
