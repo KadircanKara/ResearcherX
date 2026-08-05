@@ -15,6 +15,7 @@ from retrieval_eval.metrics import Scored
 from retrieval_eval.run_eval import (
     _MIN_NEGATIVES_FOR_CONFIDENCE,
     _MIN_POSITIVES_FOR_CONFIDENCE,
+    _display_point,
     _is_provisional,
     _model_mismatch_message,
     _off_topic_acceptance_rate,
@@ -214,3 +215,22 @@ def test_off_topic_acceptance_rate_mixed_empty_and_nonempty_still_measures():
     would wrongly report 1.0 instead of 0.5."""
     negatives = [[], [_s("Beta", "junk", 0.10)]]
     assert _off_topic_acceptance_rate(negatives, threshold=0.75) == 0.5
+
+
+# --- _display_point --------------------------------------------------------------
+
+
+def test_display_point_formats_midpoint_when_safe():
+    assert _display_point(0.4543, 0.4749) == "0.4646"
+
+
+def test_display_point_falls_back_to_raw_bounds_when_recommended_point_raises():
+    """`recommended_point` raises ValueError when an interval is narrower
+    than display precision (see its own tests in
+    test_retrieval_eval_metrics.py). That must never propagate out of
+    main(): uncaught, it would take out the ROBUST FINDING section printed
+    after it and, with --json, the whole file dump — for a display nicety.
+    Must fall back to the raw bounds instead of crashing."""
+    text = _display_point(0.499991, 0.499992)
+    assert "0.499991" in text
+    assert "0.499992" in text

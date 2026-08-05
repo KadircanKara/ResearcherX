@@ -183,6 +183,22 @@ def _off_topic_acceptance_rate(negatives: list[list[Scored]], threshold: float) 
     return accepted / len(negatives)
 
 
+def _display_point(lo: float, hi: float) -> str:
+    """Recommended midpoint of (lo, hi], formatted for display — or the raw
+    bounds when the interval is too narrow for `recommended_point` to find a
+    rounded value that still lies inside it (see its docstring: a measured
+    possibility on a narrow interval, not a bug). The ValueError it raises is
+    correct to raise from a pure metrics function, but must never propagate
+    out of `main()`: uncaught, it would take out the ROBUST FINDING section
+    printed after it, and — with --json — the whole file dump, over a display
+    nicety.
+    """
+    try:
+        return f"{recommended_point(lo, hi):.4f}"
+    except ValueError:
+        return f"no display value fits — raw bounds ({lo:.6f}, {hi:.6f}]"
+
+
 async def _chunks_for(db, svc: EmbeddingService, case: Case) -> list[Scored]:
     embedding = await svc.embed(case.question, task_type="RETRIEVAL_QUERY")
     rows = (
@@ -386,7 +402,7 @@ async def main() -> None:  # noqa: PLR0912, PLR0915 — a report script, not a l
         else:
             lo, hi = diagnosis.interval.lo, diagnosis.interval.hi
             margin = hi - lo
-            point = recommended_point(lo, hi)
+            point_display = _display_point(lo, hi)
             n_pos, n_neg = len(positives), len(negatives)
             neg_bests = [min(c.distance for c in chunks) for chunks in negatives if chunks]
             neg_spread = (max(neg_bests) - min(neg_bests)) if len(neg_bests) > 1 else 0.0
@@ -405,7 +421,7 @@ async def main() -> None:  # noqa: PLR0912, PLR0915 — a report script, not a l
                 f"n={n_neg} negatives"
             )
             print(
-                f"    any T in ({lo:.4f}, {hi:.4f}] separates; midpoint {point:.4f}, "
+                f"    any T in ({lo:.4f}, {hi:.4f}] separates; midpoint {point_display}, "
                 f"margin {margin:.4f}"
             )
 
@@ -420,8 +436,7 @@ async def main() -> None:  # noqa: PLR0912, PLR0915 — a report script, not a l
                     )
                 elif alt < hi:
                     print(
-                        f"    Drop {diagnosis.lo_case_id} and it becomes "
-                        f"{recommended_point(alt, hi):.4f}."
+                        f"    Drop {diagnosis.lo_case_id} and it becomes {_display_point(alt, hi)}."
                     )
                 else:
                     print(
@@ -436,7 +451,9 @@ async def main() -> None:  # noqa: PLR0912, PLR0915 — a report script, not a l
                     f"exceeding {lo:.4f} — together ~{p_either:.0%} odds the recommendation is "
                     "already dead if the set grows by one of each."
                 )
-                print(f"    Treat {point:.4f} as a hypothesis to test, not a value to configure.")
+                print(
+                    f"    Treat {point_display} as a hypothesis to test, not a value to configure."
+                )
 
     # --- robust finding: survives any resampling, printed unconditionally --
     current = settings.similarity_threshold
