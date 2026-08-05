@@ -42,9 +42,15 @@ from retrieval_eval.metrics import (
 _DEFAULT_SET = Path(__file__).parent / "golden_set.json"
 
 # A printed separating threshold only drops the PROVISIONAL banner when
-# there are enough negatives AND the margin clears the spread of the
-# negatives that define it — see the "closed-form separating interval"
-# section of main() and README.md's "Reading the output".
+# there are enough cases on BOTH sides AND the margin clears the spread of
+# the negatives that define it — see the "closed-form separating interval"
+# section of main() and README.md's "Reading the output". `lo` is set by a
+# single worst-case positive exactly as `hi` is set by a single closest
+# negative, so the gate must check sample size on both sides, not just the
+# negative one -- these numbers also match the ROBUST-finding text's own
+# ">=20 positives, >=10 negatives" advice; the gate and the advice must
+# agree, or the advice is telling users to reach a bar the code never checks.
+_MIN_POSITIVES_FOR_CONFIDENCE = 20
 _MIN_NEGATIVES_FOR_CONFIDENCE = 10
 
 _MODEL_COUNTS_SQL = text("SELECT model, count(*) AS n FROM paper_chunk_embeddings GROUP BY model")
@@ -130,6 +136,27 @@ def _positive_case_status(case: Case, chunks: list[Scored]) -> str | None:
             f"corpus contains {list(case.expect_substrings)!r}"
         )
     return None
+
+
+def _is_provisional(n_pos: int, n_neg: int, margin: float, neg_spread: float) -> bool:
+    """Whether a found separating interval must print PROVISIONAL rather
+    than an unqualified SEPARATION FOUND.
+
+    Gates on sample size on BOTH sides, not just negatives: `lo` is set by a
+    single worst-case positive exactly as `hi` is set by a single closest
+    negative, so a golden set with plenty of negatives but only 1-2
+    positives is exactly as fragile as one with plenty of positives but too
+    few negatives — an unqualified verdict from either shape rests on a
+    single witness. `_MIN_POSITIVES_FOR_CONFIDENCE` /
+    `_MIN_NEGATIVES_FOR_CONFIDENCE` also match the numbers the ROBUST-finding
+    text recommends widening to; the gate and the advice must agree, or the
+    advice is telling users to reach a bar the code doesn't check.
+    """
+    return not (
+        n_pos >= _MIN_POSITIVES_FOR_CONFIDENCE
+        and n_neg >= _MIN_NEGATIVES_FOR_CONFIDENCE
+        and margin > neg_spread
+    )
 
 
 async def _chunks_for(db, svc: EmbeddingService, case: Case) -> list[Scored]:
@@ -323,7 +350,7 @@ async def main() -> None:  # noqa: PLR0912, PLR0915 — a report script, not a l
             n_pos, n_neg = len(positives), len(negatives)
             neg_bests = [min(c.distance for c in chunks) for chunks in negatives if chunks]
             neg_spread = (max(neg_bests) - min(neg_bests)) if len(neg_bests) > 1 else 0.0
-            provisional = not (n_neg >= _MIN_NEGATIVES_FOR_CONFIDENCE and margin > neg_spread)
+            provisional = _is_provisional(n_pos, n_neg, margin, neg_spread)
 
             header = "SEPARATION FOUND"
             if provisional:

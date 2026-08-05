@@ -13,6 +13,9 @@ import pytest
 from retrieval_eval.golden_set import Case
 from retrieval_eval.metrics import Scored
 from retrieval_eval.run_eval import (
+    _MIN_NEGATIVES_FOR_CONFIDENCE,
+    _MIN_POSITIVES_FOR_CONFIDENCE,
+    _is_provisional,
     _model_mismatch_message,
     _positive_case_status,
     _positive_int,
@@ -100,3 +103,65 @@ def test_positive_case_status_reports_unwinnable_substring_not_missing_paper():
     assert status is not None
     assert "no paper matching" not in status
     assert "no chunk in the corpus contains" in status
+
+
+# --- _is_provisional -----------------------------------------------------------
+
+
+def test_is_provisional_false_when_both_sides_and_margin_clear_the_bar():
+    assert (
+        _is_provisional(
+            n_pos=_MIN_POSITIVES_FOR_CONFIDENCE,
+            n_neg=_MIN_NEGATIVES_FOR_CONFIDENCE,
+            margin=0.10,
+            neg_spread=0.05,
+        )
+        is False
+    )
+
+
+def test_is_provisional_true_with_plenty_of_negatives_but_few_positives():
+    """The asymmetry the review caught: the gate used to check only n_neg
+    and margin, never n_pos. `lo` is set by a single worst-case positive
+    exactly as `hi` is set by a single closest negative, so a golden set
+    with 15 negatives and only 2 positives is exactly as fragile as one with
+    too few negatives — an unqualified SEPARATION FOUND from either shape
+    would rest on a single witness. Plenty of negatives and a comfortable
+    margin must NOT be enough on their own."""
+    assert (
+        _is_provisional(
+            n_pos=2,
+            n_neg=15,
+            margin=0.20,
+            neg_spread=0.01,
+        )
+        is True
+    )
+
+
+def test_is_provisional_true_with_plenty_of_positives_but_few_negatives():
+    """The symmetric, already-covered case: too few negatives alone must
+    also still be provisional."""
+    assert (
+        _is_provisional(
+            n_pos=25,
+            n_neg=3,
+            margin=0.20,
+            neg_spread=0.01,
+        )
+        is True
+    )
+
+
+def test_is_provisional_true_when_margin_does_not_clear_negative_spread():
+    """Sample size alone isn't enough either — the margin must exceed the
+    spread of the negatives that define it."""
+    assert (
+        _is_provisional(
+            n_pos=_MIN_POSITIVES_FOR_CONFIDENCE,
+            n_neg=_MIN_NEGATIVES_FOR_CONFIDENCE,
+            margin=0.02,
+            neg_spread=0.05,
+        )
+        is True
+    )
