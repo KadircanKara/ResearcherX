@@ -32,10 +32,17 @@ class SweepRow:
 
 
 def simulate_retrieval(chunks: list[Scored], k: int) -> list[Scored]:
-    """Reproduce chat_service._retrieve_paper_chunks: top-k PER PAPER, concatenated.
+    """Reproduce the SET of chunks chat_service._retrieve_paper_chunks would fetch:
+    top-k PER PAPER (not a global top-k — the production path queries each paper
+    separately, so a global cut would starve every paper but the nearest and
+    overstate misses).
 
-    Not a global top-k — the production path queries each paper separately, so a
-    global cut would starve every paper but the nearest and overstate misses.
+    The returned order is NOT production's order: production iterates papers in
+    library order and concatenates each paper's chunks without a final re-sort
+    across papers, so a hit's position in the LLM's context can differ from its
+    rank here. This function instead returns the set ordered by distance —
+    nearest chunk first regardless of which paper it came from. See
+    `mean_reciprocal_rank` for what that means for MRR.
     """
     by_paper: dict[str, list[Scored]] = {}
     for chunk in sorted(chunks, key=lambda c: c.distance):
@@ -53,6 +60,14 @@ def first_satisfying_rank(case: Case, retrieved: list[Scored]) -> int | None:
 
 
 def recall_at_k(case_chunks: list[tuple[Case, list[Scored]]], k: int) -> float:
+    """Fraction of cases with a satisfying chunk within the per-paper top-k.
+
+    This is the retrieval CEILING, not what production returns: no distance
+    cutoff is applied here, only per-paper top-k. Production also filters by
+    `similarity_threshold` before top-k (see `sweep`), so production recall is
+    always <= this number. Do not report this figure as "what production
+    achieves" — pair it with `sweep`'s content_recall column for that.
+    """
     if not case_chunks:
         raise ValueError("no cases to score")
     hits = sum(
@@ -64,6 +79,17 @@ def recall_at_k(case_chunks: list[tuple[Case, list[Scored]]], k: int) -> float:
 
 
 def mean_reciprocal_rank(case_chunks: list[tuple[Case, list[Scored]]], k: int) -> float:
+    """Mean of 1/rank over each case's first satisfying chunk, ranked by
+    `simulate_retrieval`'s distance order (nearest first, across all retrieved
+    papers).
+
+    This measures embedding rank quality, NOT position in the LLM's context:
+    production concatenates papers in library order without re-sorting across
+    papers, so a chunk's rank here can differ from where it lands in the
+    prompt production actually sends. Like `recall_at_k`, no distance cutoff
+    is applied, so this is also a ceiling, not what `similarity_threshold`
+    filtering leaves production with.
+    """
     if not case_chunks:
         raise ValueError("no cases to score")
     total = 0.0
