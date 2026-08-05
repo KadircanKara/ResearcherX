@@ -8,7 +8,19 @@ import { cn } from "@/lib/utils";
 
 // Module-level so it survives re-renders and is shared across every citation
 // in the conversation — re-hovering the same source costs nothing.
+//
+// The key (`paper_id:chunk_index`) is unique across papers but NOT across
+// time: `index_chunks` deletes and reinserts every row on re-index, so a
+// given chunk_index can point at different text after a paper is
+// re-ingested. An unbounded cache would then serve stale text forever with
+// no signal — worse than the 404 case, which visibly falls back to the
+// snippet. `resetChunkCache` bounds staleness to a single conversation view;
+// call it whenever the conversation being displayed changes.
 const chunkCache = new Map<string, string>();
+
+export function resetChunkCache() {
+  chunkCache.clear();
+}
 
 const STOPWORDS = new Set([
   "what", "which", "does", "used", "from", "with", "that", "this",
@@ -37,7 +49,7 @@ function highlight(text: string, terms: string[]) {
     .map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
   const re = new RegExp(`(${escaped.join("|")})`, "gi");
   return text.split(re).map((part, i) =>
-    re.test(part) && terms.includes(part.toLowerCase()) ? (
+    terms.includes(part.toLowerCase()) ? (
       <mark key={i} className="rounded bg-amber-300/30 px-0.5 text-inherit">
         {part}
       </mark>

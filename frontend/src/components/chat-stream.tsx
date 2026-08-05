@@ -6,7 +6,7 @@ import remarkGfm from "remark-gfm";
 import type { ChatCitation, ChatEvent, ChatMessage } from "@/lib/types";
 import { chatMessagesUrl, getConversation } from "@/lib/chat";
 import { getDevUserId } from "@/lib/api";
-import { CitationHoverCard, queryTermsFrom } from "@/components/citation-hover-card";
+import { CitationHoverCard, queryTermsFrom, resetChunkCache } from "@/components/citation-hover-card";
 
 // Typography for markdown inside a chat bubble. `prose-invert` under .dark
 // (tailwind darkMode: "class"). max-w-none because the bubble already caps
@@ -53,6 +53,10 @@ export function ChatStream({
     setStreamingText("");
     setStatus("idle");
     setError(null);
+    // Bound the citation chunk cache to a single conversation view: a chunk
+    // fetched under a stale chunk_index (paper re-ingested after it was
+    // cached) must not leak into a different conversation's citations.
+    resetChunkCache();
   }, [conversationId]);
 
   // Auto-scroll
