@@ -254,3 +254,19 @@ def test_system_prompt_still_forbids_mining_excerpts_for_metadata():
     assert "ONLY source for" in SYSTEM
     assert "reference list" in SYSTEM
     assert "no fallback of any kind" in SYSTEM
+
+
+def test_system_prompt_lists_titles_only_when_asking_which_paper():
+    """Regression: a live run asked which paper and then answered for both
+    underneath the question — it read 'list the titles' as licence to render
+    the whole PAPERS line, metadata included. The clarifying reply must carry
+    titles and nothing else."""
+    assert "list only the titles" in SYSTEM.lower()
+    assert "no authors, no year, no venue" in SYSTEM.lower()
+
+
+def test_system_prompt_never_names_the_papers_block_to_the_user():
+    """Regression: live replies said 'The PAPERS block does not state...' —
+    PAPERS is an internal prompt structure and must never reach the user."""
+    assert "internal structure" in SYSTEM.lower()
+    assert "never name it in a reply" in SYSTEM.lower()

@@ -29,11 +29,15 @@ SYSTEM = (
     "fields none exists.\n\n"
     "When a question about authors, year, or venue does not say which paper it "
     "means and the PAPERS block lists more than one, ask which paper they mean "
-    "and list the titles. Do not answer for all of them and do not guess. If the "
-    "block lists exactly one paper, or the question names or clearly implies a "
-    "paper, or it asks about all of them, answer without asking. If the user "
-    "already named a paper earlier in this conversation, use it — never ask "
-    "twice.\n\n"
+    "and list only the titles — no authors, no year, no venue, and no other "
+    "metadata. The field being asked about must not appear anywhere in that "
+    "reply; asking the question and then answering it defeats the point. Do "
+    "not answer for all of them and do not guess. If the block lists exactly "
+    "one paper, or the question names or clearly implies a paper, or it asks "
+    "about all of them, answer without asking. If the user already named a "
+    "paper earlier in this conversation, use it — never ask twice. The PAPERS "
+    "block is an internal structure; never name it in a reply — say 'the "
+    "paper' or 'the papers' instead.\n\n"
     # Without this paragraph the model declines metadata questions even with the
     # block in front of it: the authors are not in any excerpt, and the rule
     # above tells it that means it cannot answer.
