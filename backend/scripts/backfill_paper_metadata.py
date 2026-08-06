@@ -9,7 +9,9 @@ isn't installed and file-path invocation drops cwd from sys.path, failing with
 
 The prod image copies only app/, alembic/, and alembic.ini — `scripts/` is not
 in it — so backfilling production means running this from a local checkout
-pointed at the prod DATABASE_URL, not from the deployed container.
+pointed at the prod DATABASE_URL, not from the deployed container. `--force`
+against that DATABASE_URL writes unconditionally: see its --help for what
+that can overwrite.
 
 Extraction runs through the same `apply_metadata` live ingest uses, so what
 this writes is what production would have written.
@@ -30,15 +32,22 @@ async def main() -> None:
     parser.add_argument(
         "--force",
         action="store_true",
-        help="re-extract papers that already have metadata (default: skip them)",
+        help=(
+            "re-extract papers that already have metadata (default: skip them). "
+            "Writes unconditionally: a noisier re-extraction than the one already "
+            "stored will overwrite real authors with [] and reset metadata_source "
+            "to 'none'. There is no dry-run or confirmation prompt."
+        ),
     )
     args = parser.parse_args()
 
     async with SessionLocal() as db:
         papers = (await db.execute(select(Paper).order_by(Paper.created_at))).scalars().all()
         targets = [p for p in papers if args.force or p.metadata_source == SOURCE_NONE]
-        # Materialise what each call needs before the loop: apply_metadata
-        # commits, which expires the ORM instances.
+        # Materialise what each call needs before the loop: this `async with`
+        # block closes the session before the loop runs, and the ORM
+        # instances loaded through it would be detached from any session
+        # thereafter.
         work = [(p.id, p.title, p.extracted_text, p.pdf_url) for p in targets]
 
     print(f"{len(papers)} papers, {len(work)} to process")

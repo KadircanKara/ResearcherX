@@ -30,8 +30,17 @@ behind it.
 
 `hallucinated` is the bucket that matters and the one a plain accuracy score
 would hide: a `venue` populated for a paper that has none *looks* like a filled
-field. Both dev-corpus papers are preprints with no year and no venue, so this
-bucket is exercised on every run rather than being theoretical.
+field. Both dev-corpus papers are preprints with no year and no venue, so the
+*absent-truth/absent-extraction → `correct`* comparison is exercised on every
+run — but that is not the same as the `hallucinated` verdict itself. Reaching
+`hallucinated` requires the database to hold a value the paper does not
+state, and a correctly-behaving extractor never produces one, so on a healthy
+corpus this run never exercises that branch live. It is a detector, covered
+instead by unit tests on the pure comparison functions
+(`tests/test_evals_metadata_compare.py`). `0 HALLUCINATED` on a run therefore
+means "nothing was detected this run," not "the detector was proven live
+here" — the detector's correctness rests on those unit tests, not on this
+harness ever having a case that trips it.
 
 `missed` alone exits 0; any `wrong` or `hallucinated` exits 1.
 
