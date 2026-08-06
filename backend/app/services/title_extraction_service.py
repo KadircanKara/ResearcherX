@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field, field_validator
 from app.core import debug_log
 from app.core.logging import log
 from app.llm.structured import parse_structured
+from app.services.text_normalization import recompose_diacritics
 
 _MAX_AUTHORS = 50
 _MAX_AUTHOR_LEN = 200
@@ -47,7 +48,7 @@ class PaperMeta(BaseModel):
         for item in v:
             if not isinstance(item, str):
                 continue
-            name = " ".join(item.split())
+            name = recompose_diacritics(" ".join(item.split()))
             if name:
                 out.append(name[:_MAX_AUTHOR_LEN])
         return out[:_MAX_AUTHORS]
@@ -68,7 +69,7 @@ class PaperMeta(BaseModel):
     def _coerce_venue(cls, v: object) -> str | None:
         if not isinstance(v, str):
             return None
-        return " ".join(v.split())[:_MAX_VENUE_LEN] or None
+        return recompose_diacritics(" ".join(v.split()))[:_MAX_VENUE_LEN] or None
 
 
 _DOI_RE = re.compile(r"10\.\d{4,}/[^\s\"<>]+")

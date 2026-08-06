@@ -59,6 +59,16 @@ def test_venue_whitespace_collapsed():
     assert PaperMeta(venue="IEEE   ICRA\n2024").venue == "IEEE ICRA 2024"
 
 
+def test_authors_have_pdf_mangled_diacritics_repaired():
+    """The corpus really stores these forms; users must never see them."""
+    m = PaperMeta(authors=["Evs¸en Yanmaz", "˙Islam G¨uven"])
+    assert m.authors == ["Evşen Yanmaz", "İslam Güven"]
+
+
+def test_venue_diacritics_repaired():
+    assert PaperMeta(venue="Conf´erence Internationale").venue == "Conférence Internationale"
+
+
 def test_defaults_are_absent():
     m = PaperMeta()
     assert m.authors == []
