@@ -353,7 +353,7 @@ async def ingest_paper_from_url(
             },
         )
     try:
-        n = await ingest(db, paper_id, pdf_bytes)
+        n = await ingest(db, paper_id, pdf_bytes, source_url=body.url)
     except RateLimitError:
         # The PDF fetched and parsed fine — only the embedding provider is out
         # of quota. A 500 here reads to the user as "this paper is unreachable"

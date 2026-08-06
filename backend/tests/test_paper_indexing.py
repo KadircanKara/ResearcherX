@@ -2,6 +2,7 @@
 
 from unittest.mock import AsyncMock, patch
 
+import pytest
 import pytest_asyncio
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -10,6 +11,18 @@ from app.core.config import settings
 from app.db.models import Paper, PaperChunkEmbedding, Project, ProjectMember, User
 from app.db.seed import seed_users
 from app.services import paper_ingest_service as svc
+
+
+@pytest.fixture(autouse=True)
+def no_metadata_extraction():
+    """ingest() now makes an LLM call for metadata. It fails open, so tests
+    pass either way — but the SDK retries the unroutable endpoint with
+    backoff first, adding seconds per test for nothing."""
+    with patch(
+        "app.services.paper_ingest_service.apply_metadata",
+        new=AsyncMock(return_value="none"),
+    ):
+        yield
 
 
 @pytest_asyncio.fixture

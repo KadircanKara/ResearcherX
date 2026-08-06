@@ -3,6 +3,7 @@
 from unittest.mock import AsyncMock, patch
 
 import httpx
+import pytest
 import pytest_asyncio
 from httpx import AsyncClient
 from openai import RateLimitError
@@ -12,6 +13,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.models import Project, ProjectMember, User
 from app.db.seed import seed_users
 from app.services.paper_fetch_service import PaywallError
+
+
+@pytest.fixture(autouse=True)
+def no_metadata_extraction():
+    """ingest() now makes an LLM call for metadata. It fails open, so tests
+    pass either way — but the SDK retries the unroutable endpoint with
+    backoff first, adding seconds per test for nothing."""
+    with patch(
+        "app.services.paper_ingest_service.apply_metadata",
+        new=AsyncMock(return_value="none"),
+    ):
+        yield
+
 
 _FAKE_PDF = (
     b"%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n"
