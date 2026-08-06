@@ -89,9 +89,13 @@ def build_papers_block(papers: list[PaperMetaContext]) -> str:
         return ""
     lines = []
     for p in papers:
-        parts = [f'"{p.title}"']
-        if p.authors:
-            parts.append("Authors: " + ", ".join(p.authors))
+        # Collapse whitespace (including embedded newlines) so a title can
+        # never forge an extra "- " line or split the PAPERS block's
+        # one-line-per-paper structure.
+        parts = [f'"{" ".join(p.title.split())}"']
+        authors = [a for a in p.authors if a and a.strip()]
+        if authors:
+            parts.append("Authors: " + ", ".join(authors))
         if p.year is not None:
             parts.append(str(p.year))
         if p.venue:
