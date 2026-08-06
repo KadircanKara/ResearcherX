@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from app.agents.retrieval_planner import PlannerInput, RetrievalPlan, RetrievalPlannerAgent
 from app.agents.chat_agent import (
+    SYSTEM,
     ChatAgent,
     ChatAgentInput,
     ChunkContext,
@@ -180,3 +181,16 @@ async def test_stream_still_works_without_papers():
             )
         ]
     assert tokens == ["hi"]
+
+
+def test_system_prompt_forbids_mining_excerpts_for_paper_metadata():
+    """Regression: live check asked "What year were these published?" and the
+    model read a cited work's year out of chunk 13 — that paper's own
+    bibliography — and reported it as the paper's publication year. The
+    PAPERS block must be authoritative for absence too, not just presence,
+    or the model falls back to mining excerpt text for a year-shaped number.
+    """
+    assert "ONLY source for" in SYSTEM
+    assert "authors, year, and venue" in SYSTEM
+    assert "reference list" in SYSTEM
+    assert "the paper does not state it" in SYSTEM

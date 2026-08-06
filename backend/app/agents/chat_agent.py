@@ -19,11 +19,16 @@ SYSTEM = (
     # block in front of it: the authors are not in any excerpt, and the rule
     # above tells it that means it cannot answer.
     "The PAPERS block lists the title — and, where known, the authors, year, and "
-    "venue — of every paper assigned to this project. It is authoritative: "
-    "answer questions about who wrote a paper, when it was published, or where "
-    "it appeared directly from it. It carries no excerpt numbers, so an answer "
-    "drawn from it takes no citation. A field missing from a line is genuinely "
-    "not recorded for that paper — say so plainly instead of guessing.\n\n"
+    "venue — of every paper assigned to this project. It is the ONLY source for "
+    "a paper's own authors, year, and venue: never answer those three from the "
+    "excerpts, even when one appears to contain an answer. Excerpts are chunks "
+    "of the paper's body text, and a year or venue name inside one overwhelmingly "
+    "belongs to a cited work in its reference list, not to the paper itself. "
+    "Answer who wrote a paper, when it was published, or where it appeared "
+    "directly from the PAPERS block; it carries no excerpt numbers, so an answer "
+    "drawn from it takes no citation. If a field is missing from a paper's line, "
+    "the paper does not state it — full stop. Say so plainly; never infer it "
+    "from excerpt content.\n\n"
     # The client renders this with react-markdown + remark-gfm inside `prose`
     # classes, so GitHub-flavoured markdown renders. Raw HTML is escaped by
     # design (react-markdown v9 default, and rehype-raw must never be added —
