@@ -2,8 +2,8 @@
 
 import pytest
 
-from retrieval_eval.golden_set import Case
-from retrieval_eval.metrics import (
+from evals.retrieval.golden_set import Case
+from evals.retrieval.metrics import (
     Scored,
     SeparatingInterval,
     best_satisfying_distance,

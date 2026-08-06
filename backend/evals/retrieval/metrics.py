@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from retrieval_eval.golden_set import Case, chunk_satisfies
+from evals.retrieval.golden_set import Case, chunk_satisfies
 
 # Swept range. Below 0.30 nothing survives; above 0.90 nothing is excluded.
 THRESHOLDS: tuple[float, ...] = tuple(round(0.30 + 0.05 * i, 2) for i in range(13))
@@ -283,7 +283,7 @@ def diagnose_separation(
     report a number in that situation, and must not silently drop the case
     and compute one from the rest (that reintroduces the exact bug this
     function exists to prevent — see the counterexample in
-    `test_retrieval_eval_metrics.py`).
+    `test_evals_retrieval_metrics.py`).
 
     When there are no positives or no usable negatives, the corresponding
     bound is `None` too. Otherwise both `lo` and `hi` are always populated —

@@ -3,10 +3,10 @@
 Measures retrieval quality against the **live dev database**. Measures only —
 it never writes.
 
-    docker compose exec -T backend python -m retrieval_eval.run_eval
-    docker compose exec -T backend python -m retrieval_eval.run_eval --k 3 --json /tmp/retrieval_eval.json
+    docker compose exec -T backend python -m evals.retrieval.run_eval
+    docker compose exec -T backend python -m evals.retrieval.run_eval --k 3 --json /tmp/retrieval.json
 
-The `-m` form is required: `pyproject.toml` packages only `app*`, so `retrieval_eval`
+The `-m` form is required: `pyproject.toml` packages only `app*`, so `evals`
 isn't installed and running it by file path fails with
 `ModuleNotFoundError: No module named 'app'`.
 

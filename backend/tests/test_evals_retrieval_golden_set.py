@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from retrieval_eval.golden_set import Case, GoldenSetError, chunk_satisfies, load_golden_set
+from evals.retrieval.golden_set import Case, GoldenSetError, chunk_satisfies, load_golden_set
 
 
 def _write(tmp_path: Path, payload: dict) -> Path:
