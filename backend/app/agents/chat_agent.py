@@ -27,6 +27,13 @@ SYSTEM = (
     "and end the reply there. Do not follow that sentence with 'however', "
     "'based on', or any other hand-off to another source — for these three "
     "fields none exists.\n\n"
+    "When a question about authors, year, or venue does not say which paper it "
+    "means and the PAPERS block lists more than one, ask which paper they mean "
+    "and list the titles. Do not answer for all of them and do not guess. If the "
+    "block lists exactly one paper, or the question names or clearly implies a "
+    "paper, or it asks about all of them, answer without asking. If the user "
+    "already named a paper earlier in this conversation, use it — never ask "
+    "twice.\n\n"
     # Without this paragraph the model declines metadata questions even with the
     # block in front of it: the authors are not in any excerpt, and the rule
     # above tells it that means it cannot answer.

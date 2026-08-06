@@ -240,3 +240,17 @@ def test_system_prompt_forbids_hand_off_after_declining_a_metadata_question():
     # The general decline-then-speculate rule is untouched — this is a scoped
     # exception, not a replacement.
     assert "Based on general knowledge: ...'" in SYSTEM
+
+
+def test_system_prompt_asks_which_paper_when_metadata_question_is_ambiguous():
+    """With 2+ papers and no paper named, the model must ask rather than answer."""
+    assert "ask which paper" in SYSTEM.lower()
+    assert "exactly one paper" in SYSTEM.lower()
+
+
+def test_system_prompt_still_forbids_mining_excerpts_for_metadata():
+    """Regression guard: the disambiguation rule sits beside the anti-fabrication
+    rules that took two live fix rounds to get right. They must survive it."""
+    assert "ONLY source for" in SYSTEM
+    assert "reference list" in SYSTEM
+    assert "no fallback of any kind" in SYSTEM
