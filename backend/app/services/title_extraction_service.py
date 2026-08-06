@@ -140,13 +140,18 @@ _CROSSREF_DATE_KEYS = ("published", "published-print", "published-online", "issu
 
 
 def _first_string(values: object) -> str | None:
-    """First non-blank string of a Crossref list field. Blank is absence."""
+    """First non-blank string of a Crossref list field. Blank is absence.
+
+    Crossref returns HTML-escaped strings (e.g. "... Discovery &amp; Data Mining");
+    unescape before stripping, same as `_meta_content` does on the HTML-meta path,
+    so an entity like `&nbsp;` collapses to whitespace and is then caught by strip.
+    """
     if not isinstance(values, list) or not values:
         return None
     first = values[0]
     if not isinstance(first, str):
         return None
-    return first.strip() or None
+    return _html_module.unescape(first).strip() or None
 
 
 def parse_crossref_message(message: dict) -> PaperMeta:

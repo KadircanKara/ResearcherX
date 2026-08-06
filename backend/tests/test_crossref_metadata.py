@@ -72,6 +72,20 @@ def test_empty_message_is_all_absent():
     assert meta.venue is None
 
 
+def test_html_entities_are_decoded():
+    """Crossref returns HTML-escaped strings; the parsed value must be plain text."""
+    meta = parse_crossref_message(
+        {
+            "title": ["Knowledge Discovery &amp; Data Mining"],
+            "container-title": ["Proceedings of KDD &amp; Related Conferences"],
+        }
+    )
+    assert "&" in meta.title
+    assert "&amp;" not in meta.title
+    assert "&" in meta.venue
+    assert "&amp;" not in meta.venue
+
+
 async def test_extract_title_from_doi_still_returns_only_the_title():
     """suggest_paper_title_from_url in app/api/v1/projects.py depends on this."""
     with patch(
