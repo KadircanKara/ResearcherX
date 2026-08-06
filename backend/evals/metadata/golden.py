@@ -40,7 +40,7 @@ def _parse_case(raw: object) -> MetadataCase:
         raise GoldenSetError(f"authors must be a list of strings: {raw!r}")
 
     year = raw.get("year")
-    if year is not None and not isinstance(year, int):
+    if year is not None and (isinstance(year, bool) or not isinstance(year, int)):
         raise GoldenSetError(f"year must be an integer or null: {raw!r}")
 
     venue = raw.get("venue")
