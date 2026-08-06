@@ -80,10 +80,17 @@ def test_html_entities_are_decoded():
             "container-title": ["Proceedings of KDD &amp; Related Conferences"],
         }
     )
-    assert "&" in meta.title
-    assert "&amp;" not in meta.title
-    assert "&" in meta.venue
-    assert "&amp;" not in meta.venue
+    assert meta.title == "Knowledge Discovery & Data Mining"
+    assert meta.venue == "Proceedings of KDD & Related Conferences"
+
+
+def test_unescape_runs_before_strip_so_boundary_entities_are_trimmed():
+    """`&nbsp;` decodes to a non-breaking space — only a *subsequent* strip removes
+    it. This pins the order: reordering `_first_string` back to strip-then-unescape
+    would leave the padding in and fail this test.
+    """
+    meta = parse_crossref_message({"title": ["&nbsp;Padded Title&nbsp;"]})
+    assert meta.title == "Padded Title"
 
 
 async def test_extract_title_from_doi_still_returns_only_the_title():

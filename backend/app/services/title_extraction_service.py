@@ -142,9 +142,10 @@ _CROSSREF_DATE_KEYS = ("published", "published-print", "published-online", "issu
 def _first_string(values: object) -> str | None:
     """First non-blank string of a Crossref list field. Blank is absence.
 
-    Crossref returns HTML-escaped strings (e.g. "... Discovery &amp; Data Mining");
-    unescape before stripping, same as `_meta_content` does on the HTML-meta path,
-    so an entity like `&nbsp;` collapses to whitespace and is then caught by strip.
+    Crossref returns HTML-escaped strings (e.g. "... Discovery &amp; Data Mining").
+    Unescape MUST run before strip: an entity like `&nbsp;` decodes to a
+    non-breaking space rather than to nothing, so only a strip that runs after
+    unescaping will trim it. Stripping first would leave that padding in place.
     """
     if not isinstance(values, list) or not values:
         return None
