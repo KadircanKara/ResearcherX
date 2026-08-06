@@ -2,7 +2,7 @@
 
 from collections.abc import AsyncIterator
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.llm.client import create_chat_completion
 
@@ -13,8 +13,17 @@ SYSTEM = (
     "Citation rules:\n"
     "- Every non-trivial claim MUST cite its source excerpt number.\n"
     "- Use ONLY numbers from the provided EXCERPT CATALOG. Never invent numbers.\n"
-    "- If the answer cannot be found in the excerpts, say: "
+    "- If the answer cannot be found in the excerpts or the PAPERS block, say: "
     "'The assigned papers do not appear to cover this. Based on general knowledge: ...'\n\n"
+    # Without this paragraph the model declines metadata questions even with the
+    # block in front of it: the authors are not in any excerpt, and the rule
+    # above tells it that means it cannot answer.
+    "The PAPERS block lists the title — and, where known, the authors, year, and "
+    "venue — of every paper assigned to this project. It is authoritative: "
+    "answer questions about who wrote a paper, when it was published, or where "
+    "it appeared directly from it. It carries no excerpt numbers, so an answer "
+    "drawn from it takes no citation. A field missing from a line is genuinely "
+    "not recorded for that paper — say so plainly instead of guessing.\n\n"
     # The client renders this with react-markdown + remark-gfm inside `prose`
     # classes, so GitHub-flavoured markdown renders. Raw HTML is escaped by
     # design (react-markdown v9 default, and rehype-raw must never be added —
@@ -43,10 +52,45 @@ class ChunkContext(BaseModel):
     text: str
 
 
+class PaperMetaContext(BaseModel):
+    """One assigned paper's structured metadata, for the PAPERS block."""
+
+    title: str
+    authors: list[str] = Field(default_factory=list)
+    year: int | None = None
+    venue: str | None = None
+
+
+def build_papers_block(papers: list[PaperMetaContext]) -> str:
+    """One compact line per assigned paper — roughly 30 tokens each.
+
+    A field with no value is omitted entirely. Printing "Authors: unknown"
+    reads to the model as a discovered fact about the paper rather than as an
+    absence in our own record, and it will repeat it back to the user as one.
+    """
+    if not papers:
+        return ""
+    lines = []
+    for p in papers:
+        parts = [f'"{p.title}"']
+        if p.authors:
+            parts.append("Authors: " + ", ".join(p.authors))
+        if p.year is not None:
+            parts.append(str(p.year))
+        if p.venue:
+            parts.append(p.venue)
+        lines.append("- " + " — ".join(parts))
+    return "PAPERS ASSIGNED TO THIS PROJECT:\n" + "\n".join(lines)
+
+
 class ChatAgentInput(BaseModel):
     query: str
     prior_messages: list[dict]  # [{"role": "user"|"assistant", "content": "..."}]
     paper_chunks: list[ChunkContext]
+    # Defaulted so existing callers keep working. Injected on every turn:
+    # deciding *when* metadata is relevant is a routing problem this does not
+    # solve, and at 2-10 papers the unconditional cost is negligible.
+    papers: list[PaperMetaContext] = Field(default_factory=list)
 
 
 class ChatAgent:
@@ -68,10 +112,15 @@ class ChatAgent:
         messages = [{"role": "system", "content": SYSTEM}]
         for m in inp.prior_messages:
             messages.append({"role": m["role"], "content": m["content"]})
+        blocks = []
+        papers_block = build_papers_block(inp.papers)
+        if papers_block:
+            blocks.append(papers_block)
+        blocks.append(context_block)
         messages.append(
             {
                 "role": "user",
-                "content": f"{context_block}\n\nQUESTION: {inp.query}",
+                "content": "\n\n".join(blocks) + f"\n\nQUESTION: {inp.query}",
             }
         )
 

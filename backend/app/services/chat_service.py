@@ -12,7 +12,7 @@ from collections.abc import AsyncGenerator
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.agents.chat_agent import ChatAgent, ChatAgentInput, ChunkContext
+from app.agents.chat_agent import ChatAgent, ChatAgentInput, ChunkContext, PaperMetaContext
 from app.agents.retrieval_planner import PaperInfo, PlannerInput, RetrievalPlannerAgent
 from app.core.config import settings
 from app.core.logging import log
@@ -60,6 +60,18 @@ class ChatService:
                     .scalars()
                     .all()
                 )
+
+                # Built inside the session: the attributes are loaded, but
+                # building it here keeps it independent of session lifetime.
+                paper_metas = [
+                    PaperMetaContext(
+                        title=p.title,
+                        authors=list(p.authors or []),
+                        year=p.year,
+                        venue=p.venue,
+                    )
+                    for p in paper_rows
+                ]
 
                 # Format prior messages (all except the user's current message)
                 prior_messages = [
@@ -136,6 +148,7 @@ class ChatService:
                 query=user_content,
                 prior_messages=all_prior,
                 paper_chunks=paper_chunks,
+                papers=paper_metas,
             )
 
             # Stream response
