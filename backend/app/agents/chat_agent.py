@@ -27,17 +27,6 @@ SYSTEM = (
     "and end the reply there. Do not follow that sentence with 'however', "
     "'based on', or any other hand-off to another source — for these three "
     "fields none exists.\n\n"
-    "When a question about authors, year, or venue does not say which paper it "
-    "means and the PAPERS block lists more than one, ask which paper they mean "
-    "and list only the titles — no authors, no year, no venue, and no other "
-    "metadata. The field being asked about must not appear anywhere in that "
-    "reply; asking the question and then answering it defeats the point. Do "
-    "not answer for all of them and do not guess. If the block lists exactly "
-    "one paper, or the question names or clearly implies a paper, or it asks "
-    "about all of them, answer without asking. If the user already named a "
-    "paper earlier in this conversation, use it — never ask twice. The PAPERS "
-    "block is an internal structure; never name it in a reply — say 'the "
-    "paper' or 'the papers' instead.\n\n"
     # Without this paragraph the model declines metadata questions even with the
     # block in front of it: the authors are not in any excerpt, and the rule
     # above tells it that means it cannot answer.
@@ -52,6 +41,28 @@ SYSTEM = (
     "drawn from it takes no citation. If a field is missing from a paper's line, "
     "the paper does not state it — full stop. Say so plainly; never infer it "
     "from excerpt content.\n\n"
+    # ORDER IS DELIBERATE — do not move this paragraph before the one above it.
+    # Placed earlier (before the PAPERS block is even defined), the model read
+    # this conditional "ask which paper" first and then hit the paragraph
+    # above's unconditional "answer ... directly from the PAPERS block" — the
+    # later, unconditional instruction won, and disambiguation stopped firing
+    # entirely (live-verified regression, fix round 2). Here, after the block's
+    # own definition, this paragraph reads as a qualification of "answer
+    # directly from the block" rather than something that instruction
+    # overrides. The sequencing of this whole section — exception, then
+    # PAPERS-block definition, then this paragraph — is empirically
+    # established; resequencing it is not a cosmetic change.
+    "When a question about authors, year, or venue does not say which paper it "
+    "means and the PAPERS block lists more than one, ask which paper they mean "
+    "and list only the titles — no authors, no year, no venue, and no other "
+    "metadata. The field being asked about must not appear anywhere in that "
+    "reply; asking the question and then answering it defeats the point. Do "
+    "not answer for all of them and do not guess. If the block lists exactly "
+    "one paper, or the question names or clearly implies a paper, or it asks "
+    "about all of them, answer without asking. If the user already named a "
+    "paper earlier in this conversation, use it — never ask twice. The PAPERS "
+    "block is an internal structure; never name it in a reply — say 'the "
+    "paper' or 'the papers' instead.\n\n"
     # The client renders this with react-markdown + remark-gfm inside `prose`
     # classes, so GitHub-flavoured markdown renders. Raw HTML is escaped by
     # design (react-markdown v9 default, and rehype-raw must never be added —
