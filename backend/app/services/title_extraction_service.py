@@ -136,24 +136,88 @@ def normalize_pdf_url(url: str) -> str:
     return url
 
 
-async def extract_title_from_doi(doi: str) -> str | None:
-    """Query Crossref for the canonical title of a DOI."""
-    debug_log.step("extract_title_from_doi", doi=doi)
+_CROSSREF_DATE_KEYS = ("published", "published-print", "published-online", "issued")
+
+
+def _first_string(values: object) -> str | None:
+    """First non-blank string of a Crossref list field. Blank is absence."""
+    if not isinstance(values, list) or not values:
+        return None
+    first = values[0]
+    if not isinstance(first, str):
+        return None
+    return first.strip() or None
+
+
+def parse_crossref_message(message: dict) -> PaperMeta:
+    """Map a Crossref `message` object onto PaperMeta.
+
+    Every field is guarded independently: Crossref returns keys present-but-null
+    for records that lack them, and `date-parts` can be `[[None]]`.
+    """
+    authors: list[str] = []
+    for entry in message.get("author") or []:
+        if not isinstance(entry, dict):
+            continue
+        # Crossref splits person names into given/family; join them into the
+        # same full-display-name shape the LLM path produces, so the two
+        # sources are comparable and the evaluation can score both.
+        parts = [
+            p.strip()
+            for p in (entry.get("given"), entry.get("family"))
+            if isinstance(p, str) and p.strip()
+        ]
+        name = " ".join(parts)
+        if not name:
+            # Organisational authors carry `name` instead of given/family.
+            org = entry.get("name")
+            name = org.strip() if isinstance(org, str) else ""
+        if name:
+            authors.append(name)
+
+    year: int | None = None
+    for key in _CROSSREF_DATE_KEYS:
+        parts = (message.get(key) or {}).get("date-parts") or []
+        if parts and isinstance(parts[0], list) and parts[0] and isinstance(parts[0][0], int):
+            year = parts[0][0]
+            break
+
+    return PaperMeta(
+        title=_first_string(message.get("title")),
+        authors=authors,
+        year=year,
+        venue=_first_string(message.get("container-title")),
+    )
+
+
+async def fetch_crossref_meta(doi: str) -> PaperMeta | None:
+    """Query Crossref for a DOI's full record. None on any failure."""
+    debug_log.step("fetch_crossref_meta", doi=doi)
     try:
         async with httpx.AsyncClient(timeout=_CROSSREF_TIMEOUT, headers=_UA) as client:
             r = await client.get(f"https://api.crossref.org/works/{doi}")
             debug_log.step("crossref_response", doi=doi, status=r.status_code)
-            if r.status_code == 200:
-                titles = r.json().get("message", {}).get("title", [])
-                if titles and titles[0].strip():
-                    result = titles[0].strip()
-                    debug_log.step("crossref_title_found", title=result)
-                    return result
-                debug_log.step("crossref_no_title", doi=doi)
+            if r.status_code != 200:
+                return None
+            message = r.json().get("message")
+            if not isinstance(message, dict):
+                debug_log.step("crossref_no_message", doi=doi)
+                return None
+            meta = parse_crossref_message(message)
+            debug_log.step(
+                "crossref_meta_found", title=meta.title, authors=len(meta.authors), year=meta.year
+            )
+            return meta
     except Exception as exc:
-        log.debug("crossref_title_failed", doi=doi, error=str(exc))
+        log.debug("crossref_meta_failed", doi=doi, error=str(exc))
         debug_log.step("crossref_error", doi=doi, error=str(exc))
     return None
+
+
+async def extract_title_from_doi(doi: str) -> str | None:
+    """Query Crossref for the canonical title of a DOI."""
+    meta = await fetch_crossref_meta(doi)
+    return meta.title if meta is not None else None
 
 
 async def extract_metadata_from_text(text: str) -> PaperMeta:
