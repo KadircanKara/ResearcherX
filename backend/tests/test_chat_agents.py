@@ -194,3 +194,20 @@ def test_system_prompt_forbids_mining_excerpts_for_paper_metadata():
     assert "authors, year, and venue" in SYSTEM
     assert "reference list" in SYSTEM
     assert "the paper does not state it" in SYSTEM
+
+
+def test_system_prompt_forbids_hand_off_after_declining_a_metadata_question():
+    """Regression: the general decline rule is a template — decline, then
+    supply an answer from elsewhere ('Based on general knowledge: ...'). The
+    model followed it to the letter for a paper's own year, declining and
+    then adding "however, based on the EXCERPT CATALOG..." with a fabricated
+    year from a bibliography excerpt. For authors/year/venue there must be no
+    hand-off at all: the reply ends at the decline.
+    """
+    assert "Exception — authors, year, venue" in SYSTEM
+    assert "no fallback of any kind" in SYSTEM
+    assert "'however'" in SYSTEM
+    assert "'based on'" in SYSTEM
+    # The general decline-then-speculate rule is untouched — this is a scoped
+    # exception, not a replacement.
+    assert "Based on general knowledge: ...'" in SYSTEM

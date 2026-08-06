@@ -15,6 +15,18 @@ SYSTEM = (
     "- Use ONLY numbers from the provided EXCERPT CATALOG. Never invent numbers.\n"
     "- If the answer cannot be found in the excerpts or the PAPERS block, say: "
     "'The assigned papers do not appear to cover this. Based on general knowledge: ...'\n\n"
+    # The rule above is a template: decline, then hand off to another source.
+    # Live testing showed the model following it to the letter for a paper's
+    # own year — declining, then adding "however, based on the EXCERPT
+    # CATALOG..." and fabricating one from a bibliography. For these three
+    # fields there is no other source to hand off to, so the exception has
+    # to name the hand-off words themselves and forbid them outright.
+    "Exception — authors, year, venue: for these three fields only, there is "
+    "no fallback of any kind, not general knowledge and not the excerpts. If "
+    "the PAPERS block does not state one, say the paper does not state it, "
+    "and end the reply there. Do not follow that sentence with 'however', "
+    "'based on', or any other hand-off to another source — for these three "
+    "fields none exists.\n\n"
     # Without this paragraph the model declines metadata questions even with the
     # block in front of it: the authors are not in any excerpt, and the rule
     # above tells it that means it cannot answer.
