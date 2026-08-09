@@ -1,12 +1,12 @@
 """Retrieval eval harness — measures, never mutates.
 
-Run:  docker compose exec -T backend python -m retrieval_eval.run_eval
+Run:  docker compose exec -T backend python -m evals.retrieval.run_eval
 
-The `-m` form is required: `pyproject.toml` packages only `app*`, so `retrieval_eval` is
+The `-m` form is required: `pyproject.toml` packages only `app*`, so `evals` is
 not installed and file-path invocation drops cwd from sys.path.
 
 One query per case pulls EVERY chunk with its cosine distance; all scoring
-happens in retrieval_eval.metrics, so the threshold sweep costs no extra queries.
+happens in evals.retrieval.metrics, so the threshold sweep costs no extra queries.
 """
 
 from __future__ import annotations
@@ -21,8 +21,8 @@ from sqlalchemy import text
 from app.core.config import settings
 from app.db.session import SessionLocal
 from app.services.embedding_service import EmbeddingService
-from retrieval_eval.golden_set import Case, load_golden_set
-from retrieval_eval.metrics import (
+from evals.retrieval.golden_set import Case, load_golden_set
+from evals.retrieval.metrics import (
     THRESHOLDS,
     Scored,
     SeparationDiagnosis,

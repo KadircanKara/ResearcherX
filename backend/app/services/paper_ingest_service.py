@@ -12,6 +12,7 @@ from app.core.config import settings
 from app.core.logging import log
 from app.db.models import Paper, PaperChunkEmbedding, _now
 from app.services.embedding_service import EmbeddingService
+from app.services.paper_metadata_service import apply_metadata
 
 # Simple word-based chunking: ~384 words ≈ 512 tokens, 48-word overlap ≈ 64 tokens
 _CHUNK_WORDS = 384
@@ -117,11 +118,16 @@ async def index_chunks(db: AsyncSession, paper_id: str, chunks: list[str]) -> in
     return n_chunks
 
 
-async def ingest(db: AsyncSession, paper_id: str, pdf_bytes: bytes) -> int:
+async def ingest(
+    db: AsyncSession, paper_id: str, pdf_bytes: bytes, source_url: str | None = None
+) -> int:
     """Extract, chunk, embed, and persist a PDF. Returns number of chunks stored.
 
     Figure captions are appended after regular text chunks so similarity search
     on "Figure N" queries hits them directly.
+
+    `source_url` is the link a paper was ingested from, when there was one. A
+    DOI in it routes metadata extraction to Crossref instead of the LLM.
     """
     md = _extract_markdown(pdf_bytes)
 
@@ -140,7 +146,14 @@ async def ingest(db: AsyncSession, paper_id: str, pdf_bytes: bytes) -> int:
         text_chunks=len(text_chunks),
         figure_chunks=len(figure_chunks),
     )
-    return await index_chunks(db, paper_id, text_chunks + figure_chunks)
+    n = await index_chunks(db, paper_id, text_chunks + figure_chunks)
+
+    # After indexing, deliberately, in its own transaction: indexing is the
+    # load-bearing operation and must not be delayed or endangered by an LLM
+    # call. Metadata is independently recoverable — see
+    # scripts/backfill_paper_metadata.py.
+    await apply_metadata(db, paper_id, md, source_url)
+    return n
 
 
 async def index_manual(

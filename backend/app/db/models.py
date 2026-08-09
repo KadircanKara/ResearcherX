@@ -135,6 +135,17 @@ class Paper(Base):
     )
     title: Mapped[str] = mapped_column(String(512))
     abstract: Mapped[str | None] = mapped_column(Text, default=None)
+    # Structured metadata, extracted at ingest. Authors are full display names
+    # in the order printed on the paper. `year`/`venue` are null when the paper
+    # genuinely states neither — preprints usually don't — and are never
+    # inferred from PDF file dates, which record when the file was saved.
+    authors: Mapped[list] = mapped_column(JSON, default=list, server_default="[]")
+    year: Mapped[int | None] = mapped_column(Integer(), default=None)
+    venue: Mapped[str | None] = mapped_column(Text, default=None)
+    # "crossref" | "llm" | "none". Diagnostic only — nothing in the UI reads it.
+    # It records which papers went through the fallible LLM path, so a future
+    # accuracy question can be answered without re-running extraction.
+    metadata_source: Mapped[str] = mapped_column(String(16), default="none", server_default="none")
     body: Mapped[str | None] = mapped_column(Text, default=None)
     # Markdown extracted from an uploaded/linked PDF. Deliberately separate from
     # `body`, which carries manual-entry semantics that update_paper enforces

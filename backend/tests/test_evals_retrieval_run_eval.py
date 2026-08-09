@@ -3,16 +3,16 @@
 `main()` itself needs Postgres + a live embedding provider and is exercised
 by actually running the harness (see README.md / task reports), not by
 pytest — but the decision logic it delegates to is pure and unit-tested
-here, same as retrieval_eval.metrics.
+here, same as evals.retrieval.metrics.
 """
 
 import argparse
 
 import pytest
 
-from retrieval_eval.golden_set import Case
-from retrieval_eval.metrics import Scored
-from retrieval_eval.run_eval import (
+from evals.retrieval.golden_set import Case
+from evals.retrieval.metrics import Scored
+from evals.retrieval.run_eval import (
     _MIN_NEGATIVES_FOR_CONFIDENCE,
     _MIN_POSITIVES_FOR_CONFIDENCE,
     _display_point,
@@ -227,7 +227,7 @@ def test_display_point_formats_midpoint_when_safe():
 def test_display_point_falls_back_to_raw_bounds_when_recommended_point_raises():
     """`recommended_point` raises ValueError when an interval is narrower
     than display precision (see its own tests in
-    test_retrieval_eval_metrics.py). That must never propagate out of
+    test_evals_retrieval_metrics.py). That must never propagate out of
     main(): uncaught, it would take out the ROBUST FINDING section printed
     after it and, with --json, the whole file dump — for a display nicety.
     Must fall back to the raw bounds instead of crashing."""
