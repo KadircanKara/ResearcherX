@@ -6,6 +6,7 @@ import remarkGfm from "remark-gfm";
 import type { ChatCitation, ChatEvent, ChatMessage } from "@/lib/types";
 import { chatMessagesUrl, getConversation } from "@/lib/chat";
 import { getDevUserId } from "@/lib/api";
+import { CitationHoverCard, queryTermsFrom, resetChunkCache } from "@/components/citation-hover-card";
 
 // Typography for markdown inside a chat bubble. `prose-invert` under .dark
 // (tailwind darkMode: "class"). max-w-none because the bubble already caps
@@ -52,6 +53,10 @@ export function ChatStream({
     setStreamingText("");
     setStatus("idle");
     setError(null);
+    // Bound the citation chunk cache to a single conversation view: a chunk
+    // fetched under a stale chunk_index (paper re-ingested after it was
+    // cached) must not leak into a different conversation's citations.
+    resetChunkCache();
   }, [conversationId]);
 
   // Auto-scroll
@@ -171,13 +176,20 @@ export function ChatStream({
             {msg.role === "assistant" && msg.citations.length > 0 && (
               <div className="mt-2 flex flex-wrap gap-1">
                 {msg.citations.map((c) => (
-                  <span
+                  <CitationHoverCard
                     key={c.n}
-                    title={`${c.title} — ${c.snippet}`}
-                    className="cursor-help rounded bg-background/50 px-1.5 py-0.5 text-xs text-muted-foreground hover:bg-background"
-                  >
-                    [{c.n}]
-                  </span>
+                    citation={c}
+                    projectId={projectId}
+                    queryTerms={queryTermsFrom(
+                      // The user message this answer replied to. The card stays
+                      // presentational; resolving conversation state is this
+                      // component's job, not its child's.
+                      messages
+                        .slice(0, messages.indexOf(msg))
+                        .reverse()
+                        .find((m) => m.role === "user")?.content ?? ""
+                    )}
+                  />
                 ))}
               </div>
             )}
