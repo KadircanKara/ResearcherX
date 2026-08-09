@@ -24,6 +24,11 @@ from app.services.embedding_service import EmbeddingService
 _HISTORY_TOP_K = 5
 _PLANNER_MIN_PAPERS = 3  # skip planner for ≤2 papers; use broad default
 _SMALL_LIBRARY_K = 5  # chunks per paper when planner is skipped (few papers → go deeper)
+# Ceiling for a paper the planner ran but never allocated. The planner cannot
+# enumerate a large library inside its max_tokens budget, so on a 100-paper
+# project this silently covers most of them — evals/retrieval/run_eval.py
+# mirrors this constant when simulating production retrieval.
+_UNALLOCATED_PAPER_K = 2
 
 _CITATION_RE = re.compile(r"\[(\d+)\]")
 
@@ -240,46 +245,82 @@ class ChatService:
         per_paper_map: dict[str, int],
         query_embedding: list[float],
     ) -> list[ChunkContext]:
-        """Retrieve top-k chunks per paper using pgvector cosine distance."""
+        """Retrieve the globally nearest chunks across the whole library.
+
+        ONE query, not one per paper. Each paper keeps its planner-allocated
+        ceiling — so a single well-matching paper can't monopolise the context
+        and comparative questions still see both sides — but the final
+        selection is a global top-k under a hard budget.
+
+        The distinction matters: per-paper allocation made the retrieved total
+        a function of LIBRARY SIZE, so a 100-paper project pulled 191 chunks
+        (~118.5k tokens) and every turn failed with `context_length_exceeded`.
+        The budget now depends only on the context window.
+        """
         if not paper_infos:
             return []
         qvec = _vec_str(query_embedding)
         paper_title_map = {p.paper_id: p.title for p in paper_infos}
+        # Every paper gets an EXPLICIT ceiling. The old implicit
+        # `.get(paper_id, 2)` applied to whichever papers the planner didn't
+        # name — 87 of 100 in practice, since 100 allocations don't fit in the
+        # planner's max_tokens — and 2 is twice what 'targeted' mode intends
+        # for a non-target paper. Making it explicit keeps the SQL honest and
+        # the fallback greppable.
+        alloc = {
+            p.paper_id: per_paper_map.get(p.paper_id, _UNALLOCATED_PAPER_K) for p in paper_infos
+        }
 
-        all_chunks: list[ChunkContext] = []
-        n = 1
-        for paper in paper_infos:
-            k = per_paper_map.get(paper.paper_id, 2)
-            sql = text("""
-                SELECT id, paper_id, chunk_index, text,
-                       (embedding <=> CAST(:qvec AS vector)) AS distance
-                FROM paper_chunk_embeddings
-                WHERE paper_id = :paper_id
-                  AND model = :model
-                  AND (embedding <=> CAST(:qvec AS vector)) < :threshold
-                ORDER BY distance ASC
-                LIMIT :k
-            """)
-            result = await db.execute(
-                sql,
-                {
-                    "qvec": qvec,
-                    "paper_id": paper.paper_id,
-                    "model": settings.embedding_model,
-                    "threshold": settings.similarity_threshold,
-                    "k": k,
-                },
+        # The allocation rides in as one jsonb param rather than a VALUES list
+        # or a pair of arrays: a 100-paper library would otherwise need 200
+        # bind params, and asyncpg array binding through text() needs explicit
+        # casts that differ per driver.
+        sql = text("""
+            WITH alloc AS (
+                SELECT key AS paper_id, value::int AS k
+                FROM jsonb_each_text(CAST(:alloc AS jsonb))
+            ),
+            ranked AS (
+                SELECT c.paper_id, c.chunk_index, c.text,
+                       (c.embedding <=> CAST(:qvec AS vector)) AS distance,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY c.paper_id
+                           ORDER BY c.embedding <=> CAST(:qvec AS vector)
+                       ) AS rn
+                FROM paper_chunk_embeddings c
+                JOIN alloc a ON a.paper_id = c.paper_id
+                WHERE c.model = :model
+                  AND (c.embedding <=> CAST(:qvec AS vector)) < :threshold
             )
-            for row in result.fetchall():
-                all_chunks.append(
-                    ChunkContext(
-                        n=n,
-                        paper_id=row.paper_id,
-                        title=paper_title_map.get(row.paper_id, ""),
-                        chunk_index=row.chunk_index,
-                        text=row.text,
-                    )
-                )
-                n += 1
-
-        return all_chunks
+            SELECT r.paper_id, r.chunk_index, r.text, r.distance
+            FROM ranked r
+            JOIN alloc a ON a.paper_id = r.paper_id
+            WHERE r.rn <= a.k
+            ORDER BY r.distance ASC
+            LIMIT :max_chunks
+        """)
+        result = await db.execute(
+            sql,
+            {
+                "qvec": qvec,
+                "alloc": json.dumps(alloc),
+                "model": settings.embedding_model,
+                "threshold": settings.similarity_threshold,
+                "max_chunks": settings.max_context_chunks,
+            },
+        )
+        # Re-applied in Python on purpose. LIMIT bounds what crosses the wire;
+        # this bounds what reaches the model. The budget is the single
+        # invariant that keeps chat working at any library size, so it must not
+        # depend on a SQL clause surviving a future edit to the query.
+        rows = result.fetchall()[: settings.max_context_chunks]
+        return [
+            ChunkContext(
+                n=i,
+                paper_id=row.paper_id,
+                title=paper_title_map.get(row.paper_id, ""),
+                chunk_index=row.chunk_index,
+                text=row.text,
+            )
+            for i, row in enumerate(rows, 1)
+        ]

@@ -141,3 +141,87 @@ async def test_retrieve_paper_chunks_uses_settings_similarity_threshold():
 
     _, params = mock_db.execute.call_args.args
     assert params["threshold"] == 0.42
+
+
+def _mock_db_returning(n_rows: int) -> MagicMock:
+    """Fake AsyncSession returning `n_rows` chunk rows, nearest first.
+
+    Deliberately ignores any LIMIT in the SQL — that is the point: it proves
+    the service bounds its own output rather than trusting the database to.
+    """
+    rows = [
+        MagicMock(
+            id=f"c{i}",
+            paper_id=f"p{i % 100}",
+            chunk_index=i,
+            text=f"chunk {i}",
+            distance=0.1 + i * 0.0001,
+        )
+        for i in range(n_rows)
+    ]
+    mock_result = MagicMock()
+    mock_result.fetchall.return_value = rows
+    mock_db = MagicMock()
+    mock_db.execute = AsyncMock(return_value=mock_result)
+    return mock_db
+
+
+async def test_retrieve_paper_chunks_issues_one_query_for_the_whole_library():
+    """One global query, not one per paper.
+
+    The per-paper loop cost 100 sequential round trips on a 100-paper library
+    and, worse, made the retrieved total scale with library size instead of
+    with the context budget.
+    """
+    from app.agents.retrieval_planner import PaperInfo
+    from app.services.chat_service import ChatService
+
+    svc = ChatService()
+    mock_db = _mock_db_returning(0)
+    papers = [PaperInfo(paper_id=f"p{i}", title=f"Paper {i}", abstract="") for i in range(100)]
+
+    await svc._retrieve_paper_chunks(mock_db, papers, {p.paper_id: 5 for p in papers}, [0.0] * 768)
+
+    assert mock_db.execute.await_count == 1
+
+
+async def test_retrieve_paper_chunks_caps_total_at_settings_max_context_chunks():
+    """The context budget is a hard ceiling, independent of library size.
+
+    Without it, 100 papers × the k=2 fallback produced 191 chunks ≈ 118.5k
+    tokens and every chat turn died on `context_length_exceeded`.
+    """
+    from app.agents.retrieval_planner import PaperInfo
+    from app.services.chat_service import ChatService
+
+    svc = ChatService()
+    mock_db = _mock_db_returning(500)
+    papers = [PaperInfo(paper_id=f"p{i}", title=f"Paper {i}", abstract="") for i in range(100)]
+
+    with patch.object(settings, "max_context_chunks", 40):
+        chunks = await svc._retrieve_paper_chunks(
+            mock_db, papers, {p.paper_id: 5 for p in papers}, [0.0] * 768
+        )
+
+    assert len(chunks) == 40
+
+
+async def test_retrieve_paper_chunks_numbers_citations_contiguously_after_capping():
+    """Citation markers must be 1..N over the chunks actually sent.
+
+    `chat_agent` cites by position, so a gap or a number past the end of the
+    list would point at a source the model was never given.
+    """
+    from app.agents.retrieval_planner import PaperInfo
+    from app.services.chat_service import ChatService
+
+    svc = ChatService()
+    mock_db = _mock_db_returning(500)
+    papers = [PaperInfo(paper_id=f"p{i}", title=f"Paper {i}", abstract="") for i in range(100)]
+
+    with patch.object(settings, "max_context_chunks", 40):
+        chunks = await svc._retrieve_paper_chunks(
+            mock_db, papers, {p.paper_id: 5 for p in papers}, [0.0] * 768
+        )
+
+    assert [c.n for c in chunks] == list(range(1, 41))
