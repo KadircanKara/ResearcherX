@@ -240,3 +240,33 @@ def test_system_prompt_forbids_hand_off_after_declining_a_metadata_question():
     # The general decline-then-speculate rule is untouched — this is a scoped
     # exception, not a replacement.
     assert "Based on general knowledge: ...'" in SYSTEM
+
+
+def test_system_prompt_asks_which_paper_when_metadata_question_is_ambiguous():
+    """With 2+ papers and no paper named, the model must ask rather than answer."""
+    assert "ask which paper" in SYSTEM.lower()
+    assert "exactly one paper" in SYSTEM.lower()
+
+
+def test_system_prompt_still_forbids_mining_excerpts_for_metadata():
+    """Regression guard: the disambiguation rule sits beside the anti-fabrication
+    rules that took two live fix rounds to get right. They must survive it."""
+    assert "ONLY source for" in SYSTEM
+    assert "reference list" in SYSTEM
+    assert "no fallback of any kind" in SYSTEM
+
+
+def test_system_prompt_lists_titles_only_when_asking_which_paper():
+    """Regression: a live run asked which paper and then answered for both
+    underneath the question — it read 'list the titles' as licence to render
+    the whole PAPERS line, metadata included. The clarifying reply must carry
+    titles and nothing else."""
+    assert "list only the titles" in SYSTEM.lower()
+    assert "no authors, no year, no venue" in SYSTEM.lower()
+
+
+def test_system_prompt_never_names_the_papers_block_to_the_user():
+    """Regression: live replies said 'The PAPERS block does not state...' —
+    PAPERS is an internal prompt structure and must never reach the user."""
+    assert "internal structure" in SYSTEM.lower()
+    assert "never name it in a reply" in SYSTEM.lower()
