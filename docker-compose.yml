@@ -56,8 +56,14 @@ services:
       # documents/queries, and the model name alone can't detect drift.
       # These override .env's copies for these two keys, which is
       # intentional — the model and its prefixes must never drift apart.
-      EMBEDDING_DOCUMENT_PREFIX: ${EMBEDDING_DOCUMENT_PREFIX:-search_document:}
-      EMBEDDING_QUERY_PREFIX: ${EMBEDDING_QUERY_PREFIX:-search_query:}
+      #
+      # `-` NOT `:-`: the default must apply only when the var is UNSET. Under
+      # `:-` an explicitly-empty value also falls back to the nomic prefix, so
+      # a provider that takes no prefixes (OpenAI text-embedding-3-small) could
+      # not be configured at all — every vector would silently carry a
+      # "search_document:" prefix that model never saw, with no error anywhere.
+      EMBEDDING_DOCUMENT_PREFIX: ${EMBEDDING_DOCUMENT_PREFIX-search_document:}
+      EMBEDDING_QUERY_PREFIX: ${EMBEDDING_QUERY_PREFIX-search_query:}
     depends_on:
       db:
         condition: service_healthy

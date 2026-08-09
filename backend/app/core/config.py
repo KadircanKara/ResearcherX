@@ -66,6 +66,16 @@ class Settings(BaseSettings):
     # SIMILARITY_THRESHOLD env var rather than editing this default.
     similarity_threshold: float = 0.75
 
+    # Hard ceiling on chunks sent to the chat model in one turn.
+    #
+    # The retrieval budget must be a function of the CONTEXT WINDOW, never of
+    # library size. Per-paper allocation made it the latter: measured on a
+    # 100-paper library, one turn retrieved 191 chunks ≈ 118.5k tokens and
+    # every question died on `context_length_exceeded` before the model saw a
+    # word. 40 chunks × ~384 words ≈ 20k tokens, which leaves room for the
+    # system prompt, conversation history and the answer itself.
+    max_context_chunks: int = 40
+
     # Abuse limits (decision D3): anonymous per-IP quotas + a global daily
     # cap; the owner API key (X-API-Key header) bypasses both. The cap is
     # the real DoS backstop for the Groq quota.

@@ -142,9 +142,11 @@ class Paper(Base):
     authors: Mapped[list] = mapped_column(JSON, default=list, server_default="[]")
     year: Mapped[int | None] = mapped_column(Integer(), default=None)
     venue: Mapped[str | None] = mapped_column(Text, default=None)
-    # "crossref" | "llm" | "none". Diagnostic only — nothing in the UI reads it.
-    # It records which papers went through the fallible LLM path, so a future
-    # accuracy question can be answered without re-running extraction.
+    # "crossref" | "llm" | "s2" | "none". Diagnostic only — nothing in the UI
+    # reads it. It records which papers went through the fallible LLM path, so a
+    # future accuracy question can be answered without re-running extraction.
+    # "s2" marks papers bulk-loaded from Semantic Scholar metadata by
+    # scripts/bulk_ingest_arxiv.py, which skips extraction entirely.
     metadata_source: Mapped[str] = mapped_column(String(16), default="none", server_default="none")
     body: Mapped[str | None] = mapped_column(Text, default=None)
     # Markdown extracted from an uploaded/linked PDF. Deliberately separate from
