@@ -76,6 +76,24 @@ class Settings(BaseSettings):
     # system prompt, conversation history and the answer itself.
     max_context_chunks: int = 40
 
+    # Output budget for one chat answer. PROVIDER-SPECIFIC, like the
+    # similarity threshold above — re-measure when LLM_MODEL changes.
+    #
+    # Reasoning models bill their thinking against `max_tokens` on the
+    # OpenAI-compatible endpoint, and the charge does not appear in
+    # `completion_tokens` — only in `total_tokens`. Measured on
+    # gemini-3.6-flash: of a 2000-token budget, 1,921 went to thinking and 75
+    # to the answer, so every reply stopped mid-sentence with
+    # finish_reason=length. Thinking cannot be capped from this endpoint —
+    # `reasoning_effort` is silently ignored and `thinking_config` is
+    # rejected with a 400 — so the only lever is a larger budget. 6000 covers
+    # the ~2.3k worst-case thinking observed plus a full answer.
+    #
+    # Lower it for a non-reasoning model on a tight per-request tier (Groq
+    # free caps a single request at 12k TPM, and the papers block already
+    # takes ~5.5k of that at 100 papers).
+    chat_answer_max_tokens: int = 6000
+
     # Abuse limits (decision D3): anonymous per-IP quotas + a global daily
     # cap; the owner API key (X-API-Key header) bypasses both. The cap is
     # the real DoS backstop for the Groq quota.

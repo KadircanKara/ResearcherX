@@ -128,6 +128,39 @@ async def test_chat_agent_streams_tokens():
     assert "hello " in tokens
 
 
+async def test_chat_agent_takes_its_answer_budget_from_settings():
+    """The answer budget is provider-specific, so it must be env-tunable.
+
+    Reasoning models bill thinking tokens against `max_tokens` on the
+    OpenAI-compatible endpoint, and the charge is invisible in
+    `completion_tokens`. Measured on gemini-3.6-flash: a 2000-token budget
+    was spent 1,921 on thinking and 75 on the answer, so every reply stopped
+    mid-sentence with finish_reason=length. A non-reasoning model on a
+    12k-TPM tier wants the opposite value, which is why this is a setting
+    and not a bigger literal.
+    """
+    from app.core.config import settings
+
+    agent = ChatAgent()
+    fake_stream = MagicMock()
+
+    async def empty():
+        return
+        yield  # pragma: no cover - makes this an async generator
+
+    fake_stream.__aiter__ = lambda self: empty()
+    create = AsyncMock(return_value=fake_stream)
+
+    with (
+        patch("app.agents.chat_agent.create_chat_completion", new=create),
+        patch.object(settings, "chat_answer_max_tokens", 4242),
+    ):
+        async for _ in agent.stream(ChatAgentInput(query="q", prior_messages=[], paper_chunks=[])):
+            pass
+
+    assert create.await_args.kwargs["max_tokens"] == 4242
+
+
 def test_papers_block_renders_every_known_field():
     block = build_papers_block(
         [

@@ -4,6 +4,7 @@ from collections.abc import AsyncIterator
 
 from pydantic import BaseModel, Field
 
+from app.core.config import settings
 from app.llm.client import create_chat_completion
 
 SYSTEM = (
@@ -168,7 +169,7 @@ class ChatAgent:
         )
 
         stream = await create_chat_completion(
-            max_tokens=2000,
+            max_tokens=settings.chat_answer_max_tokens,
             stream=True,
             messages=messages,
         )
