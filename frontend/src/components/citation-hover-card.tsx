@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { PreviewCard } from "@base-ui/react/preview-card";
 import { getPaperChunk } from "@/lib/projects";
 import type { ChatCitation } from "@/lib/types";
@@ -70,24 +70,37 @@ function highlight(text: string, terms: string[]) {
 }
 
 export function CitationHoverCard({
-  citation,
+  citations,
+  startIndex,
   projectId,
   queryTerms,
+  variant,
 }: {
-  citation: ChatCitation;
+  citations: ChatCitation[];
+  startIndex: number;
   projectId: string;
   queryTerms: string[];
+  variant: "inline" | "chip";
 }) {
+  const [index, setIndex] = useState(startIndex);
+  const citation = citations[index] ?? citations[0];
   const key = `${citation.paper_id}:${citation.chunk_index}`;
-  // Start from the snippet already in the payload so the card has content the
-  // instant it opens — no spinner, no layout shift when the full text lands.
-  // Guard the cache read too: a value cached under this key may have been
-  // written for a different (pre-re-index) chunk that happened to share the
-  // same paper_id:chunk_index address.
   const [text, setText] = useState<string>(() => {
     const cached = chunkCache.get(key);
     return cached?.startsWith(citation.snippet) ? cached : citation.snippet;
   });
+
+  // Navigating changes which citation is displayed, so the passage must
+  // follow it. Seed from cache-or-snippet first — same guard as the initial
+  // state — so the card never blanks between siblings, then fetch.
+  useEffect(() => {
+    const cached = chunkCache.get(key);
+    setText(cached?.startsWith(citation.snippet) ? cached : citation.snippet);
+    void loadFullText();
+    // loadFullText is redefined every render and closes over `citation`;
+    // keying the effect on `key` is what makes it run once per shown citation.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key]);
 
   async function loadFullText() {
     const cached = chunkCache.get(key);
@@ -111,6 +124,11 @@ export function CitationHoverCard({
     }
   }
 
+  const hasGroup = citations.length > 1;
+  function step(delta: number) {
+    setIndex((i) => Math.min(citations.length - 1, Math.max(0, i + delta)));
+  }
+
   return (
     <PreviewCard.Root onOpenChange={(open) => open && void loadFullText()}>
       {/* render={<span />}: this is not a link (the default `<a>` has no
@@ -124,10 +142,17 @@ export function CitationHoverCard({
       <PreviewCard.Trigger
         render={<span />}
         tabIndex={0}
+        onKeyDown={(event) => {
+          if (event.key === "ArrowLeft") { event.preventDefault(); step(-1); }
+          if (event.key === "ArrowRight") { event.preventDefault(); step(1); }
+        }}
         className={cn(
-          "cursor-help rounded bg-background/50 px-1.5 py-0.5 text-xs",
-          "text-muted-foreground transition-colors hover:bg-background",
-          "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          "cursor-help rounded transition-colors",
+          "text-blue-600 dark:text-blue-400",
+          "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+          variant === "chip"
+            ? "bg-background/50 px-1.5 py-0.5 text-xs hover:bg-background"
+            : "font-medium hover:underline"
         )}
       >
         [{citation.n}]
@@ -163,6 +188,31 @@ export function CitationHoverCard({
                 {highlight(text, queryTerms)}
               </p>
             </div>
+            {hasGroup && (
+              <div className="flex items-center justify-between border-t border-border px-3 py-1.5">
+                <button
+                  type="button"
+                  aria-label="Previous citation"
+                  disabled={index === 0}
+                  onClick={() => step(-1)}
+                  className="rounded px-1 text-xs text-muted-foreground disabled:opacity-30 hover:text-foreground"
+                >
+                  ◀
+                </button>
+                <span className="text-[11px] text-muted-foreground">
+                  {index + 1} of {citations.length}
+                </span>
+                <button
+                  type="button"
+                  aria-label="Next citation"
+                  disabled={index === citations.length - 1}
+                  onClick={() => step(1)}
+                  className="rounded px-1 text-xs text-muted-foreground disabled:opacity-30 hover:text-foreground"
+                >
+                  ▶
+                </button>
+              </div>
+            )}
           </PreviewCard.Popup>
         </PreviewCard.Positioner>
       </PreviewCard.Portal>
