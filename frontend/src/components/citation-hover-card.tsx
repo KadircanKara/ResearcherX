@@ -83,6 +83,11 @@ export function CitationHoverCard({
   variant: "inline" | "chip";
 }) {
   const [index, setIndex] = useState(startIndex);
+  // What this trigger IS, fixed for the life of the marker. Distinct from
+  // `citation` below, which follows navigation: rendering the navigated
+  // citation here rewrote the marker in the answer text, turning
+  // "[7], [8]" into "[8], [8]" after one press of the arrow.
+  const anchor = citations[startIndex] ?? citations[0];
   const citation = citations[index] ?? citations[0];
   const key = `${citation.paper_id}:${citation.chunk_index}`;
   const [text, setText] = useState<string>(() => {
@@ -147,7 +152,12 @@ export function CitationHoverCard({
   }
 
   return (
-    <PreviewCard.Root onOpenChange={(open) => open && void loadFullText(key)}>
+    <PreviewCard.Root
+      onOpenChange={(open) => {
+        if (open) void loadFullText(key);
+        else setIndex(startIndex);
+      }}
+    >
       {/* render={<span />}: this is not a link (the default `<a>` has no
           href) and, more importantly, an href-less `<a>` is not keyboard-
           focusable — tabIndex={0} is what actually puts it in the tab
@@ -172,7 +182,7 @@ export function CitationHoverCard({
             : "font-medium hover:underline"
         )}
       >
-        [{citation.n}]
+        [{anchor.n}]
       </PreviewCard.Trigger>
       <PreviewCard.Portal>
         <PreviewCard.Positioner side="top" sideOffset={6} className="isolate z-50">
@@ -216,7 +226,7 @@ export function CitationHoverCard({
                 >
                   ◀
                 </button>
-                <span className="text-[11px] text-muted-foreground">
+                <span aria-live="polite" className="text-[11px] text-muted-foreground">
                   {index + 1} of {citations.length}
                 </span>
                 <button
