@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { PreviewCard } from "@base-ui/react/preview-card";
 import { getPaperChunk } from "@/lib/projects";
 import type { ChatCitation } from "@/lib/types";
@@ -90,22 +90,33 @@ export function CitationHoverCard({
     return cached?.startsWith(citation.snippet) ? cached : citation.snippet;
   });
 
+  // Which citation the card is currently showing. A fetch started for one
+  // sibling must not install its result after the reader has stepped to
+  // another: the snippet guard below validates a response against ITS OWN
+  // citation, so a late-landing response passes its own check and would
+  // overwrite a newer sibling's passage — right title, wrong text.
+  const shownKey = useRef(key);
+  shownKey.current = key;
+
   // Navigating changes which citation is displayed, so the passage must
   // follow it. Seed from cache-or-snippet first — same guard as the initial
   // state — so the card never blanks between siblings, then fetch.
   useEffect(() => {
     const cached = chunkCache.get(key);
     setText(cached?.startsWith(citation.snippet) ? cached : citation.snippet);
-    void loadFullText();
+    void loadFullText(key);
     // loadFullText is redefined every render and closes over `citation`;
     // keying the effect on `key` is what makes it run once per shown citation.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key]);
 
-  async function loadFullText() {
+  async function loadFullText(forKey: string) {
     const cached = chunkCache.get(key);
     if (cached !== undefined) {
-      if (cached.startsWith(citation.snippet)) setText(cached);
+      // shownKey check: a sibling fetch's cache hit resolves synchronously,
+      // but by the time an AWAITed one gets here the reader may have already
+      // stepped again — same race as the network branch below.
+      if (cached.startsWith(citation.snippet) && shownKey.current === forKey) setText(cached);
       return;
     }
     try {
@@ -116,6 +127,12 @@ export function CitationHoverCard({
       // different text and this response must not be installed.
       if (!chunk.text.startsWith(citation.snippet)) return; // keep the snippet
       chunkCache.set(key, chunk.text);
+      // Separate from the snippet check above, which only catches a
+      // re-indexed chunk: this catches a late response for a citation the
+      // reader has since navigated away from. The cache write above still
+      // stands — the text is valid, just no longer what THIS card should
+      // show — only the setText is guarded.
+      if (shownKey.current !== forKey) return;
       setText(chunk.text);
     } catch {
       // Keep the snippet. A failed preview must never replace readable content
@@ -130,7 +147,7 @@ export function CitationHoverCard({
   }
 
   return (
-    <PreviewCard.Root onOpenChange={(open) => open && void loadFullText()}>
+    <PreviewCard.Root onOpenChange={(open) => open && void loadFullText(key)}>
       {/* render={<span />}: this is not a link (the default `<a>` has no
           href) and, more importantly, an href-less `<a>` is not keyboard-
           focusable — tabIndex={0} is what actually puts it in the tab
