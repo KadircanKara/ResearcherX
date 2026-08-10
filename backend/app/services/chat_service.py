@@ -97,7 +97,8 @@ class ChatService:
             except Exception:
                 log.warning("chat_embedding_unavailable_fallback", conversation_id=conversation_id)
 
-            # Retrieval plan
+            # This project's paper ids + titles: scopes the global top-k chunk
+            # query below to this project and labels citations by title.
             paper_infos = [PaperInfo(paper_id=p.id, title=p.title) for p in paper_rows]
 
             if query_embedding is not None:
@@ -111,9 +112,30 @@ class ChatService:
                     # Reformulate only when there IS a conversation to resolve
                     # against. A first turn is already standalone, so the call
                     # would buy nothing and is skipped.
+                    #
+                    # Gate on prior_messages ALONE -- never on history_hits or
+                    # on reformulation_context below. conversation_service's
+                    # save_message() fires asyncio.create_task(_embed_message
+                    # (...)) for the user's own message before respond() runs,
+                    # so by the time _retrieve_history executes above, that
+                    # row is frequently already embedded and sitting in
+                    # conversation_message_embeddings. It then self-matches
+                    # its own query embedding at distance ~= 0 (comfortably
+                    # under similarity_threshold) and comes back as a
+                    # "history hit" -- even on a genuine first turn. Gating on
+                    # `prior_messages + history_hits` therefore raced that
+                    # background embedding task: whether the reformulator ran
+                    # on a first turn depended on embedding latency, not on
+                    # whether a prior turn actually existed. prior_messages is
+                    # immune to that race (it's read from conv.messages,
+                    # loaded before this turn's message was embedded), and
+                    # hits can only ever come from THIS conversation, so an
+                    # empty prior_messages means any hit IS the current
+                    # message. Do not "simplify" this back to
+                    # `if reformulation_context:`.
                     reformulation_context = prior_messages + history_hits
                     retrieval_query = user_content
-                    if reformulation_context:
+                    if prior_messages:
                         retrieval_query = await self._reformulator.run(
                             ReformulatorInput(
                                 query=user_content,

@@ -248,6 +248,48 @@ async def test_respond_skips_reformulation_on_a_first_turn(
     reformulate.assert_not_awaited()
 
 
+async def test_respond_skips_reformulation_on_a_first_turn_despite_a_history_hit(
+    db_session: AsyncSession, project: Project, conversation_with_message
+):
+    """Guards the self-match race (see the gate's comment in chat_service.py):
+    conversation_service.save_message() fires an asyncio.create_task to embed
+    the user's own message BEFORE respond() runs, so on a genuine first turn
+    _retrieve_history can legitimately come back with that same message as a
+    "history hit" (it self-matches at distance ~0). If the gate were
+    `if prior_messages + history_hits:` instead of `if prior_messages:`, this
+    hit alone would trip it and run the reformulator on a first turn. Only
+    prior_messages is a reliable first-turn signal, so asserting ZERO calls
+    here -- with a non-empty history hit forced in -- is the point."""
+    from app.db.models import Paper
+    from app.services.chat_service import ChatService
+
+    conv = conversation_with_message
+    db_session.add(Paper(project_id=project.id, title="Paper A", source="manual"))
+    await db_session.commit()
+
+    async def fake_stream(*args, **kwargs):
+        yield "answer"
+
+    svc = ChatService()
+    reformulate = AsyncMock(return_value="should not be called")
+    # Simulates the self-match race: the just-saved current-turn user message
+    # comes back from _retrieve_history as if it were a "history hit".
+    self_match_hit = [{"role": "user", "content": "Test question"}]
+
+    with (
+        patch.object(svc._embedding_svc, "embed", AsyncMock(return_value=[0.0] * 768)),
+        patch.object(svc, "_retrieve_history", AsyncMock(return_value=self_match_hit)),
+        patch.object(svc._reformulator, "run", reformulate),
+        patch.object(svc, "_retrieve_paper_chunks", AsyncMock(return_value=[])),
+        patch.object(svc._chat_agent, "stream", return_value=fake_stream()),
+        patch.object(svc._conv_svc, "save_message", AsyncMock()),
+    ):
+        async for _ in svc.respond(conv.id, "Test question"):
+            pass
+
+    reformulate.assert_not_awaited()
+
+
 async def test_respond_retrieves_with_the_reformulated_query(
     db_session: AsyncSession, project: Project, conversation_with_message, you: User
 ):
