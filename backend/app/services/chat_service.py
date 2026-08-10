@@ -14,7 +14,7 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.chat_agent import ChatAgent, ChatAgentInput, ChunkContext, PaperMetaContext
-from app.agents.retrieval_planner import PlannerInput, RetrievalPlannerAgent
+from app.agents.query_reformulator import QueryReformulatorAgent, ReformulatorInput
 from app.core.config import settings
 from app.core.logging import log
 from app.db.models import Paper
@@ -23,7 +23,6 @@ from app.services.conversation_service import ConversationService
 from app.services.embedding_service import EmbeddingService
 
 _HISTORY_TOP_K = 5
-_PLANNER_MIN_PAPERS = 3  # skip the planner for <=2 papers
 
 _CITATION_RE = re.compile(r"\[(\d+)\]")
 
@@ -43,7 +42,7 @@ def _vec_str(embedding: list[float]) -> str:
 class ChatService:
     def __init__(self) -> None:
         self._embedding_svc = EmbeddingService()
-        self._planner = RetrievalPlannerAgent()
+        self._reformulator = QueryReformulatorAgent()
         self._chat_agent = ChatAgent()
         self._conv_svc = ConversationService()
 
@@ -109,24 +108,18 @@ class ChatService:
                     )
 
                 if paper_infos:
-                    if len(paper_infos) >= _PLANNER_MIN_PAPERS:
-                        plan = await self._planner.run(
-                            PlannerInput(
+                    # Reformulate only when there IS a conversation to resolve
+                    # against. A first turn is already standalone, so the call
+                    # would buy nothing and is skipped.
+                    reformulation_context = prior_messages + history_hits
+                    retrieval_query = user_content
+                    if reformulation_context:
+                        retrieval_query = await self._reformulator.run(
+                            ReformulatorInput(
                                 query=user_content,
-                                paper_list=[
-                                    {
-                                        "paper_id": p.id,
-                                        "title": p.title,
-                                        "abstract": p.abstract or "",
-                                    }
-                                    for p in paper_rows
-                                ],
-                                prior_messages=prior_messages + history_hits,
+                                prior_messages=reformulation_context,
                             )
                         )
-                        retrieval_query = plan.reformulated_query or user_content
-                    else:
-                        retrieval_query = user_content
 
                     retrieval_embedding = (
                         await self._embedding_svc.embed(

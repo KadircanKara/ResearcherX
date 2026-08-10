@@ -52,15 +52,8 @@ async def test_respond_yields_events(
     db_session: AsyncSession, project: Project, conversation_with_message
 ):
     from app.services.chat_service import ChatService
-    from app.agents.retrieval_planner import RetrievalPlan
 
     conv = conversation_with_message
-
-    fake_plan = RetrievalPlan(
-        mode="broad",
-        reformulated_query="test question expanded",
-        per_paper=[],
-    )
 
     async def fake_stream(*args, **kwargs):
         yield "answer token "
@@ -71,7 +64,7 @@ async def test_respond_yields_events(
     with (
         patch.object(svc._embedding_svc, "embed", AsyncMock(return_value=[0.0] * 768)),
         patch.object(svc, "_retrieve_history", AsyncMock(return_value=[])),
-        patch.object(svc._planner, "run", AsyncMock(return_value=fake_plan)),
+        patch.object(svc._reformulator, "run", AsyncMock(return_value="test question expanded")),
         patch.object(svc, "_retrieve_paper_chunks", AsyncMock(return_value=[])),
         patch.object(svc._chat_agent, "stream", return_value=fake_stream()),
         patch.object(
@@ -220,6 +213,76 @@ async def test_retrieve_paper_chunks_scopes_to_this_projects_papers():
 
     _, params = mock_db.execute.call_args.args
     assert json.loads(params["ids"]) == ["p0", "p1", "p2"]
+
+
+async def test_respond_skips_reformulation_on_a_first_turn(
+    db_session: AsyncSession, project: Project, conversation_with_message
+):
+    """With no prior conversation there is nothing to resolve, so the call
+    buys nothing. Asserting ZERO calls is the point: this is what keeps the
+    common case at one LLM call per turn instead of two."""
+    from app.db.models import Paper
+    from app.services.chat_service import ChatService
+
+    conv = conversation_with_message
+    db_session.add(Paper(project_id=project.id, title="Paper A", source="manual"))
+    await db_session.commit()
+
+    async def fake_stream(*args, **kwargs):
+        yield "answer"
+
+    svc = ChatService()
+    reformulate = AsyncMock(return_value="should not be called")
+
+    with (
+        patch.object(svc._embedding_svc, "embed", AsyncMock(return_value=[0.0] * 768)),
+        patch.object(svc, "_retrieve_history", AsyncMock(return_value=[])),
+        patch.object(svc._reformulator, "run", reformulate),
+        patch.object(svc, "_retrieve_paper_chunks", AsyncMock(return_value=[])),
+        patch.object(svc._chat_agent, "stream", return_value=fake_stream()),
+        patch.object(svc._conv_svc, "save_message", AsyncMock()),
+    ):
+        async for _ in svc.respond(conv.id, "Test question"):
+            pass
+
+    reformulate.assert_not_awaited()
+
+
+async def test_respond_retrieves_with_the_reformulated_query(
+    db_session: AsyncSession, project: Project, conversation_with_message, you: User
+):
+    """The rewritten query must be what gets embedded for retrieval —
+    otherwise the reformulation call is paid for and thrown away."""
+    from app.db.models import ChatMessage, Paper
+    from app.services.chat_service import ChatService
+
+    conv = conversation_with_message
+    db_session.add(Paper(project_id=project.id, title="Paper A", source="manual"))
+    # A prior turn, so reformulation runs at all.
+    db_session.add(ChatMessage(conversation_id=conv.id, role="assistant", content="Earlier answer"))
+    await db_session.commit()
+
+    async def fake_stream(*args, **kwargs):
+        yield "answer"
+
+    svc = ChatService()
+    embed = AsyncMock(return_value=[0.0] * 768)
+
+    with (
+        patch.object(svc._embedding_svc, "embed", embed),
+        patch.object(svc, "_retrieve_history", AsyncMock(return_value=[])),
+        patch.object(
+            svc._reformulator, "run", AsyncMock(return_value="rewritten standalone query")
+        ),
+        patch.object(svc, "_retrieve_paper_chunks", AsyncMock(return_value=[])),
+        patch.object(svc._chat_agent, "stream", return_value=fake_stream()),
+        patch.object(svc._conv_svc, "save_message", AsyncMock()),
+    ):
+        async for _ in svc.respond(conv.id, "Test question"):
+            pass
+
+    embedded = [c.args[0] for c in embed.await_args_list]
+    assert "rewritten standalone query" in embedded
 
 
 async def test_retrieve_paper_chunks_numbers_citations_contiguously_after_capping():

@@ -94,6 +94,15 @@ class Settings(BaseSettings):
     # takes ~5.5k of that at 100 papers).
     chat_answer_max_tokens: int = 6000
 
+    # Output budget for one query reformulation. PROVIDER-SPECIFIC for the
+    # same reason as chat_answer_max_tokens above: the output is a single
+    # short string, so 600 would be ample on gpt-4.1-mini — but a reasoning
+    # model spends ~1,900 tokens thinking before emitting a character and
+    # would truncate the call outright, exactly as it truncated chat answers.
+    # max_tokens is a cap, not a charge, so a generous default costs nothing
+    # on a model that does not think.
+    query_reformulator_max_tokens: int = 3000
+
     # Abuse limits (decision D3): anonymous per-IP quotas + a global daily
     # cap; the owner API key (X-API-Key header) bypasses both. The cap is
     # the real DoS backstop for the Groq quota.

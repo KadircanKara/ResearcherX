@@ -1,8 +1,7 @@
-"""RetrievalPlannerAgent and ChatAgent unit tests — LLM mocked."""
+"""ChatAgent unit tests — LLM mocked."""
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from app.agents.retrieval_planner import PlannerInput, RetrievalPlan, RetrievalPlannerAgent
 from app.agents.chat_agent import (
     SYSTEM,
     ChatAgent,
@@ -11,92 +10,6 @@ from app.agents.chat_agent import (
     PaperMetaContext,
     build_papers_block,
 )
-
-
-FAKE_PLAN = RetrievalPlan(
-    mode="comparative",
-    reformulated_query="UAV coordination methods comparison",
-    per_paper=[{"paper_id": "p1", "chunks": 3}, {"paper_id": "p2", "chunks": 3}],
-)
-
-
-async def test_retrieval_planner_returns_plan():
-    agent = RetrievalPlannerAgent()
-    with patch(
-        "app.agents.retrieval_planner.parse_structured",
-        new=AsyncMock(return_value=FAKE_PLAN),
-    ):
-        plan = await agent.run(
-            PlannerInput(
-                query="Compare methods in both papers",
-                paper_list=[
-                    {"paper_id": "p1", "title": "Paper A", "abstract": "Abstract A"},
-                    {"paper_id": "p2", "title": "Paper B", "abstract": "Abstract B"},
-                ],
-                prior_messages=[],
-            )
-        )
-    assert plan.mode == "comparative"
-    assert len(plan.per_paper) == 2
-
-
-async def test_retrieval_planner_fail_open_reports_no_allocation():
-    """Error in parse_structured → degraded, with NO fabricated allocation.
-
-    Fail-open used to invent `chunks=2` for every paper, which chat_service
-    then applied as a per-paper ceiling. That is a guess wearing the costume
-    of a decision: at 100 papers it capped the target paper at its own 2
-    nearest chunks and dropped the answering chunk (global rank 21) from a
-    40-chunk budget. No signal must stay no signal, so the global top-k can
-    decide instead.
-    """
-    agent = RetrievalPlannerAgent()
-    with patch(
-        "app.agents.retrieval_planner.parse_structured",
-        new=AsyncMock(side_effect=ValueError("llm down")),
-    ):
-        plan = await agent.run(
-            PlannerInput(
-                query="Any question",
-                paper_list=[
-                    {"paper_id": "px", "title": "X", "abstract": "x"},
-                ],
-                prior_messages=[],
-            )
-        )
-    assert plan.mode == "broad"
-    assert plan.degraded is True
-    assert plan.per_paper == []
-
-
-async def test_retrieval_planner_success_is_never_degraded():
-    """`degraded` is a service-side signal, not model output.
-
-    parse_structured pastes RetrievalPlan's JSON schema into the prompt
-    (structured.py), so the field is visible to the LLM and a model that
-    echoes it back would switch off per-paper allocation for a plan that
-    actually has one.
-    """
-    agent = RetrievalPlannerAgent()
-    lying_plan = RetrievalPlan(
-        mode="targeted",
-        reformulated_query="q",
-        per_paper=[{"paper_id": "p1", "chunks": 5}],
-        degraded=True,
-    )
-    with patch(
-        "app.agents.retrieval_planner.parse_structured",
-        new=AsyncMock(return_value=lying_plan),
-    ):
-        plan = await agent.run(
-            PlannerInput(
-                query="Any question",
-                paper_list=[{"paper_id": "p1", "title": "X", "abstract": "x"}],
-                prior_messages=[],
-            )
-        )
-    assert plan.degraded is False
-    assert plan.per_paper[0].chunks == 5
 
 
 async def test_chat_agent_streams_tokens():
