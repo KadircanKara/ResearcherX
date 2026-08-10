@@ -59,10 +59,17 @@ _MODEL_COUNTS_SQL = text("SELECT model, count(*) AS n FROM paper_chunk_embedding
 
 # Mirrors chat_service._retrieve_paper_chunks: same <=> operator, same model
 # filter, and since 2026-08-10 the same GLOBAL top-k — there is no per-paper
-# ceiling in production to diverge from. The remaining simplification is that
-# this embeds the golden-set question verbatim; production reformulates a query
-# only when the conversation has prior turns, so for the single-turn questions
-# in the golden set the two paths now agree.
+# ceiling in production to diverge from. Two divergences remain (see
+# README.md's "What it measures vs. what production does" for the full
+# writeup):
+#   - Project scoping. Production always scopes retrieval to the current
+#     project's papers; this query reads every project's chunks unless
+#     --project-id is given. Harmless under the old per-paper ceiling, but a
+#     global top-k lets another project's chunks compete for the same budget.
+#   - Query reformulation. This embeds the golden-set question verbatim;
+#     production reformulates through a QueryReformulatorAgent only when the
+#     conversation has prior turns, so for the single-turn golden set the two
+#     paths still agree.
 _SQL = text("""
     SELECT c.paper_id AS paper_id,
            p.title AS paper_title,
@@ -71,6 +78,22 @@ _SQL = text("""
     FROM paper_chunk_embeddings c
     JOIN papers p ON p.id = c.paper_id
     WHERE c.model = :model
+    ORDER BY distance ASC
+""")
+
+# Same query, scoped to one project's papers -- used when --project-id is
+# given. Kept as a second literal query rather than string-building a WHERE
+# clause around a bind parameter, so both forms stay grep-able and neither
+# risks an interpolated filter.
+_SQL_SCOPED = text("""
+    SELECT c.paper_id AS paper_id,
+           p.title AS paper_title,
+           c.text AS chunk_text,
+           (c.embedding <=> CAST(:qvec AS vector)) AS distance
+    FROM paper_chunk_embeddings c
+    JOIN papers p ON p.id = c.paper_id
+    WHERE c.model = :model
+      AND p.project_id = :project_id
     ORDER BY distance ASC
 """)
 
@@ -193,11 +216,16 @@ def _display_point(lo: float, hi: float) -> str:
         return f"no display value fits — raw bounds ({lo:.6f}, {hi:.6f}]"
 
 
-async def _chunks_for(db, svc: EmbeddingService, case: Case) -> list[Scored]:
+async def _chunks_for(
+    db, svc: EmbeddingService, case: Case, project_id: str | None
+) -> list[Scored]:
     embedding = await svc.embed(case.question, task_type="RETRIEVAL_QUERY")
-    rows = (
-        await db.execute(_SQL, {"qvec": _vec(embedding), "model": settings.embedding_model})
-    ).fetchall()
+    params = {"qvec": _vec(embedding), "model": settings.embedding_model}
+    sql = _SQL
+    if project_id:
+        sql = _SQL_SCOPED
+        params["project_id"] = project_id
+    rows = (await db.execute(sql, params)).fetchall()
     return [
         Scored(
             paper_id=r.paper_id,
@@ -224,6 +252,14 @@ async def main() -> None:  # noqa: PLR0912, PLR0915 — a report script, not a l
         default=settings.max_context_chunks,
         help="total chunks retrieved globally (default: max_context_chunks)",
     )
+    parser.add_argument(
+        "--project-id",
+        default=None,
+        help=(
+            "scope the corpus to one project's papers, matching production's own "
+            "scoping (default: every project, this harness's original behaviour)"
+        ),
+    )
     parser.add_argument("--set", type=Path, default=_DEFAULT_SET)
     parser.add_argument("--json", type=Path, default=None, help="also dump results here")
     args = parser.parse_args()
@@ -246,7 +282,7 @@ async def main() -> None:  # noqa: PLR0912, PLR0915 — a report script, not a l
 
         corpus_note = ""
         for case in cases:
-            chunks = await _chunks_for(db, svc, case)
+            chunks = await _chunks_for(db, svc, case, args.project_id)
             if not corpus_note:
                 corpus_note = _corpus_note(chunks)
 
@@ -285,7 +321,11 @@ async def main() -> None:  # noqa: PLR0912, PLR0915 — a report script, not a l
                 }
             )
 
-    print(f"\ncorpus: {corpus_note}   model: {settings.embedding_model}   k={args.k}")
+    project_note = args.project_id if args.project_id else "ALL (no --project-id)"
+    print(
+        f"\ncorpus: {corpus_note}   model: {settings.embedding_model}   k={args.k}   "
+        f"project: {project_note}"
+    )
     print("(small, thematically clustered corpus — numbers are indicative, not conclusive)")
     print(
         "(recall/MRR below apply no distance cutoff — they are the retrieval "
@@ -495,6 +535,7 @@ async def main() -> None:  # noqa: PLR0912, PLR0915 — a report script, not a l
                 {
                     "model": settings.embedding_model,
                     "k": args.k,
+                    "project_id": args.project_id,
                     "corpus": corpus_note,
                     "cases": per_case,
                     "errors": errors,

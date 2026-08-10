@@ -32,9 +32,9 @@ CASE = Case(
 
 
 def _s(title: str, text: str, dist: float, paper_id: str | None = None) -> Scored:
-    """paper_id defaults to the title so existing per-paper-by-title tests
-    don't need updating; tests that care about id-vs-title pass it
-    explicitly."""
+    """paper_id defaults to the title as a convenience for tests that don't
+    care about the distinction; pass it explicitly for a test that needs a
+    paper_id different from its title (e.g. two papers sharing a title)."""
     return Scored(paper_id=paper_id or title, paper_title=title, chunk_text=text, distance=dist)
 
 
@@ -240,13 +240,15 @@ def test_topk_satisfying_distance_matches_best_when_within_top_k():
 
 def test_topk_satisfying_distance_none_when_crowded_out_of_top_k():
     """Counterexample for the bug code review caught: best_satisfying_distance
-    ignores whether nearer same-paper chunks crowd the satisfying chunk out of
-    the per-paper top-k. Here 5 irrelevant chunks are all nearer than the one
-    satisfying chunk, so the satisfying chunk misses EVERY per-paper top-5 for
-    every possible threshold -- not because of the threshold, but because 5
-    competitors already outrank it regardless of any cutoff. best_satisfying_
-    distance happily reports 0.10 (it exists in the corpus); the top-k-aware
-    function must report None, because no threshold ever retrieves it at k=5.
+    ignores whether nearer chunks crowd the satisfying chunk out of the
+    GLOBAL top-k (production applies no per-paper ceiling -- see
+    metrics.simulate_retrieval). Here 5 irrelevant chunks are all nearer than
+    the one satisfying chunk, so the satisfying chunk misses EVERY global
+    top-5 for every possible threshold -- not because of the threshold, but
+    because 5 competitors already outrank it regardless of any cutoff.
+    best_satisfying_distance happily reports 0.10 (it exists in the corpus);
+    the top-k-aware function must report None, because no threshold ever
+    retrieves it at k=5.
     """
     chunks = [
         _s("P1", "irrelevant", 0.05),
@@ -287,10 +289,10 @@ def test_diagnose_separation_reports_blocked_case_instead_of_a_wrong_interval():
     approach) instead of topk_satisfying_distance, it would report a
     seemingly-safe interval starting just above 0.10 here -- and ANY
     threshold recommended from that interval achieves ZERO recall for this
-    case, because its satisfying chunk never survives the per-paper top-5
-    cut regardless of T (see the counterexample test above). The correct
-    behavior is to refuse to name an interval at all, and say which case
-    blocks it.
+    case, because its satisfying chunk never survives the GLOBAL top-5 cut
+    regardless of T (production applies no per-paper ceiling; see the
+    counterexample test above). The correct behavior is to refuse to name an
+    interval at all, and say which case blocks it.
     """
     positive_chunks = [
         _s("P1", "irrelevant", 0.05),

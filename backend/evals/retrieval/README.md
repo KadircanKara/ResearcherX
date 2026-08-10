@@ -20,8 +20,12 @@ Flags:
 
 - `--k` — total chunks retrieved globally (default: `max_context_chunks`,
   production's own budget). See "What it measures vs. what production does"
-  below for the one remaining way this harness's query differs from
-  production's.
+  below for how this harness's query still differs from production's.
+- `--project-id` — scope the corpus to one project's papers, matching how
+  production always scopes retrieval. Default: every project (this harness's
+  original behaviour, unchanged unless you pass this). Pass it whenever the
+  database has more than one populated project — see "What it measures vs.
+  what production does" below for why this matters under a global top-k.
 - `--set` — path to an alternate golden-set JSON file (default: `golden_set.json`
   next to this file, same schema as "Adding a case" below).
 - `--json` — also write the full per-case results, threshold-sweep grid, and
@@ -36,15 +40,27 @@ its **top-k too**: production applies no per-paper ceiling, just
 `ORDER BY distance ASC LIMIT max_context_chunks`, which is exactly what
 `--k` (default: `max_context_chunks`) simulates here.
 
-The one remaining divergence is query reformulation. Production
-(`chat_service.py`) reformulates the query through a `QueryReformulatorAgent`
-only when the conversation has prior turns — a first turn is already
-standalone, so the call is skipped and the raw question is embedded directly.
-This harness always embeds the golden-set `question` verbatim. Since the
-golden set is single-turn questions, the two paths now agree: there's no
-reformulation for either of them to diverge on. Re-validate this section if
-the golden set ever grows multi-turn cases, or after any change to the
-reformulator's behavior.
+Two divergences remain:
+
+- **Project scoping.** Production always scopes retrieval to the current
+  project's papers (`chat_service._retrieve_paper_chunks` joins on a `scope`
+  CTE built from that project's paper ids). By default this harness reads
+  every project's chunks instead — harmless under the old per-paper top-k,
+  where another project's chunks couldn't take a slot away from the paper
+  being measured, but not harmless under a global top-k, where they compete
+  for the same fixed budget directly. Pass `--project-id` to scope the
+  harness the same way production scopes a real chat; omit it to keep
+  measuring across every project (e.g. when the database only has one
+  populated project, which is why this was latent rather than visible until
+  now).
+- **Query reformulation.** Production (`chat_service.py`) reformulates the
+  query through a `QueryReformulatorAgent` only when the conversation has
+  prior turns — a first turn is already standalone, so the call is skipped
+  and the raw question is embedded directly. This harness always embeds the
+  golden-set `question` verbatim. Since the golden set is single-turn
+  questions, the two paths still agree: there's no reformulation for either
+  of them to diverge on. Re-validate this section if the golden set ever
+  grows multi-turn cases, or after any change to the reformulator's behavior.
 
 ## Adding a case
 
