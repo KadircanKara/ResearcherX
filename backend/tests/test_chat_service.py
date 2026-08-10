@@ -343,3 +343,86 @@ async def test_retrieve_paper_chunks_numbers_citations_contiguously_after_cappin
         chunks = await svc._retrieve_paper_chunks(mock_db, papers, [0.0] * 768)
 
     assert [c.n for c in chunks] == list(range(1, 41))
+
+
+def _mock_db_returning_shortlist(rows: list[tuple[str, float, int]]) -> MagicMock:
+    """Fake AsyncSession returning (paper_id, best, n_chunks) rows.
+
+    Deliberately returns them in the order given, ignoring any ORDER BY, so
+    the tests prove what the service does with the rows rather than what
+    Postgres would have done for it.
+    """
+    mock_rows = [MagicMock(paper_id=p, best=b, n_chunks=n) for p, b, n in rows]
+    mock_result = MagicMock()
+    mock_result.fetchall.return_value = mock_rows
+    mock_db = MagicMock()
+    mock_db.execute = AsyncMock(return_value=mock_result)
+    return mock_db
+
+
+async def test_shortlist_papers_returns_nearest_first_capped_at_limit():
+    from app.services.chat_service import ChatService, PaperInfo
+
+    svc = ChatService()
+    mock_db = _mock_db_returning_shortlist([("p0", 0.30, 10), ("p1", 0.31, 20), ("p2", 0.32, 30)])
+    papers = [PaperInfo(paper_id=f"p{i}", title=f"Paper {i}") for i in range(3)]
+
+    candidates, _ = await svc._shortlist_papers(mock_db, papers, [0.0] * 768, 2)
+
+    assert [c.paper_id for c in candidates] == ["p0", "p1"]
+    assert [c.title for c in candidates] == ["Paper 0", "Paper 1"]
+
+
+async def test_shortlist_papers_counts_chunks_across_the_whole_project():
+    """The total must cover EVERY paper, not just the returned candidates.
+
+    It is what decides whether targeting is worth an LLM call at all: if the
+    whole library already fits the context budget, scoping cannot change what
+    is retrieved. Counting only the top few would under-report and skip
+    targeting on projects that need it.
+    """
+    from app.services.chat_service import ChatService, PaperInfo
+
+    svc = ChatService()
+    mock_db = _mock_db_returning_shortlist([("p0", 0.30, 10), ("p1", 0.31, 20), ("p2", 0.32, 30)])
+    papers = [PaperInfo(paper_id=f"p{i}", title=f"Paper {i}") for i in range(3)]
+
+    _, total = await svc._shortlist_papers(mock_db, papers, [0.0] * 768, 2)
+
+    assert total == 60
+
+
+async def test_shortlist_papers_issues_one_scoped_query():
+    """One query, scoped to this project's papers and this embedding model.
+
+    paper_chunk_embeddings is global; an unscoped ranking would rank another
+    project's papers as candidates for this project's question.
+    """
+    from app.services.chat_service import ChatService, PaperInfo
+
+    svc = ChatService()
+    mock_db = _mock_db_returning_shortlist([])
+    papers = [PaperInfo(paper_id=f"p{i}", title=f"Paper {i}") for i in range(3)]
+
+    with patch.object(settings, "embedding_model", "test-embed-model"):
+        await svc._shortlist_papers(mock_db, papers, [0.0] * 768, 10)
+
+    assert mock_db.execute.await_count == 1
+    _, params = mock_db.execute.call_args.args
+    assert json.loads(params["ids"]) == ["p0", "p1", "p2"]
+    assert params["model"] == "test-embed-model"
+
+
+async def test_shortlist_papers_skips_rows_for_unknown_papers():
+    """A row whose paper_id is not in paper_infos cannot be labelled with a
+    title, so it must be dropped rather than surfaced with an empty one."""
+    from app.services.chat_service import ChatService, PaperInfo
+
+    svc = ChatService()
+    mock_db = _mock_db_returning_shortlist([("ghost", 0.20, 5), ("p0", 0.30, 10)])
+    papers = [PaperInfo(paper_id="p0", title="Paper 0")]
+
+    candidates, total = await svc._shortlist_papers(mock_db, papers, [0.0] * 768, 10)
+
+    assert [c.paper_id for c in candidates] == ["p0"]
+    assert total == 15
