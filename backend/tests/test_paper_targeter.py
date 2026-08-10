@@ -99,6 +99,17 @@ async def test_targeter_prompt_carries_titles_only():
     assert "ALSO SHOULD NOT APPEAR" not in sent
 
 
+async def test_targeter_fails_open_when_a_candidate_dict_is_malformed():
+    """A candidate dict missing an expected key (e.g. "title") must fail open
+    to None like every other error path here, not raise KeyError out of
+    run() and fail the whole turn. Prompt construction happens inside the
+    try for exactly this reason."""
+    agent = PaperTargeterAgent()
+    malformed = [{"paper_id": "p1"}]  # missing "title"
+    got = await agent.run(TargeterInput(query="q", candidates=malformed, prior_messages=[]))
+    assert got is None
+
+
 async def test_targeter_takes_its_budget_from_settings():
     """Provider-specific like the other agent budgets: the output is a single
     id, but a reasoning model spends ~1,900 tokens thinking before emitting a

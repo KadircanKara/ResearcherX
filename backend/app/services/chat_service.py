@@ -109,6 +109,11 @@ class ChatService:
             # This project's paper ids + titles: scopes the global top-k chunk
             # query below to this project and labels citations by title.
             paper_infos = [PaperInfo(paper_id=p.id, title=p.title) for p in paper_rows]
+            # Defaults to the whole project; narrowed below only when
+            # targeting picks one paper. Initialised here, unconditionally,
+            # so it is always defined at the 'retrieving' event below even
+            # when embedding failed or the project has no papers.
+            scope = paper_infos
 
             if query_embedding is not None:
                 # Retrieve relevant history
@@ -165,12 +170,25 @@ class ChatService:
                             db, paper_infos, retrieval_embedding, _TARGETER_CANDIDATES
                         )
 
-                    # Scope retrieval to one paper when the question is about
-                    # one paper. Skipped when the whole library already fits
-                    # the budget: scoping cannot change what is retrieved
-                    # then, so the call would be pure cost and latency.
-                    scope = paper_infos
-                    if total_chunks > settings.max_context_chunks and candidates:
+                    # Scope retrieval to one paper when the question might be
+                    # about one paper. Skipped for single-paper projects: the
+                    # scope would be that one paper whether the targeter names
+                    # it or answers None, so targeting there is a guaranteed
+                    # no-op that still costs a full extra LLM call every turn
+                    # -- and "upload one PDF and ask about it" is the common
+                    # case. Also skipped when the whole library already fits
+                    # the context budget; that second skip is a COST decision,
+                    # not a correctness one -- with similarity_threshold in
+                    # play, scoping to one paper can still change which chunks
+                    # come back even under budget (a threshold-passing chunk
+                    # from another paper is not available once scoped). Small
+                    # projects deliberately keep that original misattribution
+                    # risk in exchange for skipping this LLM call.
+                    if (
+                        len(paper_infos) > 1
+                        and total_chunks > settings.max_context_chunks
+                        and candidates
+                    ):
                         target_id = await self._targeter.run(
                             TargeterInput(
                                 query=retrieval_query,
@@ -182,17 +200,36 @@ class ChatService:
                         )
                         if target_id is not None:
                             scope = [c for c in candidates if c.paper_id == target_id]
+                            log.info(
+                                "paper_targeted",
+                                conversation_id=conversation_id,
+                                paper_id=target_id,
+                                candidates=len(candidates),
+                            )
 
                     async with SessionLocal() as db:
                         paper_chunks = await self._retrieve_paper_chunks(
                             db, scope, retrieval_embedding
                         )
 
+                    if scope is not paper_infos and not paper_chunks:
+                        # A targeted paper whose every chunk sits at or beyond
+                        # similarity_threshold retrieves nothing, and
+                        # chat_agent then answers ungrounded -- a worse
+                        # failure than the misattribution this feature fixes.
+                        # Re-querying the untargeted scope keeps the answer
+                        # grounded, same as if targeting had never fired.
+                        async with SessionLocal() as db:
+                            paper_chunks = await self._retrieve_paper_chunks(
+                                db, paper_infos, retrieval_embedding
+                            )
+                        scope = paper_infos
+
             yield {
                 "event": "retrieving",
                 "data": json.dumps(
                     {
-                        "paper_count": len(paper_rows),
+                        "paper_count": len(scope),
                         "history_hits": len(history_hits),
                     }
                 ),
@@ -312,7 +349,10 @@ class ChatService:
         threshold belongs at retrieval time, and applying it here could empty
         the shortlist on a vaguely worded question.
         """
-        if not paper_infos:
+        if len(paper_infos) <= 1:
+            # A single-paper project has nothing to disambiguate: the
+            # candidate list would be that one paper regardless of what this
+            # query returns, so skip it and its SQL round trip entirely.
             return [], 0
         sql = text("""
             WITH scope AS (
@@ -348,13 +388,19 @@ class ChatService:
         paper_infos: list[PaperInfo],
         query_embedding: list[float],
     ) -> list[ChunkContext]:
-        """Retrieve the globally nearest chunks across the whole library.
+        """Retrieve the nearest chunks from `paper_infos`, ranked by distance.
+
+        `paper_infos` is the retrieval SCOPE the caller decided on -- the
+        whole project's papers by default, or the single paper the targeter
+        picked. This method has no opinion on which; it just ranks whatever
+        scope it is given.
 
         ONE query, and no per-paper ceiling. Cosine similarity spreads the
-        result across papers by itself: measured on a 100-paper library, a
-        global top-40 spanned 14-25 distinct papers and no paper ever took
-        more than 11 of the 40 slots — and that case was the correct paper
-        going deep on a question about its own contents.
+        result across papers by itself when scope is the whole library:
+        measured on a 100-paper library, a global top-40 spanned 14-25
+        distinct papers and no paper ever took more than 11 of the 40 slots
+        — and that case was the correct paper going deep on a question about
+        its own contents.
 
         A ceiling could only ever REDUCE the right paper's share, never raise
         it. On the EA-operators question the target paper earns 6 chunks by

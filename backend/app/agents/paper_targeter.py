@@ -53,25 +53,29 @@ class PaperTargeterAgent:
     async def run(self, inp: TargeterInput) -> str | None:
         if not inp.candidates:
             return None
-        # Titles and ids only. Building this list explicitly rather than
-        # dumping each candidate dict is what keeps an abstract or a chunk of
-        # body text from reaching the prompt if a caller ever passes richer
-        # dicts — see test_targeter_prompt_carries_titles_only.
-        offered = {c["paper_id"] for c in inp.candidates}
-        catalog = "\n".join(f"[{c['paper_id']}] {c['title']}" for c in inp.candidates)
-        history = (
-            "\n".join(
-                f"[{m['role'].upper()}]: {m['content'][:300]}"
-                for m in inp.prior_messages[-6:]  # last 6 messages max
-            )
-            or "(no prior conversation)"
-        )
-        user = (
-            f"PRIOR CONVERSATION:\n{history}\n\n"
-            f"CANDIDATE PAPERS:\n{catalog}\n\n"
-            f"QUESTION: {inp.query}"
-        )
         try:
+            # Titles and ids only. Building this list explicitly rather than
+            # dumping each candidate dict is what keeps an abstract or a
+            # chunk of body text from reaching the prompt if a caller ever
+            # passes richer dicts — see test_targeter_prompt_carries_titles_only.
+            #
+            # Inside the try on purpose: a candidate or history dict missing
+            # an expected key must fail open to None like every other error
+            # here, not raise KeyError out of run() and fail the whole turn.
+            offered = {c["paper_id"] for c in inp.candidates}
+            catalog = "\n".join(f"[{c['paper_id']}] {c['title']}" for c in inp.candidates)
+            history = (
+                "\n".join(
+                    f"[{m['role'].upper()}]: {m['content'][:300]}"
+                    for m in inp.prior_messages[-6:]  # last 6 messages max
+                )
+                or "(no prior conversation)"
+            )
+            user = (
+                f"PRIOR CONVERSATION:\n{history}\n\n"
+                f"CANDIDATE PAPERS:\n{catalog}\n\n"
+                f"QUESTION: {inp.query}"
+            )
             out = await parse_structured(
                 system=SYSTEM,
                 user=user,
