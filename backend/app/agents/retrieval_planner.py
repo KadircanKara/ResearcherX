@@ -1,8 +1,10 @@
 """RetrievalPlannerAgent — decides per-paper chunk allocation for a query.
 
-Fail-open: on any error, returns mode=broad with 2 chunks per paper and
-the original query unchanged. This keeps the chat pipeline robust against
-flaky structured-output calls.
+Fail-open: on any error, returns mode=broad with the original query and
+`degraded=True` — carrying NO allocation. This keeps the chat pipeline robust
+against flaky structured-output calls without inventing a decision it never
+made: `degraded` tells chat_service to skip per-paper ceilings entirely and
+let the global top-k choose.
 """
 
 from pydantic import BaseModel, Field
@@ -47,6 +49,11 @@ class RetrievalPlan(BaseModel):
     mode: str = "broad"
     reformulated_query: str = ""
     per_paper: list[PaperAlloc] = Field(default_factory=list)
+    # Set only by the fail-open path below, never by the model — `run()`
+    # overwrites it on success. It has to be a distinct signal because an
+    # empty `per_paper` already means something else (the planner ran and
+    # named nobody, so every paper takes the unallocated fallback).
+    degraded: bool = False
 
 
 class RetrievalPlannerAgent:
@@ -71,17 +78,26 @@ class RetrievalPlannerAgent:
             f"ASSIGNED PAPERS:\n{paper_block}"
         )
         try:
-            return await parse_structured(
+            plan = await parse_structured(
                 system=SYSTEM,
                 user=user,
                 output_model=RetrievalPlan,
                 max_tokens=600,
             )
+            # parse_structured pastes this model's JSON schema into the prompt,
+            # so `degraded` is visible to the LLM. A model that echoes it back
+            # would switch off per-paper allocation for a plan that has one.
+            return plan.model_copy(update={"degraded": False})
         except Exception as exc:
             log.warning("retrieval_planner_failed_open", error=str(exc)[:200])
-            # Fail open: broad retrieval, original query
+            # Fail open: broad retrieval, original query, and no allocation.
+            # Fabricating one (this used to be 2 chunks per paper) reads
+            # downstream as a real decision: at 100 papers it capped the target
+            # paper at its 2 nearest chunks and dropped the answering chunk —
+            # global rank 21 — from a 40-chunk budget it easily fitted.
             return RetrievalPlan(
                 mode="broad",
                 reformulated_query=inp.query,
-                per_paper=[PaperAlloc(paper_id=p.paper_id, chunks=2) for p in paper_list],
+                per_paper=[],
+                degraded=True,
             )

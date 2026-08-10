@@ -1,5 +1,6 @@
 """ChatService integration test — all external calls mocked."""
 
+import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest_asyncio
@@ -204,6 +205,99 @@ async def test_retrieve_paper_chunks_caps_total_at_settings_max_context_chunks()
         )
 
     assert len(chunks) == 40
+
+
+async def test_retrieve_paper_chunks_applies_no_ceiling_when_allocation_is_absent():
+    """`per_paper_map=None` means "the planner produced no allocation".
+
+    A ceiling equal to the whole context budget is the same as no ceiling —
+    the global LIMIT already bounds any single paper to that many chunks — so
+    selection falls through to pure global top-k. The allocation still has to
+    list every paper, because the alloc CTE is also what scopes the search to
+    this project's chunks.
+    """
+    from app.agents.retrieval_planner import PaperInfo
+    from app.services.chat_service import ChatService
+
+    svc = ChatService()
+    mock_db = _mock_db_returning(0)
+    papers = [PaperInfo(paper_id=f"p{i}", title=f"Paper {i}", abstract="") for i in range(100)]
+
+    with patch.object(settings, "max_context_chunks", 40):
+        await svc._retrieve_paper_chunks(mock_db, papers, None, [0.0] * 768)
+
+    _, params = mock_db.execute.call_args.args
+    alloc = json.loads(params["alloc"])
+    assert len(alloc) == 100
+    assert set(alloc.values()) == {40}
+
+
+async def test_retrieve_paper_chunks_honours_planner_allocations():
+    """A real plan is still a per-paper ceiling — that is what stops one
+    well-matching paper monopolising a comparative answer. Papers the planner
+    ran but never named keep the explicit unallocated fallback."""
+    from app.agents.retrieval_planner import PaperInfo
+    from app.services.chat_service import ChatService, _UNALLOCATED_PAPER_K
+
+    svc = ChatService()
+    mock_db = _mock_db_returning(0)
+    papers = [PaperInfo(paper_id=f"p{i}", title=f"Paper {i}", abstract="") for i in range(3)]
+
+    with patch.object(settings, "max_context_chunks", 40):
+        await svc._retrieve_paper_chunks(mock_db, papers, {"p0": 5, "p1": 1}, [0.0] * 768)
+
+    _, params = mock_db.execute.call_args.args
+    assert json.loads(params["alloc"]) == {"p0": 5, "p1": 1, "p2": _UNALLOCATED_PAPER_K}
+
+
+async def test_respond_drops_per_paper_ceiling_when_plan_is_degraded(
+    db_session: AsyncSession, project: Project, conversation_with_message
+):
+    """A degraded plan must reach retrieval as "no allocation", not as an
+    allocation that happens to be empty.
+
+    Without this the fail-open path is indistinguishable from a genuine
+    `broad` plan, and every paper silently collects the unallocated fallback.
+    """
+    from app.agents.retrieval_planner import RetrievalPlan
+    from app.db.models import Paper
+    from app.services.chat_service import ChatService
+
+    conv = conversation_with_message
+    # _PLANNER_MIN_PAPERS: the planner only runs from 3 papers up.
+    for i in range(3):
+        db_session.add(Paper(project_id=project.id, title=f"Paper {i}", source="manual"))
+    await db_session.commit()
+
+    async def fake_stream(*args, **kwargs):
+        yield "answer"
+
+    svc = ChatService()
+    retrieve = AsyncMock(return_value=[])
+
+    with (
+        patch.object(svc._embedding_svc, "embed", AsyncMock(return_value=[0.0] * 768)),
+        patch.object(svc, "_retrieve_history", AsyncMock(return_value=[])),
+        patch.object(
+            svc._planner,
+            "run",
+            AsyncMock(
+                return_value=RetrievalPlan(
+                    mode="broad",
+                    reformulated_query="Test question",
+                    per_paper=[],
+                    degraded=True,
+                )
+            ),
+        ),
+        patch.object(svc, "_retrieve_paper_chunks", retrieve),
+        patch.object(svc._chat_agent, "stream", return_value=fake_stream()),
+        patch.object(svc._conv_svc, "save_message", AsyncMock()),
+    ):
+        async for _ in svc.respond(conv.id, "Test question"):
+            pass
+
+    assert retrieve.await_args.args[2] is None
 
 
 async def test_retrieve_paper_chunks_numbers_citations_contiguously_after_capping():

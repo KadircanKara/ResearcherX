@@ -17,6 +17,12 @@ os.environ["LLM_API_KEY"] = "test-key-never-used"
 os.environ["LLM_BASE_URL"] = "http://localhost:1/v1"  # unroutable: fail fast if hit
 os.environ["EMBEDDING_API_KEY"] = "test-key-never-used"
 os.environ["EMBEDDING_BASE_URL"] = "http://localhost:1/v1"  # unroutable: fail fast if hit
+# Overriding the primary key is not enough: LLM_FALLBACKS carries its own
+# base_url/api_key/model per entry, and pydantic-settings reads it straight
+# from .env when it is not overridden here. Without this line a populated
+# fallback chain puts live credentials into every test run — and pytest
+# prints the whole Settings repr, keys included, in an assertion failure.
+os.environ["LLM_FALLBACKS"] = "[]"
 
 import asyncio  # noqa: E402
 
