@@ -58,34 +58,22 @@ _MIN_NEGATIVES_FOR_CONFIDENCE = 10
 _MODEL_COUNTS_SQL = text("SELECT model, count(*) AS n FROM paper_chunk_embeddings GROUP BY model")
 
 # Mirrors chat_service._retrieve_paper_chunks: same <=> operator, same model
-# filter, and since 2026-08-10 the same GLOBAL top-k — there is no per-paper
-# ceiling in production to diverge from. Two divergences remain (see
-# README.md's "What it measures vs. what production does" for the full
-# writeup):
-#   - Project scoping. Production always scopes retrieval to the current
-#     project's papers; this query reads every project's chunks unless
-#     --project-id is given. Harmless under the old per-paper ceiling, but a
-#     global top-k lets another project's chunks compete for the same budget.
-#   - Query reformulation. This embeds the golden-set question verbatim;
-#     production reformulates through a QueryReformulatorAgent only when the
-#     conversation has prior turns, so for the single-turn golden set the two
-#     paths still agree.
+# filter, same project scoping, and since 2026-08-10 the same GLOBAL top-k —
+# there is no per-paper ceiling in production to diverge from.
+#
+# `--project-id` is REQUIRED rather than defaulting to every project. There is
+# no unscoped path in production, so an unscoped run here would report numbers
+# production cannot produce: under a global top-k another project's chunks
+# compete for the same budget, silently displacing the ones production would
+# have retrieved. That was harmless under the old per-paper ceiling, where each
+# paper held its own budget. There is no sensible default project, so the flag
+# is required instead of guessed.
+#
+# ONE divergence remains (see README.md's "What it measures vs. what production
+# does"): this embeds the golden-set question verbatim, while production
+# reformulates through a QueryReformulatorAgent when the conversation has prior
+# turns. For the single-turn golden set the two paths agree.
 _SQL = text("""
-    SELECT c.paper_id AS paper_id,
-           p.title AS paper_title,
-           c.text AS chunk_text,
-           (c.embedding <=> CAST(:qvec AS vector)) AS distance
-    FROM paper_chunk_embeddings c
-    JOIN papers p ON p.id = c.paper_id
-    WHERE c.model = :model
-    ORDER BY distance ASC
-""")
-
-# Same query, scoped to one project's papers -- used when --project-id is
-# given. Kept as a second literal query rather than string-building a WHERE
-# clause around a bind parameter, so both forms stay grep-able and neither
-# risks an interpolated filter.
-_SQL_SCOPED = text("""
     SELECT c.paper_id AS paper_id,
            p.title AS paper_title,
            c.text AS chunk_text,
@@ -216,16 +204,14 @@ def _display_point(lo: float, hi: float) -> str:
         return f"no display value fits — raw bounds ({lo:.6f}, {hi:.6f}]"
 
 
-async def _chunks_for(
-    db, svc: EmbeddingService, case: Case, project_id: str | None
-) -> list[Scored]:
+async def _chunks_for(db, svc: EmbeddingService, case: Case, project_id: str) -> list[Scored]:
     embedding = await svc.embed(case.question, task_type="RETRIEVAL_QUERY")
-    params = {"qvec": _vec(embedding), "model": settings.embedding_model}
-    sql = _SQL
-    if project_id:
-        sql = _SQL_SCOPED
-        params["project_id"] = project_id
-    rows = (await db.execute(sql, params)).fetchall()
+    params = {
+        "qvec": _vec(embedding),
+        "model": settings.embedding_model,
+        "project_id": project_id,
+    }
+    rows = (await db.execute(_SQL, params)).fetchall()
     return [
         Scored(
             paper_id=r.paper_id,
@@ -254,10 +240,11 @@ async def main() -> None:  # noqa: PLR0912, PLR0915 — a report script, not a l
     )
     parser.add_argument(
         "--project-id",
-        default=None,
+        required=True,
         help=(
             "scope the corpus to one project's papers, matching production's own "
-            "scoping (default: every project, this harness's original behaviour)"
+            "scoping. Required: production has no unscoped path, so an unscoped "
+            "run would measure a corpus production can never assemble"
         ),
     )
     parser.add_argument("--set", type=Path, default=_DEFAULT_SET)
@@ -321,10 +308,9 @@ async def main() -> None:  # noqa: PLR0912, PLR0915 — a report script, not a l
                 }
             )
 
-    project_note = args.project_id if args.project_id else "ALL (no --project-id)"
     print(
         f"\ncorpus: {corpus_note}   model: {settings.embedding_model}   k={args.k}   "
-        f"project: {project_note}"
+        f"project: {args.project_id}"
     )
     print("(small, thematically clustered corpus — numbers are indicative, not conclusive)")
     print(

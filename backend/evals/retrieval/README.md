@@ -9,8 +9,8 @@ it never writes.
 > A recall@5 from the old harness and a recall@5 from this one measure
 > different things.
 
-    docker compose exec -T backend python -m evals.retrieval.run_eval
-    docker compose exec -T backend python -m evals.retrieval.run_eval --k 3 --json /tmp/retrieval.json
+    docker compose exec -T backend python -m evals.retrieval.run_eval --project-id <uuid>
+    docker compose exec -T backend python -m evals.retrieval.run_eval --project-id <uuid> --k 3 --json /tmp/retrieval.json
 
 The `-m` form is required: `pyproject.toml` packages only `app*`, so `evals`
 isn't installed and running it by file path fails with
@@ -21,11 +21,10 @@ Flags:
 - `--k` — total chunks retrieved globally (default: `max_context_chunks`,
   production's own budget). See "What it measures vs. what production does"
   below for how this harness's query still differs from production's.
-- `--project-id` — scope the corpus to one project's papers, matching how
-  production always scopes retrieval. Default: every project (this harness's
-  original behaviour, unchanged unless you pass this). Pass it whenever the
-  database has more than one populated project — see "What it measures vs.
-  what production does" below for why this matters under a global top-k.
+- `--project-id` — **required.** Scopes the corpus to one project's papers,
+  matching how production always scopes retrieval. There is no unscoped path
+  in production, so there is no default here: a run across every project would
+  report numbers production cannot produce.
 - `--set` — path to an alternate golden-set JSON file (default: `golden_set.json`
   next to this file, same schema as "Adding a case" below).
 - `--json` — also write the full per-case results, threshold-sweep grid, and
@@ -40,19 +39,15 @@ its **top-k too**: production applies no per-paper ceiling, just
 `ORDER BY distance ASC LIMIT max_context_chunks`, which is exactly what
 `--k` (default: `max_context_chunks`) simulates here.
 
-Two divergences remain:
+Project scoping matches: production scopes retrieval to the current project's
+papers (`chat_service._retrieve_paper_chunks` joins on a `scope` CTE built from
+that project's paper ids), and `--project-id` is required here for the same
+reason. Under the old per-paper top-k an unscoped harness was harmless, since
+another project's chunks could not take a slot away from the paper being
+measured; under a global top-k they compete for the same fixed budget directly.
 
-- **Project scoping.** Production always scopes retrieval to the current
-  project's papers (`chat_service._retrieve_paper_chunks` joins on a `scope`
-  CTE built from that project's paper ids). By default this harness reads
-  every project's chunks instead — harmless under the old per-paper top-k,
-  where another project's chunks couldn't take a slot away from the paper
-  being measured, but not harmless under a global top-k, where they compete
-  for the same fixed budget directly. Pass `--project-id` to scope the
-  harness the same way production scopes a real chat; omit it to keep
-  measuring across every project (e.g. when the database only has one
-  populated project, which is why this was latent rather than visible until
-  now).
+One divergence remains:
+
 - **Query reformulation.** Production (`chat_service.py`) reformulates the
   query through a `QueryReformulatorAgent` only when the conversation has
   prior turns — a first turn is already standalone, so the call is skipped
