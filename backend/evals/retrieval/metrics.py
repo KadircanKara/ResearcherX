@@ -32,23 +32,17 @@ class SweepRow:
 
 
 def simulate_retrieval(chunks: list[Scored], k: int) -> list[Scored]:
-    """Reproduce the SET of chunks chat_service._retrieve_paper_chunks would fetch:
-    top-k PER PAPER (not a global top-k — the production path queries each paper
-    separately, so a global cut would starve every paper but the nearest and
-    overstate misses).
+    """Reproduce the SET of chunks chat_service._retrieve_paper_chunks fetches:
+    a GLOBAL top-k across the whole project, nearest first.
 
-    The returned order is NOT production's order: production iterates papers in
-    library order and concatenates each paper's chunks without a final re-sort
-    across papers, so a hit's position in the LLM's context can differ from its
-    rank here. This function instead returns the set ordered by distance —
-    nearest chunk first regardless of which paper it came from. See
-    `mean_reciprocal_rank` for what that means for MRR.
+    Production applies no per-paper ceiling. Cosine similarity spreads the
+    result across papers by itself — measured on a 100-paper library, a global
+    top-40 spanned 14-25 distinct papers. Simulating top-k PER PAPER, as this
+    did until 2026-08-10, gave every paper its own budget regardless of library
+    size, which is why recall@k here was structurally close to invariant under
+    corpus growth.
     """
-    by_paper: dict[str, list[Scored]] = {}
-    for chunk in sorted(chunks, key=lambda c: c.distance):
-        by_paper.setdefault(chunk.paper_id, []).append(chunk)
-    kept = [c for group in by_paper.values() for c in group[:k]]
-    return sorted(kept, key=lambda c: c.distance)
+    return sorted(chunks, key=lambda c: c.distance)[:k]
 
 
 def first_satisfying_rank(case: Case, retrieved: list[Scored]) -> int | None:
@@ -60,10 +54,10 @@ def first_satisfying_rank(case: Case, retrieved: list[Scored]) -> int | None:
 
 
 def recall_at_k(case_chunks: list[tuple[Case, list[Scored]]], k: int) -> float:
-    """Fraction of cases with a satisfying chunk within the per-paper top-k.
+    """Fraction of cases with a satisfying chunk within the global top-k.
 
     This is the retrieval CEILING, not what production returns: no distance
-    cutoff is applied here, only per-paper top-k. Production also filters by
+    cutoff is applied here, only a global top-k. Production also filters by
     `similarity_threshold` before top-k (see `sweep`), so production recall is
     always <= this number. Do not report this figure as "what production
     achieves" — pair it with `sweep`'s content_recall column for that.
@@ -80,15 +74,14 @@ def recall_at_k(case_chunks: list[tuple[Case, list[Scored]]], k: int) -> float:
 
 def mean_reciprocal_rank(case_chunks: list[tuple[Case, list[Scored]]], k: int) -> float:
     """Mean of 1/rank over each case's first satisfying chunk, ranked by
-    `simulate_retrieval`'s distance order (nearest first, across all retrieved
-    papers).
+    `simulate_retrieval`'s distance order (nearest first, across the whole
+    project).
 
-    This measures embedding rank quality, NOT position in the LLM's context:
-    production concatenates papers in library order without re-sorting across
-    papers, so a chunk's rank here can differ from where it lands in the
-    prompt production actually sends. Like `recall_at_k`, no distance cutoff
-    is applied, so this is also a ceiling, not what `similarity_threshold`
-    filtering leaves production with.
+    Since 2026-08-10 this also matches production's own order: chat_service.py
+    fetches with `ORDER BY distance ASC LIMIT :max_chunks` and never re-sorts,
+    so a chunk's rank here is the same position it lands in the LLM's prompt.
+    Like `recall_at_k`, no distance cutoff is applied, so this is still a
+    ceiling, not what `similarity_threshold` filtering leaves production with.
     """
     if not case_chunks:
         raise ValueError("no cases to score")
@@ -189,31 +182,30 @@ def separating_threshold(rows: list[SweepRow]) -> float | None:
 
 def topk_satisfying_distance(case: Case, chunks: list[Scored], k: int) -> float | None:
     """Distance of the chunk `first_satisfying_rank` finds within this case's
-    own per-paper top-k, or None if no satisfying chunk survives that cut —
+    own global top-k, or None if no satisfying chunk survives that cut —
     even when `best_satisfying_distance` finds one elsewhere in the corpus.
 
     This is the value a separating threshold actually needs, and it is NOT
     the same number `best_satisfying_distance` reports: `best_satisfying_distance`
     is the globally-nearest satisfying chunk in the whole corpus, ignoring
-    whether nearer same-paper chunks would crowd it out of the per-paper
-    top-k that `simulate_retrieval` (and hence production) actually returns.
+    whether nearer chunks from ANY paper would crowd it out of the top-k
+    that `simulate_retrieval` (and hence production) actually returns.
 
     Why the max of THIS value over positives is the correct separating lower
     bound, and the max of `best_satisfying_distance` is not: distance-
-    threshold filtering (`distance < T`) and per-paper top-k selection are
-    both "keep the nearest prefix" operations on the same distance-sorted
-    list, so they commute. Concretely — a chunk already in the unfiltered
-    top-k survives filtering at threshold T iff its own distance < T, because
-    every nearer same-paper competitor also has distance < T and so also
-    survives (nothing is promoted past it). And no chunk OUTSIDE the
-    unfiltered top-k can ever enter a thresholded top-k, because thresholding
-    only removes candidates — it can never let a chunk leapfrog a nearer
-    same-paper competitor that already excluded it in the unfiltered ranking.
-    So a case whose satisfying chunk misses the unfiltered top-k can never
-    achieve recall at ANY threshold: this function returns None for exactly
-    that case, and callers (`diagnose_separation`) must treat that as "no
-    threshold exists for this case," never silently fall back to a different,
-    more optimistic number.
+    threshold filtering (`distance < T`) and top-k selection are both "keep
+    the nearest prefix" operations on the same distance-sorted list, so they
+    commute. Concretely — a chunk already in the unfiltered top-k survives
+    filtering at threshold T iff its own distance < T, because every nearer
+    competitor also has distance < T and so also survives (nothing is
+    promoted past it). And no chunk OUTSIDE the unfiltered top-k can ever
+    enter a thresholded top-k, because thresholding only removes candidates
+    — it can never let a chunk leapfrog a nearer competitor that already
+    excluded it in the unfiltered ranking. So a case whose satisfying chunk
+    misses the unfiltered top-k can never achieve recall at ANY threshold:
+    this function returns None for exactly that case, and callers
+    (`diagnose_separation`) must treat that as "no threshold exists for this
+    case," never silently fall back to a different, more optimistic number.
     """
     retrieved = simulate_retrieval(chunks, k)
     rank = first_satisfying_rank(case, retrieved)
@@ -276,7 +268,7 @@ def diagnose_separation(
     which case sets `hi`, the same reporting need `positives` already serves
     by carrying `Case` instead of bare chunk lists.
 
-    A positive case with no satisfying chunk within its own per-paper top-k
+    A positive case with no satisfying chunk within its own global top-k
     makes `lo` undefined outright (see `topk_satisfying_distance`) — not
     "very high", *undefined*, because no threshold recovers it. That case's
     id is returned in `blocked_case_ids` with `lo=None`; callers must not

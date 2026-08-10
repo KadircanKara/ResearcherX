@@ -38,9 +38,13 @@ def _s(title: str, text: str, dist: float, paper_id: str | None = None) -> Score
     return Scored(paper_id=paper_id or title, paper_title=title, chunk_text=text, distance=dist)
 
 
-def test_simulate_retrieval_takes_top_k_per_paper_not_globally():
-    """Mirrors chat_service._retrieve_paper_chunks: k per paper, concatenated.
-    A global top-k would starve every paper but the closest one."""
+def test_simulate_retrieval_takes_a_global_top_k_not_per_paper():
+    """Mirrors chat_service._retrieve_paper_chunks: one global top-k.
+
+    Per-paper simulation is why recall here was structurally close to
+    invariant under corpus growth — every paper kept its own budget no matter
+    how large the library got, so growth could not crowd anything out.
+    """
     chunks = [
         _s("Alpha", "a1", 0.10),
         _s("Alpha", "a2", 0.11),
@@ -48,42 +52,27 @@ def test_simulate_retrieval_takes_top_k_per_paper_not_globally():
         _s("Beta", "b1", 0.50),
         _s("Beta", "b2", 0.51),
     ]
-    got = simulate_retrieval(chunks, k=2)
-    assert [c.chunk_text for c in got] == ["a1", "a2", "b1", "b2"]
+    got = simulate_retrieval(chunks, k=4)
+    assert [c.chunk_text for c in got] == ["a1", "a2", "a3", "b1"]
 
 
 def test_simulate_retrieval_sorts_result_by_distance():
-    """With k=1, each paper contributes only its nearest chunk, so a paper's
-    position in `by_paper`'s insertion order already coincides with its
-    distance rank -- this input alone can't distinguish "sorted at the end"
-    from "left in insertion order." Use k=2 so a paper's second chunk can
-    land farther out than another paper's chunk, which only the final
-    distance-sort (not insertion order) places correctly."""
+    """The input list is deliberately NOT in distance order (Beta's 0.30
+    comes before Alpha's nearer 0.10) -- a naive `chunks[:k]` that skipped
+    sorting entirely would return `["b1", "a1"]` here, wrong both in order
+    and in which chunk ends up first. k=2 also drops the farthest chunk
+    (Alpha's 0.50) from the result, proving the cut applies AFTER the sort,
+    not before it."""
     chunks = [_s("Beta", "b1", 0.30), _s("Alpha", "a1", 0.10), _s("Alpha", "a2", 0.50)]
     got = simulate_retrieval(chunks, k=2)
-    assert [c.chunk_text for c in got] == ["a1", "b1", "a2"]
+    assert [c.chunk_text for c in got] == ["a1", "b1"]
 
 
 def test_simulate_retrieval_interleaves_papers_by_distance():
     got = simulate_retrieval(
         [_s("Alpha", "a1", 0.10), _s("Alpha", "a2", 0.90), _s("Beta", "b1", 0.20)], k=2
     )
-    assert [c.chunk_text for c in got] == ["a1", "b1", "a2"]
-
-
-def test_simulate_retrieval_groups_by_paper_id_not_title():
-    """Production keys the per-paper query on paper_id (chat_service.py
-    queries `WHERE paper_id = :paper_id`). Two distinct papers that happen
-    to share a title -- e.g. both have a missing title defaulted to "" --
-    must not collapse into one shared top-k budget."""
-    chunks = [
-        _s("", "p1a", 0.10, paper_id="p1"),
-        _s("", "p1b", 0.11, paper_id="p1"),
-        _s("", "p2a", 0.15, paper_id="p2"),
-        _s("", "p2b", 0.16, paper_id="p2"),
-    ]
-    got = simulate_retrieval(chunks, k=1)
-    assert [c.chunk_text for c in got] == ["p1a", "p2a"]
+    assert [c.chunk_text for c in got] == ["a1", "b1"]
 
 
 def test_first_satisfying_rank_is_one_based():
