@@ -9,11 +9,12 @@ import json
 import re
 from collections.abc import AsyncGenerator
 
+from pydantic import BaseModel
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.chat_agent import ChatAgent, ChatAgentInput, ChunkContext, PaperMetaContext
-from app.agents.retrieval_planner import PaperInfo, PlannerInput, RetrievalPlannerAgent
+from app.agents.retrieval_planner import PlannerInput, RetrievalPlannerAgent
 from app.core.config import settings
 from app.core.logging import log
 from app.db.models import Paper
@@ -22,15 +23,16 @@ from app.services.conversation_service import ConversationService
 from app.services.embedding_service import EmbeddingService
 
 _HISTORY_TOP_K = 5
-_PLANNER_MIN_PAPERS = 3  # skip planner for ≤2 papers; use broad default
-_SMALL_LIBRARY_K = 5  # chunks per paper when planner is skipped (few papers → go deeper)
-# Ceiling for a paper the planner ran but never allocated. The planner cannot
-# enumerate a large library inside its max_tokens budget, so on a 100-paper
-# project this silently covers most of them — evals/retrieval/run_eval.py
-# mirrors this constant when simulating production retrieval.
-_UNALLOCATED_PAPER_K = 2
+_PLANNER_MIN_PAPERS = 3  # skip the planner for <=2 papers
 
 _CITATION_RE = re.compile(r"\[(\d+)\]")
+
+
+class PaperInfo(BaseModel):
+    """Just enough about a paper to scope retrieval and label a citation."""
+
+    paper_id: str
+    title: str
 
 
 def _vec_str(embedding: list[float]) -> str:
@@ -97,10 +99,7 @@ class ChatService:
                 log.warning("chat_embedding_unavailable_fallback", conversation_id=conversation_id)
 
             # Retrieval plan
-            paper_infos = [
-                PaperInfo(paper_id=p.id, title=p.title, abstract=p.abstract or "")
-                for p in paper_rows
-            ]
+            paper_infos = [PaperInfo(paper_id=p.id, title=p.title) for p in paper_rows]
 
             if query_embedding is not None:
                 # Retrieve relevant history
@@ -114,22 +113,20 @@ class ChatService:
                         plan = await self._planner.run(
                             PlannerInput(
                                 query=user_content,
-                                paper_list=paper_infos,
+                                paper_list=[
+                                    {
+                                        "paper_id": p.id,
+                                        "title": p.title,
+                                        "abstract": p.abstract or "",
+                                    }
+                                    for p in paper_rows
+                                ],
                                 prior_messages=prior_messages + history_hits,
                             )
                         )
                         retrieval_query = plan.reformulated_query or user_content
-                        # A degraded plan carries no allocation signal, so don't
-                        # manufacture one — None means "no per-paper ceiling",
-                        # and the global top-k decides alone.
-                        per_paper_map = (
-                            None
-                            if plan.degraded
-                            else {alloc.paper_id: alloc.chunks for alloc in plan.per_paper}
-                        )
                     else:
                         retrieval_query = user_content
-                        per_paper_map = {p.id: _SMALL_LIBRARY_K for p in paper_rows}
 
                     retrieval_embedding = (
                         await self._embedding_svc.embed(
@@ -141,7 +138,7 @@ class ChatService:
 
                     async with SessionLocal() as db:
                         paper_chunks = await self._retrieve_paper_chunks(
-                            db, paper_infos, per_paper_map, retrieval_embedding
+                            db, paper_infos, retrieval_embedding
                         )
 
             yield {
@@ -249,79 +246,52 @@ class ChatService:
         self,
         db: AsyncSession,
         paper_infos: list[PaperInfo],
-        per_paper_map: dict[str, int] | None,
         query_embedding: list[float],
     ) -> list[ChunkContext]:
         """Retrieve the globally nearest chunks across the whole library.
 
-        ONE query, not one per paper. Each paper keeps its planner-allocated
-        ceiling — so a single well-matching paper can't monopolise the context
-        and comparative questions still see both sides — but the final
-        selection is a global top-k under a hard budget.
+        ONE query, and no per-paper ceiling. Cosine similarity spreads the
+        result across papers by itself: measured on a 100-paper library, a
+        global top-40 spanned 14-25 distinct papers and no paper ever took
+        more than 11 of the 40 slots — and that case was the correct paper
+        going deep on a question about its own contents.
 
-        The distinction matters: per-paper allocation made the retrieved total
-        a function of LIBRARY SIZE, so a 100-paper project pulled 191 chunks
-        (~118.5k tokens) and every turn failed with `context_length_exceeded`.
-        The budget now depends only on the context window.
+        A ceiling could only ever REDUCE the right paper's share, never raise
+        it. On the EA-operators question the target paper earns 6 chunks by
+        distance, where the old unallocated fallback would have capped it at 2.
 
-        `per_paper_map=None` means the planner produced no allocation at all
-        (it failed open). There is then nothing to enforce, so every paper is
-        given the whole budget as its ceiling — equivalent to no ceiling, since
-        the global LIMIT already bounds any single paper to that many chunks.
+        The budget must stay a function of the CONTEXT WINDOW, never of
+        library size. Per-paper allocation made it the latter, and a 100-paper
+        project pulled 191 chunks (~118.5k tokens) until every turn died on
+        `context_length_exceeded`.
         """
         if not paper_infos:
             return []
         qvec = _vec_str(query_embedding)
         paper_title_map = {p.paper_id: p.title for p in paper_infos}
-        # Every paper gets an EXPLICIT ceiling. The old implicit
-        # `.get(paper_id, 2)` applied to whichever papers the planner didn't
-        # name — 87 of 100 in practice, since 100 allocations don't fit in the
-        # planner's max_tokens — and 2 is twice what 'targeted' mode intends
-        # for a non-target paper. Making it explicit keeps the SQL honest and
-        # the fallback greppable.
-        # Every paper appears either way: the alloc CTE is also what scopes the
-        # search to this project's chunks, so it can't be dropped even when
-        # there is no ceiling to apply.
-        if per_paper_map is None:
-            alloc = {p.paper_id: settings.max_context_chunks for p in paper_infos}
-        else:
-            alloc = {
-                p.paper_id: per_paper_map.get(p.paper_id, _UNALLOCATED_PAPER_K) for p in paper_infos
-            }
-
-        # The allocation rides in as one jsonb param rather than a VALUES list
-        # or a pair of arrays: a 100-paper library would otherwise need 200
-        # bind params, and asyncpg array binding through text() needs explicit
-        # casts that differ per driver.
+        # `paper_chunk_embeddings` is global, so this query MUST be scoped to
+        # the project. The ids ride in as one jsonb param rather than an IN
+        # list: 100 papers would otherwise need 100 bind params, and asyncpg
+        # array binding through text() needs casts that differ per driver.
         sql = text("""
-            WITH alloc AS (
-                SELECT key AS paper_id, value::int AS k
-                FROM jsonb_each_text(CAST(:alloc AS jsonb))
-            ),
-            ranked AS (
-                SELECT c.paper_id, c.chunk_index, c.text,
-                       (c.embedding <=> CAST(:qvec AS vector)) AS distance,
-                       ROW_NUMBER() OVER (
-                           PARTITION BY c.paper_id
-                           ORDER BY c.embedding <=> CAST(:qvec AS vector)
-                       ) AS rn
-                FROM paper_chunk_embeddings c
-                JOIN alloc a ON a.paper_id = c.paper_id
-                WHERE c.model = :model
-                  AND (c.embedding <=> CAST(:qvec AS vector)) < :threshold
+            WITH scope AS (
+                SELECT value AS paper_id
+                FROM jsonb_array_elements_text(CAST(:ids AS jsonb))
             )
-            SELECT r.paper_id, r.chunk_index, r.text, r.distance
-            FROM ranked r
-            JOIN alloc a ON a.paper_id = r.paper_id
-            WHERE r.rn <= a.k
-            ORDER BY r.distance ASC
+            SELECT c.paper_id, c.chunk_index, c.text,
+                   (c.embedding <=> CAST(:qvec AS vector)) AS distance
+            FROM paper_chunk_embeddings c
+            JOIN scope s ON s.paper_id = c.paper_id
+            WHERE c.model = :model
+              AND (c.embedding <=> CAST(:qvec AS vector)) < :threshold
+            ORDER BY distance ASC
             LIMIT :max_chunks
         """)
         result = await db.execute(
             sql,
             {
                 "qvec": qvec,
-                "alloc": json.dumps(alloc),
+                "ids": json.dumps([p.paper_id for p in paper_infos]),
                 "model": settings.embedding_model,
                 "threshold": settings.similarity_threshold,
                 "max_chunks": settings.max_context_chunks,
@@ -329,8 +299,8 @@ class ChatService:
         )
         # Re-applied in Python on purpose. LIMIT bounds what crosses the wire;
         # this bounds what reaches the model. The budget is the single
-        # invariant that keeps chat working at any library size, so it must not
-        # depend on a SQL clause surviving a future edit to the query.
+        # invariant that keeps chat working at any library size, so it must
+        # not depend on a SQL clause surviving a future edit to the query.
         rows = result.fetchall()[: settings.max_context_chunks]
         return [
             ChunkContext(
