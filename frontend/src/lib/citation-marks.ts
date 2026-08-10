@@ -8,10 +8,13 @@ export type CitationToken =
 // a section reference, a note — is prose and must survive untouched.
 const MARKER = /\[(\d+)\]/g;
 
-// Two markers belong to the same run when only whitespace and separating
-// punctuation sit between them: "[7], [8]" is one run, "[6] and later [7]"
-// is two. The run is what the hover card's arrows step through.
-const SEPARATOR = /^[\s,;]*$/;
+// Two markers belong to the same run when only whitespace, separating
+// punctuation, and a single bare "and"/"or" sit between them: "[7], [8]" is
+// one run, and so is "[7], [8], and [9]" — a reader sees three side-by-side
+// sources, not two grouped plus a stray one. "[6] and later [7]" is still
+// two: "later" is prose, not a joiner. The run is what the hover card's
+// arrows step through.
+const SEPARATOR = /^[\s,;]*(?:and|or)?[\s,;]*$/i;
 
 /** Split text into plain-text and citation tokens.
  *

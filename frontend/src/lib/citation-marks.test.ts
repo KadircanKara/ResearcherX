@@ -33,6 +33,31 @@ describe("tokenizeCitations", () => {
     ]);
   });
 
+  it("groups three markers joined by commas and a trailing \"and\"", () => {
+    // "[6], [7], and [8]" is the common citation phrasing — a reader sees
+    // three side-by-side sources, not two grouped plus a stray one, so the
+    // bare "and" before the last marker must still count as a joiner.
+    expect(tokenizeCitations("as shown in [6], [7], and [8]", VALID)).toEqual([
+      { kind: "text", value: "as shown in " },
+      { kind: "cite", n: 6, group: [6, 7, 8] },
+      { kind: "text", value: ", " },
+      { kind: "cite", n: 7, group: [6, 7, 8] },
+      { kind: "text", value: ", and " },
+      { kind: "cite", n: 8, group: [6, 7, 8] },
+    ]);
+  });
+
+  it("does not treat prose containing \"and\" as a joiner", () => {
+    // This pins the boundary the previous case widened: "and compare with"
+    // is prose between two independent claims, not a bare "and" joining two
+    // markers, so it must NOT collapse into one run.
+    const got = tokenizeCitations("see [6] and compare with [7]", VALID);
+    expect(got.filter((t) => t.kind === "cite")).toEqual([
+      { kind: "cite", n: 6, group: [6] },
+      { kind: "cite", n: 7, group: [7] },
+    ]);
+  });
+
   it("leaves a number with no matching citation as plain text", () => {
     // chat_service rewrites out-of-range markers, but prose still contains
     // bracketed numbers of its own — a year, a section number.
