@@ -14,6 +14,7 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.chat_agent import ChatAgent, ChatAgentInput, ChunkContext, PaperMetaContext
+from app.agents.paper_targeter import PaperTargeterAgent, TargeterInput
 from app.agents.query_reformulator import QueryReformulatorAgent, ReformulatorInput
 from app.core.config import settings
 from app.core.logging import log
@@ -23,6 +24,13 @@ from app.services.conversation_service import ConversationService
 from app.services.embedding_service import EmbeddingService
 
 _HISTORY_TOP_K = 5
+
+# Papers offered to the targeter. Sized by measurement, not by prompt budget:
+# on the question this feature exists to fix, the correct paper ranked 6th by
+# nearest-chunk distance. Questions whose target ranks below this generally
+# name no paper at all (measured at 17th and 51st), where the honest answer is
+# "none" anyway.
+_TARGETER_CANDIDATES = 10
 
 _CITATION_RE = re.compile(r"\[(\d+)\]")
 
@@ -43,6 +51,7 @@ class ChatService:
     def __init__(self) -> None:
         self._embedding_svc = EmbeddingService()
         self._reformulator = QueryReformulatorAgent()
+        self._targeter = PaperTargeterAgent()
         self._chat_agent = ChatAgent()
         self._conv_svc = ConversationService()
 
@@ -152,8 +161,31 @@ class ChatService:
                     )
 
                     async with SessionLocal() as db:
+                        candidates, total_chunks = await self._shortlist_papers(
+                            db, paper_infos, retrieval_embedding, _TARGETER_CANDIDATES
+                        )
+
+                    # Scope retrieval to one paper when the question is about
+                    # one paper. Skipped when the whole library already fits
+                    # the budget: scoping cannot change what is retrieved
+                    # then, so the call would be pure cost and latency.
+                    scope = paper_infos
+                    if total_chunks > settings.max_context_chunks and candidates:
+                        target_id = await self._targeter.run(
+                            TargeterInput(
+                                query=retrieval_query,
+                                candidates=[
+                                    {"paper_id": c.paper_id, "title": c.title} for c in candidates
+                                ],
+                                prior_messages=reformulation_context,
+                            )
+                        )
+                        if target_id is not None:
+                            scope = [c for c in candidates if c.paper_id == target_id]
+
+                    async with SessionLocal() as db:
                         paper_chunks = await self._retrieve_paper_chunks(
-                            db, paper_infos, retrieval_embedding
+                            db, scope, retrieval_embedding
                         )
 
             yield {
