@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { PreviewCard } from "@base-ui/react/preview-card";
 import { getPaperChunk } from "@/lib/projects";
 import type { ChatCitation } from "@/lib/types";
@@ -70,29 +70,58 @@ function highlight(text: string, terms: string[]) {
 }
 
 export function CitationHoverCard({
-  citation,
+  citations,
+  startIndex,
   projectId,
   queryTerms,
+  variant,
 }: {
-  citation: ChatCitation;
+  citations: ChatCitation[];
+  startIndex: number;
   projectId: string;
   queryTerms: string[];
+  variant: "inline" | "chip";
 }) {
+  const [index, setIndex] = useState(startIndex);
+  // What this trigger IS, fixed for the life of the marker. Distinct from
+  // `citation` below, which follows navigation: rendering the navigated
+  // citation here rewrote the marker in the answer text, turning
+  // "[7], [8]" into "[8], [8]" after one press of the arrow.
+  const anchor = citations[startIndex] ?? citations[0];
+  const citation = citations[index] ?? citations[0];
   const key = `${citation.paper_id}:${citation.chunk_index}`;
-  // Start from the snippet already in the payload so the card has content the
-  // instant it opens — no spinner, no layout shift when the full text lands.
-  // Guard the cache read too: a value cached under this key may have been
-  // written for a different (pre-re-index) chunk that happened to share the
-  // same paper_id:chunk_index address.
   const [text, setText] = useState<string>(() => {
     const cached = chunkCache.get(key);
     return cached?.startsWith(citation.snippet) ? cached : citation.snippet;
   });
 
-  async function loadFullText() {
+  // Which citation the card is currently showing. A fetch started for one
+  // sibling must not install its result after the reader has stepped to
+  // another: the snippet guard below validates a response against ITS OWN
+  // citation, so a late-landing response passes its own check and would
+  // overwrite a newer sibling's passage — right title, wrong text.
+  const shownKey = useRef(key);
+  shownKey.current = key;
+
+  // Navigating changes which citation is displayed, so the passage must
+  // follow it. Seed from cache-or-snippet first — same guard as the initial
+  // state — so the card never blanks between siblings, then fetch.
+  useEffect(() => {
+    const cached = chunkCache.get(key);
+    setText(cached?.startsWith(citation.snippet) ? cached : citation.snippet);
+    void loadFullText(key);
+    // loadFullText is redefined every render and closes over `citation`;
+    // keying the effect on `key` is what makes it run once per shown citation.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key]);
+
+  async function loadFullText(forKey: string) {
     const cached = chunkCache.get(key);
     if (cached !== undefined) {
-      if (cached.startsWith(citation.snippet)) setText(cached);
+      // shownKey check: a sibling fetch's cache hit resolves synchronously,
+      // but by the time an AWAITed one gets here the reader may have already
+      // stepped again — same race as the network branch below.
+      if (cached.startsWith(citation.snippet) && shownKey.current === forKey) setText(cached);
       return;
     }
     try {
@@ -103,6 +132,12 @@ export function CitationHoverCard({
       // different text and this response must not be installed.
       if (!chunk.text.startsWith(citation.snippet)) return; // keep the snippet
       chunkCache.set(key, chunk.text);
+      // Separate from the snippet check above, which only catches a
+      // re-indexed chunk: this catches a late response for a citation the
+      // reader has since navigated away from. The cache write above still
+      // stands — the text is valid, just no longer what THIS card should
+      // show — only the setText is guarded.
+      if (shownKey.current !== forKey) return;
       setText(chunk.text);
     } catch {
       // Keep the snippet. A failed preview must never replace readable content
@@ -111,8 +146,18 @@ export function CitationHoverCard({
     }
   }
 
+  const hasGroup = citations.length > 1;
+  function step(delta: number) {
+    setIndex((i) => Math.min(citations.length - 1, Math.max(0, i + delta)));
+  }
+
   return (
-    <PreviewCard.Root onOpenChange={(open) => open && void loadFullText()}>
+    <PreviewCard.Root
+      onOpenChange={(open) => {
+        if (open) void loadFullText(key);
+        else setIndex(startIndex);
+      }}
+    >
       {/* render={<span />}: this is not a link (the default `<a>` has no
           href) and, more importantly, an href-less `<a>` is not keyboard-
           focusable — tabIndex={0} is what actually puts it in the tab
@@ -124,13 +169,20 @@ export function CitationHoverCard({
       <PreviewCard.Trigger
         render={<span />}
         tabIndex={0}
+        onKeyDown={(event) => {
+          if (event.key === "ArrowLeft") { event.preventDefault(); step(-1); }
+          if (event.key === "ArrowRight") { event.preventDefault(); step(1); }
+        }}
         className={cn(
-          "cursor-help rounded bg-background/50 px-1.5 py-0.5 text-xs",
-          "text-muted-foreground transition-colors hover:bg-background",
-          "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          "cursor-help rounded transition-colors",
+          "text-blue-600 dark:text-blue-400",
+          "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+          variant === "chip"
+            ? "bg-background/50 px-1.5 py-0.5 text-xs hover:bg-background"
+            : "font-medium hover:underline"
         )}
       >
-        [{citation.n}]
+        [{anchor.n}]
       </PreviewCard.Trigger>
       <PreviewCard.Portal>
         <PreviewCard.Positioner side="top" sideOffset={6} className="isolate z-50">
@@ -163,6 +215,31 @@ export function CitationHoverCard({
                 {highlight(text, queryTerms)}
               </p>
             </div>
+            {hasGroup && (
+              <div className="flex items-center justify-between border-t border-border px-3 py-1.5">
+                <button
+                  type="button"
+                  aria-label="Previous citation"
+                  disabled={index === 0}
+                  onClick={() => step(-1)}
+                  className="rounded px-1 text-xs text-muted-foreground disabled:opacity-30 hover:text-foreground"
+                >
+                  ◀
+                </button>
+                <span aria-live="polite" className="text-[11px] text-muted-foreground">
+                  {index + 1} of {citations.length}
+                </span>
+                <button
+                  type="button"
+                  aria-label="Next citation"
+                  disabled={index === citations.length - 1}
+                  onClick={() => step(1)}
+                  className="rounded px-1 text-xs text-muted-foreground disabled:opacity-30 hover:text-foreground"
+                >
+                  ▶
+                </button>
+              </div>
+            )}
           </PreviewCard.Popup>
         </PreviewCard.Positioner>
       </PreviewCard.Portal>

@@ -7,6 +7,7 @@ import type { ChatCitation, ChatEvent, ChatMessage } from "@/lib/types";
 import { chatMessagesUrl, getConversation } from "@/lib/chat";
 import { getDevUserId } from "@/lib/api";
 import { CitationHoverCard, queryTermsFrom, resetChunkCache } from "@/components/citation-hover-card";
+import { citationMarks } from "@/lib/citation-marks";
 
 // Typography for markdown inside a chat bubble. `prose-invert` under .dark
 // (tailwind darkMode: "class"). max-w-none because the bubble already caps
@@ -150,6 +151,17 @@ export function ChatStream({
     return () => { cancelled = true; controller.abort(); };
   }, [pendingContent, projectId, conversationId]);
 
+  // The user message this answer replied to, for term highlighting. Resolving
+  // conversation state is this component's job, not the card's.
+  function questionFor(msg: ChatMessage): string[] {
+    return queryTermsFrom(
+      messages
+        .slice(0, messages.indexOf(msg))
+        .reverse()
+        .find((m) => m.role === "user")?.content ?? ""
+    );
+  }
+
   return (
     <div className="flex flex-col gap-4 py-4">
       {messages.map((msg) => (
@@ -166,7 +178,42 @@ export function ChatStream({
           >
             {msg.role === "assistant" ? (
               <div className={PROSE}>
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                <ReactMarkdown
+                  remarkPlugins={[remarkGfm]}
+                  // Tuple form, not citationMarks({...}): unified treats a bare
+                  // function as an ATTACHER and calls it with the options, using
+                  // its return value as the transformer. Passing an
+                  // already-invoked transformer makes unified call it again with
+                  // no arguments, and it crashes on an undefined tree — after
+                  // passing tsc, lint and build, so only a browser check finds it.
+                  rehypePlugins={[
+                    [citationMarks, { valid: new Set(msg.citations.map((c) => c.n)) }],
+                  ]}
+                  components={{
+                    span: ({ node, children, ...props }) => {
+                      const raw = props as Record<string, string | undefined>;
+                      const n = Number(raw["data-citation-n"]);
+                      const groupAttr = raw["data-citation-group"];
+                      if (!groupAttr || Number.isNaN(n)) return <span {...props}>{children}</span>;
+                      const group = groupAttr
+                        .split(",")
+                        .map(Number)
+                        .map((num) => msg.citations.find((c) => c.n === num))
+                        .filter((c): c is ChatCitation => c !== undefined);
+                      const start = group.findIndex((c) => c.n === n);
+                      if (start === -1) return <span {...props}>{children}</span>;
+                      return (
+                        <CitationHoverCard
+                          citations={group}
+                          startIndex={start}
+                          projectId={projectId}
+                          queryTerms={questionFor(msg)}
+                          variant="inline"
+                        />
+                      );
+                    },
+                  }}
+                >
                   {msg.content}
                 </ReactMarkdown>
               </div>
@@ -175,20 +222,14 @@ export function ChatStream({
             )}
             {msg.role === "assistant" && msg.citations.length > 0 && (
               <div className="mt-2 flex flex-wrap gap-1">
-                {msg.citations.map((c) => (
+                {msg.citations.map((c, i) => (
                   <CitationHoverCard
                     key={c.n}
-                    citation={c}
+                    citations={msg.citations}
+                    startIndex={i}
                     projectId={projectId}
-                    queryTerms={queryTermsFrom(
-                      // The user message this answer replied to. The card stays
-                      // presentational; resolving conversation state is this
-                      // component's job, not its child's.
-                      messages
-                        .slice(0, messages.indexOf(msg))
-                        .reverse()
-                        .find((m) => m.role === "user")?.content ?? ""
-                    )}
+                    queryTerms={questionFor(msg)}
+                    variant="chip"
                   />
                 ))}
               </div>
@@ -211,6 +252,8 @@ export function ChatStream({
         <div className="flex justify-start">
           <div className="max-w-[80%] rounded-2xl bg-muted px-4 py-3 text-sm text-foreground">
             <div className={PROSE}>
+              {/* No citationMarks here: citations arrive with the `done` event,
+                  so mid-stream there is nothing to resolve a marker against. */}
               <ReactMarkdown remarkPlugins={[remarkGfm]}>{streamingText}</ReactMarkdown>
             </div>
           </div>
