@@ -119,7 +119,14 @@ class ChatService:
                             )
                         )
                         retrieval_query = plan.reformulated_query or user_content
-                        per_paper_map = {alloc.paper_id: alloc.chunks for alloc in plan.per_paper}
+                        # A degraded plan carries no allocation signal, so don't
+                        # manufacture one — None means "no per-paper ceiling",
+                        # and the global top-k decides alone.
+                        per_paper_map = (
+                            None
+                            if plan.degraded
+                            else {alloc.paper_id: alloc.chunks for alloc in plan.per_paper}
+                        )
                     else:
                         retrieval_query = user_content
                         per_paper_map = {p.id: _SMALL_LIBRARY_K for p in paper_rows}
@@ -242,7 +249,7 @@ class ChatService:
         self,
         db: AsyncSession,
         paper_infos: list[PaperInfo],
-        per_paper_map: dict[str, int],
+        per_paper_map: dict[str, int] | None,
         query_embedding: list[float],
     ) -> list[ChunkContext]:
         """Retrieve the globally nearest chunks across the whole library.
@@ -256,6 +263,11 @@ class ChatService:
         a function of LIBRARY SIZE, so a 100-paper project pulled 191 chunks
         (~118.5k tokens) and every turn failed with `context_length_exceeded`.
         The budget now depends only on the context window.
+
+        `per_paper_map=None` means the planner produced no allocation at all
+        (it failed open). There is then nothing to enforce, so every paper is
+        given the whole budget as its ceiling — equivalent to no ceiling, since
+        the global LIMIT already bounds any single paper to that many chunks.
         """
         if not paper_infos:
             return []
@@ -267,9 +279,15 @@ class ChatService:
         # planner's max_tokens — and 2 is twice what 'targeted' mode intends
         # for a non-target paper. Making it explicit keeps the SQL honest and
         # the fallback greppable.
-        alloc = {
-            p.paper_id: per_paper_map.get(p.paper_id, _UNALLOCATED_PAPER_K) for p in paper_infos
-        }
+        # Every paper appears either way: the alloc CTE is also what scopes the
+        # search to this project's chunks, so it can't be dropped even when
+        # there is no ceiling to apply.
+        if per_paper_map is None:
+            alloc = {p.paper_id: settings.max_context_chunks for p in paper_infos}
+        else:
+            alloc = {
+                p.paper_id: per_paper_map.get(p.paper_id, _UNALLOCATED_PAPER_K) for p in paper_infos
+            }
 
         # The allocation rides in as one jsonb param rather than a VALUES list
         # or a pair of arrays: a 100-paper library would otherwise need 200
