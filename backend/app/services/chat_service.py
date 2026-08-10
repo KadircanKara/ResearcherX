@@ -14,6 +14,7 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.chat_agent import ChatAgent, ChatAgentInput, ChunkContext, PaperMetaContext
+from app.agents.paper_targeter import PaperTargeterAgent, TargeterInput
 from app.agents.query_reformulator import QueryReformulatorAgent, ReformulatorInput
 from app.core.config import settings
 from app.core.logging import log
@@ -23,6 +24,13 @@ from app.services.conversation_service import ConversationService
 from app.services.embedding_service import EmbeddingService
 
 _HISTORY_TOP_K = 5
+
+# Papers offered to the targeter. Sized by measurement, not by prompt budget:
+# on the question this feature exists to fix, the correct paper ranked 6th by
+# nearest-chunk distance. Questions whose target ranks below this generally
+# name no paper at all (measured at 17th and 51st), where the honest answer is
+# "none" anyway.
+_TARGETER_CANDIDATES = 10
 
 _CITATION_RE = re.compile(r"\[(\d+)\]")
 
@@ -43,6 +51,7 @@ class ChatService:
     def __init__(self) -> None:
         self._embedding_svc = EmbeddingService()
         self._reformulator = QueryReformulatorAgent()
+        self._targeter = PaperTargeterAgent()
         self._chat_agent = ChatAgent()
         self._conv_svc = ConversationService()
 
@@ -100,6 +109,11 @@ class ChatService:
             # This project's paper ids + titles: scopes the global top-k chunk
             # query below to this project and labels citations by title.
             paper_infos = [PaperInfo(paper_id=p.id, title=p.title) for p in paper_rows]
+            # Defaults to the whole project; narrowed below only when
+            # targeting picks one paper. Initialised here, unconditionally,
+            # so it is always defined at the 'retrieving' event below even
+            # when embedding failed or the project has no papers.
+            scope = paper_infos
 
             if query_embedding is not None:
                 # Retrieve relevant history
@@ -152,15 +166,70 @@ class ChatService:
                     )
 
                     async with SessionLocal() as db:
-                        paper_chunks = await self._retrieve_paper_chunks(
-                            db, paper_infos, retrieval_embedding
+                        candidates, total_chunks = await self._shortlist_papers(
+                            db, paper_infos, retrieval_embedding, _TARGETER_CANDIDATES
                         )
+
+                    # Scope retrieval to one paper when the question might be
+                    # about one paper. Skipped for single-paper projects: the
+                    # scope would be that one paper whether the targeter names
+                    # it or answers None, so targeting there is a guaranteed
+                    # no-op that still costs a full extra LLM call every turn
+                    # -- and "upload one PDF and ask about it" is the common
+                    # case. Also skipped when the whole library already fits
+                    # the context budget; that second skip is a COST decision,
+                    # not a correctness one -- with similarity_threshold in
+                    # play, scoping to one paper can still change which chunks
+                    # come back even under budget (a threshold-passing chunk
+                    # from another paper is not available once scoped). Small
+                    # projects deliberately keep that original misattribution
+                    # risk in exchange for skipping this LLM call.
+                    if (
+                        len(paper_infos) > 1
+                        and total_chunks > settings.max_context_chunks
+                        and candidates
+                    ):
+                        target_id = await self._targeter.run(
+                            TargeterInput(
+                                query=retrieval_query,
+                                candidates=[
+                                    {"paper_id": c.paper_id, "title": c.title} for c in candidates
+                                ],
+                                prior_messages=reformulation_context,
+                            )
+                        )
+                        if target_id is not None:
+                            scope = [c for c in candidates if c.paper_id == target_id]
+                            log.info(
+                                "paper_targeted",
+                                conversation_id=conversation_id,
+                                paper_id=target_id,
+                                candidates=len(candidates),
+                            )
+
+                    async with SessionLocal() as db:
+                        paper_chunks = await self._retrieve_paper_chunks(
+                            db, scope, retrieval_embedding
+                        )
+
+                    if scope is not paper_infos and not paper_chunks:
+                        # A targeted paper whose every chunk sits at or beyond
+                        # similarity_threshold retrieves nothing, and
+                        # chat_agent then answers ungrounded -- a worse
+                        # failure than the misattribution this feature fixes.
+                        # Re-querying the untargeted scope keeps the answer
+                        # grounded, same as if targeting had never fired.
+                        async with SessionLocal() as db:
+                            paper_chunks = await self._retrieve_paper_chunks(
+                                db, paper_infos, retrieval_embedding
+                            )
+                        scope = paper_infos
 
             yield {
                 "event": "retrieving",
                 "data": json.dumps(
                     {
-                        "paper_count": len(paper_rows),
+                        "paper_count": len(scope),
                         "history_hits": len(history_hits),
                     }
                 ),
@@ -257,19 +326,81 @@ class ChatService:
         rows = result.fetchall()
         return [{"role": r.role, "content": r.content} for r in rows]
 
+    async def _shortlist_papers(
+        self,
+        db: AsyncSession,
+        paper_infos: list[PaperInfo],
+        query_embedding: list[float],
+        limit: int,
+    ) -> tuple[list[PaperInfo], int]:
+        """Rank this project's papers by their nearest chunk.
+
+        Returns at most `limit` papers, nearest first, plus the project's
+        TOTAL chunk count across every paper — two answers from one query.
+
+        No SQL LIMIT, on purpose. The GROUP BY already scans the project's
+        chunks either way, so a LIMIT would save only the transfer of a few
+        dozen rows while costing a second round trip to learn the total. The
+        total is what decides whether targeting is worth an LLM call at all.
+
+        MIN distance rather than a mean of the nearest few: measured across
+        seven questions with known target papers the two ranked about equally
+        well, and MIN is simpler. No similarity_threshold filter — the
+        threshold belongs at retrieval time, and applying it here could empty
+        the shortlist on a vaguely worded question.
+        """
+        if len(paper_infos) <= 1:
+            # A single-paper project has nothing to disambiguate: the
+            # candidate list would be that one paper regardless of what this
+            # query returns, so skip it and its SQL round trip entirely.
+            return [], 0
+        sql = text("""
+            WITH scope AS (
+                SELECT value AS paper_id
+                FROM jsonb_array_elements_text(CAST(:ids AS jsonb))
+            )
+            SELECT c.paper_id,
+                   MIN(c.embedding <=> CAST(:qvec AS vector)) AS best,
+                   COUNT(*) AS n_chunks
+            FROM paper_chunk_embeddings c
+            JOIN scope s ON s.paper_id = c.paper_id
+            WHERE c.model = :model
+            GROUP BY c.paper_id
+            ORDER BY best ASC
+        """)
+        result = await db.execute(
+            sql,
+            {
+                "qvec": _vec_str(query_embedding),
+                "ids": json.dumps([p.paper_id for p in paper_infos]),
+                "model": settings.embedding_model,
+            },
+        )
+        rows = result.fetchall()
+        by_id = {p.paper_id: p for p in paper_infos}
+        total_chunks = sum(r.n_chunks for r in rows)
+        candidates = [by_id[r.paper_id] for r in rows if r.paper_id in by_id][:limit]
+        return candidates, total_chunks
+
     async def _retrieve_paper_chunks(
         self,
         db: AsyncSession,
         paper_infos: list[PaperInfo],
         query_embedding: list[float],
     ) -> list[ChunkContext]:
-        """Retrieve the globally nearest chunks across the whole library.
+        """Retrieve the nearest chunks from `paper_infos`, ranked by distance.
+
+        `paper_infos` is the retrieval SCOPE the caller decided on -- the
+        whole project's papers by default, or the single paper the targeter
+        picked. This method has no opinion on which; it just ranks whatever
+        scope it is given.
 
         ONE query, and no per-paper ceiling. Cosine similarity spreads the
-        result across papers by itself: measured on a 100-paper library, a
-        global top-40 spanned 14-25 distinct papers and no paper ever took
-        more than 11 of the 40 slots — and that case was the correct paper
-        going deep on a question about its own contents.
+        result across papers by itself when scope is the whole library:
+        measured on a 100-paper library, a global top-40 spanned 14-25
+        distinct papers and no paper ever took more than 11 of the 40 slots
+        — and that case was the correct paper going deep on a question about
+        its own contents.
 
         A ceiling could only ever REDUCE the right paper's share, never raise
         it. On the EA-operators question the target paper earns 6 chunks by
