@@ -52,15 +52,8 @@ async def test_respond_yields_events(
     db_session: AsyncSession, project: Project, conversation_with_message
 ):
     from app.services.chat_service import ChatService
-    from app.agents.retrieval_planner import RetrievalPlan
 
     conv = conversation_with_message
-
-    fake_plan = RetrievalPlan(
-        mode="broad",
-        reformulated_query="test question expanded",
-        per_paper=[],
-    )
 
     async def fake_stream(*args, **kwargs):
         yield "answer token "
@@ -71,7 +64,7 @@ async def test_respond_yields_events(
     with (
         patch.object(svc._embedding_svc, "embed", AsyncMock(return_value=[0.0] * 768)),
         patch.object(svc, "_retrieve_history", AsyncMock(return_value=[])),
-        patch.object(svc._planner, "run", AsyncMock(return_value=fake_plan)),
+        patch.object(svc._reformulator, "run", AsyncMock(return_value="test question expanded")),
         patch.object(svc, "_retrieve_paper_chunks", AsyncMock(return_value=[])),
         patch.object(svc._chat_agent, "stream", return_value=fake_stream()),
         patch.object(
@@ -130,15 +123,14 @@ async def test_retrieve_history_uses_settings_similarity_threshold():
 
 async def test_retrieve_paper_chunks_uses_settings_similarity_threshold():
     """Same wiring check as above, for the per-paper chunk retrieval query."""
-    from app.agents.retrieval_planner import PaperInfo
-    from app.services.chat_service import ChatService
+    from app.services.chat_service import ChatService, PaperInfo
 
     svc = ChatService()
     mock_db = _mock_db_returning_no_rows()
-    paper = PaperInfo(paper_id="p1", title="Test Paper", abstract="")
+    paper = PaperInfo(paper_id="p1", title="Test Paper")
 
     with patch.object(settings, "similarity_threshold", 0.42):
-        await svc._retrieve_paper_chunks(mock_db, [paper], {"p1": 5}, [0.0] * 768)
+        await svc._retrieve_paper_chunks(mock_db, [paper], [0.0] * 768)
 
     _, params = mock_db.execute.call_args.args
     assert params["threshold"] == 0.42
@@ -174,14 +166,13 @@ async def test_retrieve_paper_chunks_issues_one_query_for_the_whole_library():
     and, worse, made the retrieved total scale with library size instead of
     with the context budget.
     """
-    from app.agents.retrieval_planner import PaperInfo
-    from app.services.chat_service import ChatService
+    from app.services.chat_service import ChatService, PaperInfo
 
     svc = ChatService()
     mock_db = _mock_db_returning(0)
-    papers = [PaperInfo(paper_id=f"p{i}", title=f"Paper {i}", abstract="") for i in range(100)]
+    papers = [PaperInfo(paper_id=f"p{i}", title=f"Paper {i}") for i in range(100)]
 
-    await svc._retrieve_paper_chunks(mock_db, papers, {p.paper_id: 5 for p in papers}, [0.0] * 768)
+    await svc._retrieve_paper_chunks(mock_db, papers, [0.0] * 768)
 
     assert mock_db.execute.await_count == 1
 
@@ -192,112 +183,148 @@ async def test_retrieve_paper_chunks_caps_total_at_settings_max_context_chunks()
     Without it, 100 papers × the k=2 fallback produced 191 chunks ≈ 118.5k
     tokens and every chat turn died on `context_length_exceeded`.
     """
-    from app.agents.retrieval_planner import PaperInfo
-    from app.services.chat_service import ChatService
+    from app.services.chat_service import ChatService, PaperInfo
 
     svc = ChatService()
     mock_db = _mock_db_returning(500)
-    papers = [PaperInfo(paper_id=f"p{i}", title=f"Paper {i}", abstract="") for i in range(100)]
+    papers = [PaperInfo(paper_id=f"p{i}", title=f"Paper {i}") for i in range(100)]
 
     with patch.object(settings, "max_context_chunks", 40):
-        chunks = await svc._retrieve_paper_chunks(
-            mock_db, papers, {p.paper_id: 5 for p in papers}, [0.0] * 768
-        )
+        chunks = await svc._retrieve_paper_chunks(mock_db, papers, [0.0] * 768)
 
     assert len(chunks) == 40
 
 
-async def test_retrieve_paper_chunks_applies_no_ceiling_when_allocation_is_absent():
-    """`per_paper_map=None` means "the planner produced no allocation".
+async def test_retrieve_paper_chunks_scopes_to_this_projects_papers():
+    """paper_chunk_embeddings is global; the query must be scoped.
 
-    A ceiling equal to the whole context budget is the same as no ceiling —
-    the global LIMIT already bounds any single paper to that many chunks — so
-    selection falls through to pure global top-k. The allocation still has to
-    list every paper, because the alloc CTE is also what scopes the search to
-    this project's chunks.
+    The old per-paper `alloc` CTE did this implicitly by joining on the
+    allocation map. With ceilings gone there is no alloc CTE, so scoping is
+    now explicit and load-bearing — without it a project's chat would
+    retrieve other projects' chunks.
     """
-    from app.agents.retrieval_planner import PaperInfo
-    from app.services.chat_service import ChatService
+    from app.services.chat_service import ChatService, PaperInfo
 
     svc = ChatService()
     mock_db = _mock_db_returning(0)
-    papers = [PaperInfo(paper_id=f"p{i}", title=f"Paper {i}", abstract="") for i in range(100)]
+    papers = [PaperInfo(paper_id=f"p{i}", title=f"Paper {i}") for i in range(3)]
 
-    with patch.object(settings, "max_context_chunks", 40):
-        await svc._retrieve_paper_chunks(mock_db, papers, None, [0.0] * 768)
-
-    _, params = mock_db.execute.call_args.args
-    alloc = json.loads(params["alloc"])
-    assert len(alloc) == 100
-    assert set(alloc.values()) == {40}
-
-
-async def test_retrieve_paper_chunks_honours_planner_allocations():
-    """A real plan is still a per-paper ceiling — that is what stops one
-    well-matching paper monopolising a comparative answer. Papers the planner
-    ran but never named keep the explicit unallocated fallback."""
-    from app.agents.retrieval_planner import PaperInfo
-    from app.services.chat_service import ChatService, _UNALLOCATED_PAPER_K
-
-    svc = ChatService()
-    mock_db = _mock_db_returning(0)
-    papers = [PaperInfo(paper_id=f"p{i}", title=f"Paper {i}", abstract="") for i in range(3)]
-
-    with patch.object(settings, "max_context_chunks", 40):
-        await svc._retrieve_paper_chunks(mock_db, papers, {"p0": 5, "p1": 1}, [0.0] * 768)
+    await svc._retrieve_paper_chunks(mock_db, papers, [0.0] * 768)
 
     _, params = mock_db.execute.call_args.args
-    assert json.loads(params["alloc"]) == {"p0": 5, "p1": 1, "p2": _UNALLOCATED_PAPER_K}
+    assert json.loads(params["ids"]) == ["p0", "p1", "p2"]
 
 
-async def test_respond_drops_per_paper_ceiling_when_plan_is_degraded(
+async def test_respond_skips_reformulation_on_a_first_turn(
     db_session: AsyncSession, project: Project, conversation_with_message
 ):
-    """A degraded plan must reach retrieval as "no allocation", not as an
-    allocation that happens to be empty.
-
-    Without this the fail-open path is indistinguishable from a genuine
-    `broad` plan, and every paper silently collects the unallocated fallback.
-    """
-    from app.agents.retrieval_planner import RetrievalPlan
+    """With no prior conversation there is nothing to resolve, so the call
+    buys nothing. Asserting ZERO calls is the point: this is what keeps the
+    common case at one LLM call per turn instead of two."""
     from app.db.models import Paper
     from app.services.chat_service import ChatService
 
     conv = conversation_with_message
-    # _PLANNER_MIN_PAPERS: the planner only runs from 3 papers up.
-    for i in range(3):
-        db_session.add(Paper(project_id=project.id, title=f"Paper {i}", source="manual"))
+    db_session.add(Paper(project_id=project.id, title="Paper A", source="manual"))
     await db_session.commit()
 
     async def fake_stream(*args, **kwargs):
         yield "answer"
 
     svc = ChatService()
-    retrieve = AsyncMock(return_value=[])
+    reformulate = AsyncMock(return_value="should not be called")
 
     with (
         patch.object(svc._embedding_svc, "embed", AsyncMock(return_value=[0.0] * 768)),
         patch.object(svc, "_retrieve_history", AsyncMock(return_value=[])),
-        patch.object(
-            svc._planner,
-            "run",
-            AsyncMock(
-                return_value=RetrievalPlan(
-                    mode="broad",
-                    reformulated_query="Test question",
-                    per_paper=[],
-                    degraded=True,
-                )
-            ),
-        ),
-        patch.object(svc, "_retrieve_paper_chunks", retrieve),
+        patch.object(svc._reformulator, "run", reformulate),
+        patch.object(svc, "_retrieve_paper_chunks", AsyncMock(return_value=[])),
         patch.object(svc._chat_agent, "stream", return_value=fake_stream()),
         patch.object(svc._conv_svc, "save_message", AsyncMock()),
     ):
         async for _ in svc.respond(conv.id, "Test question"):
             pass
 
-    assert retrieve.await_args.args[2] is None
+    reformulate.assert_not_awaited()
+
+
+async def test_respond_skips_reformulation_on_a_first_turn_despite_a_history_hit(
+    db_session: AsyncSession, project: Project, conversation_with_message
+):
+    """Guards the self-match race (see the gate's comment in chat_service.py):
+    conversation_service.save_message() fires an asyncio.create_task to embed
+    the user's own message BEFORE respond() runs, so on a genuine first turn
+    _retrieve_history can legitimately come back with that same message as a
+    "history hit" (it self-matches at distance ~0). If the gate were
+    `if prior_messages + history_hits:` instead of `if prior_messages:`, this
+    hit alone would trip it and run the reformulator on a first turn. Only
+    prior_messages is a reliable first-turn signal, so asserting ZERO calls
+    here -- with a non-empty history hit forced in -- is the point."""
+    from app.db.models import Paper
+    from app.services.chat_service import ChatService
+
+    conv = conversation_with_message
+    db_session.add(Paper(project_id=project.id, title="Paper A", source="manual"))
+    await db_session.commit()
+
+    async def fake_stream(*args, **kwargs):
+        yield "answer"
+
+    svc = ChatService()
+    reformulate = AsyncMock(return_value="should not be called")
+    # Simulates the self-match race: the just-saved current-turn user message
+    # comes back from _retrieve_history as if it were a "history hit".
+    self_match_hit = [{"role": "user", "content": "Test question"}]
+
+    with (
+        patch.object(svc._embedding_svc, "embed", AsyncMock(return_value=[0.0] * 768)),
+        patch.object(svc, "_retrieve_history", AsyncMock(return_value=self_match_hit)),
+        patch.object(svc._reformulator, "run", reformulate),
+        patch.object(svc, "_retrieve_paper_chunks", AsyncMock(return_value=[])),
+        patch.object(svc._chat_agent, "stream", return_value=fake_stream()),
+        patch.object(svc._conv_svc, "save_message", AsyncMock()),
+    ):
+        async for _ in svc.respond(conv.id, "Test question"):
+            pass
+
+    reformulate.assert_not_awaited()
+
+
+async def test_respond_retrieves_with_the_reformulated_query(
+    db_session: AsyncSession, project: Project, conversation_with_message, you: User
+):
+    """The rewritten query must be what gets embedded for retrieval —
+    otherwise the reformulation call is paid for and thrown away."""
+    from app.db.models import ChatMessage, Paper
+    from app.services.chat_service import ChatService
+
+    conv = conversation_with_message
+    db_session.add(Paper(project_id=project.id, title="Paper A", source="manual"))
+    # A prior turn, so reformulation runs at all.
+    db_session.add(ChatMessage(conversation_id=conv.id, role="assistant", content="Earlier answer"))
+    await db_session.commit()
+
+    async def fake_stream(*args, **kwargs):
+        yield "answer"
+
+    svc = ChatService()
+    embed = AsyncMock(return_value=[0.0] * 768)
+
+    with (
+        patch.object(svc._embedding_svc, "embed", embed),
+        patch.object(svc, "_retrieve_history", AsyncMock(return_value=[])),
+        patch.object(
+            svc._reformulator, "run", AsyncMock(return_value="rewritten standalone query")
+        ),
+        patch.object(svc, "_retrieve_paper_chunks", AsyncMock(return_value=[])),
+        patch.object(svc._chat_agent, "stream", return_value=fake_stream()),
+        patch.object(svc._conv_svc, "save_message", AsyncMock()),
+    ):
+        async for _ in svc.respond(conv.id, "Test question"):
+            pass
+
+    embedded = [c.args[0] for c in embed.await_args_list]
+    assert "rewritten standalone query" in embedded
 
 
 async def test_retrieve_paper_chunks_numbers_citations_contiguously_after_capping():
@@ -306,16 +333,13 @@ async def test_retrieve_paper_chunks_numbers_citations_contiguously_after_cappin
     `chat_agent` cites by position, so a gap or a number past the end of the
     list would point at a source the model was never given.
     """
-    from app.agents.retrieval_planner import PaperInfo
-    from app.services.chat_service import ChatService
+    from app.services.chat_service import ChatService, PaperInfo
 
     svc = ChatService()
     mock_db = _mock_db_returning(500)
-    papers = [PaperInfo(paper_id=f"p{i}", title=f"Paper {i}", abstract="") for i in range(100)]
+    papers = [PaperInfo(paper_id=f"p{i}", title=f"Paper {i}") for i in range(100)]
 
     with patch.object(settings, "max_context_chunks", 40):
-        chunks = await svc._retrieve_paper_chunks(
-            mock_db, papers, {p.paper_id: 5 for p in papers}, [0.0] * 768
-        )
+        chunks = await svc._retrieve_paper_chunks(mock_db, papers, [0.0] * 768)
 
     assert [c.n for c in chunks] == list(range(1, 41))

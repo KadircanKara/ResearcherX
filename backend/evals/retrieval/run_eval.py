@@ -55,31 +55,21 @@ _DEFAULT_SET = Path(__file__).parent / "golden_set.json"
 _MIN_POSITIVES_FOR_CONFIDENCE = 20
 _MIN_NEGATIVES_FOR_CONFIDENCE = 10
 
-# Two production per-paper k values from chat_service.py, duplicated (not
-# imported — they're private module state there) so this harness can name a
-# divergence between its own uniform --k and what production actually uses
-# (see the corpus-note caveats and the closed-form "NOTE" in main()).
-# chat_service._SMALL_LIBRARY_K: every paper gets this when the planner is
-# skipped (<3 papers in the library).
-_SMALL_LIBRARY_K = 5
-# chat_service.py:239 `per_paper_map.get(paper.paper_id, 2)`: fallback k for
-# a paper the planner ran but didn't allocate.
-_UNALLOCATED_PAPER_K = 2
-
 _MODEL_COUNTS_SQL = text("SELECT model, count(*) AS n FROM paper_chunk_embeddings GROUP BY model")
 
-# Mirrors chat_service._retrieve_paper_chunks's DISTANCE COMPUTATION only —
-# same <=> operator, same model filter. It does NOT mirror the retrieval
-# PATH: production embeds `plan.reformulated_query` (not the raw question)
-# and hands each paper a planner-allocated `k` whenever the library has >=
-# _PLANNER_MIN_PAPERS papers (chat_service.py) — true today, since the dev
-# corpus has 4 papers. This harness embeds the raw golden-set question and
-# applies a single uniform --k instead: a deliberate simplification for
-# reproducibility, not an oversight, but it means a threshold calibrated
-# here is calibrated on raw-question distances, and would be applied in
-# production to reformulated-query distances. Re-validate after any change
-# to the planner's reformulation behavior, not just after an embedding
-# model change.
+# Mirrors chat_service._retrieve_paper_chunks: same <=> operator, same model
+# filter, and since 2026-08-10 the same GLOBAL top-k — there is no per-paper
+# ceiling in production to diverge from. Two divergences remain (see
+# README.md's "What it measures vs. what production does" for the full
+# writeup):
+#   - Project scoping. Production always scopes retrieval to the current
+#     project's papers; this query reads every project's chunks unless
+#     --project-id is given. Harmless under the old per-paper ceiling, but a
+#     global top-k lets another project's chunks compete for the same budget.
+#   - Query reformulation. This embeds the golden-set question verbatim;
+#     production reformulates through a QueryReformulatorAgent only when the
+#     conversation has prior turns, so for the single-turn golden set the two
+#     paths still agree.
 _SQL = text("""
     SELECT c.paper_id AS paper_id,
            p.title AS paper_title,
@@ -91,6 +81,22 @@ _SQL = text("""
     ORDER BY distance ASC
 """)
 
+# Same query, scoped to one project's papers -- used when --project-id is
+# given. Kept as a second literal query rather than string-building a WHERE
+# clause around a bind parameter, so both forms stay grep-able and neither
+# risks an interpolated filter.
+_SQL_SCOPED = text("""
+    SELECT c.paper_id AS paper_id,
+           p.title AS paper_title,
+           c.text AS chunk_text,
+           (c.embedding <=> CAST(:qvec AS vector)) AS distance
+    FROM paper_chunk_embeddings c
+    JOIN papers p ON p.id = c.paper_id
+    WHERE c.model = :model
+      AND p.project_id = :project_id
+    ORDER BY distance ASC
+""")
+
 
 def _vec(embedding: list[float]) -> str:
     return "[" + ",".join(str(x) for x in embedding) + "]"
@@ -99,9 +105,9 @@ def _vec(embedding: list[float]) -> str:
 def _positive_int(raw: str) -> int:
     """argparse type for --k: must be a positive integer.
 
-    `simulate_retrieval`'s `group[:k]` silently accepts k <= 0 (an empty
-    per-paper slice), which would make every case an automatic miss and read
-    as a retrieval failure instead of the usage error it actually is.
+    `simulate_retrieval`'s `[:k]` silently accepts k <= 0 (an empty result),
+    which would make every case an automatic miss and read as a retrieval
+    failure instead of the usage error it actually is.
     """
     value = int(raw)
     if value < 1:
@@ -210,11 +216,16 @@ def _display_point(lo: float, hi: float) -> str:
         return f"no display value fits — raw bounds ({lo:.6f}, {hi:.6f}]"
 
 
-async def _chunks_for(db, svc: EmbeddingService, case: Case) -> list[Scored]:
+async def _chunks_for(
+    db, svc: EmbeddingService, case: Case, project_id: str | None
+) -> list[Scored]:
     embedding = await svc.embed(case.question, task_type="RETRIEVAL_QUERY")
-    rows = (
-        await db.execute(_SQL, {"qvec": _vec(embedding), "model": settings.embedding_model})
-    ).fetchall()
+    params = {"qvec": _vec(embedding), "model": settings.embedding_model}
+    sql = _SQL
+    if project_id:
+        sql = _SQL_SCOPED
+        params["project_id"] = project_id
+    rows = (await db.execute(sql, params)).fetchall()
     return [
         Scored(
             paper_id=r.paper_id,
@@ -227,16 +238,28 @@ async def _chunks_for(db, svc: EmbeddingService, case: Case) -> list[Scored]:
 
 
 def _corpus_note(chunks: list[Scored]) -> str:
-    # Grouped by paper_id, not title: production groups retrieval per
-    # paper_id (WHERE paper_id = :paper_id), and two papers could in
-    # principle share a title, which would understate the paper count.
+    # Grouped by paper_id, not title: two papers could in principle share a
+    # title (e.g. both title-less), which would understate the paper count.
     papers = len({c.paper_id for c in chunks})
     return f"{len(chunks)} chunks across {papers} papers"
 
 
 async def main() -> None:  # noqa: PLR0912, PLR0915 — a report script, not a library API
     parser = argparse.ArgumentParser(description="Measure retrieval quality.")
-    parser.add_argument("--k", type=_positive_int, default=5, help="chunks per paper (default: 5)")
+    parser.add_argument(
+        "--k",
+        type=_positive_int,
+        default=settings.max_context_chunks,
+        help="total chunks retrieved globally (default: max_context_chunks)",
+    )
+    parser.add_argument(
+        "--project-id",
+        default=None,
+        help=(
+            "scope the corpus to one project's papers, matching production's own "
+            "scoping (default: every project, this harness's original behaviour)"
+        ),
+    )
     parser.add_argument("--set", type=Path, default=_DEFAULT_SET)
     parser.add_argument("--json", type=Path, default=None, help="also dump results here")
     args = parser.parse_args()
@@ -259,7 +282,7 @@ async def main() -> None:  # noqa: PLR0912, PLR0915 — a report script, not a l
 
         corpus_note = ""
         for case in cases:
-            chunks = await _chunks_for(db, svc, case)
+            chunks = await _chunks_for(db, svc, case, args.project_id)
             if not corpus_note:
                 corpus_note = _corpus_note(chunks)
 
@@ -284,12 +307,12 @@ async def main() -> None:  # noqa: PLR0912, PLR0915 — a report script, not a l
                     "kind": case.kind,
                     "rank": rank,
                     # Globally-nearest satisfying chunk in the WHOLE corpus,
-                    # ignoring per-paper top-k — NOT top-k-aware. Invites the
-                    # wrong "so lower the threshold" inference; see
-                    # README.md's "Reading the output".
+                    # ignoring top-k — NOT top-k-aware. Invites the wrong "so
+                    # lower the threshold" inference; see README.md's
+                    # "Reading the output".
                     "best_distance": best_satisfying_distance(case, chunks),
                     # Top-k-aware: the distance of the satisfying chunk that
-                    # actually survives this case's own per-paper top-k, or
+                    # actually survives this case's own top-k, or
                     # None when it doesn't (see `blocked` and
                     # metrics.topk_satisfying_distance). This is the number
                     # the closed-form separation actually uses.
@@ -298,16 +321,16 @@ async def main() -> None:  # noqa: PLR0912, PLR0915 — a report script, not a l
                 }
             )
 
-    print(f"\ncorpus: {corpus_note}   model: {settings.embedding_model}   k={args.k}")
+    project_note = args.project_id if args.project_id else "ALL (no --project-id)"
+    print(
+        f"\ncorpus: {corpus_note}   model: {settings.embedding_model}   k={args.k}   "
+        f"project: {project_note}"
+    )
     print("(small, thematically clustered corpus — numbers are indicative, not conclusive)")
     print(
-        "(recall/MRR below apply no distance cutoff — they are the retrieval ceiling, not "
-        f"production recall. k is uniform here; production allocates k per paper, falling "
-        f"back to {_UNALLOCATED_PAPER_K} for an unallocated paper, not {_SMALL_LIBRARY_K}.)"
-    )
-    print(
-        "(the question embedded below is the raw question, not the planner's "
-        "reformulated_query — chat_service.py:104.)\n"
+        "(recall/MRR below apply no distance cutoff — they are the retrieval "
+        "ceiling, not production recall. k here is a GLOBAL budget, matching "
+        f"production's max_context_chunks of {settings.max_context_chunks}.)"
     )
 
     if errors:
@@ -401,13 +424,13 @@ async def main() -> None:  # noqa: PLR0912, PLR0915 — a report script, not a l
         if diagnosis.blocked_case_ids:
             print("  NO SEPARATION POSSIBLE AT THIS k.")
             print(
-                f"  case(s) with no satisfying chunk within their paper's own top-{args.k}: "
+                f"  case(s) with no satisfying chunk within their own top-{args.k}: "
                 f"{', '.join(diagnosis.blocked_case_ids)}"
             )
             print(
                 "  No threshold recovers this: thresholding only removes competing chunks, "
-                "it can never let a chunk leapfrog nearer same-paper competitors that already "
-                "excluded it. Increase --k or fix retrieval ranking — not the threshold."
+                "it can never let a chunk leapfrog nearer competitors that already excluded "
+                "it. Increase --k or fix retrieval ranking — not the threshold."
             )
         elif diagnosis.interval is None:
             print("  NO THRESHOLD SEPARATES CONTENT FROM NOISE (exact — not a grid artifact).")
@@ -444,13 +467,11 @@ async def main() -> None:  # noqa: PLR0912, PLR0915 — a report script, not a l
                 f"    any T in ({lo:.4f}, {hi:.4f}] separates; midpoint {point_display}, "
                 f"margin {margin:.4f}"
             )
-            if args.k != _SMALL_LIBRARY_K:
+            if args.k != settings.max_context_chunks:
                 print(
                     f"    NOTE: this recommendation is at --k {args.k}. Production's "
-                    f"per-paper k is at most {_SMALL_LIBRARY_K} (small-library fallback; "
-                    "the planner's own 'targeted' allocation tops out there too) and "
-                    f"commonly {_UNALLOCATED_PAPER_K} — this may describe an operating "
-                    "point production never reaches."
+                    f"global budget is max_context_chunks = {settings.max_context_chunks} "
+                    "— this may describe an operating point production never reaches."
                 )
 
             if provisional:
@@ -514,6 +535,7 @@ async def main() -> None:  # noqa: PLR0912, PLR0915 — a report script, not a l
                 {
                     "model": settings.embedding_model,
                     "k": args.k,
+                    "project_id": args.project_id,
                     "corpus": corpus_note,
                     "cases": per_case,
                     "errors": errors,

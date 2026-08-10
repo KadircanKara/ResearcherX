@@ -3,6 +3,12 @@
 Measures retrieval quality against the **live dev database**. Measures only —
 it never writes.
 
+> **2026-08-10 — numbers recorded before this date are not comparable.** The
+> harness simulated top-k *per paper* until production dropped per-paper
+> allocation; `--k` is now a global budget defaulting to `max_context_chunks`.
+> A recall@5 from the old harness and a recall@5 from this one measure
+> different things.
+
     docker compose exec -T backend python -m evals.retrieval.run_eval
     docker compose exec -T backend python -m evals.retrieval.run_eval --k 3 --json /tmp/retrieval.json
 
@@ -12,9 +18,14 @@ isn't installed and running it by file path fails with
 
 Flags:
 
-- `--k` — chunks per paper (default: 5). Uniform across every paper; see
-  "What it measures vs. what production does" below for how that differs
-  from production's per-paper allocation.
+- `--k` — total chunks retrieved globally (default: `max_context_chunks`,
+  production's own budget). See "What it measures vs. what production does"
+  below for how this harness's query still differs from production's.
+- `--project-id` — scope the corpus to one project's papers, matching how
+  production always scopes retrieval. Default: every project (this harness's
+  original behaviour, unchanged unless you pass this). Pass it whenever the
+  database has more than one populated project — see "What it measures vs.
+  what production does" below for why this matters under a global top-k.
 - `--set` — path to an alternate golden-set JSON file (default: `golden_set.json`
   next to this file, same schema as "Adding a case" below).
 - `--json` — also write the full per-case results, threshold-sweep grid, and
@@ -23,21 +34,33 @@ Flags:
 
 ## What it measures vs. what production does
 
-The runner's SQL mirrors production's **distance computation** exactly (same
-`<=>` cosine operator, same `WHERE model = :model` filter) but not its
-**retrieval path**. Production (`chat_service.py`) runs a planning step
-whenever a project has 3+ papers — true of the current dev corpus — which
-embeds a *reformulated* query (not the user's raw question, `chat_service.py:104`)
-and allocates a different `k` per paper (1-6 per the planner's schema,
-commonly 2 or 5 in practice; a paper the planner ran but didn't explicitly
-allocate falls back to `k=2`, `chat_service.py:239` — not this harness's
-default of 5). This harness always embeds the golden-set `question` verbatim
-and applies one uniform `--k` to every paper. That's a deliberate
-simplification for reproducibility, not an oversight — but it
-means a threshold calibrated here is calibrated on raw-question distances,
-and production would apply it to reformulated-query distances. Re-validate
-after any change to the planner's reformulation behavior, not just after an
-embedding model change.
+The runner's SQL mirrors production's **distance computation** (same `<=>`
+cosine operator, same `WHERE model = :model` filter) and, since 2026-08-10,
+its **top-k too**: production applies no per-paper ceiling, just
+`ORDER BY distance ASC LIMIT max_context_chunks`, which is exactly what
+`--k` (default: `max_context_chunks`) simulates here.
+
+Two divergences remain:
+
+- **Project scoping.** Production always scopes retrieval to the current
+  project's papers (`chat_service._retrieve_paper_chunks` joins on a `scope`
+  CTE built from that project's paper ids). By default this harness reads
+  every project's chunks instead — harmless under the old per-paper top-k,
+  where another project's chunks couldn't take a slot away from the paper
+  being measured, but not harmless under a global top-k, where they compete
+  for the same fixed budget directly. Pass `--project-id` to scope the
+  harness the same way production scopes a real chat; omit it to keep
+  measuring across every project (e.g. when the database only has one
+  populated project, which is why this was latent rather than visible until
+  now).
+- **Query reformulation.** Production (`chat_service.py`) reformulates the
+  query through a `QueryReformulatorAgent` only when the conversation has
+  prior turns — a first turn is already standalone, so the call is skipped
+  and the raw question is embedded directly. This harness always embeds the
+  golden-set `question` verbatim. Since the golden set is single-turn
+  questions, the two paths still agree: there's no reformulation for either
+  of them to diverge on. Re-validate this section if the golden set ever
+  grows multi-turn cases, or after any change to the reformulator's behavior.
 
 ## Adding a case
 
@@ -81,36 +104,36 @@ runner refuses to compute one without usable negatives.
 ## Reading the output
 
 - **the per-case table** (`case  kind  rank  best_dist`):
-  - **rank** is the chunk's 1-based position in the *merged, distance-sorted*
-    list `simulate_retrieval` returns — up to `papers × k` chunks, not just
-    `k` — so a legitimate rank can exceed `--k` (e.g. rank 12 at `--k 5` with
-    4 papers). It is **not** a rank within one paper's own budget.
+  - **rank** is the chunk's 1-based position in `simulate_retrieval`'s
+    distance-sorted global top-`k`, so a non-`-` rank is always `<= --k` —
+    there's no larger pool to rank within. (Before 2026-08-10, when this
+    simulated top-k *per paper*, a legitimate rank could exceed `--k`; a
+    global top-k has no such headroom, by construction.)
   - **`-`** means three different things depending on the column and row: for
     a positive/metadata/figure case, a `-` rank means no satisfying chunk
-    survived this case's own per-paper top-`k` (it may still exist elsewhere
-    in the corpus — see `best_dist` on that same row); for an `off_topic`
-    case, `rank` is always `-` because negatives have no "satisfying chunk"
-    to rank; and `best_dist` is `-` only when a case retrieved zero chunks at
+    survived this case's own top-`k` (it may still exist elsewhere in the
+    corpus — see `best_dist` on that same row); for an `off_topic` case,
+    `rank` is always `-` because negatives have no "satisfying chunk" to
+    rank; and `best_dist` is `-` only when a case retrieved zero chunks at
     all (corpus empty for that model). Don't read a `-` as "zero" or as
     "identical to the row above" — check which column and which kind.
   - **best_dist** is the closest distance among *all* chunks in the whole
     corpus that satisfy the case — **not top-k-aware**. It ignores whether
-    nearer same-paper chunks crowd the satisfying chunk out of the per-paper
-    top-`k` that production (and `rank`) actually use, so it can report a
-    small, encouraging number for a case whose rank is `-`. Do not read a
-    small `best_dist` next to a `-` rank as "so lower the threshold" — that's
+    nearer chunks crowd the satisfying chunk out of the top-`k` that
+    production (and `rank`) actually use, so it can report a small,
+    encouraging number for a case whose rank is `-`. Do not read a small
+    `best_dist` next to a `-` rank as "so lower the threshold" — that's
     precisely the inference the closed-form section below refuses to make
     (see "NO SEPARATION POSSIBLE AT THIS k"). The `--json` dump's per-case
     `topk_distance` field is the top-k-aware equivalent, and `blocked` says
     outright whether that number exists.
 - **recall@k** / **MRR** — the retrieval *ceiling*: no distance cutoff is
-  applied, only the per-paper top-k. The LLM can ignore an irrelevant chunk
-  but cannot use one that never arrived, so this is the metric that matters
-  most — but pair it with the closed-form section below for what a real
+  applied, only the global top-k. The LLM can ignore an irrelevant chunk but
+  cannot use one that never arrived, so this is the metric that matters most
+  — but pair it with the closed-form section below for what a real
   `similarity_threshold` cutoff actually leaves production with, and see the
-  console's own printed caveats (no cutoff; `--k` is uniform here, production
-  allocates per paper; the query is the raw question, not the planner's
-  reformulation).
+  console's own printed caveat (no cutoff; `k` is a global budget matching
+  production's `max_context_chunks`).
 - **noise floor** — the closest distance any off-topic question achieved. A
   threshold is only meaningful below this and above the content distances.
 - **threshold sweep grid** — a fixed 0.05-step table, kept as a coarse visual
@@ -131,8 +154,8 @@ runner refuses to compute one without usable negatives.
   `blocked_case_ids`, `k`); it is `null` when there was nothing to diagnose
   (no usable negatives, or no scored positives). Three outcomes:
   - **NO SEPARATION POSSIBLE AT THIS k** — a positive case's satisfying
-    chunk doesn't survive its own paper's top-k at all, for any threshold.
-    The fix is `--k` or retrieval ranking, not the threshold.
+    chunk doesn't survive its own top-k at all, for any threshold. The fix
+    is `--k` or retrieval ranking, not the threshold.
   - **NO THRESHOLD SEPARATES CONTENT FROM NOISE** — a genuine, exactly
     computed non-separation (the worst content distance is >= the closest
     off-topic distance). The next lever is reranking or hybrid retrieval,
@@ -145,8 +168,8 @@ runner refuses to compute one without usable negatives.
     interval becomes if the deciding positive case is dropped) and can
     evaporate the moment the set grows — the printed order-statistics odds
     quantify exactly how fragile it is. If `--k` isn't production's own
-    operating range, the report also names that divergence explicitly (see
-    "What it measures vs. what production does").
+    operating point (`max_context_chunks`), the report also names that
+    divergence explicitly (see "What it measures vs. what production does").
 - **ROBUST FINDING** — the current `similarity_threshold`'s off-topic
   acceptance rate on this set, printed unconditionally. Unlike the
   interval above, this survives resampling: it doesn't depend on finding an
@@ -158,35 +181,41 @@ Results are model-specific. Re-baseline after any change to
 ## Findings
 
 Dated measurements from the live dev corpus at the time this branch's final
-review was fixed: **2026-08-05**, corpus **122 chunks / 4 papers**, model
-**nomic-embed-text**. Re-baseline (re-run and update this section) after any
-change to `EMBEDDING_MODEL` or either `EMBEDDING_*_PREFIX` — these numbers
-are specific to that embedding space and will not hold after either changes.
+review was fixed: **2026-08-05**, corpus **122 chunks / 4 papers** (the dev
+corpus has since grown to 100 papers — see the warning at the top of this
+file), model **nomic-embed-text**. These numbers also predate the
+2026-08-10 move to a global top-k (see "What it measures vs. what production
+does") and are not comparable to a current run for either reason. Re-baseline
+(re-run and update this section) after any change to `EMBEDDING_MODEL`,
+either `EMBEDDING_*_PREFIX`, or the corpus.
 
-- **Per-paper top-k is chunk-count-blind — the biggest finding this harness
-  has produced.** `segmentation-datasets`'s answering chunk sits at distance
+- **Per-paper top-k was chunk-count-blind — the biggest finding this harness
+  produced, and the direct motivation for removing the per-paper ceiling on
+  2026-08-10.** `segmentation-datasets`'s answering chunk sat at distance
   0.2048 — among the closest in the entire corpus — but at within-paper rank
-  18 of 67, so it never surfaces at `--k` 5, 8, or 12; it needs `--k 20`.
-  Seventeen chunks from its own 67-chunk paper outrank it. A 67-chunk paper
-  and a 12-chunk paper receive the same per-paper budget of `k`, so large
-  papers are starved in proportion to their size. **No threshold can fix
-  this**: threshold-filtering and top-k-selection are both nearest-prefix
+  18 of 67, so it never surfaced at `--k` 5, 8, or 12; it needed `--k 20`.
+  Seventeen chunks from its own 67-chunk paper outranked it. A 67-chunk paper
+  and a 12-chunk paper received the same per-paper budget of `k`, so large
+  papers were starved in proportion to their size. No threshold could fix
+  this: threshold-filtering and top-k-selection are both nearest-prefix
   operations on the same distance-sorted list (see
   `metrics.topk_satisfying_distance`'s docstring for the proof), so a chunk
-  already excluded from the unfiltered top-k can never be recovered by any
-  threshold. The fix, if one is wanted, is `--k` or retrieval ranking — not
-  `similarity_threshold`.
+  already excluded from the unfiltered top-k could never be recovered by any
+  threshold. Production now applies no per-paper ceiling at all, which
+  removes this failure mode outright rather than just tuning around it.
 - **Robust finding**: `similarity_threshold = 0.75` (the shipped default)
-  accepts **100%** of off-topic questions in the current golden set — the
-  opposite of a working guard rail. Survives resampling in the sense that it
-  doesn't depend on finding an exact separating boundary, only on whether
-  today's threshold already admits noise, which it does for every negative
-  case currently in the set.
-- **Measured baseline** (`--k 5`, this corpus, this model): `recall@5 =
-  0.88`, `MRR = 0.589`, noise floor `0.4749`. Read `recall@5` as the
-  retrieval ceiling (no distance cutoff applied), not as what production
-  actually returns — see "Reading the output" above.
+  accepted **100%** of off-topic questions in this golden set — the opposite
+  of a working guard rail. Survives resampling in the sense that it doesn't
+  depend on finding an exact separating boundary, only on whether the
+  threshold already admits noise, which it did for every negative case in
+  the set at the time.
+- **Measured baseline** (`--k 5` per paper — this harness's old semantics,
+  this corpus, this model): `recall@5 = 0.88`, `MRR = 0.589`, noise floor
+  `0.4749`. Not comparable to a `recall@5` from this harness post-2026-08-10
+  (see the warning at the top of this file); read it only as what the
+  per-paper simulation reported at the time.
 
-This section records findings; it does not change retrieval behavior. Any
-fix (raising `--k`'s production analogue, retuning `similarity_threshold`,
-reranking) is separate work.
+This section records a historical finding; it does not change retrieval
+behavior. The per-paper ceiling it describes has since been removed from
+production; a fresh baseline against the current (100-paper) corpus, at
+`--k = max_context_chunks`, is separate work.

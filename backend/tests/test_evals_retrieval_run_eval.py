@@ -37,10 +37,10 @@ def test_positive_int_accepts_positive_values():
 
 
 def test_positive_int_rejects_zero_and_negative():
-    """simulate_retrieval's `group[:k]` silently accepts k <= 0 (an empty
-    slice), which would score every case an automatic miss and read as a
-    retrieval failure instead of a usage error — must reject at the CLI
-    boundary instead."""
+    """simulate_retrieval's `[:k]` silently accepts k <= 0 (an empty slice),
+    which would score every case an automatic miss and read as a retrieval
+    failure instead of a usage error — must reject at the CLI boundary
+    instead."""
     with pytest.raises(argparse.ArgumentTypeError):
         _positive_int("0")
     with pytest.raises(argparse.ArgumentTypeError):
