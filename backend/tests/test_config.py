@@ -48,3 +48,24 @@ def test_prod_rejects_dev_host_regardless_of_case(monkeypatch):
 def test_prod_accepts_hosted_embedding_base_url(monkeypatch):
     _set_valid_prod(monkeypatch)
     settings.validate_for_environment()  # must not raise
+
+
+def test_prod_rejects_negative_intra_paper_delta(monkeypatch):
+    """A negative delta makes keep_within_paper return 0, emptying every
+    single-paper retrieval -- and a single-paper project has no untargeted
+    fallback, so the model would answer ungrounded."""
+    _set_valid_prod(monkeypatch)
+    monkeypatch.setattr(settings, "intra_paper_delta", -0.01)
+    with pytest.raises(RuntimeError, match="INTRA_PAPER_DELTA"):
+        settings.validate_for_environment()
+
+
+def test_prod_rejects_ceiling_below_similarity_threshold(monkeypatch):
+    """A ceiling below the global threshold would silently make single-paper
+    scope STRICTER than global scope -- the opposite of its purpose as a
+    looser noise floor."""
+    _set_valid_prod(monkeypatch)
+    monkeypatch.setattr(settings, "similarity_threshold", 0.90)
+    monkeypatch.setattr(settings, "intra_paper_ceiling", 0.85)
+    with pytest.raises(RuntimeError, match="INTRA_PAPER_CEILING"):
+        settings.validate_for_environment()

@@ -103,9 +103,16 @@ case" below already asks for: pick a more distinctive substring.
 
 `_production_cut` then applies the cut to that scoped, distance-sorted list
 in production's exact order — SQL filters on the ceiling, LIMITs to
-`max_context_chunks`, *then* the delta cut runs in Python — because that
-order matters: budget-then-delta and delta-then-budget can keep different
-chunks. The cut itself is `keep_within_paper`, **imported** from
+`max_context_chunks`, *then* the delta cut runs in Python. The order does
+not actually change the result today: ceiling, budget and delta are all
+prefix truncations of the same distance-ascending sort, and the delta cut
+point depends only on `distances[0]` (the nearest chunk), which no earlier
+truncation can move — any ordering yields the same
+`min(n_ceiling, n_delta, budget)`. The order is still mirrored deliberately:
+if either side ever adds a non-prefix operation (MMR, dedup, a rerank), a
+harness that copies production's literal order will surface the divergence
+immediately instead of hiding behind today's accidental equivalence. The cut
+itself is `keep_within_paper`, **imported** from
 `app.services.intra_paper_ranker` rather than reimplemented here, so the
 harness can never measure a policy that has drifted from what production
 actually ships.
@@ -130,6 +137,19 @@ The report's columns:
   `intra_paper_ceiling` lets through when the targeter picks the wrong paper.
 - **survived** — whether the satisfying chunk is still present after the
   cut. `-` for off_topic, same reason as `intra_rank`.
+
+**`kept = 0` on an off_topic row does not mean production returns nothing.**
+It means the single-paper cut emptied the mis-targeted paper's scope — but
+`chat_service.py`'s `respond()` re-queries the untargeted (whole-project)
+scope whenever the targeted retrieval comes back empty
+(`scope is not paper_infos and not paper_chunks`, right after
+`_retrieve_paper_chunks` in `respond()`), so production still answers, from
+global chunks, instead of returning nothing. This matters for the "Open
+finding" below: raising `intra_paper_ceiling`'s scrutiny would push more
+mis-targeted off_topic questions toward `kept = 0`, i.e. toward *this*
+fallback rather than toward an empty, ungrounded answer — the two are not
+the same failure mode, and a tighter ceiling trades one for the other rather
+than eliminating a risk outright.
 
 `survival@cut` at the bottom is `survived == yes` count over scored
 (non-off_topic) cases — the single number to watch when re-tuning

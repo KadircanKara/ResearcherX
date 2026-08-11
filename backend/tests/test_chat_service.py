@@ -954,6 +954,11 @@ async def test_single_paper_scope_applies_the_delta_cut():
     # best 0.50 + 0.25 = 0.75 -> the 0.80 row is cut, the 0.74 row survives
     assert len(chunks) == 3
     assert [c.n for c in chunks] == [1, 2, 3]
+    # `n` alone is tautological here (it's just enumerate(rows, 1) over
+    # whatever length survives), so it would pass even if the cut kept the
+    # wrong end of the sorted list. chunk_index pins down WHICH rows —
+    # 0, 1, 2 (distances 0.50, 0.60, 0.74) — survived, not just how many.
+    assert [c.chunk_index for c in chunks] == [0, 1, 2]
 
 
 async def test_multi_paper_scope_applies_no_delta_cut():
@@ -979,10 +984,12 @@ async def test_multi_paper_scope_applies_no_delta_cut():
     assert len(chunks) == 3
 
 
-async def test_single_paper_scope_cut_to_empty_returns_empty():
-    """An empty return is what triggers respond()'s existing fallback to
-    global scope, so the cut must be able to produce it rather than
-    defensively keeping a chunk."""
+async def test_single_paper_scope_with_empty_sql_result_returns_empty():
+    """Guards the empty-SQL passthrough, not a cut-to-empty: `keep_within_paper`
+    always keeps `distances[0]` (see test_intra_paper_ranker.py), so a
+    non-empty SQL result can never be cut to nothing by the delta. This proves
+    only that zero SQL rows in means an empty list out — which is what
+    triggers respond()'s existing fallback to global scope."""
     from app.services.chat_service import ChatService, PaperInfo
 
     svc = ChatService()

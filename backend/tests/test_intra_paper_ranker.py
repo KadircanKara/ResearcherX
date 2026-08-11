@@ -56,9 +56,15 @@ def test_intra_paper_constants_are_settings_not_literals():
     any other embedding model. They must be env-tunable without a code change.
 
     The ordering assertion is the real content: a ceiling below the delta band
-    would make the delta dead code, and a ceiling at or above 0.90 leaks
-    off-topic chunks (measured: 1, 2 and 9 chunks admitted on the three
-    off_topic golden cases).
+    would make the delta dead code. The original evidence for the upper bound
+    (three off_topic cases where 0.90 admitted 1, 2 and 9 chunks) is NOT the
+    full picture and config.py now explicitly retracts it as too easy: nine
+    later near-domain negatives (drone regulation, insurance, hobbyist gear)
+    land at 0.547-0.652, comfortably inside 0.85 itself, and a mis-targeted
+    one keeps 9-52 chunks of the wrong paper at the shipped delta (see
+    evals/retrieval/README.md, "Open finding"). 0.85 is a known-loose,
+    open-follow-up constant, not a settled upper bound — this test only pins
+    that ceiling and delta stay ordered and within the range measured so far.
     """
     from app.core.config import settings
 

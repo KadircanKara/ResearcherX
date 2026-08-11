@@ -284,8 +284,14 @@ def test_scope_to_nearest_paper_handles_no_chunks():
 
 
 def test_production_cut_applies_ceiling_then_budget_then_delta():
-    """Order matters and mirrors production exactly: SQL filters by the
-    ceiling and LIMITs to the budget, and only then does the delta cut run."""
+    """Mirrors production's literal order: SQL filters by the ceiling and
+    LIMITs to the budget, then the delta cut runs in Python. The order
+    doesn't actually change the result today — ceiling, budget and delta are
+    all prefix truncations of one distance-ascending sort, so any ordering
+    yields the same min(n_ceiling, n_delta, budget). Production's order is
+    still mirrored here so a future non-prefix change on either side (MMR,
+    dedup, a rerank) surfaces as a divergence instead of hiding behind
+    today's accidental equivalence."""
     from evals.retrieval.run_eval import _production_cut
 
     chunks = [

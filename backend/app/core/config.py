@@ -97,8 +97,12 @@ class Settings(BaseSettings):
 
     # The DELTA is cost and precision: keep every chunk within this distance
     # of the paper's own nearest chunk. The ceiling alone is far too generous
-    # on real questions — measured, it keeps 63/64 and 76/84 chunks of a
-    # targeted paper, near-whole-paper dumps at ~439 tokens per chunk.
+    # on real questions — measured (evals/retrieval/README.md, "Measured —
+    # 2026-08-12"), at delta 0.20 four cases (marl-security-attacks,
+    # deadly-triad, lazy-agents-reward, hnpfl-fair-comparison) keep exactly
+    # the 60-chunk max_context_chunks budget, i.e. the BUDGET bound them
+    # before the delta even got a chance to — the ceiling alone would let
+    # far more of a large paper through unguarded.
     #
     # 0.20 is a swept measurement, not a single witness. `run_eval --targeted`
     # on 2026-08-12 over a golden set at the harness's own confidence gate
@@ -236,6 +240,27 @@ class Settings(BaseSettings):
             problems.append(
                 "EMBEDDING_BASE_URL points at a dev host "
                 "(set EMBEDDING_BASE_URL to a hosted embedding endpoint)"
+            )
+        # Guards for the single-paper scope constants (see the "single-paper
+        # scope" block above). Checked here rather than at Settings
+        # construction because this method is the codebase's one existing
+        # config-validation mechanism, and it is prod-only by design (dev/
+        # tests must still boot on defaults) — these two misconfigurations
+        # are exactly the kind a prod operator could introduce via env vars
+        # (see docker-compose.prod.yml), so they belong on the same gate as
+        # every other prod boot guard, not a new mechanism.
+        if self.intra_paper_delta < 0:
+            problems.append(
+                "INTRA_PAPER_DELTA is negative (keep_within_paper returns 0, "
+                "emptying every single-paper retrieval -- and a single-paper "
+                "project has no untargeted scope to fall back to, so the "
+                "model would answer ungrounded)"
+            )
+        if self.intra_paper_ceiling < self.similarity_threshold:
+            problems.append(
+                "INTRA_PAPER_CEILING is below SIMILARITY_THRESHOLD (single-paper "
+                "scope would silently become STRICTER than global scope, the "
+                "opposite of its purpose as a looser noise floor)"
             )
         if problems:
             raise RuntimeError(f"refusing to start with ENVIRONMENT=prod: {'; '.join(problems)}")

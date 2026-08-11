@@ -425,12 +425,29 @@ async def main() -> None:  # noqa: PLR0912, PLR0915 — a report script, not a l
             if not corpus_note:
                 corpus_note = _corpus_note(chunks)
 
-            if args.targeted:
+            # Hoisted so targeted mode can see a golden-set defect BEFORE
+            # deciding whether to build a targeted row. A case with a broken
+            # golden case (paper vanished from the corpus, or its substring no
+            # longer matches any chunk) must never reach the targeted report:
+            # it would print an ERRORS line from the check below AND a
+            # targeted row with paper_chunks=0, survived=False, dragging down
+            # survival@cut for a golden-set problem rather than a real
+            # retrieval failure. None for negatives — off_topic cases have no
+            # notion of "winnable".
+            status = None if case.is_negative else _positive_case_status(case, chunks)
+
+            if args.targeted and status is None:
                 targeted_status = _targeted_case_status(case, chunks)
                 if targeted_status is not None:
                     errors.append(f"{case.id}: {targeted_status}")
                 else:
                     targeted_rows.append(_targeted_row(case, chunks))
+            # else: status is not None, so this case's single ERRORS line is
+            # appended below (positives branch) — it must not ALSO get a
+            # targeted-mode error from _targeted_case_status, which checks a
+            # different, unrelated condition (title ambiguity) and could
+            # independently flag the same case, printing two ERRORS lines for
+            # one case id.
 
             if case.is_negative:
                 negatives.append(chunks)
@@ -439,7 +456,6 @@ async def main() -> None:  # noqa: PLR0912, PLR0915 — a report script, not a l
                 per_case.append({"id": case.id, "kind": case.kind, "best_distance": best})
                 continue
 
-            status = _positive_case_status(case, chunks)
             if status is not None:
                 errors.append(f"{case.id}: {status}")
                 continue

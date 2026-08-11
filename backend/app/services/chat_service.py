@@ -460,7 +460,8 @@ class ChatService:
 
                     if scope is not paper_infos and not paper_chunks:
                         # A targeted paper whose every chunk sits at or beyond
-                        # similarity_threshold retrieves nothing, and
+                        # intra_paper_ceiling (the single-paper SQL cutoff --
+                        # see _retrieve_paper_chunks) retrieves nothing, and
                         # chat_agent then answers ungrounded -- a worse
                         # failure than the misattribution this feature fixes.
                         # Re-querying the untargeted scope keeps the answer
@@ -665,9 +666,15 @@ class ChatService:
             empty-result fallback never fires;
           - a relative cut keeps only chunks within `intra_paper_delta` of
             this paper's own nearest chunk, because the looser ceiling alone
-            keeps 63/64 and 76/84 chunks of a paper at ~439 tokens each.
+            keeps far more of a targeted paper than a question needs -- at
+            delta 0.20, four cases (marl-security-attacks, deadly-triad,
+            lazy-agents-reward, hnpfl-fair-comparison) keep the entire
+            60-chunk max_context_chunks budget, budget-bound before the delta
+            even bites (evals/retrieval/README.md, "Measured — 2026-08-12").
         A relative cut alone would be no guard at all: an off-topic question's
-        distances are compressed, so delta 0.25 keeps the ENTIRE paper.
+        distances are compressed, so delta 0.20 keeps most or all of the
+        wrong paper (measured: 9-52 chunks across the near-domain off_topic
+        cases -- see the "Open finding" in evals/retrieval/README.md).
         """
         if not paper_infos:
             return []
