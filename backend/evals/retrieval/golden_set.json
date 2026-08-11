@@ -16,27 +16,6 @@
       "expect_substrings": ["probabilistic occupancy updates"]
     },
     {
-      "id": "nineveh-case-study",
-      "kind": "content",
-      "question": "What archaeological region was surveyed with drones?",
-      "paper_title_contains": "Nineveh",
-      "expect_substrings": ["Nineveh archaeological region"]
-    },
-    {
-      "id": "segmentation-datasets",
-      "kind": "content",
-      "question": "Which UAV datasets are used for segmentation?",
-      "paper_title_contains": "Diverse Applications",
-      "expect_substrings": ["semantic segmentation in urban scenes"]
-    },
-    {
-      "id": "rotary-wing-types",
-      "kind": "content",
-      "question": "What types of rotary wing drones are described?",
-      "paper_title_contains": "Nineveh",
-      "expect_substrings": ["quadcopter"]
-    },
-    {
       "id": "authors-of-search-paper",
       "kind": "metadata",
       "question": "Who wrote the paper on cooperative multi-target search?",
@@ -49,13 +28,6 @@
       "question": "What role does the ground control station play?",
       "paper_title_contains": "Cooperative Multi-Target",
       "expect_substrings": ["Ground Control Station"]
-    },
-    {
-      "id": "figure-reference",
-      "kind": "figure",
-      "question": "What does the figure showing UAV classification depict?",
-      "paper_title_contains": "Nineveh",
-      "expect_substrings": ["Types of drones according to their shapes and type of wings"]
     },
     {
       "id": "offtopic-cake",
@@ -71,6 +43,35 @@
       "id": "offtopic-gibberish",
       "kind": "off_topic",
       "question": "zxqw plorb fnargle wibbet"
-    }
+    },
+    {"id": "handover-figure", "kind": "figure",
+     "question": "What does the figure comparing handover types show?",
+     "paper_title_contains": "Survey of Important Issues",
+     "expect_substrings": ["Hard Handover", "Soft Handover"]},
+
+    {"id": "radioml-datasets", "kind": "content",
+     "question": "Which datasets are used to evaluate the online machine learning method?",
+     "paper_title_contains": "UAV-Assisted Online Machine Learning",
+     "expect_substrings": ["RADIOML", "FMNIST"]},
+
+    {"id": "dcgan-video-production", "kind": "content",
+     "question": "How are deep convolutional GANs applied in UAV imaging?",
+     "paper_title_contains": "Reliable and Efficient Data Collection",
+     "expect_substrings": ["image and video production"]},
+
+    {"id": "marl-security-attacks", "kind": "content",
+     "question": "Which security attacks does the multi-agent RL survey review?",
+     "paper_title_contains": "Applications of Multi-Agent Reinforcement Learning",
+     "expect_substrings": ["eavesdropping attacks", "DDoS"]},
+
+    {"id": "deep-q-routing", "kind": "content",
+     "question": "What routing method uses extra information to lower delivery delay?",
+     "paper_title_contains": "Applications of Multi-Agent Reinforcement Learning",
+     "expect_substrings": ["deep Q- routing"]},
+
+    {"id": "hybrid-split-federated", "kind": "content",
+     "question": "What distributed learning structure combines split and federated learning?",
+     "paper_title_contains": "Distributed Machine Learning for UAV Swarms",
+     "expect_substrings": ["hybrid split and federated learning"]}
   ]
 }
