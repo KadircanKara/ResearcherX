@@ -262,11 +262,51 @@ def _production_cut(
     return ranked[: keep_within_paper([c.distance for c in ranked], delta=delta)]
 
 
+def _targeted_case_status(case: Case, chunks: list[Scored]) -> str | None:
+    """None if `case` scopes to exactly one paper for targeted mode;
+    otherwise a reason to route it to `errors` instead of `targeted_rows`.
+
+    Production's single-paper policy assumes there really is only one paper
+    in scope (`single_paper = len(paper_infos) == 1` in
+    `chat_service._retrieve_paper_chunks`) — the delta cut is relative to
+    THAT one paper's own nearest chunk. `_scope_to_paper` only checks that a
+    case's `paper_title_contains` needle appears in a title; it never checks
+    that the needle is unique. A second paper whose title also contains the
+    needle would silently contribute its chunks to `scoped`, competing for
+    the budget and inflating `paper_chunks`/`intra_rank`/`kept` into numbers
+    that describe a scope production could never assemble — exactly the
+    drift this mode exists to catch, just aimed at itself. Golden-set fix is
+    the same one README.md's "Adding a case" already asks for: pick a MORE
+    distinctive substring.
+
+    Only applies to non-negative cases: off_topic cases scope via
+    `_scope_to_nearest_paper`, which selects by `paper_id` off a single
+    nearest chunk and so always returns exactly one paper by construction.
+    """
+    if case.is_negative:
+        return None
+    scoped = _scope_to_paper(chunks, case.paper_title_contains or "")
+    papers = {c.paper_id for c in scoped}
+    if len(papers) > 1:
+        return (
+            f"paper_title_contains {case.paper_title_contains!r} matches "
+            f"{len(papers)} distinct papers — not distinctive enough for targeted "
+            "mode's single-paper scope; production's single_paper policy assumes "
+            "exactly one"
+        )
+    return None
+
+
 def _targeted_row(case: Case, chunks: list[Scored]) -> dict:
     """One row of the targeted report for a case whose corpus chunks are
     already fetched. Off_topic cases get no rank and no survival verdict —
     they have no satisfying chunk by definition; their kept-count is the
-    ceiling measurement."""
+    ceiling measurement.
+
+    Caller must check `_targeted_case_status` first: this function does not
+    re-check scope ambiguity, it trusts the caller already routed ambiguous
+    cases to `errors`.
+    """
     scoped = (
         _scope_to_nearest_paper(chunks)
         if case.is_negative
@@ -386,7 +426,11 @@ async def main() -> None:  # noqa: PLR0912, PLR0915 — a report script, not a l
                 corpus_note = _corpus_note(chunks)
 
             if args.targeted:
-                targeted_rows.append(_targeted_row(case, chunks))
+                targeted_status = _targeted_case_status(case, chunks)
+                if targeted_status is not None:
+                    errors.append(f"{case.id}: {targeted_status}")
+                else:
+                    targeted_rows.append(_targeted_row(case, chunks))
 
             if case.is_negative:
                 negatives.append(chunks)

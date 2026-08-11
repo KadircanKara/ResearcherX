@@ -314,3 +314,62 @@ def test_production_cut_on_off_topic_distances_keeps_almost_nothing():
 
     chunks = [_s("P", f"c{i}", 0.86 + i * 0.005, paper_id="p1") for i in range(20)]
     assert _production_cut(chunks, ceiling=0.85, delta=0.25, budget=60) == []
+
+
+# --- _targeted_case_status -------------------------------------------------------
+
+_TARGETED_CASE = Case(
+    id="joint-optimization-case",
+    kind="content",
+    question="q",
+    paper_title_contains="Joint Optimization",
+    expect_substrings=("target",),
+)
+
+_TARGETED_OFF_TOPIC_CASE = Case(
+    id="off-topic-case",
+    kind="off_topic",
+    question="q",
+    paper_title_contains=None,
+    expect_substrings=(),
+)
+
+
+def test_targeted_case_status_none_when_title_matches_exactly_one_paper():
+    from evals.retrieval.run_eval import _targeted_case_status
+
+    chunks = [
+        _s("Joint Optimization of X and Y", "a", 0.30, paper_id="p1"),
+        _s("Joint Optimization of X and Y", "b", 0.55, paper_id="p1"),
+    ]
+    assert _targeted_case_status(_TARGETED_CASE, chunks) is None
+
+
+def test_targeted_case_status_flags_ambiguous_title_match():
+    """The finding this test pins: a second paper whose title also contains
+    the needle would silently blend its chunks into the single-paper scope,
+    inflating paper_chunks/intra_rank/kept into numbers production's
+    single_paper policy (chat_service._retrieve_paper_chunks) could never
+    produce -- it assumes exactly one paper in scope."""
+    from evals.retrieval.run_eval import _targeted_case_status
+
+    chunks = [
+        _s("Joint Optimization of X and Y", "a", 0.30, paper_id="p1"),
+        _s("Joint Optimization for Z", "b", 0.40, paper_id="p2"),
+    ]
+    status = _targeted_case_status(_TARGETED_CASE, chunks)
+    assert status is not None
+    assert "2 distinct papers" in status
+
+
+def test_targeted_case_status_none_for_off_topic_regardless_of_ambiguity():
+    """off_topic cases scope via _scope_to_nearest_paper, which always
+    returns exactly one paper by construction -- ambiguity can't apply, and
+    off_topic cases carry no paper_title_contains to even check."""
+    from evals.retrieval.run_eval import _targeted_case_status
+
+    chunks = [
+        _s("Paper One", "a", 0.30, paper_id="p1"),
+        _s("Paper Two", "b", 0.40, paper_id="p2"),
+    ]
+    assert _targeted_case_status(_TARGETED_OFF_TOPIC_CASE, chunks) is None

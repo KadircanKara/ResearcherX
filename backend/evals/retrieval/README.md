@@ -87,6 +87,20 @@ the targeter would:
   paper to scope an off_topic case to, so the worst case (nearest wrong
   paper) is what's measured.
 
+**A `paper_title_contains` needle must be unique.** Production's
+single-paper policy (`single_paper = len(paper_infos) == 1` in
+`chat_service._retrieve_paper_chunks`) assumes there really is only one
+paper in scope — the delta cut is relative to that one paper's own nearest
+chunk. If a case's `paper_title_contains` substring matches two or more
+papers, `_scope_to_paper` would otherwise blend a second paper's chunks
+into the scope, describing a measurement production can never actually
+produce. `_targeted_case_status` catches this before it can happen silently:
+an ambiguous case is routed to the existing `errors` list (same channel as
+"no paper matching ..." in the global report) instead of into
+`targeted_rows`, and prints under the `ERRORS (golden-set problems...)`
+block naming how many distinct papers it hit. Fix is the same one "Adding a
+case" below already asks for: pick a more distinctive substring.
+
 `_production_cut` then applies the cut to that scoped, distance-sorted list
 in production's exact order — SQL filters on the ceiling, LIMITs to
 `max_context_chunks`, *then* the delta cut runs in Python — because that
