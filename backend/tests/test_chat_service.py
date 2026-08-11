@@ -776,3 +776,55 @@ async def test_respond_reports_the_scoped_paper_count_in_the_retrieving_event(
 
     retrieving = next(e for e in events if e["event"] == "retrieving")
     assert json.loads(retrieving["data"])["paper_count"] == 1
+
+
+async def test_respond_persists_citations_renumbered_from_one(
+    db_session: AsyncSession, project: Project, conversation_with_message
+):
+    """The persisted answer and its citation payload must agree on the new
+    numbering. The client refetches the conversation on `done` and renders
+    what was saved, so a mismatch here is what the reader sees.
+    """
+    from app.agents.chat_agent import ChunkContext
+    from app.db.models import Paper
+    from app.services.chat_service import ChatService
+
+    conv = conversation_with_message
+    db_session.add(Paper(project_id=project.id, title="Paper A", source="manual"))
+    await db_session.commit()
+
+    # Retrieval handed the model a catalog of three chunks; it cited the third
+    # and then the first, in that order.
+    chunks = [
+        ChunkContext(n=1, paper_id="pA", title="Paper A", chunk_index=0, text="first"),
+        ChunkContext(n=2, paper_id="pA", title="Paper A", chunk_index=1, text="second"),
+        ChunkContext(n=3, paper_id="pA", title="Paper A", chunk_index=2, text="third"),
+    ]
+
+    async def fake_stream(*args, **kwargs):
+        yield "Coverage [3] and then connectivity [1]."
+
+    svc = ChatService()
+    save = AsyncMock()
+
+    with (
+        patch.object(svc._embedding_svc, "embed", AsyncMock(return_value=[0.0] * 768)),
+        patch.object(svc, "_retrieve_history", AsyncMock(return_value=[])),
+        patch.object(svc, "_shortlist_papers", AsyncMock(return_value=([], 0))),
+        patch.object(svc, "_retrieve_paper_chunks", AsyncMock(return_value=chunks)),
+        patch.object(svc._chat_agent, "stream", return_value=fake_stream()),
+        patch.object(svc._conv_svc, "save_message", save),
+    ):
+        events = []
+        async for event in svc.respond(conv.id, "Test question"):
+            events.append(event)
+
+    _, _, _, content, citations = save.await_args.args
+    assert content == "Coverage [1] and then connectivity [2]."
+    # Renumbered, ordered by the new number, and each still resolving to the
+    # chunk the model actually cited: [1] is catalog entry 3, [2] is entry 1.
+    assert [c["n"] for c in citations] == [1, 2]
+    assert [c["chunk_index"] for c in citations] == [2, 0]
+
+    done = [e for e in events if e["event"] == "done"][-1]
+    assert json.loads(done["data"])["citations"] == citations
