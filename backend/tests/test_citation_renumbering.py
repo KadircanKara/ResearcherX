@@ -114,3 +114,43 @@ def test_malformed_input_is_byte_identical_outside_renumbered_markers():
     got, mapping = renumber_citations(text, max_n=40)
     assert got == text.replace("mark [8]", "mark [1]", 1)
     assert mapping == {8: 1}
+
+
+def test_a_marker_inside_a_tilde_fenced_block_is_left_alone():
+    """Final review: ~~~ is as valid a markdown fence as ```, and remark —
+    the frontend's renderer — treats both as <pre><code>. Reported repro:
+    "~~~python\\narr[8]\\n~~~" used to renumber to arr[1]."""
+    text = "See [14].\n\n~~~python\nx = arr[8]\n~~~\n\nAlso [27]."
+    got, mapping = renumber_citations(text, max_n=40)
+    assert got == "See [1].\n\n~~~python\nx = arr[8]\n~~~\n\nAlso [2]."
+    assert mapping == {14: 1, 27: 2}
+
+
+def test_an_unterminated_tilde_fence_runs_to_end_of_text():
+    """Mirrors test_an_unterminated_fence_runs_to_end_of_text for the ~~~
+    form: a fence with no matching closing delimiter still consumes to end
+    of text, via the same backreference-driven rule, not a second special
+    case."""
+    text = "Intro [8].\n\n~~~python\nx = arr[8]\n# cut off, no closing fence"
+    got, mapping = renumber_citations(text, max_n=40)
+    assert got == "Intro [1].\n\n~~~python\nx = arr[8]\n# cut off, no closing fence"
+    assert mapping == {8: 1}
+
+
+def test_an_indented_code_block_is_a_documented_gap_not_detected_as_code():
+    """Deliberate, documented current behaviour — see the comment above
+    _FENCE_RE. A four-space indented block is markdown code too, but
+    whether an indented run is a code block or a nested bullet's
+    continuation content depends on list-nesting state this function does
+    not track, and this chat's system prompt asks for "-" bullets and
+    fenced code, not indented blocks. So the indented marker below IS
+    currently renumbered rather than left alone: a false negative here was
+    judged far less likely and less bad than the false positive of treating
+    routine nested-bullet content as code, which would silently skip a
+    number out of the visible sequence. If this behaviour ever changes,
+    update this test intentionally rather than treating a diff here as a
+    regression."""
+    text = "Try:\n\n    x = arr[8]\n\nAlso [14]."
+    got, mapping = renumber_citations(text, max_n=40)
+    assert got == "Try:\n\n    x = arr[1]\n\nAlso [2]."
+    assert mapping == {8: 1, 14: 2}

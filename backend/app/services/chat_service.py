@@ -34,18 +34,35 @@ _TARGETER_CANDIDATES = 10
 
 _CITATION_RE = re.compile(r"\[(\d+)\]")
 
-# A fence with no closing ``` runs to the end of the text rather than
+# A fence opens with ``` or ~~~ — both are valid markdown fences, and remark
+# (the frontend's markdown renderer) treats either as <pre><code>. The
+# backreference (\1) means a fence can only be closed by the SAME delimiter
+# it opened with — a ``` fence is never closed by ~~~ or vice versa. A fence
+# with no matching closing delimiter runs to the end of the text rather than
 # falling through to be reinterpreted as (part of) an inline span. Fences are
 # located in a pass of their own, before inline spans are considered at all,
 # so a stray or unpaired backtick elsewhere in the answer can never pair
 # across a fence delimiter. See renumber_citations' docstring for why a
 # single combined pattern got this wrong.
-_FENCE_RE = re.compile(r"```.*?(?:```|\Z)", re.DOTALL)
+_FENCE_RE = re.compile(r"(```|~~~).*?(?:\1|\Z)", re.DOTALL)
 
 # Inline spans are matched only within the prose _FENCE_RE leaves behind, so
 # a backtick bordering a fence can no longer be mistaken for the other half
 # of an inline span.
 _INLINE_CODE_RE = re.compile(r"`[^`\n]*`")
+
+# Known gap, left deliberately: a four-space indented run is markdown code
+# too (remark renders it as <pre><code>, same as a fence), but this guard
+# does not detect it. Whether an indented run is code or list-item
+# continuation content depends on the enclosing list's nesting column, which
+# needs list-context state this function does not track — and this chat's
+# system prompt asks for "-" bullets and fenced code, not indented blocks, so
+# nested-bullet content is the routine case and a genuine indented code block
+# is not. Treating indentation as code by itself would risk the opposite,
+# worse failure: a nested bullet's citation silently skipped from the numbered
+# sequence ([1], [3], no [2]) rather than merely mis-renumbered. See
+# test_an_indented_code_block_is_a_documented_gap_not_detected_as_code for the
+# accepted current behaviour.
 
 
 def renumber_citations(text: str, max_n: int) -> tuple[str, dict[int, int]]:
@@ -75,6 +92,15 @@ def renumber_citations(text: str, max_n: int) -> tuple[str, dict[int, int]]:
     mid-snippet — an observed occurrence, not a hypothetical: a chat reply
     hit `finish_reason=length` mid-sentence on 2026-08-10 — still treats
     everything after the opening fence as code.
+
+    Markdown has more than one code form, and this guard has to agree with
+    whichever ones the client also treats as code — a form the backend
+    renumbers inside but the frontend renders as <pre><code> corrupts
+    exactly the bytes the two sides agree are code. `_FENCE_RE` accordingly
+    accepts ~~~ fences as well as ``` ones. Four-space indented blocks are
+    the one markdown code form this guard still does not detect — see the
+    comment above `_FENCE_RE` for why that gap is deliberate, not an
+    oversight.
 
     Returns the rewritten text and the old→new map, ordered by new number.
     """
