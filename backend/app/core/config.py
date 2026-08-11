@@ -80,14 +80,16 @@ class Settings(BaseSettings):
     # cases, scoped to the paper holding the globally nearest chunk (the
     # targeter-misfire simulation): 0.85 admits 0, 1 and 1 chunks; 0.90 admits
     # 1, 2 and 9. A relative rule cannot do this job — an off-topic question's
-    # distances are compressed (best 0.7518-0.8581), so delta 0.25 alone keeps
-    # 24/24, 44/44 and 64/64 chunks of the paper.
+    # distances are compressed (best 0.7518-0.8581), so the delta alone (0.25,
+    # the then-current value; it is 0.20 below now) keeps 24/24, 44/44 and
+    # 64/64 chunks of the paper.
     #
     # THOSE THREE CASES WERE TOO EASY, and 0.85 is looser than they made it
     # look. The 2026-08-12 widening added nine NEAR-domain negatives (drone
     # regulation, insurance, hobbyist gear — plausible questions this library
     # cannot answer); they land at 0.5474-0.6521, well inside the ceiling, and
-    # a mis-targeted one keeps 9-52 chunks of the wrong paper. `run_eval
+    # a mis-targeted one keeps 9-52 chunks of the wrong paper (the `kept`
+    # column of those nine rows in the delta-0.20 per-case table). `run_eval
     # --targeted` prints RAISE THE CEILING'S SCRUTINY at every delta because
     # of it. Re-tuning the ceiling is its own measurement, not a delta problem
     # — see "Measured" in evals/retrieval/README.md.
@@ -101,7 +103,7 @@ class Settings(BaseSettings):
     # 0.20 is a swept measurement, not a single witness. `run_eval --targeted`
     # on 2026-08-12 over a golden set at the harness's own confidence gate
     # (30 positives — 20 of them inside papers larger than the 60-chunk budget
-    # — and 12 near-domain negatives), 100 papers / 4527 chunks,
+    # — and 12 negatives, nine of them near-domain), 100 papers / 4527 chunks,
     # text-embedding-3-small, ceiling 0.85, budget 60:
     #
     #   delta  survival@cut  mean kept chunks  mean kept tokens

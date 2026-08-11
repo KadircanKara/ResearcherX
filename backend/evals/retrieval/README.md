@@ -169,6 +169,18 @@ exact floor, so 0.20 carries **0.035** of margin — thinner than the 0.05 a
 fresh tuning would aim for. Every other positive needs ≤0.1212, and 16 of the
 30 answer at intra-rank 1 (required delta 0.0).
 
+**That margin is, if anything, optimistic.** Several of the added questions
+are near-verbatim paraphrases of the substring they expect —
+`iot-lowpower-protocols`, `episode-duration-obstacle-figure`,
+`harvested-power-duration-figure`, `frontier-mesh-clustering` and
+`jamming-policy-algorithm` — which biases their `intra_rank` low, because the
+question and the answering chunk share surface wording a real user's phrasing
+would not. `iot-lowpower-protocols` is one of them *and* is the binding
+witness at 0.1651, so a more naturally-worded version of that question would
+plausibly need a larger delta, not a smaller one. Treat 0.035 as an upper
+bound on the true margin, and prefer questions phrased away from their
+substring when adding cases.
+
 **Delta is not the active constraint for every case.** At 0.20,
 `marl-security-attacks`, `deadly-triad`, `lazy-agents-reward` and
 `hnpfl-fair-comparison` keep exactly 60 chunks — the `max_context_chunks`
@@ -180,9 +192,13 @@ budget does.
 tuned against three trivially off-topic questions sitting at 0.75–0.86; the
 near-domain negatives added here sit at **0.547–0.652**, comfortably inside
 it, so at the chosen delta a mis-targeted near-domain question keeps 9–52
-chunks of the wrong paper instead of the ≤2 the check wants. Delta bounds the
-damage (worst 28 chunks at 0.15, 52 at 0.20, 60 at 0.25) but cannot fix it —
-the ceiling is a separate constant and a separate piece of work.
+chunks of the wrong paper instead of the ≤2 the check wants. That range is the
+`kept` column of the nine near-domain `off_topic` rows in the delta-0.20
+per-case table — 9 (`offtopic-airworthiness`) to 52
+(`offtopic-spray-nozzle`); the `ceiling check` summary line prints only the
+worst of them. Delta bounds the damage (worst 28 chunks at 0.15, 52 at 0.20,
+60 at 0.25) but cannot fix it — the ceiling is a separate constant and a
+separate piece of work.
 
 **Positives and near-domain negatives overlap on this corpus.** The worst
 positive's top-60 distance is 0.5871 (`hnpfl-fair-comparison`), and six
@@ -192,8 +208,24 @@ was attempted and measured: thirteen alternative phrasings all landed in
 single-topic UAV library can be pushed above the hardest positive. The
 nearest chunk of each was read and none answers its question, so these are
 real negatives; the overlap is a property of the corpus, not a defect in the
-cases. It is also why the closed-form section of the same run reports
-`NO SEPARATION POSSIBLE AT THIS k` rather than an interval.
+cases. **Keeping them is a ratified deviation from the plan's Step 2 rule**
+("drop or rewrite a negative whose best distance sits below the worst
+positive"), signed off by the plan author on the grounds that the rule assumed
+a separable corpus and 100 papers on one topic is not one — it is not an
+oversight, and it should not be "fixed" back.
+
+**What the closed-form section reports, and why.** That run prints
+`NO SEPARATION POSSIBLE AT THIS k`, and the overlap above is *not* the cause.
+`run_eval.py` prints that message only when `diagnosis.blocked_case_ids` is
+non-empty, and `metrics.diagnose_separation` returns early on blocked cases
+before `lo`/`hi` are ever computed — the negatives never enter that decision.
+The cause is the four positives with no satisfying chunk inside a global
+top-60 (listed below). Separately, and independently of those four, the
+overlap *would* leave no interval either: `lo = 0.5871` (worst positive) is
+already `>= hi = 0.5474` (closest negative), which is the condition for the
+**different** message, `NO THRESHOLD SEPARATES CONTENT FROM NOISE`. Two
+distinct findings — do not read the printed blocked-case message as a signal
+about negatives quality.
 
 Global report from the same run, for the record: `recall@60 = 0.87`,
 `MRR = 0.527`, noise floor `0.5474`. Four positives
@@ -201,6 +233,23 @@ Global report from the same run, for the record: `recall@60 = 0.87`,
 `demand-algorithm-baselines`, `epec-stackelberg`) have no satisfying chunk
 inside a *global* top-60 at all, yet all four survive the single-paper cut —
 which is precisely the gap `--targeted` exists to measure.
+
+**How to re-run the sweep.** `intra_paper_delta` is a pydantic setting, so
+each sweep point is an env override on the exec — no code edit, no restart,
+and nothing to remember to put back:
+
+    for d in 0.15 0.20 0.25 0.30 0.35; do
+      echo "delta=$d"
+      docker compose exec -T -e INTRA_PAPER_DELTA=$d backend \
+        python -m evals.retrieval.run_eval \
+        --project-id <uuid> --targeted | tail -4
+    done
+
+Check the printed `targeted mode (ceiling=... delta=... budget=...)` header
+changes across points. If it does not, the override is not reaching the
+process and every row is the same delta measured five times. One run costs one
+embedding API call per case, so a five-point sweep over ~40 cases is ~200
+calls — cheap, but not free; do not re-run it to confirm a documentation edit.
 
 ## Adding a case
 
