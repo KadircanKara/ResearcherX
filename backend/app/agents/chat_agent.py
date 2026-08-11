@@ -131,9 +131,11 @@ class ChatAgentInput(BaseModel):
     query: str
     prior_messages: list[dict]  # [{"role": "user"|"assistant", "content": "..."}]
     paper_chunks: list[ChunkContext]
-    # Defaulted so existing callers keep working. Injected on every turn:
-    # deciding *when* metadata is relevant is a routing problem this does not
-    # solve, and at 2-10 papers the unconditional cost is negligible.
+    # Defaulted so existing callers keep working. Titles always ship; whether
+    # authors/year/venue are populated too is now decided per turn by the
+    # caller (needs_paper_metadata in chat_service.py) before this input is
+    # even built -- this model has no opinion on that decision, only on how
+    # to render whatever PaperMetaContext list it is handed.
     papers: list[PaperMetaContext] = Field(default_factory=list)
 
 

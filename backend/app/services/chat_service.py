@@ -48,6 +48,14 @@ _CITATION_RE = re.compile(r"\[(\d+)\]")
 # Truncating costs more over-firing ("cit" also matches "city"/"citizen",
 # "dat" also matches "data"/"database" — the latter common in these papers
 # anyway) which is the harmless direction under this module's own rule.
+#
+# "newest"/"latest"/"oldest"/"recent"/"earliest" ask for a paper by its
+# relative year without naming a year, or any word above ("which paper is
+# the newest?") -- the same false-negative risk, so the same word-start-only
+# anchoring applies and "recent" also catches "recently".
+#
+# "citation" was removed: "cit" above already matches it as a prefix, so
+# keeping both listed the same signal twice, not two signals.
 _METADATA_KEYWORDS = (
     "author",
     "wrote",
@@ -63,7 +71,11 @@ _METADATA_KEYWORDS = (
     "conference",
     "proceeding",
     "cit",
-    "citation",
+    "newest",
+    "latest",
+    "oldest",
+    "recent",
+    "earliest",
 )
 # Anchored at word START only, with no trailing boundary. A trailing \b would
 # stop "author" matching "authors", "cite" matching "citations" and "publish"
@@ -72,8 +84,56 @@ _METADATA_KEYWORDS = (
 # the same way ("whole" fires "who"), which is harmless.
 _METADATA_RE = re.compile(r"\b(?:" + "|".join(_METADATA_KEYWORDS) + ")", re.IGNORECASE)
 
+# A bare year ("Summarize the 2023 paper") names a paper by a field with no
+# English synonym -- there is no word that means "year" the way "who" means
+# "author", so no keyword could ever catch this. Anchored at BOTH ends,
+# unlike every pattern above: a 4-digit run embedded in a longer number (an
+# arXiv id, a page range, a version string) is not a year and carries no
+# metadata intent, so the deliberate over-firing the rest of this module
+# trades on does not apply to bare digits -- this pattern is precise on
+# purpose, not broad on purpose.
+_YEAR_RE = re.compile(r"\b(19|20)\d{2}\b")
 
-def needs_paper_metadata(question: str, prior_messages: list[dict]) -> bool:
+# Tokenises a question into words for the corpus check below. \w+, not
+# str.split(): "Kara's" must yield "kara" on its own -- the apostrophe is not
+# a word character -- or this routing's own motivating example, "What does
+# Kara's paper say about coverage?", would silently fail to match "kara".
+_WORD_RE = re.compile(r"\w+")
+
+
+def _corpus_tokens(papers: list[Paper]) -> set[str]:
+    """Author surnames and venue words drawn from THIS project's own papers.
+
+    No fixed English keyword list can catch "What does Kara's paper say
+    about coverage?" or "Compare the Smith and Lee papers" -- the trigger is
+    corpus data, not vocabulary: a surname, a venue acronym. Only the
+    corpus itself can supply that, which is why this needs the papers at
+    all rather than being a second regex.
+
+    Surnames are the LAST whitespace-separated token of each author's
+    display name, lowercased and kept only at length >= 3, so a bare
+    initial ("J.") or a particle ("de", "van") cannot fire alone. Venue
+    words are split and filtered the same way, so an acronym like "ICRA"
+    counts but "of"/"on" do not.
+    """
+    tokens: set[str] = set()
+    for paper in papers:
+        for author in paper.authors or []:
+            words = author.split()
+            if words and len(words[-1]) >= 3:
+                tokens.add(words[-1].lower())
+        if paper.venue:
+            for word in paper.venue.split():
+                if len(word) >= 3:
+                    tokens.add(word.lower())
+    return tokens
+
+
+def _matches_keyword_or_year(text: str) -> bool:
+    return bool(_METADATA_RE.search(text) or _YEAR_RE.search(text))
+
+
+def needs_paper_metadata(question: str, prior_messages: list[dict], papers: list[Paper]) -> bool:
     """Whether this turn should carry paper authors, year and venue.
 
     Those three fields are 57% of the PAPERS block's tokens (3,158 of 5,529 at
@@ -81,13 +141,26 @@ def needs_paper_metadata(question: str, prior_messages: list[dict]) -> bool:
     their only permitted source, and the chat prompt forbids reading them out
     of excerpts.
 
-    A pronoun-only follow-up such as "and that one?" carries no keyword at all,
-    so the previous USER message is consulted. One turn only: two turns later
-    the intent has lapsed, and widening the window trades a growing number of
-    false positives for a shrinking set of real cases.
+    Three independent ways a question can ask for them: an English keyword
+    ("who wrote"), a bare year ("the 2023 paper"), or a reference to the
+    corpus's own data -- a surname ("Kara's paper") or a venue acronym ("the
+    ICRA paper") -- that no fixed keyword list could ever anticipate. The
+    corpus check does real string work, so it only runs when the cheap
+    pattern check above did not already answer; a plain content question
+    never pays for building it.
+
+    A pronoun-only follow-up such as "and that one?" carries none of the
+    above, so the previous USER message is consulted -- against the pattern
+    check only, one turn only: two turns later the intent has lapsed, and
+    widening the window trades a growing number of false positives for a
+    shrinking set of real cases.
     """
-    if _METADATA_RE.search(question):
+    if _matches_keyword_or_year(question):
         return True
+    if papers:
+        question_words = {w.lower() for w in _WORD_RE.findall(question)}
+        if question_words & _corpus_tokens(papers):
+            return True
     for message in reversed(prior_messages):
         # .get, not [] — a malformed entry (missing a key) must not raise and
         # fail the whole chat turn over a token optimisation. Not reachable
@@ -98,7 +171,7 @@ def needs_paper_metadata(question: str, prior_messages: list[dict]) -> bool:
             # Only the most recent user turn — assistant text does not carry
             # intent, and an answer that happens to mention authors must not
             # keep the full block alive.
-            return bool(_METADATA_RE.search(message.get("content") or ""))
+            return _matches_keyword_or_year(message.get("content") or "")
     return False
 
 
@@ -273,7 +346,7 @@ class ChatService:
                 # and are only ever needed to answer a question about them.
                 # Titles always ship: they are what lets the model say what is
                 # in the library, and what disambiguation lists.
-                wants_metadata = needs_paper_metadata(user_content, prior_messages)
+                wants_metadata = needs_paper_metadata(user_content, prior_messages, paper_rows)
                 # Built inside the session: the attributes are loaded, but
                 # building it here keeps it independent of session lifetime.
                 paper_metas = [
