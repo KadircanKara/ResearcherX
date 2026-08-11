@@ -2,7 +2,10 @@
 
 import { useEffect, useRef, useState } from "react";
 import { PreviewCard } from "@base-ui/react/preview-card";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { getPaperChunk } from "@/lib/projects";
+import { highlightTerms } from "@/lib/highlight-terms";
 import type { ChatCitation } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -34,6 +37,41 @@ const STOPWORDS = new Set([
   "they", "their", "about", "paper", "papers",
 ]);
 
+// Markdown styling for a 24rem card at text-xs. Deliberately not the answer
+// bubble's PROSE constant, which is tuned for a much wider container.
+//
+// The extractor emits each chunk as one continuous line with no newlines,
+// and markdown block constructs need a line start to parse — so today the
+// whole passage renders as a single <p>, never as real headings, lists,
+// tables or code blocks. Only inline constructs render: emphasis, strong,
+// inline code. prose-p:* and prose-code:* are the classes actually live
+// today, styling that one paragraph and its inline code spans.
+//
+// prose-headings:*, prose-ul:*/prose-ol:*/prose-li:*,
+// prose-table:*/prose-th:*/prose-td:*, prose-pre:*, and the
+// [&_table]:block [&_table]:overflow-x-auto pair on the wrapper below are
+// defensive-only: nothing in this corpus produces the elements they target,
+// so they do nothing today and become live only if the extractor starts
+// emitting newlines. Kept rather than deleted — Tailwind only emits CSS for
+// classes it finds referenced in source, so they cost nothing at runtime,
+// and deleting them would remove a guard whose absence would be invisible
+// until that day, when block markdown would render unstyled with nothing —
+// no test, no build failure — to flag it.
+const CARD_PROSE =
+  "prose prose-sm dark:prose-invert max-w-none text-xs " +
+  "prose-p:my-1 prose-p:text-xs prose-li:my-0 prose-li:text-xs " +
+  "prose-ul:my-1 prose-ol:my-1 " +
+  "prose-headings:text-xs prose-headings:font-semibold prose-headings:mt-2 prose-headings:mb-1 " +
+  "prose-code:text-[11px] prose-pre:text-[11px] prose-pre:my-1 " +
+  "prose-table:my-1 prose-table:text-[11px] prose-th:px-1 prose-th:py-0.5 " +
+  "prose-td:px-1 prose-td:py-0.5 " +
+  // prose-p:first, not first:prose-p: the latter requires the wrapper div
+  // ITSELF to be :first-child of its parent, and it never is — the title
+  // <p> above it always comes first. prose-p:first instead targets the
+  // first <p> inside the wrapper, which is the one that actually needs its
+  // top margin zeroed.
+  "prose-p:first:mt-0 last:prose-p:mb-0";
+
 /** Question tokens worth highlighting: 4+ chars, not stopwords, deduped. */
 export function queryTermsFrom(question: string): string[] {
   const seen = new Set<string>();
@@ -41,32 +79,6 @@ export function queryTermsFrom(question: string): string[] {
     if (raw.length >= 4 && !STOPWORDS.has(raw)) seen.add(raw);
   }
   return [...seen];
-}
-
-/** Split text on term matches and wrap hits in <mark>.
- *
- * Never dangerouslySetInnerHTML — this text is paper-derived. Same reasoning
- * as the rehype-raw prohibition on the report renderer.
- */
-function highlight(text: string, terms: string[]) {
-  if (terms.length === 0) return text;
-  // Longest first so "connectivity" wins over "connect".
-  const escaped = [...terms]
-    .sort((a, b) => b.length - a.length)
-    .map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
-  // \b word boundaries so "search" doesn't light up inside "researcher".
-  // \b matches at any word/non-word transition, so it still holds next to
-  // punctuation — "reward," and "(reward)" both keep "reward" highlighted.
-  const re = new RegExp(`\\b(${escaped.join("|")})\\b`, "gi");
-  return text.split(re).map((part, i) =>
-    terms.includes(part.toLowerCase()) ? (
-      <mark key={i} className="rounded bg-amber-300/30 px-0.5 text-inherit">
-        {part}
-      </mark>
-    ) : (
-      part
-    )
-  );
 }
 
 export function CitationHoverCard({
@@ -211,9 +223,35 @@ export function CitationHoverCard({
               <p className="mb-1.5 text-xs font-medium text-foreground">
                 {citation.title}
               </p>
-              <p className="text-xs leading-relaxed text-muted-foreground">
-                {highlight(text, queryTerms)}
-              </p>
+              {/* Tuple form, not highlightTerms({...}): unified treats a bare
+                  function as an ATTACHER and calls it with the options, using
+                  its return value as the transformer. Passing an
+                  already-invoked transformer makes unified call it again with
+                  no arguments, and it crashes on an undefined tree.
+
+                  No rehype-raw and no citationMarks here. This text is
+                  PDF-derived, so raw HTML stays escaped; and paper text is full
+                  of [16]-style bibliography references, which the citation
+                  plugin would turn into clickable citations of our own
+                  sources. */}
+              <div className={cn(CARD_PROSE, "text-muted-foreground [&_table]:block [&_table]:overflow-x-auto")}>
+                <ReactMarkdown
+                  remarkPlugins={[remarkGfm]}
+                  rehypePlugins={[[highlightTerms, { terms: queryTerms }]]}
+                  // remark-gfm autolinks bare URLs in paper text into <a>.
+                  // Without target="_blank" a click navigates the whole tab
+                  // away from the conversation — new for this card, which
+                  // previously rendered plain text. rel="noopener noreferrer"
+                  // is not optional: target="_blank" alone leaks
+                  // window.opener to the linked page, and this text is
+                  // PDF-derived.
+                  components={{
+                    a: (props) => <a {...props} target="_blank" rel="noopener noreferrer" />,
+                  }}
+                >
+                  {text}
+                </ReactMarkdown>
+              </div>
             </div>
             {hasGroup && (
               <div className="flex items-center justify-between border-t border-border px-3 py-1.5">
