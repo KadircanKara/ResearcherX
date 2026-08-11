@@ -127,10 +127,12 @@ async def test_retrieve_paper_chunks_uses_settings_similarity_threshold():
 
     svc = ChatService()
     mock_db = _mock_db_returning_no_rows()
-    paper = PaperInfo(paper_id="p1", title="Test Paper")
+    # TWO papers: with one paper in scope this query now binds
+    # intra_paper_ceiling instead — see the single-paper tests below.
+    papers = [PaperInfo(paper_id="p1", title="Test Paper"), PaperInfo(paper_id="p2", title="B")]
 
     with patch.object(settings, "similarity_threshold", 0.42):
-        await svc._retrieve_paper_chunks(mock_db, [paper], [0.0] * 768)
+        await svc._retrieve_paper_chunks(mock_db, papers, [0.0] * 768)
 
     _, params = mock_db.execute.call_args.args
     assert params["threshold"] == 0.42
@@ -906,3 +908,87 @@ async def test_respond_sends_titles_only_on_a_content_question(
     assert sent.papers[0].authors == []
     assert sent.papers[0].year is None
     assert sent.papers[0].venue is None
+
+
+async def test_single_paper_scope_binds_the_intra_paper_ceiling():
+    """One paper in scope means the user already named it, so the global
+    cutoff is the wrong instrument — the measured ground-control-station
+    answer chunk sat at 0.7293 against a 0.75 threshold, 0.02 from being
+    dropped, and the drop is silent because 13 other chunks still come back
+    so the empty-result fallback never fires."""
+    from app.services.chat_service import ChatService, PaperInfo
+
+    svc = ChatService()
+    mock_db = _mock_db_returning_no_rows()
+    paper = PaperInfo(paper_id="p1", title="Only Paper")
+
+    with (
+        patch.object(settings, "intra_paper_ceiling", 0.85),
+        patch.object(settings, "similarity_threshold", 0.75),
+    ):
+        await svc._retrieve_paper_chunks(mock_db, [paper], [0.0] * 768)
+
+    _, params = mock_db.execute.call_args.args
+    assert params["threshold"] == 0.85
+
+
+async def test_single_paper_scope_applies_the_delta_cut():
+    """Rows beyond best + delta are dropped even though SQL returned them —
+    SQL only enforces the looser ceiling."""
+    from app.services.chat_service import ChatService, PaperInfo
+
+    svc = ChatService()
+    rows = [
+        MagicMock(paper_id="p1", chunk_index=i, text=f"chunk {i}", distance=d)
+        for i, d in enumerate([0.50, 0.60, 0.74, 0.80])
+    ]
+    mock_result = MagicMock()
+    mock_result.fetchall.return_value = rows
+    mock_db = MagicMock()
+    mock_db.execute = AsyncMock(return_value=mock_result)
+    paper = PaperInfo(paper_id="p1", title="Only Paper")
+
+    with patch.object(settings, "intra_paper_delta", 0.25):
+        chunks = await svc._retrieve_paper_chunks(mock_db, [paper], [0.0] * 768)
+
+    # best 0.50 + 0.25 = 0.75 -> the 0.80 row is cut, the 0.74 row survives
+    assert len(chunks) == 3
+    assert [c.n for c in chunks] == [1, 2, 3]
+
+
+async def test_multi_paper_scope_applies_no_delta_cut():
+    """Across papers a relative cut is meaningless: the 'best' chunk belongs
+    to one paper and would gate every other paper's chunks by proximity to
+    it."""
+    from app.services.chat_service import ChatService, PaperInfo
+
+    svc = ChatService()
+    rows = [
+        MagicMock(paper_id=f"p{i}", chunk_index=0, text=f"chunk {i}", distance=d)
+        for i, d in enumerate([0.30, 0.60, 0.74])
+    ]
+    mock_result = MagicMock()
+    mock_result.fetchall.return_value = rows
+    mock_db = MagicMock()
+    mock_db.execute = AsyncMock(return_value=mock_result)
+    papers = [PaperInfo(paper_id=f"p{i}", title=f"P{i}") for i in range(3)]
+
+    with patch.object(settings, "intra_paper_delta", 0.25):
+        chunks = await svc._retrieve_paper_chunks(mock_db, papers, [0.0] * 768)
+
+    assert len(chunks) == 3
+
+
+async def test_single_paper_scope_cut_to_empty_returns_empty():
+    """An empty return is what triggers respond()'s existing fallback to
+    global scope, so the cut must be able to produce it rather than
+    defensively keeping a chunk."""
+    from app.services.chat_service import ChatService, PaperInfo
+
+    svc = ChatService()
+    mock_db = _mock_db_returning_no_rows()
+    paper = PaperInfo(paper_id="p1", title="Only Paper")
+
+    chunks = await svc._retrieve_paper_chunks(mock_db, [paper], [0.0] * 768)
+
+    assert chunks == []

@@ -22,6 +22,7 @@ from app.db.models import Paper
 from app.db.session import SessionLocal
 from app.services.conversation_service import ConversationService
 from app.services.embedding_service import EmbeddingService
+from app.services.intra_paper_ranker import keep_within_paper
 
 _HISTORY_TOP_K = 5
 
@@ -651,9 +652,28 @@ class ChatService:
         library size. Per-paper allocation made it the latter, and a 100-paper
         project pulled 191 chunks (~118.5k tokens) until every turn died on
         `context_length_exceeded`.
+
+        SINGLE-PAPER SCOPE IS DIFFERENT, and it is detected here rather than
+        passed in: one paper in `paper_infos` means the user already named the
+        paper (the targeter picked it, or the project holds only that one), so
+        an absolute cosine cutoff tuned for beating OTHER papers is the wrong
+        instrument. Two changes apply, and only together:
+          - the SQL cutoff becomes `intra_paper_ceiling` (looser, a noise
+            floor), because `similarity_threshold` silently drops answering
+            chunks -- measured, one sat at 0.7293 against 0.75, and the drop
+            is invisible because 13 other chunks still return, so respond()'s
+            empty-result fallback never fires;
+          - a relative cut keeps only chunks within `intra_paper_delta` of
+            this paper's own nearest chunk, because the looser ceiling alone
+            keeps 63/64 and 76/84 chunks of a paper at ~439 tokens each.
+        A relative cut alone would be no guard at all: an off-topic question's
+        distances are compressed, so delta 0.25 keeps the ENTIRE paper.
         """
         if not paper_infos:
             return []
+        # See the docstring: scope size, not a flag, decides the policy.
+        single_paper = len(paper_infos) == 1
+        threshold = settings.intra_paper_ceiling if single_paper else settings.similarity_threshold
         qvec = _vec_str(query_embedding)
         paper_title_map = {p.paper_id: p.title for p in paper_infos}
         # `paper_chunk_embeddings` is global, so this query MUST be scoped to
@@ -680,7 +700,7 @@ class ChatService:
                 "qvec": qvec,
                 "ids": json.dumps([p.paper_id for p in paper_infos]),
                 "model": settings.embedding_model,
-                "threshold": settings.similarity_threshold,
+                "threshold": threshold,
                 "max_chunks": settings.max_context_chunks,
             },
         )
@@ -689,6 +709,15 @@ class ChatService:
         # invariant that keeps chat working at any library size, so it must
         # not depend on a SQL clause surviving a future edit to the query.
         rows = result.fetchall()[: settings.max_context_chunks]
+        # Applied AFTER the budget slice, never before: the budget is the one
+        # invariant that keeps chat working at any library size, and the cut
+        # may only shrink what it already bounded.
+        if single_paper:
+            rows = rows[
+                : keep_within_paper(
+                    [row.distance for row in rows], delta=settings.intra_paper_delta
+                )
+            ]
         return [
             ChunkContext(
                 n=i,
