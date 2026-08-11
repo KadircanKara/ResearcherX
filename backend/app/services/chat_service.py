@@ -40,6 +40,14 @@ _CITATION_RE = re.compile(r"\[(\d+)\]")
 # — what every turn paid before this routing existed. A false negative makes
 # the model report that a paper does not state its authors, because the block
 # it was given had none.
+#
+# "cit" and "dat" are truncated stems, not typos. The whole words "cite" and
+# "date" miss real inflections in exactly the harmful direction: "citing" and
+# "dating" diverge from them one letter after the stem (a vowel change, not a
+# suffix), so no boundary fix closes the gap — only a shorter stem does.
+# Truncating costs more over-firing ("cit" also matches "city"/"citizen",
+# "dat" also matches "data"/"database" — the latter common in these papers
+# anyway) which is the harmless direction under this module's own rule.
 _METADATA_KEYWORDS = (
     "author",
     "wrote",
@@ -47,14 +55,14 @@ _METADATA_KEYWORDS = (
     "who",
     "year",
     "when",
-    "date",
+    "dat",
     "publish",
     "publication",
     "venue",
     "journal",
     "conference",
     "proceeding",
-    "cite",
+    "cit",
     "citation",
 )
 # Anchored at word START only, with no trailing boundary. A trailing \b would
@@ -81,11 +89,16 @@ def needs_paper_metadata(question: str, prior_messages: list[dict]) -> bool:
     if _METADATA_RE.search(question):
         return True
     for message in reversed(prior_messages):
-        if message["role"] == "user":
+        # .get, not [] — a malformed entry (missing a key) must not raise and
+        # fail the whole chat turn over a token optimisation. Not reachable
+        # today (every construction site here supplies both keys), but this
+        # runs on the hot path of every turn, so it degrades instead of
+        # trusting the caller.
+        if message.get("role") == "user":
             # Only the most recent user turn — assistant text does not carry
             # intent, and an answer that happens to mention authors must not
             # keep the full block alive.
-            return bool(_METADATA_RE.search(message["content"]))
+            return bool(_METADATA_RE.search(message.get("content") or ""))
     return False
 
 

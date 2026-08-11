@@ -94,3 +94,23 @@ def test_assistant_turns_are_ignored_when_carrying_back():
         {"role": "assistant", "content": "The authors describe a weighted sum."},
     ]
     assert needs_paper_metadata("And that one?", prior) is False
+
+
+def test_a_history_entry_missing_content_does_not_raise():
+    """Not reachable today — every construction site in chat_service.py
+    supplies both keys — but this sits on the hot path of every chat turn,
+    and a KeyError escaping here would fail the whole turn to satisfy a
+    token optimisation. The most recent user entry is treated as
+    content-free rather than fatal."""
+    prior = [{"role": "user"}]
+    assert needs_paper_metadata("And that one?", prior) is False
+
+
+@pytest.mark.parametrize("word", ["citing", "dating"])
+def test_truncated_stems_cover_the_ing_inflection(word: str):
+    """ "cite" and "date" are truncated to "cit" and "dat" in
+    _METADATA_KEYWORDS because the whole words miss this inflection: the
+    vowel changes right after the stem ("cite" vs "citing", "date" vs
+    "dating"), so no trailing-boundary fix could close the gap — only a
+    shorter stem does."""
+    assert needs_paper_metadata(f"tell me the {word} please", []) is True
