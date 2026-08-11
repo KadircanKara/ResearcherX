@@ -2,7 +2,10 @@
 
 import { useEffect, useRef, useState } from "react";
 import { PreviewCard } from "@base-ui/react/preview-card";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { getPaperChunk } from "@/lib/projects";
+import { highlightTerms } from "@/lib/highlight-terms";
 import type { ChatCitation } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -34,6 +37,20 @@ const STOPWORDS = new Set([
   "they", "their", "about", "paper", "papers",
 ]);
 
+// Markdown styling for a 24rem card at text-xs. Deliberately not the answer
+// bubble's PROSE constant, which is tuned for a much wider container: a paper's
+// "## B. Reward Function" heading rendered at prose defaults would dominate the
+// card. Headings are clamped near body size and every margin is tightened.
+const CARD_PROSE =
+  "prose prose-sm dark:prose-invert max-w-none text-xs " +
+  "prose-p:my-1 prose-p:text-xs prose-li:my-0 prose-li:text-xs " +
+  "prose-ul:my-1 prose-ol:my-1 " +
+  "prose-headings:text-xs prose-headings:font-semibold prose-headings:mt-2 prose-headings:mb-1 " +
+  "prose-code:text-[11px] prose-pre:text-[11px] prose-pre:my-1 " +
+  "prose-table:my-1 prose-table:text-[11px] prose-th:px-1 prose-th:py-0.5 " +
+  "prose-td:px-1 prose-td:py-0.5 " +
+  "first:prose-p:mt-0 last:prose-p:mb-0";
+
 /** Question tokens worth highlighting: 4+ chars, not stopwords, deduped. */
 export function queryTermsFrom(question: string): string[] {
   const seen = new Set<string>();
@@ -41,32 +58,6 @@ export function queryTermsFrom(question: string): string[] {
     if (raw.length >= 4 && !STOPWORDS.has(raw)) seen.add(raw);
   }
   return [...seen];
-}
-
-/** Split text on term matches and wrap hits in <mark>.
- *
- * Never dangerouslySetInnerHTML — this text is paper-derived. Same reasoning
- * as the rehype-raw prohibition on the report renderer.
- */
-function highlight(text: string, terms: string[]) {
-  if (terms.length === 0) return text;
-  // Longest first so "connectivity" wins over "connect".
-  const escaped = [...terms]
-    .sort((a, b) => b.length - a.length)
-    .map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
-  // \b word boundaries so "search" doesn't light up inside "researcher".
-  // \b matches at any word/non-word transition, so it still holds next to
-  // punctuation — "reward," and "(reward)" both keep "reward" highlighted.
-  const re = new RegExp(`\\b(${escaped.join("|")})\\b`, "gi");
-  return text.split(re).map((part, i) =>
-    terms.includes(part.toLowerCase()) ? (
-      <mark key={i} className="rounded bg-amber-300/30 px-0.5 text-inherit">
-        {part}
-      </mark>
-    ) : (
-      part
-    )
-  );
 }
 
 export function CitationHoverCard({
@@ -211,9 +202,25 @@ export function CitationHoverCard({
               <p className="mb-1.5 text-xs font-medium text-foreground">
                 {citation.title}
               </p>
-              <p className="text-xs leading-relaxed text-muted-foreground">
-                {highlight(text, queryTerms)}
-              </p>
+              {/* Tuple form, not highlightTerms({...}): unified treats a bare
+                  function as an ATTACHER and calls it with the options, using
+                  its return value as the transformer. Passing an
+                  already-invoked transformer makes unified call it again with
+                  no arguments, and it crashes on an undefined tree.
+
+                  No rehype-raw and no citationMarks here. This text is
+                  PDF-derived, so raw HTML stays escaped; and paper text is full
+                  of [16]-style bibliography references, which the citation
+                  plugin would turn into clickable citations of our own
+                  sources. */}
+              <div className={cn(CARD_PROSE, "text-muted-foreground [&_table]:block [&_table]:overflow-x-auto")}>
+                <ReactMarkdown
+                  remarkPlugins={[remarkGfm]}
+                  rehypePlugins={[[highlightTerms, { terms: queryTerms }]]}
+                >
+                  {text}
+                </ReactMarkdown>
+              </div>
             </div>
             {hasGroup && (
               <div className="flex items-center justify-between border-t border-border px-3 py-1.5">
