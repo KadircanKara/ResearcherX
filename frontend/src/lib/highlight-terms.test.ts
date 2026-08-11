@@ -84,15 +84,18 @@ describe("highlightTerms", () => {
     expect(childrenOf(tree)).toEqual([{ type: "text", value: "nothing to do here" }]);
   });
 
-  it("highlights inside nested elements such as table cells", () => {
-    // The parameter tables these cards show are the reason remark-gfm is on;
-    // a term inside a cell must still highlight.
+  it("highlights inside nested elements such as emphasis", () => {
+    // The source corpus is extracted as one line per chunk with no
+    // newlines, so block constructs like tables never actually parse here —
+    // only inline ones do. <em>/<strong> are exactly that, and are common in
+    // these papers, so they're what genuinely exercises recursion into a
+    // nested element; a term inside one must still highlight.
     const tree: Root = {
       type: "root",
       children: [
         {
           type: "element",
-          tagName: "td",
+          tagName: "em",
           properties: {},
           children: [{ type: "text", value: "reward" }],
         },

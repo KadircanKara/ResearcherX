@@ -38,9 +38,25 @@ const STOPWORDS = new Set([
 ]);
 
 // Markdown styling for a 24rem card at text-xs. Deliberately not the answer
-// bubble's PROSE constant, which is tuned for a much wider container: a paper's
-// "## B. Reward Function" heading rendered at prose defaults would dominate the
-// card. Headings are clamped near body size and every margin is tightened.
+// bubble's PROSE constant, which is tuned for a much wider container.
+//
+// The extractor emits each chunk as one continuous line with no newlines,
+// and markdown block constructs need a line start to parse — so today the
+// whole passage renders as a single <p>, never as real headings, lists,
+// tables or code blocks. Only inline constructs render: emphasis, strong,
+// inline code. prose-p:* and prose-code:* are the classes actually live
+// today, styling that one paragraph and its inline code spans.
+//
+// prose-headings:*, prose-ul:*/prose-ol:*/prose-li:*,
+// prose-table:*/prose-th:*/prose-td:*, prose-pre:*, and the
+// [&_table]:block [&_table]:overflow-x-auto pair on the wrapper below are
+// defensive-only: nothing in this corpus produces the elements they target,
+// so they do nothing today and become live only if the extractor starts
+// emitting newlines. Kept rather than deleted — Tailwind only emits CSS for
+// classes it finds referenced in source, so they cost nothing at runtime,
+// and deleting them would remove a guard whose absence would be invisible
+// until that day, when block markdown would render unstyled with nothing —
+// no test, no build failure — to flag it.
 const CARD_PROSE =
   "prose prose-sm dark:prose-invert max-w-none text-xs " +
   "prose-p:my-1 prose-p:text-xs prose-li:my-0 prose-li:text-xs " +
@@ -49,7 +65,12 @@ const CARD_PROSE =
   "prose-code:text-[11px] prose-pre:text-[11px] prose-pre:my-1 " +
   "prose-table:my-1 prose-table:text-[11px] prose-th:px-1 prose-th:py-0.5 " +
   "prose-td:px-1 prose-td:py-0.5 " +
-  "first:prose-p:mt-0 last:prose-p:mb-0";
+  // prose-p:first, not first:prose-p: the latter requires the wrapper div
+  // ITSELF to be :first-child of its parent, and it never is — the title
+  // <p> above it always comes first. prose-p:first instead targets the
+  // first <p> inside the wrapper, which is the one that actually needs its
+  // top margin zeroed.
+  "prose-p:first:mt-0 last:prose-p:mb-0";
 
 /** Question tokens worth highlighting: 4+ chars, not stopwords, deduped. */
 export function queryTermsFrom(question: string): string[] {
@@ -217,6 +238,16 @@ export function CitationHoverCard({
                 <ReactMarkdown
                   remarkPlugins={[remarkGfm]}
                   rehypePlugins={[[highlightTerms, { terms: queryTerms }]]}
+                  // remark-gfm autolinks bare URLs in paper text into <a>.
+                  // Without target="_blank" a click navigates the whole tab
+                  // away from the conversation — new for this card, which
+                  // previously rendered plain text. rel="noopener noreferrer"
+                  // is not optional: target="_blank" alone leaks
+                  // window.opener to the linked page, and this text is
+                  // PDF-derived.
+                  components={{
+                    a: (props) => <a {...props} target="_blank" rel="noopener noreferrer" />,
+                  }}
                 >
                   {text}
                 </ReactMarkdown>
