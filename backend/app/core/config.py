@@ -66,6 +66,36 @@ class Settings(BaseSettings):
     # SIMILARITY_THRESHOLD env var rather than editing this default.
     similarity_threshold: float = 0.75
 
+    # --- single-paper scope -------------------------------------------------
+    # Both numbers below apply ONLY when retrieval is scoped to one paper
+    # (the targeter named it, or the project holds a single paper). They are
+    # MODEL-SPECIFIC in exactly the way similarity_threshold above is:
+    # measured on text-embedding-3-small against the 100-paper dev corpus on
+    # 2026-08-12, and invalid for any other embedding model.
+    #
+    # They do different jobs and neither works alone.
+    #
+    # The CEILING is the noise floor. It replaces similarity_threshold as the
+    # SQL cutoff in single-paper scope. Measured on the three off_topic golden
+    # cases, scoped to the paper holding the globally nearest chunk (the
+    # targeter-misfire simulation): 0.85 admits 0, 1 and 1 chunks; 0.90 admits
+    # 1, 2 and 9. A relative rule cannot do this job — an off-topic question's
+    # distances are compressed (best 0.7518-0.8581), so delta 0.25 alone keeps
+    # 24/24, 44/44 and 64/64 chunks of the paper.
+    intra_paper_ceiling: float = 0.85
+
+    # The DELTA is cost and precision: keep every chunk within this distance
+    # of the paper's own nearest chunk. The ceiling alone is far too generous
+    # on real questions — measured, it keeps 63/64 and 76/84 chunks of a
+    # targeted paper, near-whole-paper dumps at ~439 tokens per chunk.
+    #
+    # 0.25 rests on ONE witness: the ground-control-station golden case, whose
+    # answer chunk sits 0.164 from its paper's best (0.5654 -> 0.7293), so
+    # 0.25 carries 0.086 of margin. Re-tune it with
+    # `run_eval --targeted` once the golden set reaches the harness's own
+    # confidence gate (>=20 positives, >=10 negatives).
+    intra_paper_delta: float = 0.25
+
     # Hard ceiling on chunks sent to the chat model in one turn.
     #
     # The retrieval budget must be a function of the CONTEXT WINDOW, never of

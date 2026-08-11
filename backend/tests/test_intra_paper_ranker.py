@@ -48,3 +48,19 @@ def test_cut_is_a_prefix_even_if_later_distances_come_back_inside():
     stop at the first violation rather than silently keeping a chunk that
     sits behind an excluded one."""
     assert keep_within_paper([0.30, 0.90, 0.35], delta=0.25) == 1
+
+
+def test_intra_paper_constants_are_settings_not_literals():
+    """Both numbers are embedding-model-specific, exactly like
+    similarity_threshold — measured on text-embedding-3-small and invalid for
+    any other embedding model. They must be env-tunable without a code change.
+
+    The ordering assertion is the real content: a ceiling below the delta band
+    would make the delta dead code, and a ceiling at or above 0.90 leaks
+    off-topic chunks (measured: 1, 2 and 9 chunks admitted on the three
+    off_topic golden cases).
+    """
+    from app.core.config import settings
+
+    assert 0.80 <= settings.intra_paper_ceiling <= 0.85
+    assert 0.0 < settings.intra_paper_delta < settings.intra_paper_ceiling
