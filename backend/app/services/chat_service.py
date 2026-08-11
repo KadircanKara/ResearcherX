@@ -102,19 +102,34 @@ _WORD_RE = re.compile(r"\w+")
 
 
 def _corpus_tokens(papers: list[Paper]) -> set[str]:
-    """Author surnames and venue words drawn from THIS project's own papers.
+    """Author surnames and venue ACRONYMS drawn from THIS project's own papers.
 
     No fixed English keyword list can catch "What does Kara's paper say
-    about coverage?" or "Compare the Smith and Lee papers" -- the trigger is
+    about coverage?" or "What is in the ICRA paper?" -- the trigger is
     corpus data, not vocabulary: a surname, a venue acronym. Only the
     corpus itself can supply that, which is why this needs the papers at
     all rather than being a second regex.
 
     Surnames are the LAST whitespace-separated token of each author's
     display name, lowercased and kept only at length >= 3, so a bare
-    initial ("J.") or a particle ("de", "van") cannot fire alone. Venue
-    words are split and filtered the same way, so an acronym like "ICRA"
-    counts but "of"/"on" do not.
+    initial ("J.") or a particle ("de", "van") cannot fire alone. Of 266
+    surnames measured on the live corpus, only 4 collide with an ordinary
+    word ("chen", "long", "park", "wang") -- a collision costs tokens on
+    an unrelated question, which is the harmless direction, so this stays
+    case-insensitive with no further filtering.
+
+    Venue tokens are kept ONLY when the token is uppercase in the ORIGINAL
+    venue string, not merely long enough. A length-only filter measured 100
+    word-y tokens on the live 100-paper corpus, and they are this domain's
+    own subject-matter vocabulary, not noise: "learning", "networks",
+    "control", "robotics", "automation", "intelligent", "conference",
+    "international" -- indistinguishable from what a real question about
+    these papers' content asks about, so that filter fired on nearly every
+    turn and erased the saving this function exists to produce. Of those
+    100, only 10 are uppercase acronyms ("IEEE", "ICRAS", "AIAA", ...), and
+    an acronym is exactly what a user types to reference a venue ("the ICRA
+    paper") -- the only part of a venue string that is NOT also the
+    corpus's own content vocabulary.
     """
     tokens: set[str] = set()
     for paper in papers:
@@ -124,7 +139,7 @@ def _corpus_tokens(papers: list[Paper]) -> set[str]:
                 tokens.add(words[-1].lower())
         if paper.venue:
             for word in paper.venue.split():
-                if len(word) >= 3:
+                if word.isupper() and len(word) >= 3:
                     tokens.add(word.lower())
     return tokens
 

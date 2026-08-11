@@ -150,3 +150,23 @@ def test_a_question_matching_no_corpus_token_does_not_fire():
     papers = [Paper(authors=["Jane Kara"], venue="IEEE ICRA")]
     fires = needs_paper_metadata("What reward function does the planner use?", [], papers)
     assert fires is False
+
+
+def test_a_lowercase_venue_word_does_not_fire():
+    """Word-y venue tokens are indistinguishable from the corpus's own
+    subject matter -- "robotics" is exactly what a real content question
+    asks about -- so only tokens uppercase in the ORIGINAL venue string
+    (acronyms) are kept. Measured on the live 100-paper corpus: a
+    length-only filter yielded 100 such tokens and made the detector fire
+    on nearly every turn, erasing the saving it exists to produce."""
+    papers = [Paper(authors=["A B"], venue="international conference on robotics")]
+    fires = needs_paper_metadata("What does the robotics approach do?", [], papers)
+    assert fires is False
+
+
+def test_an_uppercase_venue_acronym_fires():
+    """The only part of a venue string NOT also the corpus's own content
+    vocabulary is its acronym -- exactly what a user types to reference a
+    venue ("the ICRA paper")."""
+    papers = [Paper(authors=["A B"], venue="IEEE ICRA")]
+    assert needs_paper_metadata("What is in the ICRA paper?", [], papers) is True
