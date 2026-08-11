@@ -79,3 +79,38 @@ def test_a_backtick_inside_a_fenced_block_does_not_open_an_inline_span():
     got, mapping = renumber_citations(text, max_n=40)
     assert got == "```\nuse ` here\n```\n\nAfter [1]."
     assert mapping == {8: 1}
+
+
+def test_an_unterminated_fence_runs_to_end_of_text():
+    """Review round 1: a fence with no closing ``` used to fall through to
+    the inline-span alternative, which consumed two of its three backticks as
+    an empty span and left the fence body classified as prose — so a marker
+    inside a truncated snippet got renumbered. Truncated answers are not
+    hypothetical: a chat reply hit finish_reason=length mid-sentence on
+    2026-08-10. The marker before the fence is still renumbered normally."""
+    text = "Intro [8].\n\n```python\nx = arr[8]\n# cut off, no closing fence"
+    got, mapping = renumber_citations(text, max_n=40)
+    assert got == "Intro [1].\n\n```python\nx = arr[8]\n# cut off, no closing fence"
+    assert mapping == {8: 1}
+
+
+def test_a_stray_backtick_before_a_fence_does_not_leak_the_fenced_marker():
+    """The other half of the round-1 bug: a single unpaired backtick earlier
+    in the answer used to pair with the fence's own opening backtick, leaking
+    the fenced [8] out into renumbering. [14] in the surrounding prose is
+    still renumbered normally."""
+    text = "Odd ` mark. ```python\ncode [8]\n``` Also [14]."
+    got, mapping = renumber_citations(text, max_n=40)
+    assert got == "Odd ` mark. ```python\ncode [8]\n``` Also [1]."
+    assert mapping == {14: 1}
+
+
+def test_malformed_input_is_byte_identical_outside_renumbered_markers():
+    """Even when a stray backtick and an unterminated fence appear together,
+    every byte outside the one renumbered marker site must survive
+    untouched — nothing dropped, nothing reordered — including the [14] and
+    the second [8] that sit inside the unterminated fence."""
+    text = "Odd ` mark [8]. ```python\narr[8] # unterminated, runs to end of text\nstill code [14]"
+    got, mapping = renumber_citations(text, max_n=40)
+    assert got == text.replace("mark [8]", "mark [1]", 1)
+    assert mapping == {8: 1}

@@ -34,10 +34,18 @@ _TARGETER_CANDIDATES = 10
 
 _CITATION_RE = re.compile(r"\[(\d+)\]")
 
-# Fenced blocks first, then inline spans: a stray backtick inside a fenced
-# block must not open a spurious inline span that swallows the rest of the
-# answer as "code".
-_CODE_SPAN_RE = re.compile(r"```.*?```|`[^`\n]*`", re.DOTALL)
+# A fence with no closing ``` runs to the end of the text rather than
+# falling through to be reinterpreted as (part of) an inline span. Fences are
+# located in a pass of their own, before inline spans are considered at all,
+# so a stray or unpaired backtick elsewhere in the answer can never pair
+# across a fence delimiter. See renumber_citations' docstring for why a
+# single combined pattern got this wrong.
+_FENCE_RE = re.compile(r"```.*?(?:```|\Z)", re.DOTALL)
+
+# Inline spans are matched only within the prose _FENCE_RE leaves behind, so
+# a backtick bordering a fence can no longer be mistaken for the other half
+# of an inline span.
+_INLINE_CODE_RE = re.compile(r"`[^`\n]*`")
 
 
 def renumber_citations(text: str, max_n: int) -> tuple[str, dict[int, int]]:
@@ -55,18 +63,48 @@ def renumber_citations(text: str, max_n: int) -> tuple[str, dict[int, int]]:
     pre-existing bug where an out-of-range `arr[99]` became
     `arr[source unavailable]` inside a fenced block.
 
+    Fences and inline spans are found in two separate passes rather than one
+    combined pattern. A single alternation tried left to right lets an
+    unterminated fence fall through to the inline alternative — consuming two
+    of its three backticks as an empty span — and lets a stray backtick
+    earlier in the answer pair with a fence's own opening backtick; both leak
+    a fenced marker out into renumbering. Locating fences first, over the
+    whole text, with "no closing ``` " meaning "runs to end of text" rather
+    than "not a fence", removes both failure modes: fence boundaries never
+    depend on where a stray backtick happens to sit, and an answer truncated
+    mid-snippet — an observed occurrence, not a hypothetical: a chat reply
+    hit `finish_reason=length` mid-sentence on 2026-08-10 — still treats
+    everything after the opening fence as code.
+
     Returns the rewritten text and the old→new map, ordered by new number.
     """
-    # Split into alternating prose and code segments. Only prose is rewritten,
-    # and code segments are reassembled byte-for-byte.
+    # Stage 1: split the whole text on fenced blocks. An unterminated fence
+    # consumes to the end of the text instead of un-matching.
     segments: list[tuple[str, bool]] = []  # (text, is_code)
     cursor = 0
-    for match in _CODE_SPAN_RE.finditer(text):
+    for match in _FENCE_RE.finditer(text):
         if match.start() > cursor:
             segments.append((text[cursor : match.start()], False))
         segments.append((match.group(0), True))
         cursor = match.end()
     segments.append((text[cursor:], False))
+
+    # Stage 2: within what Stage 1 left as prose, split on inline spans. Code
+    # segments pass through untouched — a fence is never re-examined here, so
+    # a backtick bordering one cannot pair across the boundary.
+    with_inline: list[tuple[str, bool]] = []
+    for body, is_code in segments:
+        if is_code:
+            with_inline.append((body, True))
+            continue
+        inner_cursor = 0
+        for match in _INLINE_CODE_RE.finditer(body):
+            if match.start() > inner_cursor:
+                with_inline.append((body[inner_cursor : match.start()], False))
+            with_inline.append((match.group(0), True))
+            inner_cursor = match.end()
+        with_inline.append((body[inner_cursor:], False))
+    segments = with_inline
 
     # First pass: assign numbers in order of appearance across prose only, so
     # a marker buried in a code block cannot claim a number.
