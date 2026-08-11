@@ -345,31 +345,27 @@ class ChatService:
 
             response_text = "".join(full_response)
 
-            # Validate citations: keep only [n] where n ≤ len(paper_chunks)
+            # Renumber the answer's citations to 1..N by order of appearance.
+            # The model cites by catalog position, which the reader never
+            # sees. This also replaces out-of-range markers, so it subsumes
+            # the validation pass that used to live here.
             max_n = len(paper_chunks)
+            clean_response, renumbered = renumber_citations(response_text, max_n)
 
-            def _clean_citations(text_str: str) -> str:
-                return _CITATION_RE.sub(
-                    lambda m: (
-                        m.group(0) if 0 < int(m.group(1)) <= max_n else "[source unavailable]"
-                    ),
-                    text_str,
-                )
-
-            clean_response = _clean_citations(response_text)
-
-            # Build citation objects for 'done' event
-            cited_ns = {int(m) for m in _CITATION_RE.findall(clean_response) if 0 < int(m) <= max_n}
+            # Ordered by the NEW number so the chip row reads 1, 2, 3 left to
+            # right. `renumbered` maps catalog position → new number, which is
+            # what still resolves each citation back to its chunk.
+            by_old = {c.n: c for c in paper_chunks}
             citations = [
                 {
-                    "n": c.n,
-                    "paper_id": c.paper_id,
-                    "title": c.title,
-                    "chunk_index": c.chunk_index,
-                    "snippet": c.text[:200],
+                    "n": new_n,
+                    "paper_id": by_old[old_n].paper_id,
+                    "title": by_old[old_n].title,
+                    "chunk_index": by_old[old_n].chunk_index,
+                    "snippet": by_old[old_n].text[:200],
                 }
-                for c in paper_chunks
-                if c.n in cited_ns
+                for old_n, new_n in sorted(renumbered.items(), key=lambda kv: kv[1])
+                if old_n in by_old
             ]
 
             # Persist assistant message
