@@ -34,6 +34,127 @@ _TARGETER_CANDIDATES = 10
 
 _CITATION_RE = re.compile(r"\[(\d+)\]")
 
+# Words that make a question possibly about a paper's authors, year or venue.
+# Deliberately over-broad: "who" and "when" fire on plenty of ordinary content
+# questions, and that is the correct bias. A false positive costs 3,158 tokens
+# — what every turn paid before this routing existed. A false negative makes
+# the model report that a paper does not state its authors, because the block
+# it was given had none.
+#
+# "cit" and "dat" are truncated stems, not typos. The whole words "cite" and
+# "date" miss real inflections in exactly the harmful direction: "citing" and
+# "dating" diverge from them one letter after the stem (a vowel change, not a
+# suffix), so no boundary fix closes the gap — only a shorter stem does.
+# Truncating costs more over-firing ("cit" also matches "city"/"citizen",
+# "dat" also matches "data"/"database" — the latter common in these papers
+# anyway) which is the harmless direction under this module's own rule.
+#
+# "newest"/"latest"/"oldest"/"recent"/"earliest" ask for a paper by its
+# relative year without naming a year, or any word above ("which paper is
+# the newest?") -- the same false-negative risk, so the same word-start-only
+# anchoring applies and "recent" also catches "recently".
+#
+# "citation" was removed: "cit" above already matches it as a prefix, so
+# keeping both listed the same signal twice, not two signals.
+_METADATA_KEYWORDS = (
+    "author",
+    "wrote",
+    "written",
+    "who",
+    "year",
+    "when",
+    "dat",
+    "publish",
+    "publication",
+    "venue",
+    "journal",
+    "conference",
+    "proceeding",
+    "cit",
+    "newest",
+    "latest",
+    "oldest",
+    "recent",
+    "earliest",
+)
+# Anchored at word START only, with no trailing boundary. A trailing \b would
+# stop "author" matching "authors", "cite" matching "citations" and "publish"
+# matching "published" — each a real metadata question falling silently into
+# the false-negative case. The cost is over-firing on words that merely begin
+# the same way ("whole" fires "who"), which is harmless.
+_METADATA_RE = re.compile(r"\b(?:" + "|".join(_METADATA_KEYWORDS) + ")", re.IGNORECASE)
+
+# A bare year ("Summarize the 2023 paper") names a paper by a field with no
+# English synonym -- there is no word that means "year" the way "who" means
+# "author", so no keyword could ever catch this. Anchored at BOTH ends,
+# unlike every pattern above: a 4-digit run embedded in a longer number (an
+# arXiv id, a page range, a version string) is not a year and carries no
+# metadata intent, so the deliberate over-firing the rest of this module
+# trades on does not apply to bare digits -- this pattern is precise on
+# purpose, not broad on purpose.
+_YEAR_RE = re.compile(r"\b(19|20)\d{2}\b")
+
+
+def _matches_keyword_or_year(text: str) -> bool:
+    return bool(_METADATA_RE.search(text) or _YEAR_RE.search(text))
+
+
+def needs_paper_metadata(question: str, prior_messages: list[dict]) -> bool:
+    """Whether this turn should carry paper authors, year and venue.
+
+    Those three fields are 57% of the PAPERS block's tokens (3,158 of 5,529 at
+    100 papers) and exist solely to answer questions about them — the block is
+    their only permitted source, and the chat prompt forbids reading them out
+    of excerpts.
+
+    Two ways a question can ask for them: an English keyword ("who wrote")
+    or a bare year ("the 2023 paper"). The superlatives in
+    _METADATA_KEYWORDS ("newest", "latest", ...) are a special case of the
+    first: they name a paper by relative year without naming a year, or any
+    other keyword, at all.
+
+    KNOWN LIMITATION, accepted on purpose: a question that REFERENCES a
+    paper's metadata without using any of these words -- "What does Kara's
+    paper say...", "the ICRA paper" -- does not fire. A corpus-derived token
+    check (author surnames, venue acronyms) was built and then reverted: it
+    collided with ordinary language in three separate rounds -- first
+    word-y venue tokens that turned out to be this domain's own subject
+    vocabulary ("learning", "networks", "control"), then author surnames
+    themselves (measured: 10 of 266 real surnames on the live corpus collide
+    with a common English word -- "how", "park", "chen", "wang", among
+    others -- and "how" alone opens a large share of all questions). The
+    list of collisions grows with every paper added, silently, with nothing
+    to flag when a new author erodes the saving again. It also bought less
+    than it cost: the paper TARGETER, which decides retrieval scoping, only
+    ever receives paper TITLES, so the system already cannot resolve
+    "Kara's paper" to a paper at the retrieval layer -- naming the author in
+    the answer-time block never fixed that; it only let the model repeat a
+    name for chunks it had already been handed some other way. Do not
+    reintroduce corpus tokens to "fix" this gap without solving that
+    retrieval-layer problem first, or the same three collision classes
+    return.
+
+    A pronoun-only follow-up such as "and that one?" carries no keyword or
+    year at all, so the previous USER message is consulted. One turn only:
+    two turns later the intent has lapsed, and widening the window trades a
+    growing number of false positives for a shrinking set of real cases.
+    """
+    if _matches_keyword_or_year(question):
+        return True
+    for message in reversed(prior_messages):
+        # .get, not [] — a malformed entry (missing a key) must not raise and
+        # fail the whole chat turn over a token optimisation. Not reachable
+        # today (every construction site here supplies both keys), but this
+        # runs on the hot path of every turn, so it degrades instead of
+        # trusting the caller.
+        if message.get("role") == "user":
+            # Only the most recent user turn — assistant text does not carry
+            # intent, and an answer that happens to mention authors must not
+            # keep the full block alive.
+            return _matches_keyword_or_year(message.get("content") or "")
+    return False
+
+
 # A fence opens with ``` or ~~~ — both are valid markdown fences, and remark
 # (the frontend's markdown renderer) treats either as <pre><code>. The
 # backreference (\1) means a fence can only be closed by the SAME delimiter
@@ -195,22 +316,27 @@ class ChatService:
                     .all()
                 )
 
+                # Format prior messages (all except the user's current message)
+                prior_messages = [
+                    {"role": m.role, "content": m.content}
+                    for m in conv.messages[:-1]  # exclude the last (just-saved user msg)
+                ]
+
+                # Authors, year and venue are 57% of the PAPERS block's tokens
+                # and are only ever needed to answer a question about them.
+                # Titles always ship: they are what lets the model say what is
+                # in the library, and what disambiguation lists.
+                wants_metadata = needs_paper_metadata(user_content, prior_messages)
                 # Built inside the session: the attributes are loaded, but
                 # building it here keeps it independent of session lifetime.
                 paper_metas = [
                     PaperMetaContext(
                         title=p.title,
-                        authors=list(p.authors or []),
-                        year=p.year,
-                        venue=p.venue,
+                        authors=list(p.authors or []) if wants_metadata else [],
+                        year=p.year if wants_metadata else None,
+                        venue=p.venue if wants_metadata else None,
                     )
                     for p in paper_rows
-                ]
-
-                # Format prior messages (all except the user's current message)
-                prior_messages = [
-                    {"role": m.role, "content": m.content}
-                    for m in conv.messages[:-1]  # exclude the last (just-saved user msg)
                 ]
 
             # Embed the query — fail-open: if embedding unavailable, skip retrieval
