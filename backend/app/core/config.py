@@ -82,6 +82,15 @@ class Settings(BaseSettings):
     # 1, 2 and 9. A relative rule cannot do this job — an off-topic question's
     # distances are compressed (best 0.7518-0.8581), so delta 0.25 alone keeps
     # 24/24, 44/44 and 64/64 chunks of the paper.
+    #
+    # THOSE THREE CASES WERE TOO EASY, and 0.85 is looser than they made it
+    # look. The 2026-08-12 widening added nine NEAR-domain negatives (drone
+    # regulation, insurance, hobbyist gear — plausible questions this library
+    # cannot answer); they land at 0.5474-0.6521, well inside the ceiling, and
+    # a mis-targeted one keeps 9-52 chunks of the wrong paper. `run_eval
+    # --targeted` prints RAISE THE CEILING'S SCRUTINY at every delta because
+    # of it. Re-tuning the ceiling is its own measurement, not a delta problem
+    # — see "Measured" in evals/retrieval/README.md.
     intra_paper_ceiling: float = 0.85
 
     # The DELTA is cost and precision: keep every chunk within this distance
@@ -89,12 +98,29 @@ class Settings(BaseSettings):
     # on real questions — measured, it keeps 63/64 and 76/84 chunks of a
     # targeted paper, near-whole-paper dumps at ~439 tokens per chunk.
     #
-    # 0.25 rests on ONE witness: the ground-control-station golden case, whose
-    # answer chunk sits 0.164 from its paper's best (0.5654 -> 0.7293), so
-    # 0.25 carries 0.086 of margin. Re-tune it with
-    # `run_eval --targeted` once the golden set reaches the harness's own
-    # confidence gate (>=20 positives, >=10 negatives).
-    intra_paper_delta: float = 0.25
+    # 0.20 is a swept measurement, not a single witness. `run_eval --targeted`
+    # on 2026-08-12 over a golden set at the harness's own confidence gate
+    # (30 positives — 20 of them inside papers larger than the 60-chunk budget
+    # — and 12 near-domain negatives), 100 papers / 4527 chunks,
+    # text-embedding-3-small, ceiling 0.85, budget 60:
+    #
+    #   delta  survival@cut  mean kept chunks  mean kept tokens
+    #   0.15   0.93 (28/30)  17.7              ~7.8k
+    #   0.20   1.00 (30/30)  27.5              ~12.1k
+    #   0.25   1.00 (30/30)  36.2              ~15.9k
+    #   0.30   1.00 (30/30)  42.4              ~18.6k
+    #   0.35   1.00 (30/30)  46.8              ~20.5k
+    #
+    # 0.20 is the smallest delta that loses no answer chunk, and delta is the
+    # cost lever, so the smallest survivor wins. The binding witness is
+    # iot-lowpower-protocols (rank 18 of its paper's 97 chunks), whose answer
+    # sits 0.1651 from that paper's own nearest chunk; ground-control-station
+    # (0.1640, the case that used to justify 0.25 alone) is only second. So
+    # 0.20 carries 0.035 of margin over the worst case, NOT the 0.05 a fresh
+    # tuning would prefer — this is the first number to re-check if a targeted
+    # answer ever comes back truncated, and the reason to re-sweep rather than
+    # nudge after any embedding-model change.
+    intra_paper_delta: float = 0.20
 
     # Hard ceiling on chunks sent to the chat model in one turn.
     #

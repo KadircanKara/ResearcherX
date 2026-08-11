@@ -141,6 +141,67 @@ off_topic case means the ceiling itself is too loose, independent of delta.
 In `--json`, this is the `targeted` key (a list of the same per-case rows,
 or `null` when `--targeted` wasn't passed).
 
+### Measured — 2026-08-12
+
+The delta sweep that set `intra_paper_delta`. Re-measure after any change to
+`EMBEDDING_MODEL`, either `EMBEDDING_*_PREFIX`, or the corpus.
+
+- corpus: 4527 chunks / 100 papers (project `fa2ab869…52922`)
+- model: `text-embedding-3-small`; ceiling `0.85`; budget `max_context_chunks = 60`
+- golden set: **30 positives** (20 of them in papers larger than the 60-chunk
+  budget) and **12 negatives** — clears the harness's confidence gate
+  (`_MIN_POSITIVES_FOR_CONFIDENCE = 20`, `_MIN_NEGATIVES_FOR_CONFIDENCE = 10`),
+  no `ERRORS` block
+
+| delta | survival@cut | mean kept chunks | mean kept tokens | worst off_topic kept |
+|-------|--------------|------------------|------------------|----------------------|
+| 0.15  | 0.93 (28/30) | 17.7             | ~7,770           | 28                   |
+| **0.20** | **1.00 (30/30)** | **27.5**  | **~12,072**      | 52                   |
+| 0.25  | 1.00 (30/30) | 36.2             | ~15,906          | 60                   |
+| 0.30  | 1.00 (30/30) | 42.4             | ~18,614          | 60                   |
+| 0.35  | 1.00 (30/30) | 46.8             | ~20,545          | 60                   |
+
+**Chosen: 0.20** — the smallest delta losing no answer chunk, and delta is the
+cost lever. The two cases that fail at 0.15 are `iot-lowpower-protocols`
+(answer at intra-rank 18 of 97, 0.1651 from its paper's nearest chunk) and
+`ground-control-station` (rank 11 of 18, 0.1640). 0.1651 is therefore the
+exact floor, so 0.20 carries **0.035** of margin — thinner than the 0.05 a
+fresh tuning would aim for. Every other positive needs ≤0.1212, and 16 of the
+30 answer at intra-rank 1 (required delta 0.0).
+
+**Delta is not the active constraint for every case.** At 0.20,
+`marl-security-attacks`, `deadly-triad`, `lazy-agents-reward` and
+`hnpfl-fair-comparison` keep exactly 60 chunks — the `max_context_chunks`
+budget bound before the delta did. No delta value moves those rows; only the
+budget does.
+
+**Open finding — the ceiling, not the delta, is the loose one.** The
+`ceiling check` line fires at every delta in the sweep. The 0.85 ceiling was
+tuned against three trivially off-topic questions sitting at 0.75–0.86; the
+near-domain negatives added here sit at **0.547–0.652**, comfortably inside
+it, so at the chosen delta a mis-targeted near-domain question keeps 9–52
+chunks of the wrong paper instead of the ≤2 the check wants. Delta bounds the
+damage (worst 28 chunks at 0.15, 52 at 0.20, 60 at 0.25) but cannot fix it —
+the ceiling is a separate constant and a separate piece of work.
+
+**Positives and near-domain negatives overlap on this corpus.** The worst
+positive's top-60 distance is 0.5871 (`hnpfl-fair-comparison`), and six
+negatives sit below it (0.547–0.585). Rewriting them further from the corpus
+was attempted and measured: thirteen alternative phrasings all landed in
+0.469–0.585, i.e. no genuinely near-domain question on a 100-paper
+single-topic UAV library can be pushed above the hardest positive. The
+nearest chunk of each was read and none answers its question, so these are
+real negatives; the overlap is a property of the corpus, not a defect in the
+cases. It is also why the closed-form section of the same run reports
+`NO SEPARATION POSSIBLE AT THIS k` rather than an interval.
+
+Global report from the same run, for the record: `recall@60 = 0.87`,
+`MRR = 0.527`, noise floor `0.5474`. Four positives
+(`ground-control-station`, `drl-subagent-decomposition`,
+`demand-algorithm-baselines`, `epec-stackelberg`) have no satisfying chunk
+inside a *global* top-60 at all, yet all four survive the single-paper cut —
+which is precisely the gap `--targeted` exists to measure.
+
 ## Adding a case
 
 Edit `golden_set.json`. Ground truth is **substrings, not chunk ids** — ids are
