@@ -263,22 +263,27 @@ class ChatService:
                     .all()
                 )
 
+                # Format prior messages (all except the user's current message)
+                prior_messages = [
+                    {"role": m.role, "content": m.content}
+                    for m in conv.messages[:-1]  # exclude the last (just-saved user msg)
+                ]
+
+                # Authors, year and venue are 57% of the PAPERS block's tokens
+                # and are only ever needed to answer a question about them.
+                # Titles always ship: they are what lets the model say what is
+                # in the library, and what disambiguation lists.
+                wants_metadata = needs_paper_metadata(user_content, prior_messages)
                 # Built inside the session: the attributes are loaded, but
                 # building it here keeps it independent of session lifetime.
                 paper_metas = [
                     PaperMetaContext(
                         title=p.title,
-                        authors=list(p.authors or []),
-                        year=p.year,
-                        venue=p.venue,
+                        authors=list(p.authors or []) if wants_metadata else [],
+                        year=p.year if wants_metadata else None,
+                        venue=p.venue if wants_metadata else None,
                     )
                     for p in paper_rows
-                ]
-
-                # Format prior messages (all except the user's current message)
-                prior_messages = [
-                    {"role": m.role, "content": m.content}
-                    for m in conv.messages[:-1]  # exclude the last (just-saved user msg)
                 ]
 
             # Embed the query — fail-open: if embedding unavailable, skip retrieval

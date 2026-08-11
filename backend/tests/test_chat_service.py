@@ -828,3 +828,81 @@ async def test_respond_persists_citations_renumbered_from_one(
 
     done = [e for e in events if e["event"] == "done"][-1]
     assert json.loads(done["data"])["citations"] == citations
+
+
+async def test_respond_sends_paper_metadata_on_a_metadata_question(
+    db_session: AsyncSession, project: Project, conversation_with_message
+):
+    """A routing decision that never reaches the agent is the failure that
+    matters, so this asserts on ChatAgentInput rather than on the detector."""
+    from app.db.models import Paper
+    from app.services.chat_service import ChatService
+
+    conv = conversation_with_message
+    db_session.add(
+        Paper(
+            project_id=project.id, title="Paper A", authors=["Jane Doe"], year=2024, source="manual"
+        )
+    )
+    await db_session.commit()
+
+    async def fake_stream(*args, **kwargs):
+        yield "answer"
+
+    svc = ChatService()
+    stream = MagicMock(return_value=fake_stream())
+
+    with (
+        patch.object(svc._embedding_svc, "embed", AsyncMock(return_value=[0.0] * 768)),
+        patch.object(svc, "_retrieve_history", AsyncMock(return_value=[])),
+        patch.object(svc, "_shortlist_papers", AsyncMock(return_value=([], 0))),
+        patch.object(svc, "_retrieve_paper_chunks", AsyncMock(return_value=[])),
+        patch.object(svc._chat_agent, "stream", stream),
+        patch.object(svc._conv_svc, "save_message", AsyncMock()),
+    ):
+        async for _ in svc.respond(conv.id, "Who wrote Paper A?"):
+            pass
+
+    sent = stream.call_args.args[0]
+    assert sent.papers[0].authors == ["Jane Doe"]
+    assert sent.papers[0].year == 2024
+
+
+async def test_respond_sends_titles_only_on_a_content_question(
+    db_session: AsyncSession, project: Project, conversation_with_message
+):
+    """The 3,158-token saving. Titles still ship — they are what lets the model
+    say what is in the library — but the three expensive fields do not."""
+    from app.db.models import Paper
+    from app.services.chat_service import ChatService
+
+    conv = conversation_with_message
+    db_session.add(
+        Paper(
+            project_id=project.id, title="Paper A", authors=["Jane Doe"], year=2024, source="manual"
+        )
+    )
+    await db_session.commit()
+
+    async def fake_stream(*args, **kwargs):
+        yield "answer"
+
+    svc = ChatService()
+    stream = MagicMock(return_value=fake_stream())
+
+    with (
+        patch.object(svc._embedding_svc, "embed", AsyncMock(return_value=[0.0] * 768)),
+        patch.object(svc, "_retrieve_history", AsyncMock(return_value=[])),
+        patch.object(svc, "_shortlist_papers", AsyncMock(return_value=([], 0))),
+        patch.object(svc, "_retrieve_paper_chunks", AsyncMock(return_value=[])),
+        patch.object(svc._chat_agent, "stream", stream),
+        patch.object(svc._conv_svc, "save_message", AsyncMock()),
+    ):
+        async for _ in svc.respond(conv.id, "What reward function does it use?"):
+            pass
+
+    sent = stream.call_args.args[0]
+    assert sent.papers[0].title == "Paper A"
+    assert sent.papers[0].authors == []
+    assert sent.papers[0].year is None
+    assert sent.papers[0].venue is None
