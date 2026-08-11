@@ -1,0 +1,81 @@
+"""renumber_citations — pure text rewriting, no service or network involved."""
+
+from app.services.chat_service import renumber_citations
+
+
+def test_renumbers_by_order_of_first_appearance():
+    """Not ascending by the model's own number: the model does not cite the
+    catalog in numerical order, and ascending would produce prose reading
+    '...as shown in [2] ... and in [1]'."""
+    text = "Coverage [27] and connectivity [8], plus revisit time [14]."
+    got, mapping = renumber_citations(text, max_n=40)
+    assert got == "Coverage [1] and connectivity [2], plus revisit time [3]."
+    assert mapping == {27: 1, 8: 2, 14: 3}
+
+
+def test_a_repeated_marker_keeps_one_number():
+    text = "First [8], then [14], back to [8]."
+    got, mapping = renumber_citations(text, max_n=40)
+    assert got == "First [1], then [2], back to [1]."
+    assert mapping == {8: 1, 14: 2}
+
+
+def test_an_already_sequential_answer_is_unchanged():
+    text = "One [1] and two [2]."
+    got, mapping = renumber_citations(text, max_n=40)
+    assert got == text
+    assert mapping == {1: 1, 2: 2}
+
+
+def test_an_out_of_range_marker_becomes_source_unavailable():
+    """The model can cite past the end of the catalog. That marker points at
+    nothing, so it must not consume a number in the new sequence either."""
+    text = "Real [8] and invented [99]."
+    got, mapping = renumber_citations(text, max_n=40)
+    assert got == "Real [1] and invented [source unavailable]."
+    assert mapping == {8: 1}
+
+
+def test_an_answer_with_no_citations_is_unchanged():
+    text = "No markers at all."
+    got, mapping = renumber_citations(text, max_n=40)
+    assert got == text
+    assert mapping == {}
+
+
+def test_a_marker_inside_a_fenced_block_is_left_alone():
+    """The chat prompt asks for fenced snippets, so this input is routine.
+    Renumbering rewrites EVERY in-range marker, so without the code guard
+    `arr[8]` would silently become `arr[1]` — a citation tidy-up corrupting
+    working code."""
+    text = "See [14].\n\n```python\nx = arr[8]\n```\n\nAlso [27]."
+    got, mapping = renumber_citations(text, max_n=40)
+    assert got == "See [1].\n\n```python\nx = arr[8]\n```\n\nAlso [2]."
+    assert mapping == {14: 1, 27: 2}
+
+
+def test_a_marker_inside_an_inline_span_is_left_alone():
+    text = "Use `arr[8]` for that [14]."
+    got, mapping = renumber_citations(text, max_n=40)
+    assert got == "Use `arr[8]` for that [1]."
+    assert mapping == {14: 1}
+
+
+def test_an_out_of_range_marker_inside_code_is_left_alone():
+    """The pre-existing bug this fixes. Verified live on 2026-08-11: asking
+    for a snippet indexing arr[6] returned `arr[source unavailable]`, in both
+    an inline span and a fenced block."""
+    text = "Text [8].\n\n```python\ny = arr[99]\n```"
+    got, mapping = renumber_citations(text, max_n=40)
+    assert got == "Text [1].\n\n```python\ny = arr[99]\n```"
+    assert mapping == {8: 1}
+
+
+def test_a_backtick_inside_a_fenced_block_does_not_open_an_inline_span():
+    """Fenced blocks are matched before inline spans. Otherwise a stray
+    backtick inside a block could swallow the rest of the answer as 'code'
+    and stop everything after it from being renumbered."""
+    text = "```\nuse ` here\n```\n\nAfter [8]."
+    got, mapping = renumber_citations(text, max_n=40)
+    assert got == "```\nuse ` here\n```\n\nAfter [1]."
+    assert mapping == {8: 1}

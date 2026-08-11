@@ -34,6 +34,61 @@ _TARGETER_CANDIDATES = 10
 
 _CITATION_RE = re.compile(r"\[(\d+)\]")
 
+# Fenced blocks first, then inline spans: a stray backtick inside a fenced
+# block must not open a spurious inline span that swallows the rest of the
+# answer as "code".
+_CODE_SPAN_RE = re.compile(r"```.*?```|`[^`\n]*`", re.DOTALL)
+
+
+def renumber_citations(text: str, max_n: int) -> tuple[str, dict[int, int]]:
+    """Renumber an answer's citation markers to 1..N by first appearance.
+
+    The model cites by position in the retrieval catalog it was handed, so an
+    answer with four sources arrives reading "[8], [14], [21], [27]". Those
+    positions are invisible to the reader and mean nothing — papers carry no
+    number of their own. Renumbering by order of appearance, rather than
+    ascending, is what stops the prose reading "as shown in [2] ... and [1]".
+
+    Markers inside code are left completely alone. This is load-bearing, not
+    tidiness: renumbering rewrites every in-range marker, so an unguarded pass
+    would turn `arr[8]` in a snippet into `arr[3]`. The same guard fixes a
+    pre-existing bug where an out-of-range `arr[99]` became
+    `arr[source unavailable]` inside a fenced block.
+
+    Returns the rewritten text and the old→new map, ordered by new number.
+    """
+    # Split into alternating prose and code segments. Only prose is rewritten,
+    # and code segments are reassembled byte-for-byte.
+    segments: list[tuple[str, bool]] = []  # (text, is_code)
+    cursor = 0
+    for match in _CODE_SPAN_RE.finditer(text):
+        if match.start() > cursor:
+            segments.append((text[cursor : match.start()], False))
+        segments.append((match.group(0), True))
+        cursor = match.end()
+    segments.append((text[cursor:], False))
+
+    # First pass: assign numbers in order of appearance across prose only, so
+    # a marker buried in a code block cannot claim a number.
+    mapping: dict[int, int] = {}
+    for body, is_code in segments:
+        if is_code:
+            continue
+        for match in _CITATION_RE.finditer(body):
+            n = int(match.group(1))
+            if 0 < n <= max_n and n not in mapping:
+                mapping[n] = len(mapping) + 1
+
+    def _rewrite(match: re.Match[str]) -> str:
+        n = int(match.group(1))
+        # An out-of-range marker points at nothing, so it never earns a number.
+        return f"[{mapping[n]}]" if n in mapping else "[source unavailable]"
+
+    rewritten = "".join(
+        body if is_code else _CITATION_RE.sub(_rewrite, body) for body, is_code in segments
+    )
+    return rewritten, mapping
+
 
 class PaperInfo(BaseModel):
     """Just enough about a paper to scope retrieval and label a citation."""
