@@ -34,6 +34,61 @@ _TARGETER_CANDIDATES = 10
 
 _CITATION_RE = re.compile(r"\[(\d+)\]")
 
+# Words that make a question possibly about a paper's authors, year or venue.
+# Deliberately over-broad: "who" and "when" fire on plenty of ordinary content
+# questions, and that is the correct bias. A false positive costs 3,158 tokens
+# — what every turn paid before this routing existed. A false negative makes
+# the model report that a paper does not state its authors, because the block
+# it was given had none.
+_METADATA_KEYWORDS = (
+    "author",
+    "wrote",
+    "written",
+    "who",
+    "year",
+    "when",
+    "date",
+    "publish",
+    "publication",
+    "venue",
+    "journal",
+    "conference",
+    "proceeding",
+    "cite",
+    "citation",
+)
+# Anchored at word START only, with no trailing boundary. A trailing \b would
+# stop "author" matching "authors", "cite" matching "citations" and "publish"
+# matching "published" — each a real metadata question falling silently into
+# the false-negative case. The cost is over-firing on words that merely begin
+# the same way ("whole" fires "who"), which is harmless.
+_METADATA_RE = re.compile(r"\b(?:" + "|".join(_METADATA_KEYWORDS) + ")", re.IGNORECASE)
+
+
+def needs_paper_metadata(question: str, prior_messages: list[dict]) -> bool:
+    """Whether this turn should carry paper authors, year and venue.
+
+    Those three fields are 57% of the PAPERS block's tokens (3,158 of 5,529 at
+    100 papers) and exist solely to answer questions about them — the block is
+    their only permitted source, and the chat prompt forbids reading them out
+    of excerpts.
+
+    A pronoun-only follow-up such as "and that one?" carries no keyword at all,
+    so the previous USER message is consulted. One turn only: two turns later
+    the intent has lapsed, and widening the window trades a growing number of
+    false positives for a shrinking set of real cases.
+    """
+    if _METADATA_RE.search(question):
+        return True
+    for message in reversed(prior_messages):
+        if message["role"] == "user":
+            # Only the most recent user turn — assistant text does not carry
+            # intent, and an answer that happens to mention authors must not
+            # keep the full block alive.
+            return bool(_METADATA_RE.search(message["content"]))
+    return False
+
+
 # A fence opens with ``` or ~~~ — both are valid markdown fences, and remark
 # (the frontend's markdown renderer) treats either as <pre><code>. The
 # backreference (\1) means a fence can only be closed by the SAME delimiter
