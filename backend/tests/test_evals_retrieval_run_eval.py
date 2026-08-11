@@ -234,3 +234,83 @@ def test_display_point_falls_back_to_raw_bounds_when_recommended_point_raises():
     text = _display_point(0.499991, 0.499992)
     assert "0.499991" in text
     assert "0.499992" in text
+
+
+# --- targeted mode -------------------------------------------------------------
+
+
+def test_scope_to_paper_keeps_only_the_matching_papers_chunks():
+    from evals.retrieval.run_eval import _scope_to_paper
+
+    chunks = [
+        _s("Survey of Important Issues", "a", 0.30, paper_id="p1"),
+        _s("Applications of Multi-Agent RL", "b", 0.31, paper_id="p2"),
+        _s("Survey of Important Issues", "c", 0.55, paper_id="p1"),
+    ]
+    scoped = _scope_to_paper(chunks, "survey of important")
+    assert [c.chunk_text for c in scoped] == ["a", "c"]
+
+
+def test_scope_to_paper_is_case_insensitive_and_sorted_by_distance():
+    from evals.retrieval.run_eval import _scope_to_paper
+
+    chunks = [
+        _s("Survey Of Important Issues", "far", 0.55, paper_id="p1"),
+        _s("Survey Of Important Issues", "near", 0.30, paper_id="p1"),
+    ]
+    assert [c.chunk_text for c in _scope_to_paper(chunks, "SURVEY of")] == ["near", "far"]
+
+
+def test_scope_to_nearest_paper_picks_the_paper_holding_the_closest_chunk():
+    """The targeter-misfire simulation for off_topic cases: production would
+    scope to whichever paper looked closest, so that is the paper whose
+    kept-count measures the ceiling."""
+    from evals.retrieval.run_eval import _scope_to_nearest_paper
+
+    chunks = [
+        _s("Far Paper", "x", 0.80, paper_id="p2"),
+        _s("Near Paper", "y", 0.76, paper_id="p1"),
+        _s("Near Paper", "z", 0.88, paper_id="p1"),
+    ]
+    scoped = _scope_to_nearest_paper(chunks)
+    assert {c.paper_id for c in scoped} == {"p1"}
+    assert [c.chunk_text for c in scoped] == ["y", "z"]
+
+
+def test_scope_to_nearest_paper_handles_no_chunks():
+    from evals.retrieval.run_eval import _scope_to_nearest_paper
+
+    assert _scope_to_nearest_paper([]) == []
+
+
+def test_production_cut_applies_ceiling_then_budget_then_delta():
+    """Order matters and mirrors production exactly: SQL filters by the
+    ceiling and LIMITs to the budget, and only then does the delta cut run."""
+    from evals.retrieval.run_eval import _production_cut
+
+    chunks = [
+        _s("P", "a", 0.50, paper_id="p1"),
+        _s("P", "b", 0.70, paper_id="p1"),
+        _s("P", "c", 0.80, paper_id="p1"),  # beyond delta, inside ceiling
+        _s("P", "d", 0.90, paper_id="p1"),  # beyond ceiling
+    ]
+    kept = _production_cut(chunks, ceiling=0.85, delta=0.25, budget=60)
+    assert [c.chunk_text for c in kept] == ["a", "b"]
+
+
+def test_production_cut_budget_binds_before_the_delta():
+    from evals.retrieval.run_eval import _production_cut
+
+    chunks = [_s("P", f"c{i}", 0.50 + i * 0.001, paper_id="p1") for i in range(10)]
+    kept = _production_cut(chunks, ceiling=0.85, delta=0.25, budget=4)
+    assert len(kept) == 4
+
+
+def test_production_cut_on_off_topic_distances_keeps_almost_nothing():
+    """The measured shape of the ceiling's job: an off-topic question's
+    nearest chunk sits at 0.7518-0.8581, so a delta-only rule would keep the
+    whole paper while the ceiling keeps 0-1 chunks."""
+    from evals.retrieval.run_eval import _production_cut
+
+    chunks = [_s("P", f"c{i}", 0.86 + i * 0.005, paper_id="p1") for i in range(20)]
+    assert _production_cut(chunks, ceiling=0.85, delta=0.25, budget=60) == []

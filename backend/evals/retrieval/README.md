@@ -30,6 +30,10 @@ Flags:
 - `--json` — also write the full per-case results, threshold-sweep grid, and
   closed-form separation to this path. See "Reading the output" for the
   `--json` shape and how it differs from the console report.
+- `--targeted` — also measure production's **single-paper** cut (see
+  "Targeted mode" below). Costs no extra queries: it re-uses the chunks
+  already fetched for the global report. Absent, `main()`'s existing global
+  report is unchanged.
 
 ## What it measures vs. what production does
 
@@ -56,6 +60,72 @@ One divergence remains:
   questions, the two paths still agree: there's no reformulation for either
   of them to diverge on. Re-validate this section if the golden set ever
   grows multi-turn cases, or after any change to the reformulator's behavior.
+
+## Targeted mode
+
+    docker compose exec -T backend python -m evals.retrieval.run_eval \
+      --project-id <uuid> --targeted
+
+The global report above measures the path production takes when retrieval is
+scoped to the whole project. Since 2026-08-10 there is a second production
+path: when a paper targeter has scoped retrieval to ONE paper,
+`chat_service._retrieve_paper_chunks` swaps in a looser SQL ceiling
+(`settings.intra_paper_ceiling`) plus a relative delta cut
+(`settings.intra_paper_delta`, via `keep_within_paper`) instead of the global
+`similarity_threshold`. `--targeted` is what measures *that* path — the
+global report cannot see it at all, because a global top-k across 100 papers
+never lets one paper's low-ranked-but-correct chunk through.
+
+**What it simulates.** Each case is scoped to a single paper, the same way
+the targeter would:
+- `content` / `metadata` / `figure` cases scope to the paper the case names
+  (`_scope_to_paper`) — the targeter picked correctly.
+- `off_topic` cases scope to whichever paper holds the globally nearest
+  chunk (`_scope_to_nearest_paper`) — this simulates the targeter
+  *mis-firing* on a question the library cannot answer, which is exactly the
+  scenario `intra_paper_ceiling` exists to contain. There is no "correct"
+  paper to scope an off_topic case to, so the worst case (nearest wrong
+  paper) is what's measured.
+
+`_production_cut` then applies the cut to that scoped, distance-sorted list
+in production's exact order — SQL filters on the ceiling, LIMITs to
+`max_context_chunks`, *then* the delta cut runs in Python — because that
+order matters: budget-then-delta and delta-then-budget can keep different
+chunks. The cut itself is `keep_within_paper`, **imported** from
+`app.services.intra_paper_ranker` rather than reimplemented here, so the
+harness can never measure a policy that has drifted from what production
+actually ships.
+
+**The metric is survival@cut**: of the positive cases, what fraction still
+have their satisfying chunk after the single-paper cut runs
+(`kept` chunks), not just somewhere in the paper's full chunk list
+(`intra_rank`). A case can show a deep `intra_rank` and still `survive` —
+that's the point of the looser ceiling — or show a shallow one and still get
+cut, which is a real finding, not a bug to code around.
+
+The report's columns:
+
+- **chunks** — how many chunks the scoped paper contributed (its full
+  chunk count for positives; the nearest-paper's chunk count for
+  off_topic).
+- **intra_rank** — the satisfying chunk's 1-based rank *within that single
+  paper's* distance order, before any cut. `-` for off_topic (no satisfying
+  chunk is defined for a negative).
+- **kept** — how many chunks survive `_production_cut`. For off_topic rows
+  this is the ceiling measurement, not a rank: it is what
+  `intra_paper_ceiling` lets through when the targeter picks the wrong paper.
+- **survived** — whether the satisfying chunk is still present after the
+  cut. `-` for off_topic, same reason as `intra_rank`.
+
+`survival@cut` at the bottom is `survived == yes` count over scored
+(non-off_topic) cases — the single number to watch when re-tuning
+`intra_paper_delta`. The `ceiling check` line beneath it is the off_topic
+side of the same coin: the worst (largest) `kept` count across off_topic
+rows, flagged if it exceeds 2 — a large kept-count on a mis-targeted
+off_topic case means the ceiling itself is too loose, independent of delta.
+
+In `--json`, this is the `targeted` key (a list of the same per-case rows,
+or `null` when `--targeted` wasn't passed).
 
 ## Adding a case
 
