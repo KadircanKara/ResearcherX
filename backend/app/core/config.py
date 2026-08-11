@@ -72,9 +72,19 @@ class Settings(BaseSettings):
     # library size. Per-paper allocation made it the latter: measured on a
     # 100-paper library, one turn retrieved 191 chunks ≈ 118.5k tokens and
     # every question died on `context_length_exceeded` before the model saw a
-    # word. 40 chunks × ~384 words ≈ 20k tokens, which leaves room for the
-    # system prompt, conversation history and the answer itself.
-    max_context_chunks: int = 40
+    # word. 60 chunks × ~384 words ≈ 30k tokens, which leaves ample room on a
+    # 1M-token window for the system prompt, conversation history and the
+    # answer itself.
+    #
+    # Raised 40 → 60 on 2026-08-11 as SLACK, not a fix. Measured on the live
+    # corpus: asked "What reward function does the RL planner use?", the chunk
+    # holding the intended paper's reward table ranked 53rd globally, because
+    # 40 chunks from 18 other UAV-RL papers sat closer in embedding space. The
+    # ranking is what is wrong; a larger budget only buys room around it, and
+    # the same chunk sits at rank 771 under a different phrasing of the same
+    # question. Hybrid lexical + dense ranking is the actual fix — do not read
+    # this number as having solved anything.
+    max_context_chunks: int = 60
 
     # Output budget for one chat answer. PROVIDER-SPECIFIC, like the
     # similarity threshold above — re-measure when LLM_MODEL changes.
