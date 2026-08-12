@@ -151,3 +151,32 @@ def test_the_capitalisation_guard_is_checked_against_the_original_question():
     wang = ResolvablePaper(paper_id="pw", title="Some Title", authors=("Lei Wang",), year=2020)
     assert match_by_author("we walked by wang market yesterday", [wang]) == []
     assert match_by_author("the method by Wang", [wang]) == ["pw"]
+
+
+def test_an_over_captured_capital_does_not_match_a_second_paper():
+    """THE false-match lock. The {1,3} capture sweeps in "Turing"; only the
+    longest-prefix rule stops that from resolving Turing's paper."""
+    wang = ResolvablePaper(paper_id="w", title="T", authors=("Lei Wang",), year=2020)
+    turing = ResolvablePaper(paper_id="t", title="T", authors=("Alan Turing",), year=1950)
+    question = "Summarize the paper by Wang Turing award winners often cite."
+    assert match_by_author(question, [wang, turing]) == ["w"]
+
+
+def test_an_over_captured_noise_word_still_resolves_the_real_name():
+    wang = ResolvablePaper(paper_id="w", title="T", authors=("Lei Wang",), year=2020)
+    assert match_by_author("by Wang Figure 3 shows a strong trend", [wang]) == ["w"]
+
+
+def test_a_full_name_span_matches_the_author():
+    yan = ResolvablePaper(paper_id="y", title="T", authors=("Evşen Yanmaz",), year=2021)
+    assert match_by_author("the paper by Evsen Yanmaz", [yan]) == ["y"]
+
+
+def test_a_diacritic_initial_surname_is_a_valid_attribution():
+    sahin = ResolvablePaper(paper_id="s", title="T", authors=("Şahin Yıldız",), year=2021)
+    assert match_by_author("the paper by Şahin", [sahin]) == ["s"]
+
+
+def test_a_curly_apostrophe_possessive_matches():
+    hopper = ResolvablePaper(paper_id="h", title="T", authors=("Grace Hopper",), year=1959)
+    assert match_by_author("What is Hopper's paper about?", [hopper]) == ["h"]

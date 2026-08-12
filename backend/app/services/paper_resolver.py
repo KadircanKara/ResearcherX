@@ -112,19 +112,31 @@ def _contains_run(haystack: str, needle: str) -> bool:
     return f" {needle} " in f" {haystack} "
 
 
-# A name may only enter through an attribution construction. This is the whole
-# defence against the surname-collision class: "how", "park", "chen" and
-# "wang" are all real surnames on this corpus AND common English words, but
-# none of them appears inside "by ___" or "___ et al." in ordinary prose.
-#
-# The capture is deliberately greedy-but-short (1-3 capitalised words): it has
-# to reach "Van Der Berg" without swallowing the rest of the sentence.
+# Word-initial is ANY letter here; the capitalisation guard is enforced in
+# Python below, because `re` has no \p{Lu} and [A-Z] silently drops every
+# diacritic-initial surname ("Şahin") on a corpus that has them.
 _ATTRIBUTION_RES = (
-    re.compile(r"\bauthored\s+by\s+((?:[A-Z][\w''-]*\s*){1,3})"),
-    re.compile(r"\bby\s+((?:[A-Z][\w''-]*\s*){1,3})"),
-    re.compile(r"\b([A-Z][\w''-]*)\s+et\s+al\b"),
-    re.compile(r"\b([A-Z][\w''-]*)['']s\b"),
+    re.compile(r"\bauthored\s+by\s+((?:[^\W\d_][\w''-]*\s*){1,3})"),
+    re.compile(r"\bby\s+((?:[^\W\d_][\w''-]*\s*){1,3})"),
+    re.compile(r"\b([^\W\d_][\w''-]*)\s+et\s+al\b"),
+    re.compile(r"\b([^\W\d_][\w''-]*)['']s\b"),
 )
+
+
+def _leading_capitalised(span: str) -> str:
+    """The leading run of capitalised words in `span`.
+
+    THE capitalisation guard, and it runs on the ORIGINAL question text:
+    "by wang market" is ordinary prose, "by Wang" is an attribution. Trimming
+    at the first lowercase word is what keeps the regex's any-letter class
+    from admitting prose.
+    """
+    kept: list[str] = []
+    for word in span.split():
+        if not word[:1].isupper():
+            break
+        kept.append(word)
+    return " ".join(kept)
 
 
 def _attributed_names(question: str) -> list[str]:
@@ -137,7 +149,7 @@ def _attributed_names(question: str) -> list[str]:
     names: list[str] = []
     for pattern in _ATTRIBUTION_RES:
         for match in pattern.finditer(question):
-            span = match.group(1).strip()
+            span = _leading_capitalised(match.group(1).strip())
             if span:
                 names.append(span)
     return names
@@ -149,16 +161,28 @@ def match_by_author(question: str, papers: Sequence[ResolvablePaper]) -> list[st
     Returns every paper the attributed names cover, in input order. Whether
     several papers is a resolution or an ambiguity is `resolve_papers`'
     decision, not this function's.
+
+    LONGEST MATCHING PREFIX, not any-token overlap. The regex captures up to
+    three capitalised words, so it can sweep in a capitalised word that is not
+    part of the name at all -- "by Wang Turing award winners" captures
+    "Wang Turing". Overlap matching then hit Turing's paper too: a false match,
+    the exact class this module exists to prevent. Taking the longest prefix
+    that is fully contained in ONE paper's author tokens rejects the stray
+    word while still resolving the real name.
     """
     if not papers:
         return []
-    name_tokens = {token for name in _attributed_names(question) for token in word_tokens(name)}
-    if not name_tokens:
-        return []
-
-    matched: list[str] = []
-    for paper in papers:
-        author_tokens = {token for author in paper.authors for token in word_tokens(author)}
-        if name_tokens & author_tokens:
-            matched.append(paper.paper_id)
-    return matched
+    tokens_by_paper = {
+        paper.paper_id: {token for author in paper.authors for token in word_tokens(author)}
+        for paper in papers
+    }
+    matched: set[str] = set()
+    for name in _attributed_names(question):
+        tokens = word_tokens(name)
+        for length in range(len(tokens), 0, -1):
+            prefix = set(tokens[:length])
+            hits = [p.paper_id for p in papers if prefix <= tokens_by_paper[p.paper_id]]
+            if hits:
+                matched.update(hits)
+                break
+    return [p.paper_id for p in papers if p.paper_id in matched]
