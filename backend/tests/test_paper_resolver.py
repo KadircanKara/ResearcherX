@@ -178,5 +178,18 @@ def test_a_diacritic_initial_surname_is_a_valid_attribution():
 
 
 def test_a_curly_apostrophe_possessive_matches():
+    """Built with chr(0x2019), never a literal ': a literal has been flattened
+    to ASCII twice in this file's history, which left this test passing while
+    exercising nothing."""
     hopper = ResolvablePaper(paper_id="h", title="T", authors=("Grace Hopper",), year=1959)
-    assert match_by_author("What is Hopper's paper about?", [hopper]) == ["h"]
+    question = "What is Hopper" + chr(0x2019) + "s paper about?"
+    assert match_by_author(question, [hopper]) == ["h"]
+
+
+def test_the_attribution_patterns_carry_the_curly_apostrophe():
+    """Structural lock. The behavioural test above can only fail if the class
+    loses U+2019; this one fails the moment it is flattened, naming the cause
+    directly instead of leaving a confusing behavioural miss."""
+    from app.services.paper_resolver import _ATTRIBUTION_RES
+
+    assert any(chr(0x2019) in pattern.pattern for pattern in _ATTRIBUTION_RES)

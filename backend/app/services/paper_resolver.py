@@ -112,14 +112,21 @@ def _contains_run(haystack: str, needle: str) -> bool:
     return f" {needle} " in f" {haystack} "
 
 
-# Word-initial is ANY letter here; the capitalisation guard is enforced in
-# Python below, because `re` has no \p{Lu} and [A-Z] silently drops every
-# diacritic-initial surname ("Şahin") on a corpus that has them.
+# U+2019 RIGHT SINGLE QUOTATION MARK, built with chr() rather than written as
+# a literal. Smart-quote autocorrect turns a typed "Hopper's" into "Hopper's",
+# so the class has to accept both -- but a literal ' in this source has now
+# been silently flattened to ASCII twice in transcription, taking the guard
+# with it and leaving a test that passed while asserting nothing. chr() is
+# all-ASCII source: there is nothing left for a transcription step to eat.
+_RSQUO = chr(0x2019)
+_NAME_CHARS = rf"[\w'{_RSQUO}-]"
+_APOSTROPHE = rf"['{_RSQUO}]"
+
 _ATTRIBUTION_RES = (
-    re.compile(r"\bauthored\s+by\s+((?:[^\W\d_][\w''-]*\s*){1,3})"),
-    re.compile(r"\bby\s+((?:[^\W\d_][\w''-]*\s*){1,3})"),
-    re.compile(r"\b([^\W\d_][\w''-]*)\s+et\s+al\b"),
-    re.compile(r"\b([^\W\d_][\w''-]*)['']s\b"),
+    re.compile(rf"\bauthored\s+by\s+((?:[^\W\d_]{_NAME_CHARS}*\s*){{1,3}})"),
+    re.compile(rf"\bby\s+((?:[^\W\d_]{_NAME_CHARS}*\s*){{1,3}})"),
+    re.compile(rf"\b([^\W\d_]{_NAME_CHARS}*)\s+et\s+al\b"),
+    re.compile(rf"\b([^\W\d_]{_NAME_CHARS}*){_APOSTROPHE}s\b"),
 )
 
 
