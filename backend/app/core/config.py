@@ -148,6 +148,30 @@ class Settings(BaseSettings):
     # this number as having solved anything.
     max_context_chunks: int = 60
 
+    # Chunks every admitted paper is guaranteed before any paper goes deep, in
+    # MULTI-paper scope only (single-paper scope has no merge — see
+    # chat_service._retrieve_multi_paper_chunks).
+    #
+    # This is the single knob trading representation against misfire cost.
+    # Pure parity (floor = max_context_chunks // len(papers)) guarantees a
+    # balanced comparison but hands a wrongly-resolved paper 30 of 60 slots at
+    # two papers, where a global sort would have given it few. A small floor
+    # bounds that damage while keeping the guarantee that made the merge
+    # necessary in the first place.
+    #
+    # 5 matches BEAR's top-5-nodes-per-document (arXiv 2601.18116) and
+    # independent practitioner guidance of 3-5 chunks per document for
+    # comparison queries.
+    #
+    # MODEL-SPECIFIC in the way intra_paper_delta is: re-sweep with
+    # `run_eval --multi` after any embedding-model change.
+    per_paper_floor: int = 5
+
+    # Cap on how many papers one question may scope to. The shortlist already
+    # caps candidates at 10 (_TARGETER_CANDIDATES); past this, every paper is
+    # diluted to the floor and the scope stops being a scoping signal at all.
+    max_resolved_papers: int = 5
+
     # Output budget for one chat answer. PROVIDER-SPECIFIC, like the
     # similarity threshold above — re-measure when LLM_MODEL changes.
     #
@@ -244,6 +268,23 @@ class Settings(BaseSettings):
                 "INTRA_PAPER_CEILING is below SIMILARITY_THRESHOLD (single-paper "
                 "scope would silently become STRICTER than global scope, the "
                 "opposite of its purpose as a looser noise floor)"
+            )
+        if self.per_paper_floor < 1:
+            raise ValueError(
+                "PER_PAPER_FLOOR is below 1 (merge_across_papers would guarantee "
+                "no paper anything, collapsing multi-paper scope back to the "
+                "global sort this feature exists to replace)"
+            )
+        if self.per_paper_floor > self.max_context_chunks:
+            raise ValueError(
+                "PER_PAPER_FLOOR exceeds MAX_CONTEXT_CHUNKS (the floor could "
+                "never be met, so the guarantee it encodes would be silently "
+                "unreachable)"
+            )
+        if self.max_resolved_papers < 1:
+            raise ValueError(
+                "MAX_RESOLVED_PAPERS is below 1 (every resolution would be "
+                "discarded and scope would always fall through to global)"
             )
         return self
 

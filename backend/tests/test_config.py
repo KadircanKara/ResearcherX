@@ -86,3 +86,26 @@ def test_settings_construct_normally_with_shipped_defaults():
     transitively app.core.config) at collection time. A regression here
     would fail every test in the suite, not just this one."""
     Settings()  # must not raise
+
+
+def test_per_paper_floor_defaults_to_five():
+    assert Settings().per_paper_floor == 5
+
+
+def test_max_resolved_papers_defaults_to_five():
+    assert Settings().max_resolved_papers == 5
+
+
+def test_zero_per_paper_floor_is_rejected():
+    with pytest.raises(ValidationError, match="PER_PAPER_FLOOR"):
+        Settings(per_paper_floor=0)
+
+
+def test_a_floor_above_the_budget_is_rejected():
+    with pytest.raises(ValidationError, match="PER_PAPER_FLOOR"):
+        Settings(per_paper_floor=61, max_context_chunks=60)
+
+
+def test_zero_max_resolved_papers_is_rejected():
+    with pytest.raises(ValidationError, match="MAX_RESOLVED_PAPERS"):
+        Settings(max_resolved_papers=0)
