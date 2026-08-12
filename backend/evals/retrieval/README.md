@@ -34,6 +34,10 @@ Flags:
   "Targeted mode" below). Costs no extra queries: it re-uses the chunks
   already fetched for the global report. Absent, `main()`'s existing global
   report is unchanged.
+- `--multi` — also measure production's **multi-paper** cut on synthetic
+  pairs (see "Multi-paper mode" below). Costs no extra queries: it re-uses
+  the chunks already fetched for the global report, same as `--targeted`.
+  Absent, `main()`'s existing global report is unchanged.
 
 ## What it measures vs. what production does
 
@@ -270,6 +274,159 @@ changes across points. If it does not, the override is not reaching the
 process and every row is the same delta measured five times. One run costs one
 embedding API call per case, so a five-point sweep over ~40 cases is ~200
 calls — cheap, but not free; do not re-run it to confirm a documentation edit.
+
+## Multi-paper mode
+
+    docker compose exec -T backend python -m evals.retrieval.run_eval \
+      --project-id <uuid> --multi
+
+Since 2026-08-12 there is a third production path: when scope resolves to
+MORE than one paper (`paper_resolver.py` rung 1, or the list-valued
+`PaperTargeterAgent` at rung 2), `chat_service._retrieve_multi_paper_chunks`
+admits each resolved paper on `settings.similarity_threshold`, cuts every
+admitted paper against its OWN nearest chunk with `keep_within_paper` (the
+same function `--targeted` measures for the single-paper path), then merges
+the per-paper cuts round-robin to `settings.per_paper_floor` before filling
+the rest of `max_context_chunks` by distance. `--multi` is what measures
+that merge — neither the global report nor `--targeted` can see it, since
+both operate on one undifferentiated pool (the whole project, or one paper).
+
+**What synthetic pairing simulates.** `--multi` costs no extra authoring: it
+reuses the existing single-paper golden set, pairing each positive case's
+question with its OWN paper (scoped with the same `_scope_to_paper` helper
+`--targeted` uses) plus the NEAREST OTHER case's paper — by rotation through
+the case list, wrapping around, skipping candidates that target the SAME
+paper as the case being paired. This measures the one thing a single-paper
+golden set structurally cannot: whether an answering chunk SURVIVES when a
+second paper competes for the same fixed budget — the asymmetric-evidence
+hazard the merge exists to contain.
+
+**What it explicitly CANNOT see: a genuine comparison question whose answer
+lives in BOTH papers at once** (e.g. "how do X and Y differ in their
+approach to Z"). Every synthetic pair still scores against ONE case's
+single expectation (`expect_substrings`) — there is no question in the
+golden set that requires content from both scoped papers to satisfy. Seeing
+that needs hand-authored cases using the golden set's `expect_papers` list
+form (see "Adding a case" below for the schema); none exist yet in
+`golden_set.json` — this is deferred work, not an oversight.
+
+**The metrics**, printed under `MULTI-PAPER (synthetic pairs)`:
+
+- **survival@cut** — of the synthetic pairs produced, what fraction still
+  have their satisfying chunk after the multi-paper cut runs. Same
+  definition `--targeted`'s survival@cut uses, applied to the two-paper
+  merge instead of the single-paper cut.
+- **mean kept** — mean total chunks kept per pair (own + other), across the
+  fixed `max_context_chunks` budget.
+- **mean own slots** / **mean other slots** — the mean kept-chunk count
+  belonging to the case's own paper vs. the partner paper it was paired
+  against. This is the allocation `per_paper_floor` exists to shape; watch
+  it alongside survival@cut, not instead of it — a floor could in principle
+  preserve survival while still starving one side's representation.
+- **floor** — the `per_paper_floor` value the run measured, printed so a
+  console log is self-describing without cross-referencing `.env`.
+
+**Skips are reported with distinct per-branch reasons, and that is load-
+bearing, not decorative.** `_synthetic_pairs` collects every case it could
+NOT turn into a pair, tagged with why: `no needle to scope its own paper`,
+`no case with a different paper`, `empty scope for one side`,
+`needle matches 2+ papers`, `own and partner needles resolved to the same
+paper`. `survival@cut`'s denominator is `len(rows)`, not the size of the
+golden set — a report that dropped cases into a bare `continue` without
+naming them could look like perfect coverage (`1.00`) while quietly scoring
+fewer and fewer pairs as golden-set edits break needles over time. The
+`skipped N` line is printed even at `N = 0` (matching the precedent
+`_targeted_case_status` set for `--targeted`'s `errors` list) so a future
+regression shows a nonzero count instead of a shrunken but still
+perfect-looking ratio.
+
+### Swept — 2026-08-12
+
+The floor sweep that set `per_paper_floor`. Full conditions: project
+`fa2ab869-6b13-4b31-be5e-ff0c22652922` (100 papers / 4527 chunks), model
+`text-embedding-3-small`, `intra_paper_ceiling = 0.85`,
+`intra_paper_delta = 0.20`, `max_context_chunks = 60`, 30 synthetic pairs
+(built from the same 30-positive golden set behind `--targeted`'s
+"Measured — 2026-08-12" table above).
+
+| floor | survival@cut | mean own slots | mean other slots |
+|-------|--------------|-----------------|-------------------|
+| 1     | 1.00 (30/30) | 24.9            | 32.2              |
+| 3     | 1.00 (30/30) | 24.9            | 32.2              |
+| 5     | 1.00 (30/30) | 24.9            | 32.3              |
+| 8     | 1.00 (30/30) | 24.8            | 32.4              |
+| 12    | 1.00 (30/30) | 24.5            | 32.6              |
+| 15    | 1.00 (30/30) | 24.2            | 32.9              |
+| 30    | 1.00 (30/30) | 20.6            | 36.6              |
+
+`skipped 0` at every floor.
+
+**FLAT — this sweep could not choose a value.** survival@cut is 1.00 at
+every floor from 1 through 30 (a floor of 30 hands HALF the entire budget
+to one side of a two-paper pair, yet nothing breaks). Cause: own + other
+slots sum to ~57 of the 60-chunk budget at every floor, so both papers in a
+synthetic pair are already well represented by distance alone before the
+floor gets a chance to act. The floor only matters when one paper's natural
+(distance-ordered) share would be near zero, and these pairs never enter
+that band: both papers are drawn from the same 100-paper single-topic
+corpus, and both clear the admission gate (`similarity_threshold = 0.75`)
+comfortably — every case here is built from a POSITIVE, whose scoped paper
+is by construction the one holding its answer.
+
+**The shipped default stayed at 5.** It rests on BEAR's (arXiv 2601.18116)
+top-5-nodes-per-document figure and the independent 3-5-chunks-per-document
+practitioner guidance cited in `config.py` — NOT on this measurement. This
+table is recorded because it is what was actually run, not because it
+justifies the number next to it: a negative result, written up honestly
+rather than dressed up as though measurement drove the choice.
+
+**The `intra_paper_delta` tiebreak ("smallest survivor wins") does not
+transfer to this constant, even setting the flat result aside.** `delta`
+changes HOW MANY chunks are kept — real token cost. `floor` only changes
+ALLOCATION inside the already-fixed `max_context_chunks` budget — a smaller
+floor is not cheaper. Even a sweep that DID discriminate a value here would
+need a different tiebreak than "smallest wins."
+
+**What a future re-sweep would need.** Pairs where the partner paper is
+admitted (clears `similarity_threshold`) but its own chunks sit far behind
+the asking paper's nearest chunk — genuinely asymmetric evidence, not two
+papers that both clear the admission gate easily. This corpus's
+single-topic shape (see "Positives and near-domain negatives overlap on
+this corpus" above, in the delta sweep) makes such pairs hard to construct
+from the existing golden set; they would likely need hand-authored
+questions against a deliberately far-apart paper pair, or a second,
+topically diverse corpus.
+
+## `resolver_set.json`
+
+A golden set for `app.services.paper_resolver.resolve_papers` (rung 1 of
+the scope ladder — the lexical resolver ahead of the LLM targeter),
+authored against the live corpus of project
+`fa2ab869-6b13-4b31-be5e-ff0c22652922` (100 papers). Every title, author and
+year in it was queried from that project's real rows; none invented.
+
+Schema:
+
+    {"id": "unique-slug",
+     "question": "...",
+     "expect_titles": ["title substring a correct resolution must produce", ...]}
+
+`expect_titles` is order-insensitive; an EMPTY list asserts `resolve_papers`
+must return NOTHING for that question — i.e. it must fall through to rung 2
+(the LLM targeter) rather than guess.
+
+**Nothing reads this file programmatically yet — including `--multi`.**
+`--multi` measures the multi-paper CUT (`_retrieve_multi_paper_chunks`'s
+admission/delta/merge policy, given an already-resolved paper set); it does
+not touch paper RESOLUTION at all, and `resolver_set.json` is a golden set
+for that separate, earlier step. It exists for whoever writes
+`paper_resolver.py`'s own eval harness next; its cases already encode the
+resolver's known behavior as assertions to check against (title-span
+resolution for one and for two papers, an author-attribution resolution, a
+year narrowing an author-attribution ambiguity, and four "resolves to
+nothing, falls through to rung 2" cases — subject vocabulary, a surname
+colliding with a common word, an ambiguous title span, and a fully general
+question) rather than as documentation examples only.
 
 ## Adding a case
 

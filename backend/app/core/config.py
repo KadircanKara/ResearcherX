@@ -161,10 +161,48 @@ class Settings(BaseSettings):
     #
     # 5 matches BEAR's top-5-nodes-per-document (arXiv 2601.18116) and
     # independent practitioner guidance of 3-5 chunks per document for
-    # comparison queries.
+    # comparison queries. UNLIKE intra_paper_delta, this rests on those
+    # external citations, not on a measurement of this corpus -- the sweep
+    # below was run and could not discriminate a value.
     #
-    # MODEL-SPECIFIC in the way intra_paper_delta is: re-sweep with
-    # `run_eval --multi` after any embedding-model change.
+    # Swept 2026-08-12 (evals/retrieval/README.md, "--multi"): `run_eval
+    # --multi` over 30 synthetic pairs, project fa2ab869-6b13-4b31-be5e-
+    # ff0c22652922 (100 papers / 4527 chunks), text-embedding-3-small,
+    # ceiling 0.85, delta 0.20, budget 60:
+    #
+    #   floor  survival@cut  mean own slots  mean other slots
+    #   1      1.00 (30/30)  24.9            32.2
+    #   3      1.00 (30/30)  24.9            32.2
+    #   5      1.00 (30/30)  24.9            32.3
+    #   8      1.00 (30/30)  24.8            32.4
+    #   12     1.00 (30/30)  24.5            32.6
+    #   15     1.00 (30/30)  24.2            32.9
+    #   30     1.00 (30/30)  20.6            36.6
+    #
+    # skipped 0 at every floor. FLAT: survival@cut is 1.00 from floor 1
+    # through floor 30, so the sweep cannot choose a value. Cause: mean kept
+    # (own + other slots) sits at ~57 of the 60-chunk budget at every floor,
+    # so both papers in a synthetic pair are already well represented by
+    # distance alone and the floor rarely binds -- it only acts when one
+    # paper's natural share would be near zero, and these pairs (both papers
+    # drawn from the same 100-paper topical corpus, both clearing the
+    # admission gate easily) never enter that band.
+    #
+    # NOT the same reasoning as intra_paper_delta's "smallest survivor
+    # wins": delta changes HOW MANY chunks are kept (real token cost);
+    # floor only changes ALLOCATION inside the fixed max_context_chunks
+    # budget. A smaller floor is not cheaper, so even a discriminating
+    # sweep would not make "smallest" the tiebreak here.
+    #
+    # KEPT AT 5 on the citations above -- a negative result, recorded
+    # honestly rather than written up as though this measurement drove the
+    # choice. A future re-sweep needs pairs where the partner paper is
+    # admitted but its chunks sit far behind the asking paper's own nearest
+    # chunk -- genuinely asymmetric evidence, which this synthetic-pairing
+    # method (see the README section above) cannot construct from a single-
+    # topic corpus. Re-sweep with `run_eval --multi` after any
+    # embedding-model change regardless, per the model-specific rule that
+    # governs intra_paper_delta and intra_paper_ceiling too.
     per_paper_floor: int = 5
 
     # Cap on how many papers one question may scope to. The shortlist already

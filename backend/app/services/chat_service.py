@@ -127,14 +127,32 @@ def needs_paper_metadata(question: str, prior_messages: list[dict]) -> bool:
     others -- and "how" alone opens a large share of all questions). The
     list of collisions grows with every paper added, silently, with nothing
     to flag when a new author erodes the saving again. It also bought less
-    than it cost: the paper TARGETER, which decides retrieval scoping, only
-    ever receives paper TITLES, so the system already cannot resolve
-    "Kara's paper" to a paper at the retrieval layer -- naming the author in
-    the answer-time block never fixed that; it only let the model repeat a
-    name for chunks it had already been handed some other way. Do not
-    reintroduce corpus tokens to "fix" this gap without solving that
-    retrieval-layer problem first, or the same three collision classes
-    return.
+    than it cost AT THE TIME: the paper TARGETER, which decides retrieval
+    scoping, only ever received paper TITLES, so the system could not
+    resolve "Kara's paper" to a paper at the retrieval layer -- naming the
+    author in the answer-time block never fixed that; it only let the model
+    repeat a name for chunks it had already been handed some other way.
+
+    THAT RETRIEVAL-LAYER PROBLEM IS NOW SOLVED, separately from this
+    function: `app/services/paper_resolver.py` (rung 1 of the scope ladder,
+    ahead of the LLM targeter) resolves "Kara's paper" by anchoring every
+    matcher on a syntactic construction -- a >=4-word contiguous title span,
+    a name inside a `by X` / `X et al.` / `X's paper` attribution, or a bare
+    year -- never on a bare corpus token. The collision measurements above
+    remain valid and are exactly why: they are the reason `paper_resolver.py`
+    anchors on syntax instead of a surname/venue token list. Bag-of-words
+    matching is therefore still forbidden, there or anywhere else in the
+    resolution path -- reintroducing it reopens the same three collision
+    classes.
+
+    THIS DOCSTRING'S OWN GAP IS STILL OPEN, though: a question that
+    REFERENCES a paper's metadata without a keyword or year -- "What does
+    Kara's paper say about X" -- can now resolve at the retrieval layer
+    (chunks come back scoped to the right paper) while still not tripping
+    THIS function, so the answer-time metadata block (authors/year/venue)
+    stays omitted even though the question named the paper by author. Fixing
+    that is a `_matches_keyword_or_year` change, not a `paper_resolver.py`
+    one -- the two gaps are different layers and this fix does not close it.
 
     A pronoun-only follow-up such as "and that one?" carries no keyword or
     year at all, so the previous USER message is consulted. One turn only:
