@@ -446,7 +446,7 @@ def test_synthetic_pairs_scope_each_question_to_two_papers():
     """Mutation this catches: scoping to the WHOLE corpus instead of the two
     named papers would pull no extra rows here (the fixture only has two
     papers per case), but swapping which needle is "own" vs "partner" -- or
-    forgetting to rotate to the NEXT case's paper -- would flip
+    breaking the different-needle partner search -- would flip
     partner_title or break the own+partner==kept accounting."""
     from evals.retrieval.golden_set import Case, PaperExpectation
     from evals.retrieval.run_eval import _synthetic_pairs
@@ -469,9 +469,10 @@ def test_synthetic_pairs_scope_each_question_to_two_papers():
         Scored("pb", "Beta Paper", "beta answer here", 0.32),
         Scored("pa", "Alpha Paper", "unrelated", 0.45),
     ]
-    rows = _synthetic_pairs([(a, chunks_a), (b, chunks_b)])
+    rows, skipped = _synthetic_pairs([(a, chunks_a), (b, chunks_b)])
 
     assert [r["id"] for r in rows] == ["ca", "cb"]
+    assert skipped == []
     assert rows[0]["partner_title"] == "Beta"
     assert rows[0]["survived"] is True
     assert rows[0]["own_slots"] + rows[0]["partner_slots"] == rows[0]["kept"]
@@ -482,7 +483,7 @@ def test_synthetic_pairs_needs_at_least_two_cases():
     (or misbehave on `cases[0 % 0]`) instead of returning an empty report."""
     from evals.retrieval.run_eval import _synthetic_pairs
 
-    assert _synthetic_pairs([]) == []
+    assert _synthetic_pairs([]) == ([], [])
 
 
 def test_synthetic_pairs_skips_a_needle_that_matches_more_than_one_paper():
@@ -491,7 +492,8 @@ def test_synthetic_pairs_skips_a_needle_that_matches_more_than_one_paper():
     than one title -- here "Alpha" matches both "Alpha Paper" and "Alpha
     Extended Paper" -- silently corrupting the two-paper scope this mode
     claims to measure. Mirrors _targeted_case_status's guard for targeted
-    mode."""
+    mode. Also pins that the drop is NAMED in `skipped`, not just absent
+    from `rows`."""
     from evals.retrieval.golden_set import Case, PaperExpectation
     from evals.retrieval.run_eval import _synthetic_pairs
 
@@ -518,6 +520,56 @@ def test_synthetic_pairs_skips_a_needle_that_matches_more_than_one_paper():
         Scored("pb", "Beta Paper", "beta answer here", 0.32),
         Scored("pa", "Alpha Paper", "unrelated", 0.45),
     ]
-    rows = _synthetic_pairs([(a, chunks_a), (b, chunks_b)])
+    rows, skipped = _synthetic_pairs([(a, chunks_a), (b, chunks_b)])
 
     assert [r["id"] for r in rows] == ["cb"]
+    assert skipped == [("ca", "needle matches 2+ papers")]
+
+
+def test_synthetic_pairs_recovers_cases_whose_immediate_neighbor_shares_their_needle():
+    """The coordinator-flagged bug, reproduced at minimum scale: two
+    consecutive cases target the SAME paper ("Same"), followed by a case
+    targeting a DIFFERENT paper ("Different") -- exactly the shape that
+    dropped occupancy-updates/authors-of-search-paper/marl-security-attacks
+    live (3 of 30 cases, invisibly, on a report whose numbers set the
+    shipped per_paper_floor).
+
+    Mutation this catches: reverting the partner search to plain
+    `cases[(i + 1) % len(cases)]` -- under that pairing, c0's partner is c1
+    (SAME needle as its own), so c0 is dropped via the
+    `own_needle == partner_needle` guard and rows only contains {c1, c2}, 2
+    of 3. This test requires all 3."""
+    from evals.retrieval.golden_set import Case, PaperExpectation
+    from evals.retrieval.run_eval import _synthetic_pairs
+
+    def _case(case_id: str, needle: str, sub: str) -> Case:
+        return Case(
+            id=case_id,
+            kind="content",
+            question=f"question for {case_id}",
+            expect_papers=(PaperExpectation(title_contains=needle, expect_substrings=(sub,)),),
+        )
+
+    c0 = _case("c0", "Same", "same answer")
+    c1 = _case("c1", "Same", "same answer two")
+    c2 = _case("c2", "Different", "different answer")
+    # Each case's own full corpus fetch carries rows for BOTH papers, exactly
+    # as a real unfiltered query would -- who ends up "own" vs "partner"
+    # depends only on which needle belongs to which case, not on which rows
+    # happen to be present.
+    chunks0 = [
+        Scored("p1", "Same Paper", "same answer chunk", 0.30),
+        Scored("p2", "Different Paper", "different answer chunk", 0.40),
+    ]
+    chunks1 = [
+        Scored("p1", "Same Paper", "same answer two chunk", 0.31),
+        Scored("p2", "Different Paper", "different unrelated", 0.41),
+    ]
+    chunks2 = [
+        Scored("p2", "Different Paper", "different answer chunk", 0.32),
+        Scored("p1", "Same Paper", "same unrelated", 0.42),
+    ]
+    rows, skipped = _synthetic_pairs([(c0, chunks0), (c1, chunks1), (c2, chunks2)])
+
+    assert {r["id"] for r in rows} == {"c0", "c1", "c2"}
+    assert skipped == []

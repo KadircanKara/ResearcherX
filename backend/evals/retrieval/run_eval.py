@@ -415,9 +415,11 @@ def _multi_paper_cut(
     return kept, [*rejected, *empty]
 
 
-def _synthetic_pairs(cases: list[tuple[Case, list[Scored]]]) -> list[dict]:
+def _synthetic_pairs(
+    cases: list[tuple[Case, list[Scored]]],
+) -> tuple[list[dict], list[tuple[str, str]]]:
     """Ask each positive case's question with a TWO-paper scope: its own
-    paper plus the next case's paper (wrapping around).
+    paper plus the NEAREST OTHER case's paper (by rotation, wrapping around).
 
     Zero authoring cost -- it reuses the existing single-paper golden set to
     measure the one thing that set structurally cannot see: whether an
@@ -433,34 +435,61 @@ def _synthetic_pairs(cases: list[tuple[Case, list[Scored]]]) -> list[dict]:
     `first_satisfying_rank` on the whole `Case` are safe here -- unlike a
     genuine multi-expectation `expect_papers` case, where the same calls would
     silently score only against expect_papers[0] and ignore the rest.
+
+    Returns `(rows, skipped)`. `skipped` names every case this function could
+    not produce a row for, and why -- collected instead of only `continue`d,
+    because a report that only shows `len(rows)` in its own denominator can
+    silently shrink its coverage while still printing a perfect score. See
+    `_report_multi`, which prints this list unconditionally.
     """
     if len(cases) < 2:
-        return []
+        return [], []
     rows: list[dict] = []
+    skipped: list[tuple[str, str]] = []
     for i, (case, chunks) in enumerate(cases):
-        partner_case, _ = cases[(i + 1) % len(cases)]
         own_needle = case.paper_title_contains or ""
-        partner_needle = partner_case.paper_title_contains or ""
-        if not own_needle or not partner_needle or own_needle == partner_needle:
+        if not own_needle:
+            skipped.append((case.id, "no needle to scope its own paper"))
             continue
+
+        # Nearest case with a DIFFERENT needle, not strictly the next one.
+        # Adjacent cases often target the SAME paper (the golden set groups
+        # them), and taking only i+1 silently dropped every member but the
+        # last of each such run -- 3 of 30 cases, invisibly, on a report whose
+        # numbers set the shipped per_paper_floor.
+        partner_case = None
+        for offset in range(1, len(cases)):
+            candidate, _ = cases[(i + offset) % len(cases)]
+            if (candidate.paper_title_contains or "") not in ("", own_needle):
+                partner_case = candidate
+                break
+        if partner_case is None:
+            skipped.append((case.id, "no case with a different paper"))
+            continue
+        partner_needle = partner_case.paper_title_contains or ""
+
         own_chunks = _scope_to_paper(chunks, own_needle)
         partner_chunks = _scope_to_paper(chunks, partner_needle)
         if not own_chunks or not partner_chunks:
+            skipped.append((case.id, "empty scope for one side"))
             continue
         # Same ambiguity guard _targeted_case_status applies, checked per
         # needle rather than on the whole pair: a needle matching more than
         # one paper would silently blend a THIRD paper's chunks into what is
         # supposed to be a clean two-paper scope, corrupting the very
         # competition this mode exists to measure.
-        if len({c.paper_id for c in own_chunks}) > 1:
-            continue
-        if len({c.paper_id for c in partner_chunks}) > 1:
+        if (
+            len({c.paper_id for c in own_chunks}) > 1
+            or len({c.paper_id for c in partner_chunks}) > 1
+        ):
+            skipped.append((case.id, "needle matches 2+ papers"))
             continue
         # Keyed by REAL paper id, not by a label: _multi_paper_cut returns
         # rejected keys in `absent`, and a label there would be unreadable.
         own_id = own_chunks[0].paper_id
         partner_id = partner_chunks[0].paper_id
         if own_id == partner_id:
+            skipped.append((case.id, "own and partner needles resolved to the same paper"))
             continue
         scoped = {own_id: own_chunks, partner_id: partner_chunks}
         kept, absent = _multi_paper_cut(
@@ -482,10 +511,10 @@ def _synthetic_pairs(cases: list[tuple[Case, list[Scored]]]) -> list[dict]:
                 "absent": len(absent),
             }
         )
-    return rows
+    return rows, skipped
 
 
-def _report_multi(rows: list[dict]) -> None:
+def _report_multi(rows: list[dict], skipped: list[tuple[str, str]]) -> None:
     """Print the multi-paper report. Modelled on _report_targeted.
 
     HONEST LIMIT, printed every time this mode runs: these are SYNTHETIC
@@ -493,6 +522,13 @@ def _report_multi(rows: list[dict]) -> None:
     case's paper -- they measure competition for a shared budget, never a
     genuine comparison question whose answer spans both papers. A mode that
     silently measured less than it appears to would be worse than no mode.
+
+    `skipped` is printed unconditionally (a "skipped 0" line included) rather
+    than only when non-empty: `_targeted_case_status` sets the precedent of
+    routing every dropped case to a visible ERRORS line, and a survival@cut
+    computed only from `len(rows)` can look like perfect coverage while
+    quietly describing fewer and fewer cases -- see _synthetic_pairs's
+    docstring for the finding this closes.
     """
     print(
         "\nMULTI-PAPER MODE measures SYNTHETIC pairs only: each case's own question, "
@@ -503,6 +539,7 @@ def _report_multi(rows: list[dict]) -> None:
     )
     if not rows:
         print("\nMULTI-PAPER: no usable pairs (need >=2 positives with distinct papers)")
+        _report_multi_skips(skipped)
         return
     survived = sum(1 for r in rows if r["survived"])
     print("\nMULTI-PAPER (synthetic pairs)")
@@ -511,12 +548,22 @@ def _report_multi(rows: list[dict]) -> None:
     print(f"  mean own slots   {sum(r['own_slots'] for r in rows) / len(rows):.1f}")
     print(f"  mean other slots {sum(r['partner_slots'] for r in rows) / len(rows):.1f}")
     print(f"  floor            {settings.per_paper_floor}")
+    _report_multi_skips(skipped)
     print("\n  id                        kept  own  other  survived")
     for r in rows:
         print(
             f"  {r['id']:<24}  {r['kept']:>4}  {r['own_slots']:>3}  "
             f"{r['partner_slots']:>5}  {str(r['survived']):>8}"
         )
+
+
+def _report_multi_skips(skipped: list[tuple[str, str]]) -> None:
+    """The `skipped N` line and its per-case reasons, printed even at N=0 so
+    a future regression shows a nonzero count instead of a shrunken -- but
+    still perfect-looking -- survival@cut denominator."""
+    print(f"  skipped          {len(skipped)}")
+    for case_id, reason in skipped:
+        print(f"    {case_id:<24}  {reason}")
 
 
 def _corpus_note(chunks: list[Scored]) -> str:
@@ -697,7 +744,8 @@ async def main() -> None:  # noqa: PLR0912, PLR0915 — a report script, not a l
         _report_targeted(targeted_rows)
 
     if args.multi:
-        _report_multi(_synthetic_pairs(positives))
+        multi_rows, multi_skipped = _synthetic_pairs(positives)
+        _report_multi(multi_rows, multi_skipped)
 
     usable_negatives = any(negatives)
 
