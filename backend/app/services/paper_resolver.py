@@ -209,6 +209,25 @@ def match_by_year(question: str, papers: Sequence[ResolvablePaper]) -> list[str]
     return [p.paper_id for p in papers if p.year is not None and p.year in years]
 
 
+def _year_is_uncorroborated(question: str, papers: Sequence[ResolvablePaper]) -> bool:
+    """True when no paper's TITLE mentions a year the question names.
+
+    A bare year is weak evidence for identity, and `.year` is not the only
+    place a year lives. Measured failure: a paper titled "The 2019 Benchmark
+    For UAV Swarms" (year=2022) sitting beside an unrelated paper with
+    year=2019 made "the 2019 benchmark paper" resolve the UNRELATED one --
+    confidently, and short-circuiting the LLM rung on the way. When a title
+    mentions the year the evidence is contested, so this rung declines and
+    lets the targeter read the surrounding words instead.
+    """
+    named = {match.group(0) for match in _YEAR_RE.finditer(question)}
+    if not named:
+        return False
+    return not any(
+        named & {match.group(0) for match in _YEAR_RE.finditer(paper.title)} for paper in papers
+    )
+
+
 def resolve_papers(
     question: str, papers: Sequence[ResolvablePaper], *, max_papers: int
 ) -> list[str]:
@@ -224,6 +243,9 @@ def resolve_papers(
         return []
 
     spans = match_by_title_span(question, papers)
+    by_author = match_by_author(question, papers)
+    by_year = match_by_year(question, papers)
+
     if spans:
         if any(len(s.paper_ids) > 1 for s in spans):
             # One span, several titles. Falling through ENTIRELY (rather than
@@ -232,10 +254,14 @@ def resolve_papers(
             # cannot.
             return []
         resolved = [s.paper_ids[0] for s in spans]
+        # A question can name one paper by title and ANOTHER by author --
+        # "Compare Breaking the Deadly Triad and the paper by Yanmaz" -- which
+        # is the comparison shape this whole feature exists to serve. Union
+        # only an UNAMBIGUOUS author hit: a name covering several papers is
+        # too vague to widen scope with.
+        if len(by_author) == 1 and by_author[0] not in resolved:
+            resolved = [*resolved, *by_author]
         return _capped(resolved, max_papers)
-
-    by_author = match_by_author(question, papers)
-    by_year = match_by_year(question, papers)
 
     if by_author:
         narrowed = [pid for pid in by_author if pid in set(by_year)] if by_year else by_author
@@ -244,8 +270,11 @@ def resolve_papers(
         # coordination by Yanmaz") that no author match can see.
         return _capped(narrowed, max_papers) if len(narrowed) == 1 else []
 
-    # A year alone resolves only when it is unique in the project.
-    return _capped(by_year, max_papers) if len(by_year) == 1 else []
+    # A year alone resolves only when it is unique in the project AND no
+    # title contests it.
+    if len(by_year) == 1 and _year_is_uncorroborated(question, papers):
+        return _capped(by_year, max_papers)
+    return []
 
 
 def _capped(paper_ids: list[str], max_papers: int) -> list[str]:

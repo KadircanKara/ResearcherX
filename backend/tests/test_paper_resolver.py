@@ -280,3 +280,48 @@ def test_resolve_falls_through_when_the_set_exceeds_the_cap():
 
 def test_resolve_returns_nothing_for_a_general_question():
     assert resolve_papers("what is reinforcement learning?", LIBRARY, max_papers=5) == []
+
+
+def test_resolve_falls_through_when_an_unambiguous_span_accompanies_an_ambiguous_one():
+    """THE lock on 'fall through ENTIRELY'. With only one span in play the
+    existing ambiguity test passes against a mutant that keeps the unambiguous
+    spans and drops only the ambiguous one; this one fails against it."""
+    dup = ResolvablePaper(
+        paper_id="p4",
+        title="Lazy Agents and Credit Assignment Revisited",
+        authors=(),
+        year=2025,
+    )
+    question = "Compare Breaking the Deadly Triad with Lazy Agents and Credit Assignment."
+    assert resolve_papers(question, [DEADLY, LAZY, dup], max_papers=5) == []
+
+
+def test_resolve_unions_a_titled_paper_with_a_single_attributed_author():
+    question = "Compare Breaking the Deadly Triad and the paper by Yanmaz."
+    assert sorted(resolve_papers(question, LIBRARY, max_papers=5)) == ["p1", "p2"]
+
+
+def test_resolve_keeps_titles_alone_when_the_attributed_author_is_ambiguous():
+    a = ResolvablePaper(
+        paper_id="pa", title="First Paper Title Here", authors=("Evsen Yanmaz",), year=2020
+    )
+    b = ResolvablePaper(
+        paper_id="pb", title="Second Paper Title Here", authors=("Evsen Yanmaz",), year=2021
+    )
+    question = "Compare Breaking the Deadly Triad and the paper by Yanmaz."
+    assert resolve_papers(question, [DEADLY, a, b], max_papers=5) == ["p1"]
+
+
+def test_resolve_falls_through_when_a_named_year_appears_in_a_title():
+    """The measured false hit: without the corroboration check this resolves
+    b2, the paper the user did not mean."""
+    bench = ResolvablePaper(
+        paper_id="b1", title="The 2019 Benchmark For UAV Swarms", authors=(), year=2022
+    )
+    other = ResolvablePaper(
+        paper_id="b2", title="Totally Unrelated Fleet Study", authors=(), year=2019
+    )
+    assert (
+        resolve_papers("what does the 2019 benchmark paper find?", [bench, other], max_papers=5)
+        == []
+    )
