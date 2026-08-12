@@ -88,6 +88,13 @@ def test_admit_rejects_a_paper_at_or_above_the_threshold():
     assert rejected == ["b"]
 
 
+def test_admit_rejects_a_paper_exactly_at_the_threshold():
+    """`<` not `<=`, matching the strict comparison in both SQL sites."""
+    admitted, rejected = admit_papers({"a": 0.75}, threshold=0.75)
+    assert admitted == []
+    assert rejected == ["a"]
+
+
 def test_admit_sorts_admitted_by_best_distance():
     admitted, _ = admit_papers({"far": 0.60, "near": 0.20, "mid": 0.40}, threshold=0.75)
     assert admitted == ["near", "mid", "far"]

@@ -207,7 +207,17 @@ def test_year_matches_every_paper_from_that_year():
 
 
 def test_year_ignores_numbers_that_are_not_years():
-    assert match_by_year("what about equation 42 and 199 agents?", LIBRARY) == []
+    """Locks the \\b anchors specifically, not just 'no run of exactly 4
+    digits' -- the old input ("equation 42 and 199 agents") has no four-digit
+    run at all, so it passed even with a stub returning []. Here 'b2021' has
+    a word character directly before 2021 (only the LEADING \\b blocks it);
+    '20211' has an extra digit directly after 2021 (only the TRAILING \\b
+    blocks it); 'model2021x' has both. Confirmed by hand: stripping the
+    leading \\b alone from _YEAR_RE lets 'b2021' match (2021 is LAZY's year,
+    so match_by_year would return ["p2"]); stripping the trailing \\b alone
+    lets '20211' match the same way."""
+    question = "b2021 report and 20211 booked and model2021x version"
+    assert match_by_year(question, LIBRARY) == []
 
 
 def test_resolve_returns_both_titled_papers():

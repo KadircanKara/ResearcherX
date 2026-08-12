@@ -510,7 +510,7 @@ async def test_respond_retrieves_across_all_papers_when_no_target(
         patch.object(svc._embedding_svc, "embed", AsyncMock(return_value=[0.0] * 768)),
         patch.object(svc, "_retrieve_history", AsyncMock(return_value=[])),
         patch.object(svc, "_shortlist_papers", AsyncMock(return_value=(candidates, 500))),
-        patch.object(svc._targeter, "run", AsyncMock(return_value=None)),
+        patch.object(svc._targeter, "run", AsyncMock(return_value=[])),
         patch.object(svc, "_retrieve_paper_chunks", retrieve),
         patch.object(svc._chat_agent, "stream", return_value=fake_stream()),
         patch.object(svc._conv_svc, "save_message", AsyncMock()),
@@ -575,7 +575,7 @@ async def test_respond_sends_the_targeter_titles_only(
         yield "answer"
 
     svc = ChatService()
-    target = AsyncMock(return_value=None)
+    target = AsyncMock(return_value=[])
     candidates = [PaperInfo(paper_id="pA", title="Paper A")]
 
     with (
@@ -730,7 +730,7 @@ async def test_respond_does_not_fall_back_when_scoped_retrieval_returns_chunks(
         patch.object(svc._embedding_svc, "embed", AsyncMock(return_value=[0.0] * 768)),
         patch.object(svc, "_retrieve_history", AsyncMock(return_value=[])),
         patch.object(svc, "_shortlist_papers", AsyncMock(return_value=(candidates, 500))),
-        patch.object(svc._targeter, "run", AsyncMock(return_value="pB")),
+        patch.object(svc._targeter, "run", AsyncMock(return_value=["pB"])),
         patch.object(svc, "_retrieve_paper_chunks", retrieve),
         patch.object(svc._chat_agent, "stream", return_value=fake_stream()),
         patch.object(svc._conv_svc, "save_message", AsyncMock()),
@@ -739,6 +739,8 @@ async def test_respond_does_not_fall_back_when_scoped_retrieval_returns_chunks(
             pass
 
     assert retrieve.await_count == 1
+    scoped = retrieve.await_args.args[1]
+    assert [p.paper_id for p in scoped] == ["pB"]
 
 
 async def test_respond_reports_the_scoped_paper_count_in_the_retrieving_event(

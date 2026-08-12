@@ -447,6 +447,12 @@ def _synthetic_pairs(
     rows: list[dict] = []
     skipped: list[tuple[str, str]] = []
     for i, (case, chunks) in enumerate(cases):
+        if len(case.expect_papers) != 1:
+            skipped.append(
+                (case.id, "multi-expectation case: --multi scores expect_papers[0] only")
+            )
+            continue
+
         own_needle = case.paper_title_contains or ""
         if not own_needle:
             skipped.append((case.id, "no needle to scope its own paper"))

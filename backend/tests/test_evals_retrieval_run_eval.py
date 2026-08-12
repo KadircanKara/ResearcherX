@@ -573,3 +573,42 @@ def test_synthetic_pairs_recovers_cases_whose_immediate_neighbor_shares_their_ne
 
     assert {r["id"] for r in rows} == {"c0", "c1", "c2"}
     assert skipped == []
+
+
+def test_synthetic_pairs_skips_a_multi_expectation_case():
+    """A hand-authored expect_papers case with 2+ entries cannot be scored by
+    --multi: own_needle and first_satisfying_rank both read expect_papers[0]
+    only, so a second expected paper would be silently dropped rather than
+    scored. Mutation this catches: dropping (or loosening to `< 1`) the
+    `len(case.expect_papers) != 1` guard would let this case fall through and
+    produce a row -- one that misreports a survival verdict computed against
+    only one of its two expected papers -- instead of the named skip this
+    test requires."""
+    from evals.retrieval.golden_set import Case, PaperExpectation
+    from evals.retrieval.run_eval import _synthetic_pairs
+
+    multi = Case(
+        id="multi",
+        kind="content",
+        question="how do X and Y differ",
+        expect_papers=(
+            PaperExpectation(title_contains="Alpha", expect_substrings=("alpha answer",)),
+            PaperExpectation(title_contains="Beta", expect_substrings=("beta answer",)),
+        ),
+    )
+    solo = Case(
+        id="solo",
+        kind="content",
+        question="question for solo",
+        expect_papers=(
+            PaperExpectation(title_contains="Gamma", expect_substrings=("gamma answer",)),
+        ),
+    )
+
+    rows, skipped = _synthetic_pairs([(multi, []), (solo, [])])
+
+    assert rows == []
+    assert skipped == [
+        ("multi", "multi-expectation case: --multi scores expect_papers[0] only"),
+        ("solo", "empty scope for one side"),
+    ]
