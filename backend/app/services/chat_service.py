@@ -22,7 +22,7 @@ from app.db.models import Paper
 from app.db.session import SessionLocal
 from app.services.conversation_service import ConversationService
 from app.services.embedding_service import EmbeddingService
-from app.services.intra_paper_ranker import keep_within_paper
+from app.services.intra_paper_ranker import admit_papers, keep_within_paper, merge_across_papers
 
 _HISTORY_TOP_K = 5
 
@@ -737,3 +737,119 @@ class ChatService:
             )
             for i, row in enumerate(rows, 1)
         ]
+
+    async def _retrieve_multi_paper_chunks(
+        self,
+        db: AsyncSession,
+        paper_infos: list[PaperInfo],
+        query_embedding: list[float],
+    ) -> tuple[list[ChunkContext], list[str]]:
+        """Retrieve from a RESOLVED SET of papers. Returns (chunks, absent).
+
+        Single-paper scope does NOT come here — `_retrieve_paper_chunks` owns
+        it, and its policy is frozen: the admission gate below would reject a
+        paper whose best chunk sits at 0.76, where that measured path keeps it
+        up to `intra_paper_ceiling`.
+
+        The pipeline, in order:
+          SQL     -> per paper, its nearest <=max_context_chunks chunks under
+                     `intra_paper_ceiling`
+          admit   -> drop papers whose best chunk is at or beyond
+                     `similarity_threshold`; their titles become `absent`
+          cut     -> `keep_within_paper` per admitted paper, relative to THAT
+                     paper's own nearest chunk
+          merge   -> `merge_across_papers` round-robins to `per_paper_floor`,
+                     then fills by distance, bounded by `max_context_chunks`
+
+        Admission, cut and merge stay in Python: `evals/retrieval/run_eval.py`
+        imports those exact functions so the harness can never measure a
+        policy production does not run.
+
+        An admitted paper always contributes at least one chunk:
+        `_check_intra_paper_relationship` refuses to start when
+        `intra_paper_ceiling < similarity_threshold`, so a chunk under the
+        admission gate always clears the SQL ceiling too. Rejection is
+        therefore the only way a resolved paper ends up absent.
+        """
+        if not paper_infos:
+            return [], []
+
+        sql = text("""
+            WITH scope AS (
+                SELECT value AS paper_id
+                FROM jsonb_array_elements_text(CAST(:ids AS jsonb))
+            ),
+            scored AS (
+                SELECT c.paper_id, c.chunk_index, c.text,
+                       (c.embedding <=> CAST(:qvec AS vector)) AS distance
+                FROM paper_chunk_embeddings c
+                JOIN scope s ON s.paper_id = c.paper_id
+                WHERE c.model = :model
+                  AND (c.embedding <=> CAST(:qvec AS vector)) < :ceiling
+            ),
+            ranked AS (
+                SELECT scored.*,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY paper_id ORDER BY distance ASC
+                       ) AS rn
+                FROM scored
+            )
+            SELECT paper_id, chunk_index, text, distance
+            FROM ranked
+            WHERE rn <= :max_chunks
+            ORDER BY paper_id, distance ASC
+        """)
+        result = await db.execute(
+            sql,
+            {
+                "qvec": _vec_str(query_embedding),
+                "ids": json.dumps([p.paper_id for p in paper_infos]),
+                "model": settings.embedding_model,
+                "ceiling": settings.intra_paper_ceiling,
+                "max_chunks": settings.max_context_chunks,
+            },
+        )
+        rows_by_paper: dict[str, list] = {}
+        for row in result.fetchall():
+            rows_by_paper.setdefault(row.paper_id, []).append(row)
+
+        title_map = {p.paper_id: p.title for p in paper_infos}
+        best_by_paper = {
+            paper_id: rows[0].distance for paper_id, rows in rows_by_paper.items() if rows
+        }
+        admitted, rejected = admit_papers(best_by_paper, threshold=settings.similarity_threshold)
+        # A resolved paper with no row at all never reaches admit_papers, so
+        # add it to the absent list here rather than letting it vanish.
+        no_rows = [p.paper_id for p in paper_infos if p.paper_id not in rows_by_paper]
+        absent = [title_map.get(pid, "") for pid in [*rejected, *no_rows]]
+
+        cuts = {
+            paper_id: [row.distance for row in rows_by_paper[paper_id]][
+                : keep_within_paper(
+                    [row.distance for row in rows_by_paper[paper_id]],
+                    delta=settings.intra_paper_delta,
+                )
+            ]
+            for paper_id in admitted
+        }
+        counts = merge_across_papers(
+            cuts, budget=settings.max_context_chunks, floor=settings.per_paper_floor
+        )
+
+        selected = [
+            row for paper_id, count in counts.items() for row in rows_by_paper[paper_id][:count]
+        ]
+        # Presentation order is global distance, so citation numbers ascend
+        # with relevance the way they do on every other retrieval path.
+        selected.sort(key=lambda row: row.distance)
+        chunks = [
+            ChunkContext(
+                n=i,
+                paper_id=row.paper_id,
+                title=title_map.get(row.paper_id, ""),
+                chunk_index=row.chunk_index,
+                text=row.text,
+            )
+            for i, row in enumerate(selected, 1)
+        ]
+        return chunks, absent

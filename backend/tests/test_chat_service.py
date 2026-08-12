@@ -1,6 +1,7 @@
 """ChatService integration test — all external calls mocked."""
 
 import json
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest_asyncio
@@ -961,29 +962,6 @@ async def test_single_paper_scope_applies_the_delta_cut():
     assert [c.chunk_index for c in chunks] == [0, 1, 2]
 
 
-async def test_multi_paper_scope_applies_no_delta_cut():
-    """Across papers a relative cut is meaningless: the 'best' chunk belongs
-    to one paper and would gate every other paper's chunks by proximity to
-    it."""
-    from app.services.chat_service import ChatService, PaperInfo
-
-    svc = ChatService()
-    rows = [
-        MagicMock(paper_id=f"p{i}", chunk_index=0, text=f"chunk {i}", distance=d)
-        for i, d in enumerate([0.30, 0.60, 0.74])
-    ]
-    mock_result = MagicMock()
-    mock_result.fetchall.return_value = rows
-    mock_db = MagicMock()
-    mock_db.execute = AsyncMock(return_value=mock_result)
-    papers = [PaperInfo(paper_id=f"p{i}", title=f"P{i}") for i in range(3)]
-
-    with patch.object(settings, "intra_paper_delta", 0.25):
-        chunks = await svc._retrieve_paper_chunks(mock_db, papers, [0.0] * 768)
-
-    assert len(chunks) == 3
-
-
 async def test_single_paper_scope_with_empty_sql_result_returns_empty():
     """Guards the empty-SQL passthrough, not a cut-to-empty: for any
     non-negative delta (production's `intra_paper_delta` is 0.20),
@@ -1001,3 +979,100 @@ async def test_single_paper_scope_with_empty_sql_result_returns_empty():
     chunks = await svc._retrieve_paper_chunks(mock_db, [paper], [0.0] * 768)
 
     assert chunks == []
+
+
+def _row(paper_id: str, chunk_index: int, text: str, distance: float) -> SimpleNamespace:
+    """One fake DB row. SimpleNamespace because the production code only ever
+    reads attributes off it (row.paper_id, row.chunk_index, row.text,
+    row.distance) -- the same shape SQLAlchemy's Row exposes."""
+    return SimpleNamespace(paper_id=paper_id, chunk_index=chunk_index, text=text, distance=distance)
+
+
+class _FakeDB:
+    """Returns a fixed row list for any execute(), already ordered the way the
+    production SQL orders it: by paper, then distance ascending."""
+
+    def __init__(self, rows: list[SimpleNamespace]) -> None:
+        self._rows = sorted(rows, key=lambda r: (r.paper_id, r.distance))
+
+    async def execute(self, *_args, **_kwargs):
+        rows = self._rows
+        return SimpleNamespace(fetchall=lambda: rows)
+
+
+async def _run_multi(
+    rows: list[SimpleNamespace], papers: list[tuple[str, str]]
+) -> tuple[list, list[str]]:
+    """Call _retrieve_multi_paper_chunks against a fake DB. `papers` is
+    [(paper_id, title), ...] — the resolved scope."""
+    from app.services.chat_service import ChatService, PaperInfo
+
+    infos = [PaperInfo(paper_id=pid, title=title) for pid, title in papers]
+    return await ChatService()._retrieve_multi_paper_chunks(_FakeDB(rows), infos, [0.0] * 8)
+
+
+async def test_multi_paper_scope_cuts_each_paper_against_its_own_best():
+    """Replaces test_multi_paper_scope_applies_no_delta_cut. The delta cut is
+    now per paper, keyed on THAT paper's own nearest chunk -- keying it on the
+    union's best would gate paper B by its proximity to paper A."""
+    rows = [
+        _row("a", 0, "a0", 0.30),
+        _row("a", 1, "a1", 0.35),
+        _row("a", 2, "a2", 0.90),  # beyond a's best + 0.20 -> cut
+        _row("b", 0, "b0", 0.60),
+        _row("b", 1, "b1", 0.65),
+        _row("b", 2, "b2", 0.95),  # beyond b's OWN best + 0.20 -> cut
+    ]
+    chunks, absent = await _run_multi(rows, papers=[("a", "A"), ("b", "B")])
+    assert {(c.paper_id, c.chunk_index) for c in chunks} == {
+        ("a", 0),
+        ("a", 1),
+        ("b", 0),
+        ("b", 1),
+    }
+    assert absent == []
+
+
+async def test_multi_paper_scope_rejects_a_paper_over_the_admission_gate():
+    rows = [
+        _row("a", 0, "a0", 0.30),
+        _row("b", 0, "b0", 0.80),  # best chunk beyond similarity_threshold
+    ]
+    chunks, absent = await _run_multi(rows, papers=[("a", "A"), ("b", "B")])
+    assert {c.paper_id for c in chunks} == {"a"}
+    assert absent == ["B"]
+
+
+async def test_multi_paper_scope_guarantees_the_floor_to_the_farther_paper():
+    rows = [_row("a", i, f"a{i}", 0.30 + 0.001 * i) for i in range(50)] + [
+        _row("b", i, f"b{i}", 0.45 + 0.001 * i) for i in range(50)
+    ]
+    with (
+        patch.object(settings, "per_paper_floor", 5),
+        patch.object(settings, "max_context_chunks", 20),
+    ):
+        chunks, absent = await _run_multi(rows, papers=[("a", "A"), ("b", "B")])
+    assert len([c for c in chunks if c.paper_id == "b"]) >= 5
+    assert len(chunks) == 20
+    assert absent == []
+
+
+async def test_multi_paper_scope_never_exceeds_the_budget():
+    rows = [_row("a", i, f"a{i}", 0.30) for i in range(80)] + [
+        _row("b", i, f"b{i}", 0.31) for i in range(80)
+    ]
+    chunks, _ = await _run_multi(rows, papers=[("a", "A"), ("b", "B")])
+    assert len(chunks) <= settings.max_context_chunks
+
+
+async def test_multi_paper_scope_numbers_citations_from_one():
+    rows = [_row("a", 0, "a0", 0.30), _row("b", 0, "b0", 0.40)]
+    chunks, _ = await _run_multi(rows, papers=[("a", "A"), ("b", "B")])
+    assert [c.n for c in chunks] == [1, 2]
+
+
+async def test_multi_paper_scope_with_every_paper_rejected_returns_no_chunks():
+    rows = [_row("a", 0, "a0", 0.80), _row("b", 0, "b0", 0.82)]
+    chunks, absent = await _run_multi(rows, papers=[("a", "A"), ("b", "B")])
+    assert chunks == []
+    assert sorted(absent) == ["A", "B"]
