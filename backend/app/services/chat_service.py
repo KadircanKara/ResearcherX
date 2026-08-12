@@ -672,9 +672,10 @@ class ChatService:
             60-chunk max_context_chunks budget, budget-bound before the delta
             even bites (evals/retrieval/README.md, "Measured — 2026-08-12").
         A relative cut alone would be no guard at all: an off-topic question's
-        distances are compressed, so delta 0.20 keeps most or all of the
-        wrong paper (measured: 9-52 chunks across the near-domain off_topic
-        cases -- see the "Open finding" in evals/retrieval/README.md).
+        distances are compressed, so the delta alone -- measured at delta
+        0.25, the then-current value -- kept 24/24, 44/44 and 64/64 chunks of
+        the nearest paper (see the CEILING measurement on intra_paper_ceiling
+        in app/core/config.py).
         """
         if not paper_infos:
             return []

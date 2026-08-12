@@ -985,11 +985,13 @@ async def test_multi_paper_scope_applies_no_delta_cut():
 
 
 async def test_single_paper_scope_with_empty_sql_result_returns_empty():
-    """Guards the empty-SQL passthrough, not a cut-to-empty: `keep_within_paper`
-    always keeps `distances[0]` (see test_intra_paper_ranker.py), so a
-    non-empty SQL result can never be cut to nothing by the delta. This proves
-    only that zero SQL rows in means an empty list out — which is what
-    triggers respond()'s existing fallback to global scope."""
+    """Guards the empty-SQL passthrough, not a cut-to-empty: for any
+    non-negative delta (production's `intra_paper_delta` is 0.20),
+    `keep_within_paper` always keeps `distances[0]` (see
+    test_intra_paper_ranker.py), so a non-empty SQL result can never be cut
+    to nothing by the delta. This proves only that zero SQL rows in means an
+    empty list out — which is what triggers respond()'s existing fallback to
+    global scope."""
     from app.services.chat_service import ChatService, PaperInfo
 
     svc = ChatService()

@@ -1,6 +1,6 @@
 from typing import Annotated
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
@@ -218,11 +218,44 @@ class Settings(BaseSettings):
             return [o.strip() for o in v.split(",") if o.strip()]
         return v
 
+    @model_validator(mode="after")
+    def _check_intra_paper_relationship(self) -> "Settings":
+        """Guards for the single-paper scope constants (see the "single-paper
+        scope" block above). Construction-time, not on the prod-only
+        validate_for_environment() gate below, because a bad value here is
+        NOT prod-only: the delta sweep documented in
+        evals/retrieval/README.md sets `INTRA_PAPER_DELTA` as a DEV env
+        override (`docker compose exec -T -e INTRA_PAPER_DELTA=$d`), which
+        never reaches validate_for_environment() (it returns immediately
+        unless ENVIRONMENT=prod) — a mistyped sweep point used to surface
+        only as `survival@cut 0.00` with no diagnostic. The shipped defaults
+        (delta 0.20, ceiling 0.85 against threshold 0.75) pass both checks
+        below, so this never blocks a normal dev or test boot.
+        """
+        if self.intra_paper_delta < 0:
+            raise ValueError(
+                "INTRA_PAPER_DELTA is negative (keep_within_paper returns 0, "
+                "emptying every single-paper retrieval -- and a single-paper "
+                "project has no untargeted scope to fall back to, so the "
+                "model would answer ungrounded)"
+            )
+        if self.intra_paper_ceiling < self.similarity_threshold:
+            raise ValueError(
+                "INTRA_PAPER_CEILING is below SIMILARITY_THRESHOLD (single-paper "
+                "scope would silently become STRICTER than global scope, the "
+                "opposite of its purpose as a looser noise floor)"
+            )
+        return self
+
     def validate_for_environment(self) -> None:
         """Fail fast when prod boots on dev fallbacks. Called at startup.
 
         The code defaults exist so dev/tests boot keyless — silently running
-        prod on them (no LLM key, sqlite) must be impossible.
+        prod on them (no LLM key, sqlite) must be impossible. The single-paper
+        scope constants (intra_paper_delta, intra_paper_ceiling) are NOT
+        checked here — they are checked unconditionally in
+        `_check_intra_paper_relationship` above, because that misconfiguration
+        is not prod-only (see its docstring).
         """
         if self.environment != "prod":
             return
@@ -240,27 +273,6 @@ class Settings(BaseSettings):
             problems.append(
                 "EMBEDDING_BASE_URL points at a dev host "
                 "(set EMBEDDING_BASE_URL to a hosted embedding endpoint)"
-            )
-        # Guards for the single-paper scope constants (see the "single-paper
-        # scope" block above). Checked here rather than at Settings
-        # construction because this method is the codebase's one existing
-        # config-validation mechanism, and it is prod-only by design (dev/
-        # tests must still boot on defaults) — these two misconfigurations
-        # are exactly the kind a prod operator could introduce via env vars
-        # (see docker-compose.prod.yml), so they belong on the same gate as
-        # every other prod boot guard, not a new mechanism.
-        if self.intra_paper_delta < 0:
-            problems.append(
-                "INTRA_PAPER_DELTA is negative (keep_within_paper returns 0, "
-                "emptying every single-paper retrieval -- and a single-paper "
-                "project has no untargeted scope to fall back to, so the "
-                "model would answer ungrounded)"
-            )
-        if self.intra_paper_ceiling < self.similarity_threshold:
-            problems.append(
-                "INTRA_PAPER_CEILING is below SIMILARITY_THRESHOLD (single-paper "
-                "scope would silently become STRICTER than global scope, the "
-                "opposite of its purpose as a looser noise floor)"
             )
         if problems:
             raise RuntimeError(f"refusing to start with ENVIRONMENT=prod: {'; '.join(problems)}")
