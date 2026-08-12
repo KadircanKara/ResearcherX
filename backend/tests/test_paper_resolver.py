@@ -2,6 +2,8 @@ from app.services.paper_resolver import (
     ResolvablePaper,
     match_by_author,
     match_by_title_span,
+    match_by_year,
+    resolve_papers,
 )
 
 DEADLY = ResolvablePaper(
@@ -193,3 +195,88 @@ def test_the_attribution_patterns_carry_the_curly_apostrophe():
     from app.services.paper_resolver import _ATTRIBUTION_RES
 
     assert any(chr(0x2019) in pattern.pattern for pattern in _ATTRIBUTION_RES)
+
+
+def test_year_matches_a_four_digit_year_in_the_question():
+    assert match_by_year("what did the 2021 paper find?", LIBRARY) == ["p2"]
+
+
+def test_year_matches_every_paper_from_that_year():
+    twin = ResolvablePaper(paper_id="p7", title="Other", authors=(), year=2021)
+    assert match_by_year("the 2021 work", [LAZY, twin]) == ["p2", "p7"]
+
+
+def test_year_ignores_numbers_that_are_not_years():
+    assert match_by_year("what about equation 42 and 199 agents?", LIBRARY) == []
+
+
+def test_resolve_returns_both_titled_papers():
+    ids = resolve_papers(
+        "In Breaking the Deadly Triad and Lazy Agents and Credit Assignment, compare rewards.",
+        LIBRARY,
+        max_papers=5,
+    )
+    assert sorted(ids) == ["p1", "p2"]
+
+
+def test_resolve_falls_through_when_any_span_is_ambiguous():
+    dup = ResolvablePaper(
+        paper_id="p4", title="Lazy Agents and Credit Assignment Revisited", authors=(), year=2025
+    )
+    assert (
+        resolve_papers("about Lazy Agents and Credit Assignment", [LAZY, dup], max_papers=5) == []
+    )
+
+
+def test_resolve_uses_author_when_no_title_span():
+    assert resolve_papers("what does the paper by Yanmaz claim?", LIBRARY, max_papers=5) == ["p2"]
+
+
+def test_resolve_falls_through_when_an_author_covers_several_papers():
+    a = ResolvablePaper(paper_id="pa", title="First", authors=("Evsen Yanmaz",), year=2020)
+    b = ResolvablePaper(paper_id="pb", title="Second", authors=("Evsen Yanmaz",), year=2021)
+    assert resolve_papers("the paper by Yanmaz", [a, b], max_papers=5) == []
+
+
+def test_resolve_narrows_an_ambiguous_author_by_year():
+    a = ResolvablePaper(paper_id="pa", title="First", authors=("Evsen Yanmaz",), year=2020)
+    b = ResolvablePaper(paper_id="pb", title="Second", authors=("Evsen Yanmaz",), year=2021)
+    assert resolve_papers("the 2021 paper by Yanmaz", [a, b], max_papers=5) == ["pb"]
+
+
+def test_resolve_uses_a_year_alone_only_when_unique():
+    twin = ResolvablePaper(paper_id="p7", title="Other", authors=(), year=2021)
+    assert resolve_papers("the 2024 paper", LIBRARY, max_papers=5) == ["p3"]
+    assert resolve_papers("the 2021 paper", [LAZY, twin], max_papers=5) == []
+
+
+def test_resolve_returns_nothing_for_a_single_paper_project():
+    assert resolve_papers("Breaking the Deadly Triad, what is it?", [DEADLY], max_papers=5) == []
+
+
+def test_resolve_falls_through_when_the_set_exceeds_the_cap():
+    """Exercises the cap through TITLE SPANS -- three papers are each named
+    outright, which is an unambiguous resolution of three, and max_papers=2
+    must discard the whole result rather than answer about an arbitrary two
+    of the three the user named."""
+    named = [
+        ResolvablePaper(
+            paper_id="m1", title="Swarm Coordination Under Jamming", authors=(), year=2019
+        ),
+        ResolvablePaper(
+            paper_id="m2", title="Energy Aware Path Planning Revisited", authors=(), year=2020
+        ),
+        ResolvablePaper(
+            paper_id="m3", title="Fair Comparison Of Fleet Policies", authors=(), year=2021
+        ),
+    ]
+    question = (
+        "Compare Swarm Coordination Under Jamming, Energy Aware Path Planning "
+        "Revisited and Fair Comparison Of Fleet Policies."
+    )
+    assert sorted(resolve_papers(question, named, max_papers=5)) == ["m1", "m2", "m3"]
+    assert resolve_papers(question, named, max_papers=2) == []
+
+
+def test_resolve_returns_nothing_for_a_general_question():
+    assert resolve_papers("what is reinforcement learning?", LIBRARY, max_papers=5) == []

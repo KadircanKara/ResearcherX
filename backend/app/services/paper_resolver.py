@@ -193,3 +193,65 @@ def match_by_author(question: str, papers: Sequence[ResolvablePaper]) -> list[st
                 matched.update(hits)
                 break
     return [p.paper_id for p in papers if p.paper_id in matched]
+
+
+# Bare four-digit years only, 1900-2099. Anchored on word boundaries so
+# "equation 42" and "199 agents" contribute nothing. Mirrors the _YEAR_RE
+# already used by needs_paper_metadata in chat_service.py.
+_YEAR_RE = re.compile(r"\b(?:19|20)\d{2}\b")
+
+
+def match_by_year(question: str, papers: Sequence[ResolvablePaper]) -> list[str]:
+    """Papers whose `year` is named literally in the question, in input order."""
+    years = {int(m.group(0)) for m in _YEAR_RE.finditer(question)}
+    if not years:
+        return []
+    return [p.paper_id for p in papers if p.year is not None and p.year in years]
+
+
+def resolve_papers(
+    question: str, papers: Sequence[ResolvablePaper], *, max_papers: int
+) -> list[str]:
+    """Paper ids this question names outright, or [] to fall through.
+
+    [] is the normal, expected answer: it means the LLM targeter should
+    decide. This function never guesses — see the module docstring's core
+    safety property.
+    """
+    if len(papers) < 2:
+        # Nothing to disambiguate: a single-paper project scopes to that paper
+        # whichever way the decision is made, so this rung has no work to do.
+        return []
+
+    spans = match_by_title_span(question, papers)
+    if spans:
+        if any(len(s.paper_ids) > 1 for s in spans):
+            # One span, several titles. Falling through ENTIRELY (rather than
+            # keeping the unambiguous spans) hands the whole question to the
+            # targeter, which can read the surrounding words this matcher
+            # cannot.
+            return []
+        resolved = [s.paper_ids[0] for s in spans]
+        return _capped(resolved, max_papers)
+
+    by_author = match_by_author(question, papers)
+    by_year = match_by_year(question, papers)
+
+    if by_author:
+        narrowed = [pid for pid in by_author if pid in set(by_year)] if by_year else by_author
+        # An author covering several papers is ambiguity, not a set: the
+        # targeter can use a topical description ("the paper about swarm
+        # coordination by Yanmaz") that no author match can see.
+        return _capped(narrowed, max_papers) if len(narrowed) == 1 else []
+
+    # A year alone resolves only when it is unique in the project.
+    return _capped(by_year, max_papers) if len(by_year) == 1 else []
+
+
+def _capped(paper_ids: list[str], max_papers: int) -> list[str]:
+    """Drop the whole result when it is too large to be a scoping signal.
+
+    Truncating instead would silently answer about an arbitrary subset of the
+    papers the question named, which is worse than falling through.
+    """
+    return paper_ids if 1 <= len(paper_ids) <= max_papers else []
