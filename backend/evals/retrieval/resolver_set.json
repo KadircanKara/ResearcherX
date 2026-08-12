@@ -1,0 +1,54 @@
+{
+  "_comment": "Golden set for app.services.paper_resolver.resolve_papers, authored against the live corpus of project fa2ab869-6b13-4b31-be5e-ff0c22652922 (100 papers). Every title/author/year below was queried from that project's real rows -- none invented. expect_titles is a list of title substrings a correct resolution must produce (order-insensitive); an empty list asserts resolve_papers must return nothing (fall through to the LLM targeter). No runner consumes this file yet -- see run_eval.py's --multi mode and paper_resolver.py's _MIN_SPAN_WORDS docstring for the intended consumer.",
+  "cases": [
+    {
+      "id": "two-papers-by-title",
+      "question": "How does the Survey of Important Issues in UAV Communication Networks compare to Massive MIMO for Communications With Drone Swarms?",
+      "expect_titles": [
+        "Survey of Important Issues in UAV Communication Networks",
+        "Massive MIMO for Communications With Drone Swarms"
+      ]
+    },
+    {
+      "id": "one-paper-by-title",
+      "question": "Summarize the paper UWB-Based Localization for Multi-UAV Systems and Collaborative Heterogeneous Multi-Robot Systems: a Survey.",
+      "expect_titles": [
+        "UWB-Based Localization for Multi-UAV Systems and Collaborative Heterogeneous Multi-Robot Systems"
+      ]
+    },
+    {
+      "id": "author-attribution",
+      "question": "What are the main findings in the paper by Chandhar?",
+      "expect_titles": [
+        "Massive MIMO for Communications With Drone Swarms"
+      ]
+    },
+    {
+      "id": "author-plus-year-narrows-ambiguity",
+      "question": "What does the 2017 paper by Zhang propose?",
+      "expect_titles": [
+        "Joint Trajectory and Communication Design for Multi-UAV Enabled Wireless Networks"
+      ]
+    },
+    {
+      "id": "subject-vocabulary-resolves-nothing",
+      "question": "What are common approaches to swarm coordination and collision avoidance in aerial robotics?",
+      "expect_titles": []
+    },
+    {
+      "id": "surname-collides-with-common-word",
+      "question": "What is the paper by How mainly about?",
+      "expect_titles": []
+    },
+    {
+      "id": "ambiguous-title-span-resolves-nothing",
+      "question": "What are the main results of the UAV coverage path planning paper?",
+      "expect_titles": []
+    },
+    {
+      "id": "general-question-resolves-nothing",
+      "question": "What is the best UAV swarm paper in this library?",
+      "expect_titles": []
+    }
+  ]
+}

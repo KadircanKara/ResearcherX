@@ -21,7 +21,11 @@ from sqlalchemy import text
 from app.core.config import settings
 from app.db.session import SessionLocal
 from app.services.embedding_service import EmbeddingService
-from app.services.intra_paper_ranker import keep_within_paper
+from app.services.intra_paper_ranker import (
+    admit_papers,
+    keep_within_paper,
+    merge_across_papers,
+)
 from evals.retrieval.golden_set import Case, load_golden_set
 from evals.retrieval.metrics import (
     THRESHOLDS,
@@ -366,6 +370,155 @@ def _report_targeted(rows: list[dict]) -> None:
         )
 
 
+def _multi_paper_cut(
+    scoped: dict[str, list[Scored]],
+    *,
+    ceiling: float,
+    delta: float,
+    budget: int,
+    floor: int,
+    threshold: float,
+) -> tuple[list[Scored], list[str]]:
+    """Exactly what chat_service._retrieve_multi_paper_chunks does to a
+    resolved paper set, in the same order: SQL filters on the ceiling and caps
+    each paper, then admission, the per-paper delta cut and the merge run in
+    Python.
+
+    `admit_papers`, `keep_within_paper` and `merge_across_papers` are IMPORTED
+    from production rather than reproduced, for the same reason
+    `_production_cut` imports `keep_within_paper`: a re-implementation here
+    would let the measured policy drift from the shipped one, which would make
+    every number this mode prints a lie.
+    """
+    ranked = {
+        paper_id: sorted((c for c in chunks if c.distance < ceiling), key=lambda c: c.distance)[
+            :budget
+        ]
+        for paper_id, chunks in scoped.items()
+    }
+    ranked = {pid: chunks for pid, chunks in ranked.items() if chunks}
+    best = {pid: chunks[0].distance for pid, chunks in ranked.items()}
+    admitted, rejected = admit_papers(best, threshold=threshold)
+    empty = [pid for pid in scoped if pid not in ranked]
+
+    cuts = {
+        pid: ranked[pid][: keep_within_paper([c.distance for c in ranked[pid]], delta=delta)]
+        for pid in admitted
+    }
+    counts = merge_across_papers(
+        {pid: [c.distance for c in chunks] for pid, chunks in cuts.items()},
+        budget=budget,
+        floor=floor,
+    )
+    kept = [c for pid, n in counts.items() for c in cuts[pid][:n]]
+    kept.sort(key=lambda c: c.distance)
+    return kept, [*rejected, *empty]
+
+
+def _synthetic_pairs(cases: list[tuple[Case, list[Scored]]]) -> list[dict]:
+    """Ask each positive case's question with a TWO-paper scope: its own
+    paper plus the next case's paper (wrapping around).
+
+    Zero authoring cost -- it reuses the existing single-paper golden set to
+    measure the one thing that set structurally cannot see: whether an
+    answering chunk survives when a second paper competes for the same budget.
+    That is the asymmetric-evidence hazard this feature exists to fix.
+
+    What it CANNOT see: a genuine comparison question, whose answer lives in
+    both papers. That is what the hand-authored expect_papers cases are for
+    (deferred -- see the golden set's README).
+
+    Every `case` here carries exactly one PaperExpectation (`positives` comes
+    from the single-paper golden set), so `paper_title_contains` /
+    `first_satisfying_rank` on the whole `Case` are safe here -- unlike a
+    genuine multi-expectation `expect_papers` case, where the same calls would
+    silently score only against expect_papers[0] and ignore the rest.
+    """
+    if len(cases) < 2:
+        return []
+    rows: list[dict] = []
+    for i, (case, chunks) in enumerate(cases):
+        partner_case, _ = cases[(i + 1) % len(cases)]
+        own_needle = case.paper_title_contains or ""
+        partner_needle = partner_case.paper_title_contains or ""
+        if not own_needle or not partner_needle or own_needle == partner_needle:
+            continue
+        own_chunks = _scope_to_paper(chunks, own_needle)
+        partner_chunks = _scope_to_paper(chunks, partner_needle)
+        if not own_chunks or not partner_chunks:
+            continue
+        # Same ambiguity guard _targeted_case_status applies, checked per
+        # needle rather than on the whole pair: a needle matching more than
+        # one paper would silently blend a THIRD paper's chunks into what is
+        # supposed to be a clean two-paper scope, corrupting the very
+        # competition this mode exists to measure.
+        if len({c.paper_id for c in own_chunks}) > 1:
+            continue
+        if len({c.paper_id for c in partner_chunks}) > 1:
+            continue
+        # Keyed by REAL paper id, not by a label: _multi_paper_cut returns
+        # rejected keys in `absent`, and a label there would be unreadable.
+        own_id = own_chunks[0].paper_id
+        partner_id = partner_chunks[0].paper_id
+        if own_id == partner_id:
+            continue
+        scoped = {own_id: own_chunks, partner_id: partner_chunks}
+        kept, absent = _multi_paper_cut(
+            scoped,
+            ceiling=settings.intra_paper_ceiling,
+            delta=settings.intra_paper_delta,
+            budget=settings.max_context_chunks,
+            floor=settings.per_paper_floor,
+            threshold=settings.similarity_threshold,
+        )
+        rows.append(
+            {
+                "id": case.id,
+                "partner_title": partner_needle,
+                "kept": len(kept),
+                "own_slots": len([c for c in kept if c.paper_id == own_id]),
+                "partner_slots": len([c for c in kept if c.paper_id == partner_id]),
+                "survived": first_satisfying_rank(case, kept) is not None,
+                "absent": len(absent),
+            }
+        )
+    return rows
+
+
+def _report_multi(rows: list[dict]) -> None:
+    """Print the multi-paper report. Modelled on _report_targeted.
+
+    HONEST LIMIT, printed every time this mode runs: these are SYNTHETIC
+    pairs built by scoping one case's question to its own paper plus another
+    case's paper -- they measure competition for a shared budget, never a
+    genuine comparison question whose answer spans both papers. A mode that
+    silently measured less than it appears to would be worse than no mode.
+    """
+    print(
+        "\nMULTI-PAPER MODE measures SYNTHETIC pairs only: each case's own question, "
+        "scoped to {its paper, another case's paper}. It measures whether the "
+        "answering chunk survives a second paper's competition for one shared "
+        "budget. It CANNOT see a genuine comparison question whose answer lives in "
+        "BOTH papers -- that needs hand-authored expect_papers cases (deferred)."
+    )
+    if not rows:
+        print("\nMULTI-PAPER: no usable pairs (need >=2 positives with distinct papers)")
+        return
+    survived = sum(1 for r in rows if r["survived"])
+    print("\nMULTI-PAPER (synthetic pairs)")
+    print(f"  survival@cut     {survived / len(rows):.2f} ({survived}/{len(rows)})")
+    print(f"  mean kept        {sum(r['kept'] for r in rows) / len(rows):.1f}")
+    print(f"  mean own slots   {sum(r['own_slots'] for r in rows) / len(rows):.1f}")
+    print(f"  mean other slots {sum(r['partner_slots'] for r in rows) / len(rows):.1f}")
+    print(f"  floor            {settings.per_paper_floor}")
+    print("\n  id                        kept  own  other  survived")
+    for r in rows:
+        print(
+            f"  {r['id']:<24}  {r['kept']:>4}  {r['own_slots']:>3}  "
+            f"{r['partner_slots']:>5}  {str(r['survived']):>8}"
+        )
+
+
 def _corpus_note(chunks: list[Scored]) -> str:
     # Grouped by paper_id, not title: two papers could in principle share a
     # title (e.g. both title-less), which would understate the paper count.
@@ -398,6 +551,14 @@ async def main() -> None:  # noqa: PLR0912, PLR0915 — a report script, not a l
         help=(
             "scope each case to its own paper, as the paper targeter does, and report "
             "whether the answering chunk survives production's single-paper cut"
+        ),
+    )
+    parser.add_argument(
+        "--multi",
+        action="store_true",
+        help=(
+            "pair each positive case with another case's paper and report whether "
+            "its answering chunk survives the competition for one shared budget"
         ),
     )
     args = parser.parse_args()
@@ -534,6 +695,9 @@ async def main() -> None:  # noqa: PLR0912, PLR0915 — a report script, not a l
 
     if args.targeted:
         _report_targeted(targeted_rows)
+
+    if args.multi:
+        _report_multi(_synthetic_pairs(positives))
 
     usable_negatives = any(negatives)
 

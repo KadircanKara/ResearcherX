@@ -378,3 +378,146 @@ def test_targeted_case_status_none_for_off_topic_regardless_of_ambiguity():
         _s("Paper Two", "b", 0.40, paper_id="p2"),
     ]
     assert _targeted_case_status(_TARGETED_OFF_TOPIC_CASE, chunks) is None
+
+
+# --- multi-paper mode ------------------------------------------------------
+
+
+def test_multi_paper_cut_gives_the_floor_to_the_farther_paper():
+    """Mutation this catches: replace the admit/cut/merge pipeline with a
+    plain global top-k over both papers' chunks. Paper "a" occupies
+    [0.300, 0.339] and paper "b" occupies [0.500, 0.539] -- ranges that do
+    NOT overlap, so a global top-20 would keep all 20 of "a" and none of
+    "b", failing the floor assertion below. (The two ranges must stay
+    disjoint for this test to mean anything -- see the docstring on
+    merge_across_papers: with overlapping ranges a plain top-k can still
+    accidentally satisfy a floor-only assertion.)"""
+    from evals.retrieval.run_eval import _multi_paper_cut
+
+    scoped = {
+        "a": [Scored("a", "A", f"a{i}", 0.30 + 0.001 * i) for i in range(40)],
+        "b": [Scored("b", "B", f"b{i}", 0.50 + 0.001 * i) for i in range(40)],
+    }
+    kept, absent = _multi_paper_cut(
+        scoped, ceiling=0.85, delta=0.20, budget=20, floor=5, threshold=0.75
+    )
+    assert len([c for c in kept if c.paper_id == "b"]) >= 5
+    assert len(kept) == 20
+    assert absent == []
+
+
+def test_multi_paper_cut_reports_a_paper_over_the_admission_gate():
+    """Mutation this catches: dropping the admit_papers call (or admitting
+    unconditionally) would let paper "b" (best chunk 0.80, over the 0.75
+    threshold) contribute, and "absent" would stay empty instead of naming
+    it."""
+    from evals.retrieval.run_eval import _multi_paper_cut
+
+    scoped = {
+        "a": [Scored("a", "A", "a0", 0.30)],
+        "b": [Scored("b", "B", "b0", 0.80)],
+    }
+    kept, absent = _multi_paper_cut(
+        scoped, ceiling=0.85, delta=0.20, budget=60, floor=5, threshold=0.75
+    )
+    assert {c.paper_id for c in kept} == {"a"}
+    assert absent == ["b"]
+
+
+def test_multi_paper_cut_uses_each_papers_own_best_for_the_delta():
+    """Mutation this catches: computing the delta cut against one GLOBAL
+    best distance (e.g. min over both papers, 0.30) instead of each paper's
+    OWN best would keep b1 (0.70) only if 0.70 <= 0.30 + delta -- false at
+    delta=0.20 -- so a global-best bug would either drop b1 (this test) or,
+    at a smaller delta, drop it while a per-paper bug keeps it; here it
+    pins that b1 (delta from b's own best of 0.60) survives while a1 (delta
+    from a's own best of 0.30) does not."""
+    from evals.retrieval.run_eval import _multi_paper_cut
+
+    scoped = {
+        "a": [Scored("a", "A", "a0", 0.30), Scored("a", "A", "a1", 0.90)],
+        "b": [Scored("b", "B", "b0", 0.60), Scored("b", "B", "b1", 0.70)],
+    }
+    kept, _ = _multi_paper_cut(scoped, ceiling=0.95, delta=0.20, budget=60, floor=5, threshold=0.75)
+    assert {c.chunk_text for c in kept} == {"a0", "b0", "b1"}
+
+
+def test_synthetic_pairs_scope_each_question_to_two_papers():
+    """Mutation this catches: scoping to the WHOLE corpus instead of the two
+    named papers would pull no extra rows here (the fixture only has two
+    papers per case), but swapping which needle is "own" vs "partner" -- or
+    forgetting to rotate to the NEXT case's paper -- would flip
+    partner_title or break the own+partner==kept accounting."""
+    from evals.retrieval.golden_set import Case, PaperExpectation
+    from evals.retrieval.run_eval import _synthetic_pairs
+
+    def _case(case_id: str, needle: str, sub: str) -> Case:
+        return Case(
+            id=case_id,
+            kind="content",
+            question=f"question for {case_id}",
+            expect_papers=(PaperExpectation(title_contains=needle, expect_substrings=(sub,)),),
+        )
+
+    a = _case("ca", "Alpha", "alpha answer")
+    b = _case("cb", "Beta", "beta answer")
+    chunks_a = [
+        Scored("pa", "Alpha Paper", "alpha answer here", 0.30),
+        Scored("pb", "Beta Paper", "unrelated", 0.40),
+    ]
+    chunks_b = [
+        Scored("pb", "Beta Paper", "beta answer here", 0.32),
+        Scored("pa", "Alpha Paper", "unrelated", 0.45),
+    ]
+    rows = _synthetic_pairs([(a, chunks_a), (b, chunks_b)])
+
+    assert [r["id"] for r in rows] == ["ca", "cb"]
+    assert rows[0]["partner_title"] == "Beta"
+    assert rows[0]["survived"] is True
+    assert rows[0]["own_slots"] + rows[0]["partner_slots"] == rows[0]["kept"]
+
+
+def test_synthetic_pairs_needs_at_least_two_cases():
+    """Mutation this catches: dropping the `len(cases) < 2` guard would raise
+    (or misbehave on `cases[0 % 0]`) instead of returning an empty report."""
+    from evals.retrieval.run_eval import _synthetic_pairs
+
+    assert _synthetic_pairs([]) == []
+
+
+def test_synthetic_pairs_skips_a_needle_that_matches_more_than_one_paper():
+    """Mutation this catches: dropping the ambiguity guard would let a THIRD
+    paper's chunks blend into "own_chunks" whenever a needle matches more
+    than one title -- here "Alpha" matches both "Alpha Paper" and "Alpha
+    Extended Paper" -- silently corrupting the two-paper scope this mode
+    claims to measure. Mirrors _targeted_case_status's guard for targeted
+    mode."""
+    from evals.retrieval.golden_set import Case, PaperExpectation
+    from evals.retrieval.run_eval import _synthetic_pairs
+
+    def _case(case_id: str, needle: str, sub: str) -> Case:
+        return Case(
+            id=case_id,
+            kind="content",
+            question=f"question for {case_id}",
+            expect_papers=(PaperExpectation(title_contains=needle, expect_substrings=(sub,)),),
+        )
+
+    a = _case("ca", "Alpha", "alpha answer")
+    b = _case("cb", "Beta", "beta answer")
+    # chunks_a matches "Alpha" against TWO distinct papers -- ca's own scope
+    # is ambiguous, so ca must be skipped. chunks_b (cb's own fetch) has no
+    # such second "Alpha" row, so cb's own scope (Beta) and its partner scope
+    # (Alpha, still resolving to exactly one paper here) are both clean.
+    chunks_a = [
+        Scored("pa", "Alpha Paper", "alpha answer here", 0.30),
+        Scored("pa2", "Alpha Extended Paper", "also alpha", 0.31),
+        Scored("pb", "Beta Paper", "unrelated", 0.40),
+    ]
+    chunks_b = [
+        Scored("pb", "Beta Paper", "beta answer here", 0.32),
+        Scored("pa", "Alpha Paper", "unrelated", 0.45),
+    ]
+    rows = _synthetic_pairs([(a, chunks_a), (b, chunks_b)])
+
+    assert [r["id"] for r in rows] == ["cb"]
