@@ -2,7 +2,7 @@
 
 import pytest
 
-from evals.retrieval.golden_set import Case
+from evals.retrieval.golden_set import Case, PaperExpectation
 from evals.retrieval.metrics import (
     Scored,
     SeparatingInterval,
@@ -26,8 +26,7 @@ CASE = Case(
     id="c",
     kind="content",
     question="q",
-    paper_title_contains="Alpha",
-    expect_substrings=("target",),
+    expect_papers=(PaperExpectation(title_contains="Alpha", expect_substrings=("target",)),),
 )
 
 
@@ -227,8 +226,7 @@ CASE_P1 = Case(
     id="p1-case",
     kind="content",
     question="q",
-    paper_title_contains="P1",
-    expect_substrings=("target chunk",),
+    expect_papers=(PaperExpectation(title_contains="P1", expect_substrings=("target chunk",)),),
 )
 
 
@@ -270,8 +268,9 @@ def test_diagnose_separation_finds_interval_and_names_the_deciding_cases():
                 id="c2",
                 kind="content",
                 question="q",
-                paper_title_contains="Beta",
-                expect_substrings=("target",),
+                expect_papers=(
+                    PaperExpectation(title_contains="Beta", expect_substrings=("target",)),
+                ),
             ),
             [_s("Beta", "the target", 0.30)],
         ),
@@ -346,8 +345,9 @@ def test_leave_one_out_lo_drops_the_named_case():
                 id="c2",
                 kind="content",
                 question="q",
-                paper_title_contains="Beta",
-                expect_substrings=("target",),
+                expect_papers=(
+                    PaperExpectation(title_contains="Beta", expect_substrings=("target",)),
+                ),
             ),
             [_s("Beta", "the target", 0.20)],
         ),

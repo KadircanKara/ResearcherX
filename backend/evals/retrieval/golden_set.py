@@ -21,16 +21,37 @@ class GoldenSetError(ValueError):
 
 
 @dataclass(frozen=True)
+class PaperExpectation:
+    """One paper a case expects to contribute, and what it must contribute."""
+
+    title_contains: str
+    expect_substrings: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class Case:
     id: str
     kind: str
     question: str
-    paper_title_contains: str | None
-    expect_substrings: tuple[str, ...]
+    expect_papers: tuple[PaperExpectation, ...]
 
     @property
     def is_negative(self) -> bool:
         return self.kind == "off_topic"
+
+    @property
+    def paper_title_contains(self) -> str | None:
+        """The first expected paper's needle, or None for off_topic.
+
+        Kept so every single-paper consumer (chunk_satisfies, _scope_to_paper,
+        _targeted_case_status, metrics.py) needs no change: a scalar case
+        parses into exactly one expectation, so this is that expectation.
+        """
+        return self.expect_papers[0].title_contains if self.expect_papers else None
+
+    @property
+    def expect_substrings(self) -> tuple[str, ...]:
+        return self.expect_papers[0].expect_substrings if self.expect_papers else ()
 
 
 def _parse_case(raw: dict) -> Case:
@@ -46,40 +67,65 @@ def _parse_case(raw: dict) -> Case:
         )
 
     title = raw.get("paper_title_contains")
+    raw_papers = raw.get("expect_papers")
 
-    raw_subs = raw.get("expect_substrings")
-    if raw_subs is not None and not isinstance(raw_subs, list):
+    if raw_papers is not None and (title or raw.get("expect_substrings")):
         raise GoldenSetError(
-            f"case {case_id!r}: expect_substrings must be a list, got {type(raw_subs).__name__}"
+            f"case {case_id!r}: sets both expect_papers and the scalar "
+            "paper_title_contains/expect_substrings — pick one form"
         )
-    for i, sub in enumerate(raw_subs or []):
-        if not isinstance(sub, str) or not sub.strip():
-            raise GoldenSetError(
-                f"case {case_id!r}: expect_substrings[{i}] must be a non-empty string"
-            )
-    # Stripped, not just validated: a trailing/leading space copied in from a
-    # source PDF (e.g. "revisit time ") would otherwise silently fail to
-    # match text where the phrase sits at a line or chunk boundary.
-    subs = tuple(sub.strip() for sub in (raw_subs or ()))
 
     if kind == "off_topic":
-        if title or subs:
+        if title or raw.get("expect_substrings") or raw_papers:
             raise GoldenSetError(
-                f"case {case_id!r}: off_topic cases must not set paper_title_contains "
-                "or expect_substrings — they assert that nothing relevant exists"
+                f"case {case_id!r}: off_topic cases must not set paper_title_contains, "
+                "expect_substrings or expect_papers — they assert that nothing "
+                "relevant exists"
             )
-    else:
-        if not (title or "").strip():
-            raise GoldenSetError(f"case {case_id!r}: {kind} case needs paper_title_contains")
-        if not subs:
-            raise GoldenSetError(f"case {case_id!r}: {kind} case needs expect_substrings")
+        return Case(id=case_id, kind=kind, question=raw["question"], expect_papers=())
 
-    return Case(
-        id=case_id,
-        kind=kind,
-        question=raw["question"],
-        paper_title_contains=title,
-        expect_substrings=subs,
+    if raw_papers is None:
+        # Scalar form: exactly one expectation. Every existing case is this.
+        raw_papers = [{"title_contains": title, "expect_substrings": raw.get("expect_substrings")}]
+    if not isinstance(raw_papers, list) or not raw_papers:
+        raise GoldenSetError(f"case {case_id!r}: expect_papers must be a non-empty list")
+
+    expectations = tuple(
+        _parse_expectation(case_id, i, entry) for i, entry in enumerate(raw_papers)
+    )
+    return Case(id=case_id, kind=kind, question=raw["question"], expect_papers=expectations)
+
+
+def _parse_expectation(case_id: str, index: int, raw: object) -> PaperExpectation:
+    """One entry of expect_papers. Same rules the scalar form always had, just
+    applied per paper: a needle AND at least one substring, every substring a
+    non-empty string, each stripped."""
+    if not isinstance(raw, dict):
+        raise GoldenSetError(
+            f"case {case_id!r}: expect_papers[{index}] must be an object, got {type(raw).__name__}"
+        )
+    needle = raw.get("title_contains")
+    if not isinstance(needle, str) or not needle.strip():
+        raise GoldenSetError(
+            f"case {case_id!r}: expect_papers[{index}] needs a non-empty title_contains"
+        )
+    subs = raw.get("expect_substrings")
+    if not isinstance(subs, list) or not subs:
+        raise GoldenSetError(
+            f"case {case_id!r}: expect_papers[{index}] needs a non-empty expect_substrings"
+        )
+    for i, sub in enumerate(subs):
+        if not isinstance(sub, str) or not sub.strip():
+            raise GoldenSetError(
+                f"case {case_id!r}: expect_papers[{index}].expect_substrings[{i}] "
+                "must be a non-empty string"
+            )
+    # Stripped, not just validated: a trailing space copied in from a source
+    # PDF would otherwise silently fail to match text where the phrase sits at
+    # a line or chunk boundary.
+    return PaperExpectation(
+        title_contains=needle.strip(),
+        expect_substrings=tuple(sub.strip() for sub in subs),
     )
 
 

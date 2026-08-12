@@ -10,7 +10,7 @@ import argparse
 
 import pytest
 
-from evals.retrieval.golden_set import Case
+from evals.retrieval.golden_set import Case, PaperExpectation
 from evals.retrieval.metrics import Scored
 from evals.retrieval.run_eval import (
     _MIN_NEGATIVES_FOR_CONFIDENCE,
@@ -76,8 +76,7 @@ CASE = Case(
     id="c1",
     kind="content",
     question="q",
-    paper_title_contains="Alpha",
-    expect_substrings=("target",),
+    expect_papers=(PaperExpectation(title_contains="Alpha", expect_substrings=("target",)),),
 )
 
 
@@ -328,16 +327,16 @@ _TARGETED_CASE = Case(
     id="joint-optimization-case",
     kind="content",
     question="q",
-    paper_title_contains="Joint Optimization",
-    expect_substrings=("target",),
+    expect_papers=(
+        PaperExpectation(title_contains="Joint Optimization", expect_substrings=("target",)),
+    ),
 )
 
 _TARGETED_OFF_TOPIC_CASE = Case(
     id="off-topic-case",
     kind="off_topic",
     question="q",
-    paper_title_contains=None,
-    expect_substrings=(),
+    expect_papers=(),
 )
 
 

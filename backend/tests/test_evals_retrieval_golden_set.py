@@ -187,7 +187,7 @@ def test_rejects_whitespace_only_title(tmp_path: Path):
             ],
         },
     )
-    with pytest.raises(GoldenSetError, match="paper_title_contains"):
+    with pytest.raises(GoldenSetError, match="title_contains"):
         load_golden_set(path)
 
 
@@ -326,12 +326,18 @@ def test_rejects_dict_valued_cases(tmp_path: Path):
 
 def test_satisfies_requires_all_substrings():
     """All, not any — one common word must not carry a case."""
+    from evals.retrieval.golden_set import PaperExpectation
+
     case = Case(
         id="c",
         kind="content",
         question="q",
-        paper_title_contains="Joint Optimization",
-        expect_substrings=("revisit time", "coverage"),
+        expect_papers=(
+            PaperExpectation(
+                title_contains="Joint Optimization",
+                expect_substrings=("revisit time", "coverage"),
+            ),
+        ),
     )
     title = "Joint Optimization of Connectivity, Coverage, and Revisit Time"
     assert chunk_satisfies(case, title, "we minimize revisit time and coverage gaps")
@@ -339,23 +345,132 @@ def test_satisfies_requires_all_substrings():
 
 
 def test_satisfies_is_case_insensitive():
+    from evals.retrieval.golden_set import PaperExpectation
+
     case = Case(
         id="c",
         kind="content",
         question="q",
-        paper_title_contains="joint optimization",
-        expect_substrings=("REVISIT TIME",),
+        expect_papers=(
+            PaperExpectation(
+                title_contains="joint optimization",
+                expect_substrings=("REVISIT TIME",),
+            ),
+        ),
     )
     assert chunk_satisfies(case, "Joint Optimization of X", "the revisit time metric")
 
 
 def test_satisfies_requires_the_expected_paper():
     """A matching substring in the wrong paper is not a hit."""
+    from evals.retrieval.golden_set import PaperExpectation
+
     case = Case(
         id="c",
         kind="content",
         question="q",
-        paper_title_contains="Joint Optimization",
-        expect_substrings=("revisit time",),
+        expect_papers=(
+            PaperExpectation(
+                title_contains="Joint Optimization",
+                expect_substrings=("revisit time",),
+            ),
+        ),
     )
     assert not chunk_satisfies(case, "Cooperative Multi-Target Search", "revisit time")
+
+
+# New tests for multi-paper expectations (Task 10)
+
+
+def test_a_scalar_case_parses_into_one_expectation():
+    from evals.retrieval.golden_set import PaperExpectation, _parse_case
+
+    case = _parse_case(
+        {
+            "id": "c1",
+            "kind": "content",
+            "question": "q",
+            "paper_title_contains": "Deadly Triad",
+            "expect_substrings": ["clipped double-Q"],
+        }
+    )
+    assert case.expect_papers == (
+        PaperExpectation(title_contains="Deadly Triad", expect_substrings=("clipped double-Q",)),
+    )
+    assert case.paper_title_contains == "Deadly Triad"
+    assert case.expect_substrings == ("clipped double-Q",)
+
+
+def test_a_multi_paper_case_parses_every_expectation():
+    from evals.retrieval.golden_set import _parse_case
+
+    case = _parse_case(
+        {
+            "id": "c2",
+            "kind": "content",
+            "question": "compare",
+            "expect_papers": [
+                {"title_contains": "Lazy Agents", "expect_substrings": ["potential-based"]},
+                {"title_contains": "Deadly Triad", "expect_substrings": ["clipped double-Q"]},
+            ],
+        }
+    )
+    assert [e.title_contains for e in case.expect_papers] == ["Lazy Agents", "Deadly Triad"]
+
+
+def test_scalar_and_list_forms_together_are_rejected():
+    from evals.retrieval.golden_set import _parse_case
+
+    with pytest.raises(GoldenSetError, match="both"):
+        _parse_case(
+            {
+                "id": "c3",
+                "kind": "content",
+                "question": "q",
+                "paper_title_contains": "A",
+                "expect_substrings": ["x"],
+                "expect_papers": [{"title_contains": "B", "expect_substrings": ["y"]}],
+            }
+        )
+
+
+def test_an_expectation_without_substrings_is_rejected():
+    from evals.retrieval.golden_set import _parse_case
+
+    with pytest.raises(GoldenSetError, match="expect_substrings"):
+        _parse_case(
+            {
+                "id": "c4",
+                "kind": "content",
+                "question": "q",
+                "expect_papers": [{"title_contains": "A", "expect_substrings": []}],
+            }
+        )
+
+
+def test_off_topic_still_rejects_expect_papers():
+    from evals.retrieval.golden_set import _parse_case
+
+    with pytest.raises(GoldenSetError, match="off_topic"):
+        _parse_case(
+            {
+                "id": "c5",
+                "kind": "off_topic",
+                "question": "q",
+                "expect_papers": [{"title_contains": "A", "expect_substrings": ["x"]}],
+            }
+        )
+
+
+def test_substrings_are_stripped_in_the_list_form():
+    from evals.retrieval.golden_set import _parse_case
+
+    case = _parse_case(
+        {
+            "id": "c6",
+            "kind": "content",
+            "question": "q",
+            "expect_papers": [{"title_contains": "A", "expect_substrings": ["  revisit time "]}],
+        }
+    )
+    assert case.expect_papers[0].expect_substrings == ("revisit time",)
