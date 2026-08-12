@@ -1,6 +1,6 @@
 from typing import Annotated
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
@@ -65,6 +65,68 @@ class Settings(BaseSettings):
     # against that model's distance distribution and adjust via the
     # SIMILARITY_THRESHOLD env var rather than editing this default.
     similarity_threshold: float = 0.75
+
+    # --- single-paper scope -------------------------------------------------
+    # Both numbers below apply ONLY when retrieval is scoped to one paper
+    # (the targeter named it, or the project holds a single paper). They are
+    # MODEL-SPECIFIC in exactly the way similarity_threshold above is:
+    # measured on text-embedding-3-small against the 100-paper dev corpus on
+    # 2026-08-12, and invalid for any other embedding model.
+    #
+    # They do different jobs and neither works alone.
+    #
+    # The CEILING is the noise floor. It replaces similarity_threshold as the
+    # SQL cutoff in single-paper scope. Measured on the three off_topic golden
+    # cases, scoped to the paper holding the globally nearest chunk (the
+    # targeter-misfire simulation): 0.85 admits 0, 1 and 1 chunks; 0.90 admits
+    # 1, 2 and 9. A relative rule cannot do this job — an off-topic question's
+    # distances are compressed (best 0.7518-0.8581), so the delta alone (0.25,
+    # the then-current value; it is 0.20 below now) keeps 24/24, 44/44 and
+    # 64/64 chunks of the paper.
+    #
+    # THOSE THREE CASES WERE TOO EASY, and 0.85 is looser than they made it
+    # look. The 2026-08-12 widening added nine NEAR-domain negatives (drone
+    # regulation, insurance, hobbyist gear — plausible questions this library
+    # cannot answer); they land at 0.5474-0.6521, well inside the ceiling, and
+    # a mis-targeted one keeps 9-52 chunks of the wrong paper (the `kept`
+    # column of those nine rows in the delta-0.20 per-case table). `run_eval
+    # --targeted` prints RAISE THE CEILING'S SCRUTINY at every delta because
+    # of it. Re-tuning the ceiling is its own measurement, not a delta problem
+    # — see "Measured" in evals/retrieval/README.md.
+    intra_paper_ceiling: float = 0.85
+
+    # The DELTA is cost and precision: keep every chunk within this distance
+    # of the paper's own nearest chunk. The ceiling alone is far too generous
+    # on real questions — measured (evals/retrieval/README.md, "Measured —
+    # 2026-08-12"), at delta 0.20 four cases (marl-security-attacks,
+    # deadly-triad, lazy-agents-reward, hnpfl-fair-comparison) keep exactly
+    # the 60-chunk max_context_chunks budget, i.e. the BUDGET bound them
+    # before the delta even got a chance to — the ceiling alone would let
+    # far more of a large paper through unguarded.
+    #
+    # 0.20 is a swept measurement, not a single witness. `run_eval --targeted`
+    # on 2026-08-12 over a golden set at the harness's own confidence gate
+    # (30 positives — 20 of them inside papers larger than the 60-chunk budget
+    # — and 12 negatives, nine of them near-domain), 100 papers / 4527 chunks,
+    # text-embedding-3-small, ceiling 0.85, budget 60:
+    #
+    #   delta  survival@cut  mean kept chunks  mean kept tokens
+    #   0.15   0.93 (28/30)  17.7              ~7.8k
+    #   0.20   1.00 (30/30)  27.5              ~12.1k
+    #   0.25   1.00 (30/30)  36.2              ~15.9k
+    #   0.30   1.00 (30/30)  42.4              ~18.6k
+    #   0.35   1.00 (30/30)  46.8              ~20.5k
+    #
+    # 0.20 is the smallest delta that loses no answer chunk, and delta is the
+    # cost lever, so the smallest survivor wins. The binding witness is
+    # iot-lowpower-protocols (rank 18 of its paper's 97 chunks), whose answer
+    # sits 0.1651 from that paper's own nearest chunk; ground-control-station
+    # (0.1640, the case that used to justify 0.25 alone) is only second. So
+    # 0.20 carries 0.035 of margin over the worst case, NOT the 0.05 a fresh
+    # tuning would prefer — this is the first number to re-check if a targeted
+    # answer ever comes back truncated, and the reason to re-sweep rather than
+    # nudge after any embedding-model change.
+    intra_paper_delta: float = 0.20
 
     # Hard ceiling on chunks sent to the chat model in one turn.
     #
@@ -156,11 +218,44 @@ class Settings(BaseSettings):
             return [o.strip() for o in v.split(",") if o.strip()]
         return v
 
+    @model_validator(mode="after")
+    def _check_intra_paper_relationship(self) -> "Settings":
+        """Guards for the single-paper scope constants (see the "single-paper
+        scope" block above). Construction-time, not on the prod-only
+        validate_for_environment() gate below, because a bad value here is
+        NOT prod-only: the delta sweep documented in
+        evals/retrieval/README.md sets `INTRA_PAPER_DELTA` as a DEV env
+        override (`docker compose exec -T -e INTRA_PAPER_DELTA=$d`), which
+        never reaches validate_for_environment() (it returns immediately
+        unless ENVIRONMENT=prod) — a mistyped sweep point used to surface
+        only as `survival@cut 0.00` with no diagnostic. The shipped defaults
+        (delta 0.20, ceiling 0.85 against threshold 0.75) pass both checks
+        below, so this never blocks a normal dev or test boot.
+        """
+        if self.intra_paper_delta < 0:
+            raise ValueError(
+                "INTRA_PAPER_DELTA is negative (keep_within_paper returns 0, "
+                "emptying every single-paper retrieval -- and a single-paper "
+                "project has no untargeted scope to fall back to, so the "
+                "model would answer ungrounded)"
+            )
+        if self.intra_paper_ceiling < self.similarity_threshold:
+            raise ValueError(
+                "INTRA_PAPER_CEILING is below SIMILARITY_THRESHOLD (single-paper "
+                "scope would silently become STRICTER than global scope, the "
+                "opposite of its purpose as a looser noise floor)"
+            )
+        return self
+
     def validate_for_environment(self) -> None:
         """Fail fast when prod boots on dev fallbacks. Called at startup.
 
         The code defaults exist so dev/tests boot keyless — silently running
-        prod on them (no LLM key, sqlite) must be impossible.
+        prod on them (no LLM key, sqlite) must be impossible. The single-paper
+        scope constants (intra_paper_delta, intra_paper_ceiling) are NOT
+        checked here — they are checked unconditionally in
+        `_check_intra_paper_relationship` above, because that misconfiguration
+        is not prod-only (see its docstring).
         """
         if self.environment != "prod":
             return

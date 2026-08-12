@@ -21,6 +21,7 @@ from sqlalchemy import text
 from app.core.config import settings
 from app.db.session import SessionLocal
 from app.services.embedding_service import EmbeddingService
+from app.services.intra_paper_ranker import keep_within_paper
 from evals.retrieval.golden_set import Case, load_golden_set
 from evals.retrieval.metrics import (
     THRESHOLDS,
@@ -223,6 +224,148 @@ async def _chunks_for(db, svc: EmbeddingService, case: Case, project_id: str) ->
     ]
 
 
+def _scope_to_paper(chunks: list[Scored], title_contains: str) -> list[Scored]:
+    """The chunks of the paper a case names, nearest first — what production
+    queries once the targeter has picked that paper."""
+    needle = title_contains.lower()
+    scoped = [c for c in chunks if needle in c.paper_title.lower()]
+    return sorted(scoped, key=lambda c: c.distance)
+
+
+def _scope_to_nearest_paper(chunks: list[Scored]) -> list[Scored]:
+    """The chunks of whichever paper holds the globally nearest chunk.
+
+    Used for off_topic cases only: it simulates the targeter mis-firing on a
+    question the library cannot answer, which is the exact scenario
+    intra_paper_ceiling exists to contain.
+    """
+    if not chunks:
+        return []
+    nearest = min(chunks, key=lambda c: c.distance)
+    scoped = [c for c in chunks if c.paper_id == nearest.paper_id]
+    return sorted(scoped, key=lambda c: c.distance)
+
+
+def _production_cut(
+    chunks: list[Scored], *, ceiling: float, delta: float, budget: int
+) -> list[Scored]:
+    """Exactly what chat_service._retrieve_paper_chunks does to a single-paper
+    scope, in the same order: SQL filters on the ceiling and LIMITs to the
+    budget, then the delta cut runs in Python.
+
+    `keep_within_paper` is IMPORTED from production rather than reproduced —
+    a re-implementation here would let the measured policy drift from the
+    shipped one, which would make every number this mode prints a lie.
+    """
+    ranked = sorted((c for c in chunks if c.distance < ceiling), key=lambda c: c.distance)
+    ranked = ranked[:budget]
+    return ranked[: keep_within_paper([c.distance for c in ranked], delta=delta)]
+
+
+def _targeted_case_status(case: Case, chunks: list[Scored]) -> str | None:
+    """None if `case` scopes to exactly one paper for targeted mode;
+    otherwise a reason to route it to `errors` instead of `targeted_rows`.
+
+    Production's single-paper policy assumes there really is only one paper
+    in scope (`single_paper = len(paper_infos) == 1` in
+    `chat_service._retrieve_paper_chunks`) — the delta cut is relative to
+    THAT one paper's own nearest chunk. `_scope_to_paper` only checks that a
+    case's `paper_title_contains` needle appears in a title; it never checks
+    that the needle is unique. A second paper whose title also contains the
+    needle would silently contribute its chunks to `scoped`, competing for
+    the budget and inflating `paper_chunks`/`intra_rank`/`kept` into numbers
+    that describe a scope production could never assemble — exactly the
+    drift this mode exists to catch, just aimed at itself. Golden-set fix is
+    the same one README.md's "Adding a case" already asks for: pick a MORE
+    distinctive substring.
+
+    Only applies to non-negative cases: off_topic cases scope via
+    `_scope_to_nearest_paper`, which selects by `paper_id` off a single
+    nearest chunk and so always returns exactly one paper by construction.
+    """
+    if case.is_negative:
+        return None
+    scoped = _scope_to_paper(chunks, case.paper_title_contains or "")
+    papers = {c.paper_id for c in scoped}
+    if len(papers) > 1:
+        return (
+            f"paper_title_contains {case.paper_title_contains!r} matches "
+            f"{len(papers)} distinct papers — not distinctive enough for targeted "
+            "mode's single-paper scope; production's single_paper policy assumes "
+            "exactly one"
+        )
+    return None
+
+
+def _targeted_row(case: Case, chunks: list[Scored]) -> dict:
+    """One row of the targeted report for a case whose corpus chunks are
+    already fetched. Off_topic cases get no rank and no survival verdict —
+    they have no satisfying chunk by definition; their kept-count is the
+    ceiling measurement.
+
+    Caller must check `_targeted_case_status` first: this function does not
+    re-check scope ambiguity, it trusts the caller already routed ambiguous
+    cases to `errors`.
+    """
+    scoped = (
+        _scope_to_nearest_paper(chunks)
+        if case.is_negative
+        else _scope_to_paper(chunks, case.paper_title_contains or "")
+    )
+    kept = _production_cut(
+        scoped,
+        ceiling=settings.intra_paper_ceiling,
+        delta=settings.intra_paper_delta,
+        budget=settings.max_context_chunks,
+    )
+    rank = None if case.is_negative else first_satisfying_rank(case, scoped)
+    survived = None if case.is_negative else first_satisfying_rank(case, kept) is not None
+    return {
+        "id": case.id,
+        "kind": case.kind,
+        "paper_chunks": len(scoped),
+        "intra_rank": rank,
+        "kept": len(kept),
+        "survived": survived,
+    }
+
+
+def _report_targeted(rows: list[dict]) -> None:
+    """Print the single-paper report. `rows` come from _targeted_row above."""
+    print(
+        f"\ntargeted mode (ceiling={settings.intra_paper_ceiling} "
+        f"delta={settings.intra_paper_delta} budget={settings.max_context_chunks})"
+    )
+    id_col = max(28, max((len(r["id"]) for r in rows), default=28) + 1)
+    print(
+        f"{'case':<{id_col}}{'kind':<10}{'chunks':>8}{'intra_rank':>12}{'kept':>6}{'survived':>10}"
+    )
+    for r in rows:
+        rank = r["intra_rank"]
+        survived = r["survived"]
+        print(
+            f"{r['id']:<{id_col}}{r['kind']:<10}{r['paper_chunks']:>8}"
+            f"{'-' if rank is None else rank:>12}{r['kept']:>6}"
+            f"{'-' if survived is None else ('yes' if survived else 'NO'):>10}"
+        )
+    scored = [r for r in rows if r["survived"] is not None]
+    if scored:
+        survival = sum(1 for r in scored if r["survived"]) / len(scored)
+        mean_kept = sum(r["kept"] for r in scored) / len(scored)
+        print(
+            f"\nsurvival@cut: {survival:.2f} ({sum(1 for r in scored if r['survived'])}"
+            f"/{len(scored)})    mean kept chunks: {mean_kept:.1f}"
+            f"    mean kept tokens: ~{round(mean_kept * 439)}"
+        )
+    misfires = [r for r in rows if r["kind"] == "off_topic"]
+    if misfires:
+        worst = max(r["kept"] for r in misfires)
+        print(
+            f"ceiling check (off_topic scoped to nearest paper): worst kept = {worst} chunk(s)"
+            + ("  <-- RAISE THE CEILING'S SCRUTINY" if worst > 2 else "")
+        )
+
+
 def _corpus_note(chunks: list[Scored]) -> str:
     # Grouped by paper_id, not title: two papers could in principle share a
     # title (e.g. both title-less), which would understate the paper count.
@@ -249,6 +392,14 @@ async def main() -> None:  # noqa: PLR0912, PLR0915 — a report script, not a l
     )
     parser.add_argument("--set", type=Path, default=_DEFAULT_SET)
     parser.add_argument("--json", type=Path, default=None, help="also dump results here")
+    parser.add_argument(
+        "--targeted",
+        action="store_true",
+        help=(
+            "scope each case to its own paper, as the paper targeter does, and report "
+            "whether the answering chunk survives production's single-paper cut"
+        ),
+    )
     args = parser.parse_args()
 
     cases = load_golden_set(args.set)
@@ -259,6 +410,7 @@ async def main() -> None:  # noqa: PLR0912, PLR0915 — a report script, not a l
     negative_ids: list[str] = []
     errors: list[str] = []
     per_case: list[dict] = []
+    targeted_rows: list[dict] = []
 
     async with SessionLocal() as db:
         counts = {r.model: r.n for r in (await db.execute(_MODEL_COUNTS_SQL)).fetchall()}
@@ -273,6 +425,30 @@ async def main() -> None:  # noqa: PLR0912, PLR0915 — a report script, not a l
             if not corpus_note:
                 corpus_note = _corpus_note(chunks)
 
+            # Hoisted so targeted mode can see a golden-set defect BEFORE
+            # deciding whether to build a targeted row. A case with a broken
+            # golden case (paper vanished from the corpus, or its substring no
+            # longer matches any chunk) must never reach the targeted report:
+            # it would print an ERRORS line from the check below AND a
+            # targeted row with paper_chunks=0, survived=False, dragging down
+            # survival@cut for a golden-set problem rather than a real
+            # retrieval failure. None for negatives — off_topic cases have no
+            # notion of "winnable".
+            status = None if case.is_negative else _positive_case_status(case, chunks)
+
+            if args.targeted and status is None:
+                targeted_status = _targeted_case_status(case, chunks)
+                if targeted_status is not None:
+                    errors.append(f"{case.id}: {targeted_status}")
+                else:
+                    targeted_rows.append(_targeted_row(case, chunks))
+            # else: status is not None, so this case's single ERRORS line is
+            # appended below (positives branch) — it must not ALSO get a
+            # targeted-mode error from _targeted_case_status, which checks a
+            # different, unrelated condition (title ambiguity) and could
+            # independently flag the same case, printing two ERRORS lines for
+            # one case id.
+
             if case.is_negative:
                 negatives.append(chunks)
                 negative_ids.append(case.id)
@@ -280,7 +456,6 @@ async def main() -> None:  # noqa: PLR0912, PLR0915 — a report script, not a l
                 per_case.append({"id": case.id, "kind": case.kind, "best_distance": best})
                 continue
 
-            status = _positive_case_status(case, chunks)
             if status is not None:
                 errors.append(f"{case.id}: {status}")
                 continue
@@ -356,6 +531,9 @@ async def main() -> None:  # noqa: PLR0912, PLR0915 — a report script, not a l
             f"{'-' if rank is None else rank:>6}"
             f"{'-' if dist is None else round(dist, 4):>12}"
         )
+
+    if args.targeted:
+        _report_targeted(targeted_rows)
 
     usable_negatives = any(negatives)
 
@@ -534,6 +712,7 @@ async def main() -> None:  # noqa: PLR0912, PLR0915 — a report script, not a l
                         "rows": [vars(r) for r in rows],
                     },
                     "separation": separation,
+                    "targeted": targeted_rows if args.targeted else None,
                 },
                 indent=2,
             )

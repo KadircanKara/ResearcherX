@@ -22,6 +22,7 @@ from app.db.models import Paper
 from app.db.session import SessionLocal
 from app.services.conversation_service import ConversationService
 from app.services.embedding_service import EmbeddingService
+from app.services.intra_paper_ranker import keep_within_paper
 
 _HISTORY_TOP_K = 5
 
@@ -459,7 +460,8 @@ class ChatService:
 
                     if scope is not paper_infos and not paper_chunks:
                         # A targeted paper whose every chunk sits at or beyond
-                        # similarity_threshold retrieves nothing, and
+                        # intra_paper_ceiling (the single-paper SQL cutoff --
+                        # see _retrieve_paper_chunks) retrieves nothing, and
                         # chat_agent then answers ungrounded -- a worse
                         # failure than the misattribution this feature fixes.
                         # Re-querying the untargeted scope keeps the answer
@@ -651,9 +653,35 @@ class ChatService:
         library size. Per-paper allocation made it the latter, and a 100-paper
         project pulled 191 chunks (~118.5k tokens) until every turn died on
         `context_length_exceeded`.
+
+        SINGLE-PAPER SCOPE IS DIFFERENT, and it is detected here rather than
+        passed in: one paper in `paper_infos` means the user already named the
+        paper (the targeter picked it, or the project holds only that one), so
+        an absolute cosine cutoff tuned for beating OTHER papers is the wrong
+        instrument. Two changes apply, and only together:
+          - the SQL cutoff becomes `intra_paper_ceiling` (looser, a noise
+            floor), because `similarity_threshold` silently drops answering
+            chunks -- measured, one sat at 0.7293 against 0.75, and the drop
+            is invisible because 13 other chunks still return, so respond()'s
+            empty-result fallback never fires;
+          - a relative cut keeps only chunks within `intra_paper_delta` of
+            this paper's own nearest chunk, because the looser ceiling alone
+            keeps far more of a targeted paper than a question needs -- at
+            delta 0.20, four cases (marl-security-attacks, deadly-triad,
+            lazy-agents-reward, hnpfl-fair-comparison) keep the entire
+            60-chunk max_context_chunks budget, budget-bound before the delta
+            even bites (evals/retrieval/README.md, "Measured — 2026-08-12").
+        A relative cut alone would be no guard at all: an off-topic question's
+        distances are compressed, so the delta alone -- measured at delta
+        0.25, the then-current value -- kept 24/24, 44/44 and 64/64 chunks of
+        the nearest paper (see the CEILING measurement on intra_paper_ceiling
+        in app/core/config.py).
         """
         if not paper_infos:
             return []
+        # See the docstring: scope size, not a flag, decides the policy.
+        single_paper = len(paper_infos) == 1
+        threshold = settings.intra_paper_ceiling if single_paper else settings.similarity_threshold
         qvec = _vec_str(query_embedding)
         paper_title_map = {p.paper_id: p.title for p in paper_infos}
         # `paper_chunk_embeddings` is global, so this query MUST be scoped to
@@ -680,7 +708,7 @@ class ChatService:
                 "qvec": qvec,
                 "ids": json.dumps([p.paper_id for p in paper_infos]),
                 "model": settings.embedding_model,
-                "threshold": settings.similarity_threshold,
+                "threshold": threshold,
                 "max_chunks": settings.max_context_chunks,
             },
         )
@@ -689,6 +717,15 @@ class ChatService:
         # invariant that keeps chat working at any library size, so it must
         # not depend on a SQL clause surviving a future edit to the query.
         rows = result.fetchall()[: settings.max_context_chunks]
+        # Applied AFTER the budget slice, never before: the budget is the one
+        # invariant that keeps chat working at any library size, and the cut
+        # may only shrink what it already bounded.
+        if single_paper:
+            rows = rows[
+                : keep_within_paper(
+                    [row.distance for row in rows], delta=settings.intra_paper_delta
+                )
+            ]
         return [
             ChunkContext(
                 n=i,

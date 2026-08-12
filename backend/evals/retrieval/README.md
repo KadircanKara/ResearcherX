@@ -30,6 +30,10 @@ Flags:
 - `--json` — also write the full per-case results, threshold-sweep grid, and
   closed-form separation to this path. See "Reading the output" for the
   `--json` shape and how it differs from the console report.
+- `--targeted` — also measure production's **single-paper** cut (see
+  "Targeted mode" below). Costs no extra queries: it re-uses the chunks
+  already fetched for the global report. Absent, `main()`'s existing global
+  report is unchanged.
 
 ## What it measures vs. what production does
 
@@ -56,6 +60,216 @@ One divergence remains:
   questions, the two paths still agree: there's no reformulation for either
   of them to diverge on. Re-validate this section if the golden set ever
   grows multi-turn cases, or after any change to the reformulator's behavior.
+
+## Targeted mode
+
+    docker compose exec -T backend python -m evals.retrieval.run_eval \
+      --project-id <uuid> --targeted
+
+The global report above measures the path production takes when retrieval is
+scoped to the whole project. Since 2026-08-10 there is a second production
+path: when a paper targeter has scoped retrieval to ONE paper,
+`chat_service._retrieve_paper_chunks` swaps in a looser SQL ceiling
+(`settings.intra_paper_ceiling`) plus a relative delta cut
+(`settings.intra_paper_delta`, via `keep_within_paper`) instead of the global
+`similarity_threshold`. `--targeted` is what measures *that* path — the
+global report cannot see it at all, because a global top-k across 100 papers
+never lets one paper's low-ranked-but-correct chunk through.
+
+**What it simulates.** Each case is scoped to a single paper, the same way
+the targeter would:
+- `content` / `metadata` / `figure` cases scope to the paper the case names
+  (`_scope_to_paper`) — the targeter picked correctly.
+- `off_topic` cases scope to whichever paper holds the globally nearest
+  chunk (`_scope_to_nearest_paper`) — this simulates the targeter
+  *mis-firing* on a question the library cannot answer, which is exactly the
+  scenario `intra_paper_ceiling` exists to contain. There is no "correct"
+  paper to scope an off_topic case to, so the worst case (nearest wrong
+  paper) is what's measured.
+
+**A `paper_title_contains` needle must be unique.** Production's
+single-paper policy (`single_paper = len(paper_infos) == 1` in
+`chat_service._retrieve_paper_chunks`) assumes there really is only one
+paper in scope — the delta cut is relative to that one paper's own nearest
+chunk. If a case's `paper_title_contains` substring matches two or more
+papers, `_scope_to_paper` would otherwise blend a second paper's chunks
+into the scope, describing a measurement production can never actually
+produce. `_targeted_case_status` catches this before it can happen silently:
+an ambiguous case is routed to the existing `errors` list (same channel as
+"no paper matching ..." in the global report) instead of into
+`targeted_rows`, and prints under the `ERRORS (golden-set problems...)`
+block naming how many distinct papers it hit. Fix is the same one "Adding a
+case" below already asks for: pick a more distinctive substring.
+
+`_production_cut` then applies the cut to that scoped, distance-sorted list
+in production's exact order — SQL filters on the ceiling, LIMITs to
+`max_context_chunks`, *then* the delta cut runs in Python. The order does
+not actually change the result today: ceiling, budget and delta are all
+prefix truncations of the same distance-ascending sort, and the delta cut
+point depends only on `distances[0]` (the nearest chunk), which no earlier
+truncation can move — any ordering yields the same
+`min(n_ceiling, n_delta, budget)`. The order is still mirrored deliberately:
+if either side ever adds a non-prefix operation (MMR, dedup, a rerank), a
+harness that copies production's literal order will surface the divergence
+immediately instead of hiding behind today's accidental equivalence. The cut
+itself is `keep_within_paper`, **imported** from
+`app.services.intra_paper_ranker` rather than reimplemented here, so the
+harness can never measure a policy that has drifted from what production
+actually ships.
+
+**The metric is survival@cut**: of the positive cases, what fraction still
+have their satisfying chunk after the single-paper cut runs
+(`kept` chunks), not just somewhere in the paper's full chunk list
+(`intra_rank`). A case can show a deep `intra_rank` and still `survive` —
+that's the point of the looser ceiling — or show a shallow one and still get
+cut, which is a real finding, not a bug to code around.
+
+The report's columns:
+
+- **chunks** — how many chunks the scoped paper contributed (its full
+  chunk count for positives; the nearest-paper's chunk count for
+  off_topic).
+- **intra_rank** — the satisfying chunk's 1-based rank *within that single
+  paper's* distance order, before any cut. `-` for off_topic (no satisfying
+  chunk is defined for a negative).
+- **kept** — how many chunks survive `_production_cut`. For off_topic rows
+  this is the ceiling measurement, not a rank: it is what
+  `intra_paper_ceiling` lets through when the targeter picks the wrong paper.
+- **survived** — whether the satisfying chunk is still present after the
+  cut. `-` for off_topic, same reason as `intra_rank`.
+
+**`kept = 0` on an off_topic row does not mean production returns nothing.**
+It means the single-paper cut emptied the mis-targeted paper's scope — but
+`chat_service.py`'s `respond()` re-queries the untargeted (whole-project)
+scope whenever the targeted retrieval comes back empty
+(`scope is not paper_infos and not paper_chunks`, right after
+`_retrieve_paper_chunks` in `respond()`), so production still answers, from
+global chunks, instead of returning nothing. This matters for the "Open
+finding" below: raising `intra_paper_ceiling`'s scrutiny would push more
+mis-targeted off_topic questions toward `kept = 0`, i.e. toward *this*
+fallback rather than toward an empty, ungrounded answer — the two are not
+the same failure mode, and a tighter ceiling trades one for the other rather
+than eliminating a risk outright.
+
+`survival@cut` at the bottom is `survived == yes` count over scored
+(non-off_topic) cases — the single number to watch when re-tuning
+`intra_paper_delta`. The `ceiling check` line beneath it is the off_topic
+side of the same coin: the worst (largest) `kept` count across off_topic
+rows, flagged if it exceeds 2 — a large kept-count on a mis-targeted
+off_topic case means the ceiling itself is too loose, independent of delta.
+
+In `--json`, this is the `targeted` key (a list of the same per-case rows,
+or `null` when `--targeted` wasn't passed).
+
+### Measured — 2026-08-12
+
+The delta sweep that set `intra_paper_delta`. Re-measure after any change to
+`EMBEDDING_MODEL`, either `EMBEDDING_*_PREFIX`, or the corpus.
+
+- corpus: 4527 chunks / 100 papers (project `fa2ab869…52922`)
+- model: `text-embedding-3-small`; ceiling `0.85`; budget `max_context_chunks = 60`
+- golden set: **30 positives** (20 of them in papers larger than the 60-chunk
+  budget) and **12 negatives** — clears the harness's confidence gate
+  (`_MIN_POSITIVES_FOR_CONFIDENCE = 20`, `_MIN_NEGATIVES_FOR_CONFIDENCE = 10`),
+  no `ERRORS` block
+
+| delta | survival@cut | mean kept chunks | mean kept tokens | worst off_topic kept |
+|-------|--------------|------------------|------------------|----------------------|
+| 0.15  | 0.93 (28/30) | 17.7             | ~7,770           | 28                   |
+| **0.20** | **1.00 (30/30)** | **27.5**  | **~12,072**      | 52                   |
+| 0.25  | 1.00 (30/30) | 36.2             | ~15,906          | 60                   |
+| 0.30  | 1.00 (30/30) | 42.4             | ~18,614          | 60                   |
+| 0.35  | 1.00 (30/30) | 46.8             | ~20,545          | 60                   |
+
+**Chosen: 0.20** — the smallest delta losing no answer chunk, and delta is the
+cost lever. The two cases that fail at 0.15 are `iot-lowpower-protocols`
+(answer at intra-rank 18 of 97, 0.1651 from its paper's nearest chunk) and
+`ground-control-station` (rank 11 of 18, 0.1640). 0.1651 is therefore the
+exact floor, so 0.20 carries **0.035** of margin — thinner than the 0.05 a
+fresh tuning would aim for. Every other positive needs ≤0.1212, and 16 of the
+30 answer at intra-rank 1 (required delta 0.0).
+
+**That margin is, if anything, optimistic.** Several of the added questions
+are near-verbatim paraphrases of the substring they expect —
+`iot-lowpower-protocols`, `episode-duration-obstacle-figure`,
+`harvested-power-duration-figure`, `frontier-mesh-clustering` and
+`jamming-policy-algorithm` — which biases their `intra_rank` low, because the
+question and the answering chunk share surface wording a real user's phrasing
+would not. `iot-lowpower-protocols` is one of them *and* is the binding
+witness at 0.1651, so a more naturally-worded version of that question would
+plausibly need a larger delta, not a smaller one. Treat 0.035 as an upper
+bound on the true margin, and prefer questions phrased away from their
+substring when adding cases.
+
+**Delta is not the active constraint for every case.** At 0.20,
+`marl-security-attacks`, `deadly-triad`, `lazy-agents-reward` and
+`hnpfl-fair-comparison` keep exactly 60 chunks — the `max_context_chunks`
+budget bound before the delta did. No delta value moves those rows; only the
+budget does.
+
+**Open finding — the ceiling, not the delta, is the loose one.** The
+`ceiling check` line fires at every delta in the sweep. The 0.85 ceiling was
+tuned against three trivially off-topic questions sitting at 0.75–0.86; the
+near-domain negatives added here sit at **0.547–0.652**, comfortably inside
+it, so at the chosen delta a mis-targeted near-domain question keeps 9–52
+chunks of the wrong paper instead of the ≤2 the check wants. That range is the
+`kept` column of the nine near-domain `off_topic` rows in the delta-0.20
+per-case table — 9 (`offtopic-airworthiness`) to 52
+(`offtopic-spray-nozzle`); the `ceiling check` summary line prints only the
+worst of them. Delta bounds the damage (worst 28 chunks at 0.15, 52 at 0.20,
+60 at 0.25) but cannot fix it — the ceiling is a separate constant and a
+separate piece of work.
+
+**Positives and near-domain negatives overlap on this corpus.** The worst
+positive's top-60 distance is 0.5871 (`hnpfl-fair-comparison`), and six
+negatives sit below it (0.547–0.585). Rewriting them further from the corpus
+was attempted and measured: thirteen alternative phrasings all landed in
+0.469–0.585, i.e. no genuinely near-domain question on a 100-paper
+single-topic UAV library can be pushed above the hardest positive. The
+nearest chunk of each was read and none answers its question, so these are
+real negatives; the overlap is a property of the corpus, not a defect in the
+cases. **Keeping them is a ratified deviation from the plan's Step 2 rule**
+("drop or rewrite a negative whose best distance sits below the worst
+positive"), signed off by the plan author on the grounds that the rule assumed
+a separable corpus and 100 papers on one topic is not one — it is not an
+oversight, and it should not be "fixed" back.
+
+**What the closed-form section reports, and why.** That run prints
+`NO SEPARATION POSSIBLE AT THIS k`, and the overlap above is *not* the cause.
+`run_eval.py` prints that message only when `diagnosis.blocked_case_ids` is
+non-empty, and `metrics.diagnose_separation` returns early on blocked cases
+before `lo`/`hi` are ever computed — the negatives never enter that decision.
+The cause is the four positives with no satisfying chunk inside a global
+top-60 (listed below). Separately, and independently of those four, the
+overlap *would* leave no interval either: `lo = 0.5871` (worst positive) is
+already `>= hi = 0.5474` (closest negative), which is the condition for the
+**different** message, `NO THRESHOLD SEPARATES CONTENT FROM NOISE`. Two
+distinct findings — do not read the printed blocked-case message as a signal
+about negatives quality.
+
+Global report from the same run, for the record: `recall@60 = 0.87`,
+`MRR = 0.527`, noise floor `0.5474`. Four positives
+(`ground-control-station`, `drl-subagent-decomposition`,
+`demand-algorithm-baselines`, `epec-stackelberg`) have no satisfying chunk
+inside a *global* top-60 at all, yet all four survive the single-paper cut —
+which is precisely the gap `--targeted` exists to measure.
+
+**How to re-run the sweep.** `intra_paper_delta` is a pydantic setting, so
+each sweep point is an env override on the exec — no code edit, no restart,
+and nothing to remember to put back:
+
+    for d in 0.15 0.20 0.25 0.30 0.35; do
+      echo "delta=$d"
+      docker compose exec -T -e INTRA_PAPER_DELTA=$d backend \
+        python -m evals.retrieval.run_eval \
+        --project-id <uuid> --targeted | tail -4
+    done
+
+Check the printed `targeted mode (ceiling=... delta=... budget=...)` header
+changes across points. If it does not, the override is not reaching the
+process and every row is the same delta measured five times. One run costs one
+embedding API call per case, so a five-point sweep over ~40 cases is ~200
+calls — cheap, but not free; do not re-run it to confirm a documentation edit.
 
 ## Adding a case
 

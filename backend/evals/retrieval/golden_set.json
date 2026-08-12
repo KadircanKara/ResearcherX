@@ -1,76 +1,190 @@
 {
   "version": 1,
   "cases": [
-    {
-      "id": "revisit-time-objective",
-      "kind": "content",
-      "question": "What is achieved by minimizing revisit time in multi-UAV path planning?",
-      "paper_title_contains": "Joint Optimization",
-      "expect_substrings": ["revisit time"]
-    },
-    {
-      "id": "occupancy-updates",
-      "kind": "content",
-      "question": "How is probabilistic occupancy used during cooperative search?",
-      "paper_title_contains": "Cooperative Multi-Target",
-      "expect_substrings": ["probabilistic occupancy updates"]
-    },
-    {
-      "id": "nineveh-case-study",
-      "kind": "content",
-      "question": "What archaeological region was surveyed with drones?",
-      "paper_title_contains": "Nineveh",
-      "expect_substrings": ["Nineveh archaeological region"]
-    },
-    {
-      "id": "segmentation-datasets",
-      "kind": "content",
-      "question": "Which UAV datasets are used for segmentation?",
-      "paper_title_contains": "Diverse Applications",
-      "expect_substrings": ["semantic segmentation in urban scenes"]
-    },
-    {
-      "id": "rotary-wing-types",
-      "kind": "content",
-      "question": "What types of rotary wing drones are described?",
-      "paper_title_contains": "Nineveh",
-      "expect_substrings": ["quadcopter"]
-    },
-    {
-      "id": "authors-of-search-paper",
-      "kind": "metadata",
-      "question": "Who wrote the paper on cooperative multi-target search?",
-      "paper_title_contains": "Cooperative Multi-Target",
-      "expect_substrings": ["Kadircan"]
-    },
-    {
-      "id": "ground-control-station",
-      "kind": "content",
-      "question": "What role does the ground control station play?",
-      "paper_title_contains": "Cooperative Multi-Target",
-      "expect_substrings": ["Ground Control Station"]
-    },
-    {
-      "id": "figure-reference",
-      "kind": "figure",
-      "question": "What does the figure showing UAV classification depict?",
-      "paper_title_contains": "Nineveh",
-      "expect_substrings": ["Types of drones according to their shapes and type of wings"]
-    },
-    {
-      "id": "offtopic-cake",
-      "kind": "off_topic",
-      "question": "What is the best recipe for chocolate cake?"
-    },
-    {
-      "id": "offtopic-capital",
-      "kind": "off_topic",
-      "question": "What is the capital of France?"
-    },
-    {
-      "id": "offtopic-gibberish",
-      "kind": "off_topic",
-      "question": "zxqw plorb fnargle wibbet"
-    }
+    {"id": "revisit-time-objective", "kind": "content",
+     "question": "What is achieved by minimizing revisit time in multi-UAV path planning?",
+     "paper_title_contains": "Joint Optimization of Connectivity",
+     "expect_substrings": ["revisit time"]},
+
+    {"id": "occupancy-updates", "kind": "content",
+     "question": "How is probabilistic occupancy used during cooperative search?",
+     "paper_title_contains": "Cooperative Multi-Target",
+     "expect_substrings": ["probabilistic occupancy updates"]},
+
+    {"id": "authors-of-search-paper", "kind": "metadata",
+     "question": "Who wrote the paper on cooperative multi-target search?",
+     "paper_title_contains": "Cooperative Multi-Target",
+     "expect_substrings": ["Kadircan"]},
+
+    {"id": "ground-control-station", "kind": "content",
+     "question": "What role does the ground control station play?",
+     "paper_title_contains": "Cooperative Multi-Target",
+     "expect_substrings": ["Ground Control Station"]},
+
+    {"id": "handover-figure", "kind": "figure",
+     "question": "What does the figure comparing handover types show?",
+     "paper_title_contains": "Survey of Important Issues",
+     "expect_substrings": ["Hard Handover", "Soft Handover"]},
+
+    {"id": "radioml-datasets", "kind": "content",
+     "question": "Which datasets are used to evaluate the online machine learning method?",
+     "paper_title_contains": "UAV-Assisted Online Machine Learning",
+     "expect_substrings": ["RADIOML", "FMNIST"]},
+
+    {"id": "dcgan-video-production", "kind": "content",
+     "question": "How are deep convolutional GANs applied in UAV imaging?",
+     "paper_title_contains": "Reliable and Efficient Data Collection",
+     "expect_substrings": ["image and video production"]},
+
+    {"id": "marl-security-attacks", "kind": "content",
+     "question": "Which security attacks does the multi-agent RL survey review?",
+     "paper_title_contains": "Applications of Multi-Agent Reinforcement Learning",
+     "expect_substrings": ["eavesdropping attacks", "DDoS"]},
+
+    {"id": "deep-q-routing", "kind": "content",
+     "question": "What routing method uses extra information to lower delivery delay?",
+     "paper_title_contains": "Applications of Multi-Agent Reinforcement Learning",
+     "expect_substrings": ["deep Q- routing"]},
+
+    {"id": "hybrid-split-federated", "kind": "content",
+     "question": "What distributed learning structure combines split and federated learning?",
+     "paper_title_contains": "Distributed Machine Learning for UAV Swarms",
+     "expect_substrings": ["hybrid split and federated learning"]},
+
+    {"id": "deadly-triad", "kind": "content",
+     "question": "Which three elements make value-based reinforcement learning unstable and divergent?",
+     "paper_title_contains": "Single and Multi-Agent Deep Reinforcement Learning",
+     "expect_substrings": ["_deadly triad_ : _function approximation_"]},
+
+    {"id": "drl-subagent-decomposition", "kind": "content",
+     "question": "How is the reinforcement learning training decomposed into simpler pieces?",
+     "paper_title_contains": "Application of Deep Reinforcement Learning",
+     "expect_substrings": ["task-oriented DRL sub-agents"]},
+
+    {"id": "coverage-mission-nine-uavs", "kind": "content",
+     "question": "How many UAVs minimise the total time of the coverage mission?",
+     "paper_title_contains": "Cooperative multi-UAV coverage mission",
+     "expect_substrings": ["global minimum when the mission is performed with 9 UAVs"]},
+
+    {"id": "harvested-power-duration-figure", "kind": "figure",
+     "question": "What does the figure of harvested power versus mission duration show?",
+     "paper_title_contains": "UAV-Enabled Wireless Power Transfer",
+     "expect_substrings": ["minimum average harvested power of GDs versus the UAV mission duration"]},
+
+    {"id": "ruav-cluster-count", "kind": "content",
+     "question": "How does the coefficient c affect the number of remaining UAV clusters?",
+     "paper_title_contains": "Resilient UAV Swarm Communications",
+     "expect_substrings": ["average number of RUAV clusters"]},
+
+    {"id": "mogoa-framework-figure", "kind": "figure",
+     "question": "What does the figure of the MOGOA framework depict?",
+     "paper_title_contains": "UAV Swarm-Enabled Collaborative Secure Relay",
+     "expect_substrings": ["rectangles filled in light green"]},
+
+    {"id": "episode-duration-obstacle-figure", "kind": "figure",
+     "question": "What does the CDF plot for the obstacle scenario compare?",
+     "paper_title_contains": "Distributed Reinforcement Learning for Flexible",
+     "expect_substrings": ["CDF of the episode duration for different algorithms in the obstacle scenario"]},
+
+    {"id": "demand-algorithm-baselines", "kind": "content",
+     "question": "Which two baseline demand algorithms is the trajectory work compared against?",
+     "paper_title_contains": "Deep Reinforcement Learning for Trajectory Path Planning",
+     "expect_substrings": ["sigmoid demand algorithm", "linear demand algorithm"]},
+
+    {"id": "iot-lowpower-protocols", "kind": "content",
+     "question": "Which low-power short-range technologies do IoT devices use for local data transmission?",
+     "paper_title_contains": "Reliable and Efficient Data Collection",
+     "expect_substrings": ["6TiSCH or LoRaWAN"]},
+
+    {"id": "nemo-mobility", "kind": "content",
+     "question": "Which IETF proposal handles network mobility, and why does it struggle in vehicular networks?",
+     "paper_title_contains": "Survey of Important Issues",
+     "expect_substrings": ["NEMO (network mobility)"]},
+
+    {"id": "lazy-agents-reward", "kind": "content",
+     "question": "What is the drawback of giving every agent one common global reward?",
+     "paper_title_contains": "Applications of Multi-Agent Reinforcement Learning",
+     "expect_substrings": ["breed lazy agents"]},
+
+    {"id": "hnpfl-fair-comparison", "kind": "content",
+     "question": "How is a fair comparison between the proposed method and the federated baseline ensured?",
+     "paper_title_contains": "UAV-Assisted Online Machine Learning",
+     "expect_substrings": ["fair comparison between HN-PFL and H-FL"]},
+
+    {"id": "epec-stackelberg", "kind": "content",
+     "question": "What game-theoretic problem arises from the Stackelberg power pricing formulation?",
+     "paper_title_contains": "Distributed Machine Learning for UAV Swarms",
+     "expect_substrings": ["equilibrium program with equilibrium constraints"]},
+
+    {"id": "irs-benchmark-td", "kind": "content",
+     "question": "What does the trajectory-design benchmark optimise while communication resources stay fixed?",
+     "paper_title_contains": "Aerial Intelligent Reflecting Surface",
+     "expect_substrings": ["Keeping the communication resources fixed"]},
+
+    {"id": "brkga-convergence-figure", "kind": "figure",
+     "question": "What does the figure of the genetic algorithm's convergence rates show?",
+     "paper_title_contains": "Multi-UAV Coverage Path Planning for the Inspection",
+     "expect_substrings": ["BRKGA convergence rates for three-UAV cases"]},
+
+    {"id": "forest-submaps", "kind": "content",
+     "question": "How are local observations compressed before being shared under the forest canopy?",
+     "paper_title_contains": "Search and rescue under the forest canopy",
+     "expect_substrings": ["lightweight submaps"]},
+
+    {"id": "cinematography-chase-shot", "kind": "content",
+     "question": "Which shot types are combined in the three-UAV filming experiment?",
+     "paper_title_contains": "Optimal Trajectory Planning for Cinematography",
+     "expect_substrings": ["performs a chase shot"]},
+
+    {"id": "u2o-collision-trigger", "kind": "content",
+     "question": "At what distance is the collision avoidance process activated?",
+     "paper_title_contains": "E2CoPre",
+     "expect_substrings": ["minimum U2O distance falls below 50"]},
+
+    {"id": "frontier-mesh-clustering", "kind": "content",
+     "question": "How are frontier meshes reduced for efficient decision making?",
+     "paper_title_contains": "Meeting-Merging-Mission",
+     "expect_substrings": ["Frontier Mesh Clustering"]},
+
+    {"id": "jamming-policy-algorithm", "kind": "content",
+     "question": "What algorithm optimises the jamming policy?",
+     "paper_title_contains": "Resource Allocation for Secure Multi-UAV",
+     "expect_substrings": ["Jamming Policy Optimization Algorithm"]},
+
+    {"id": "offtopic-cake", "kind": "off_topic",
+     "question": "What is the best recipe for chocolate cake?"},
+
+    {"id": "offtopic-capital", "kind": "off_topic",
+     "question": "What is the capital of France?"},
+
+    {"id": "offtopic-gibberish", "kind": "off_topic",
+     "question": "zxqw plorb fnargle wibbet"},
+
+    {"id": "offtopic-part107", "kind": "off_topic",
+     "question": "What are the FAA Part 107 requirements for getting a remote pilot certificate?"},
+
+    {"id": "offtopic-lipo-chemistry", "kind": "off_topic",
+     "question": "Which lithium polymer cell chemistry gives the longest cycle life in a consumer quadcopter battery?"},
+
+    {"id": "offtopic-spray-nozzle", "kind": "off_topic",
+     "question": "What nozzle size and boom pressure should I set on a crop-spraying drone before treating a vineyard?"},
+
+    {"id": "offtopic-drone-insurance", "kind": "off_topic",
+     "question": "How much does commercial drone liability insurance cost per year?"},
+
+    {"id": "offtopic-fpv-gear", "kind": "off_topic",
+     "question": "Which goggles and video transmitter should I buy for hobbyist FPV drone racing?"},
+
+    {"id": "offtopic-counter-uav-procurement", "kind": "off_topic",
+     "question": "What does it cost to procure a counter-drone radar system for a civilian airport?"},
+
+    {"id": "offtopic-warehouse-roi", "kind": "off_topic",
+     "question": "What payback period do retailers report after buying stocktaking drones for their warehouses?"},
+
+    {"id": "offtopic-airworthiness", "kind": "off_topic",
+     "question": "Which airworthiness certificate must a parcel delivery drone hold under EU aviation law, and how long does approval take?"},
+
+    {"id": "offtopic-propeller-shop", "kind": "off_topic",
+     "question": "Where can I buy replacement carbon fibre propellers for a DJI Mavic?"}
   ]
 }
