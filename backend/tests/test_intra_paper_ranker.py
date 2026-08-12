@@ -1,11 +1,15 @@
-"""keep_within_paper: the entire intra-paper selection policy, in isolation.
+"""Intra-paper and multi-paper chunk selection policies, in isolation.
 
-The function is pure so both production (chat_service) and the eval harness
+The functions are pure so both production (chat_service) and the eval harness
 can call the SAME policy — a re-implementation on either side would drift
-silently, and the whole point of the cut is that it is measurable.
+silently, and the whole point of the cuts is that they are measurable.
 """
 
-from app.services.intra_paper_ranker import keep_within_paper
+from app.services.intra_paper_ranker import (
+    admit_papers,
+    keep_within_paper,
+    merge_across_papers,
+)
 
 
 def test_empty_input_keeps_nothing():
@@ -70,3 +74,80 @@ def test_intra_paper_constants_are_settings_not_literals():
 
     assert 0.80 <= settings.intra_paper_ceiling <= 0.85
     assert 0.0 < settings.intra_paper_delta < settings.intra_paper_ceiling
+
+
+def test_admit_keeps_papers_under_the_threshold():
+    admitted, rejected = admit_papers({"a": 0.31, "b": 0.34}, threshold=0.75)
+    assert admitted == ["a", "b"]
+    assert rejected == []
+
+
+def test_admit_rejects_a_paper_at_or_above_the_threshold():
+    admitted, rejected = admit_papers({"a": 0.31, "b": 0.7518}, threshold=0.75)
+    assert admitted == ["a"]
+    assert rejected == ["b"]
+
+
+def test_admit_sorts_admitted_by_best_distance():
+    admitted, _ = admit_papers({"far": 0.60, "near": 0.20, "mid": 0.40}, threshold=0.75)
+    assert admitted == ["near", "mid", "far"]
+
+
+def test_admit_handles_an_empty_mapping():
+    assert admit_papers({}, threshold=0.75) == ([], [])
+
+
+def test_merge_guarantees_the_floor_to_every_paper():
+    """THE property the floor phase exists for, and it needs SEPARATED distance
+    ranges to be testable: with overlapping ranges a plain global top-k keeps
+    the farther paper anyway and the test passes against a merge that has no
+    floor phase at all. Here every one of b's chunks is farther than a's 60th,
+    so only the round-robin phase can get b into the budget."""
+    counts = merge_across_papers(
+        {
+            "a": [0.10 + 0.001 * i for i in range(80)],
+            "b": [0.60 + 0.001 * i for i in range(20)],
+        },
+        budget=60,
+        floor=5,
+    )
+    assert counts == {"a": 55, "b": 5}
+
+
+def test_merge_gives_the_remainder_to_the_nearer_paper():
+    """After the floor is met, distance decides -- A's chunks are all nearer
+    than B's, so A takes everything left."""
+    counts = merge_across_papers(
+        {"a": [0.10 + 0.001 * i for i in range(50)], "b": [0.60 + 0.001 * i for i in range(50)]},
+        budget=20,
+        floor=5,
+    )
+    assert counts == {"a": 15, "b": 5}
+
+
+def test_a_high_floor_produces_parity():
+    counts = merge_across_papers({"a": [0.1] * 40, "b": [0.5] * 40}, budget=60, floor=30)
+    assert counts == {"a": 30, "b": 30}
+
+
+def test_merge_never_exceeds_the_budget():
+    counts = merge_across_papers({"a": [0.1] * 100, "b": [0.2] * 100}, budget=60, floor=5)
+    assert sum(counts.values()) == 60
+
+
+def test_merge_never_exceeds_what_a_paper_has():
+    counts = merge_across_papers({"a": [0.1, 0.2], "b": [0.3] * 50}, budget=60, floor=10)
+    assert counts["a"] == 2
+
+
+def test_merge_redistributes_an_exhausted_papers_share():
+    counts = merge_across_papers({"a": [0.1, 0.2], "b": [0.3] * 50}, budget=20, floor=10)
+    assert counts == {"a": 2, "b": 18}
+
+
+def test_merge_of_a_single_paper_is_a_plain_budget_slice():
+    assert merge_across_papers({"a": [0.1] * 90}, budget=60, floor=5) == {"a": 60}
+
+
+def test_merge_handles_no_papers():
+    assert merge_across_papers({}, budget=60, floor=5) == {}
