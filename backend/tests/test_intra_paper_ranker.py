@@ -151,3 +151,16 @@ def test_merge_of_a_single_paper_is_a_plain_budget_slice():
 
 def test_merge_handles_no_papers():
     assert merge_across_papers({}, budget=60, floor=5) == {}
+
+
+def test_merge_interleaves_when_the_budget_cannot_cover_every_floor():
+    """THE fairness lock. With budget < floor * papers and BOTH papers able to
+    fill their floor, only an interleaved round-robin splits the shortfall --
+    a sequential per-paper fill would hand the first paper everything and
+    starve the second, while passing every other test in this file."""
+    counts = merge_across_papers(
+        {"a": [0.1] * 10, "b": [0.2] * 10},
+        budget=6,
+        floor=10,
+    )
+    assert counts == {"a": 3, "b": 3}

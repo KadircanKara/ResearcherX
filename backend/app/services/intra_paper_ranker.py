@@ -18,8 +18,6 @@ MULTI-paper scope adds two more decisions, both here for the same reason:
 can never measure a policy production does not run. `admit_papers` decides
 WHICH papers contribute at all; `merge_across_papers` decides how the
 per-paper cuts share one fixed budget. Neither may move into SQL.
-
-Pure on purpose: all three are imported by `evals/retrieval/run_eval.py`.
 """
 
 from collections.abc import Mapping, Sequence
