@@ -37,3 +37,13 @@ def test_word_tokens_normalizes_first():
         "reinforcement",
         "learning",
     ]
+
+
+def test_normalize_folds_letters_that_nfkd_cannot_decompose():
+    assert normalize_for_match("Yıldız") == "yildiz"
+    assert normalize_for_match("Søren Løkke") == "soren lokke"
+    assert normalize_for_match("Œuvre Æther Łódź Đurić") == "oeuvre aether lodz duric"
+
+
+def test_folded_letters_stay_one_token():
+    assert word_tokens("Yıldız Søren") == ["yildiz", "soren"]

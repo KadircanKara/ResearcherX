@@ -21,6 +21,21 @@ import unicodedata
 # a PDF and how a user types it, so none of them may carry meaning here.
 _NON_ALNUM = re.compile(r"[^0-9a-z]+")
 
+# Letters whose accent is structural, not a combining mark: NFKD leaves them
+# unchanged, and _NON_ALNUM then DELETES them -- "Yıldız" would normalize to
+# "y ld z", splitting one name into two junk tokens. An explicit map is the
+# only fix; there is no general Unicode rule that folds these.
+_FOLD = str.maketrans(
+    {
+        "ø": "o",
+        "đ": "d",
+        "ł": "l",
+        "ı": "i",
+        "æ": "ae",
+        "œ": "oe",
+    }
+)
+
 
 def normalize_for_match(text: str) -> str:
     """Casefold, strip accents, reduce punctuation to spaces, collapse runs.
@@ -32,8 +47,10 @@ def normalize_for_match(text: str) -> str:
         return ""
     # NFKD splits an accented character into base + combining mark; dropping
     # category Mn then leaves the bare letter. Casefold first so the ASCII
-    # test below is the only case rule in play.
-    decomposed = unicodedata.normalize("NFKD", text.casefold())
+    # test below is the only case rule in play. _FOLD handles structural
+    # accents that NFKD cannot decompose (e.g. ø, ł, ı), mapping them before
+    # decomposition so they fold to ASCII rather than being deleted.
+    decomposed = unicodedata.normalize("NFKD", text.casefold().translate(_FOLD))
     stripped = "".join(c for c in decomposed if not unicodedata.combining(c))
     return _NON_ALNUM.sub(" ", stripped).strip()
 
