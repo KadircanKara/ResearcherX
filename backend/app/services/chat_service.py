@@ -435,7 +435,7 @@ class ChatService:
                         and total_chunks > settings.max_context_chunks
                         and candidates
                     ):
-                        target_id = await self._targeter.run(
+                        target_ids = await self._targeter.run(
                             TargeterInput(
                                 query=retrieval_query,
                                 candidates=[
@@ -444,12 +444,13 @@ class ChatService:
                                 prior_messages=reformulation_context,
                             )
                         )
-                        if target_id is not None:
-                            scope = [c for c in candidates if c.paper_id == target_id]
+                        if target_ids:
+                            chosen = set(target_ids)
+                            scope = [c for c in candidates if c.paper_id in chosen]
                             log.info(
                                 "paper_targeted",
                                 conversation_id=conversation_id,
-                                paper_id=target_id,
+                                paper_ids=target_ids,
                                 candidates=len(candidates),
                             )
 
