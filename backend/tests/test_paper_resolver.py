@@ -73,3 +73,17 @@ def test_no_papers_returns_no_matches():
 
 def test_empty_question_returns_no_matches():
     assert match_by_title_span("", LIBRARY) == []
+
+
+def test_a_title_span_does_not_match_inside_a_longer_word():
+    """THE anti-collision lock. `_contains_run` pads both sides with spaces so
+    a title's tokens cannot match inside a larger word. Without the padding a
+    bare substring test would resolve this paper, which is the false-positive
+    class the whole module is built to prevent."""
+    short = ResolvablePaper(
+        paper_id="p6",
+        title="RL Survey",
+        authors=(),
+        year=2022,
+    )
+    assert match_by_title_span("girl survey of methods", [short]) == []
