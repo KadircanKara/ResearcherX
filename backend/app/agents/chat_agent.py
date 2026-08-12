@@ -42,6 +42,11 @@ SYSTEM = (
     "drawn from it takes no citation. If a field is missing from a paper's line, "
     "the paper does not state it — full stop. Say so plainly; never infer it "
     "from excerpt content.\n\n"
+    "A PAPERS NAMED BUT NOT RETRIEVED block lists papers the question named "
+    "whose content did not match it. Say so plainly for each one — that "
+    "nothing in it appears to cover the question — and answer the rest from "
+    "the excerpts. Do not infer what such a paper says, and do not silently "
+    "omit it from an answer that compares papers.\n\n"
     # ORDER IS DELIBERATE — do not move this paragraph before the one above it.
     # Placed earlier (before the PAPERS block is even defined), the model read
     # this conditional "ask which paper" first and then hit the paragraph
@@ -127,6 +132,19 @@ def build_papers_block(papers: list[PaperMetaContext]) -> str:
     return "PAPERS ASSIGNED TO THIS PROJECT:\n" + "\n".join(lines)
 
 
+def build_absent_block(titles: list[str]) -> str:
+    """Papers the user's question named that contributed no excerpts.
+
+    Named rather than silently dropped: a two-paper question answered from one
+    paper, with no signal, reads as if the second paper agreed with the first.
+    """
+    named = [" ".join(t.split()) for t in titles if t and t.strip()]
+    if not named:
+        return ""
+    lines = "\n".join(f'- "{t}"' for t in named)
+    return "PAPERS NAMED BUT NOT RETRIEVED — nothing in these matched the question:\n" + lines
+
+
 class ChatAgentInput(BaseModel):
     query: str
     prior_messages: list[dict]  # [{"role": "user"|"assistant", "content": "..."}]
@@ -137,6 +155,9 @@ class ChatAgentInput(BaseModel):
     # even built -- this model has no opinion on that decision, only on how
     # to render whatever PaperMetaContext list it is handed.
     papers: list[PaperMetaContext] = Field(default_factory=list)
+    # Titles the question named that returned no excerpts. Defaulted so every
+    # existing caller keeps working.
+    absent_papers: list[str] = Field(default_factory=list)
 
 
 class ChatAgent:
@@ -162,6 +183,9 @@ class ChatAgent:
         papers_block = build_papers_block(inp.papers)
         if papers_block:
             blocks.append(papers_block)
+        absent_block = build_absent_block(inp.absent_papers)
+        if absent_block:
+            blocks.append(absent_block)
         blocks.append(context_block)
         messages.append(
             {

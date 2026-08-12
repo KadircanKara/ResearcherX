@@ -23,6 +23,7 @@ from app.db.session import SessionLocal
 from app.services.conversation_service import ConversationService
 from app.services.embedding_service import EmbeddingService
 from app.services.intra_paper_ranker import admit_papers, keep_within_paper, merge_across_papers
+from app.services.paper_resolver import ResolvablePaper, resolve_papers
 
 _HISTORY_TOP_K = 5
 
@@ -317,6 +318,19 @@ class ChatService:
                     .all()
                 )
 
+                # Rung 1 (the lexical resolver) needs authors/year alongside
+                # id/title; built here, inside the session, while these
+                # attributes are loaded.
+                resolvable = [
+                    ResolvablePaper(
+                        paper_id=p.id,
+                        title=p.title,
+                        authors=tuple(p.authors or []),
+                        year=p.year,
+                    )
+                    for p in paper_rows
+                ]
+
                 # Format prior messages (all except the user's current message)
                 prior_messages = [
                     {"role": m.role, "content": m.content}
@@ -343,6 +357,10 @@ class ChatService:
             # Embed the query — fail-open: if embedding unavailable, skip retrieval
             history_hits: list[dict] = []
             paper_chunks: list = []
+            # Titles a resolved multi-paper scope named but that contributed
+            # no chunks. Initialised here, unconditionally, so it is always
+            # defined when embedding failed or the project has no papers.
+            absent_titles: list[str] = []
             query_embedding: list[float] | None = None
 
             try:
@@ -416,14 +434,33 @@ class ChatService:
                             db, paper_infos, retrieval_embedding, _TARGETER_CANDIDATES
                         )
 
-                    # Scope retrieval to one paper when the question might be
-                    # about one paper. Skipped for single-paper projects: the
+                    # Rung 1: lexical. Free, so it runs regardless of the
+                    # budget gate that guards rung 2 below -- that gate exists
+                    # only to avoid paying for an LLM call on a small project,
+                    # and scoping to a paper the user literally named is a
+                    # correctness matter at any library size.
+                    resolved_ids = resolve_papers(
+                        retrieval_query,
+                        resolvable,
+                        max_papers=settings.max_resolved_papers,
+                    )
+                    if resolved_ids:
+                        chosen = set(resolved_ids)
+                        scope = [p for p in paper_infos if p.paper_id in chosen]
+                        log.info(
+                            "papers_resolved_lexically",
+                            conversation_id=conversation_id,
+                            paper_ids=resolved_ids,
+                        )
+
+                    # Rung 2: the targeter. Skipped when the lexical rung
+                    # above already resolved, for single-paper projects: the
                     # scope would be that one paper whether the targeter names
                     # it or answers None, so targeting there is a guaranteed
                     # no-op that still costs a full extra LLM call every turn
                     # -- and "upload one PDF and ask about it" is the common
                     # case. Also skipped when the whole library already fits
-                    # the context budget; that second skip is a COST decision,
+                    # the context budget; that last skip is a COST decision,
                     # not a correctness one -- with similarity_threshold in
                     # play, scoping to one paper can still change which chunks
                     # come back even under budget (a threshold-passing chunk
@@ -431,7 +468,8 @@ class ChatService:
                     # projects deliberately keep that original misattribution
                     # risk in exchange for skipping this LLM call.
                     if (
-                        len(paper_infos) > 1
+                        not resolved_ids
+                        and len(paper_infos) > 1
                         and total_chunks > settings.max_context_chunks
                         and candidates
                     ):
@@ -445,6 +483,14 @@ class ChatService:
                             )
                         )
                         if target_ids:
+                            # The cap lives here, not in the agent: how many
+                            # papers one question may scope to is policy, and
+                            # past it every paper is diluted to the floor.
+                            # Truncating (not discarding, as the lexical rung
+                            # above does) is right for this rung -- the model
+                            # ordered the list by its own confidence, so the
+                            # head is the best guess available.
+                            target_ids = target_ids[: settings.max_resolved_papers]
                             chosen = set(target_ids)
                             scope = [c for c in candidates if c.paper_id in chosen]
                             log.info(
@@ -454,24 +500,43 @@ class ChatService:
                                 candidates=len(candidates),
                             )
 
-                    async with SessionLocal() as db:
-                        paper_chunks = await self._retrieve_paper_chunks(
-                            db, scope, retrieval_embedding
-                        )
-
-                    if scope is not paper_infos and not paper_chunks:
-                        # A targeted paper whose every chunk sits at or beyond
-                        # intra_paper_ceiling (the single-paper SQL cutoff --
-                        # see _retrieve_paper_chunks) retrieves nothing, and
-                        # chat_agent then answers ungrounded -- a worse
-                        # failure than the misattribution this feature fixes.
-                        # Re-querying the untargeted scope keeps the answer
-                        # grounded, same as if targeting had never fired.
+                    # A scope of MORE THAN ONE paper is a resolved SET and
+                    # gets the multi-paper pipeline (admission, per-paper
+                    # delta cut, merge -- see _retrieve_multi_paper_chunks).
+                    # Exactly one paper -- from either rung -- and the
+                    # whole-project default both take the untouched
+                    # single-paper/whole-project path below: ceiling, delta
+                    # cut, no admission gate, no merge.
+                    if scope is not paper_infos and len(scope) > 1:
+                        async with SessionLocal() as db:
+                            paper_chunks, absent_titles = await self._retrieve_multi_paper_chunks(
+                                db, scope, retrieval_embedding
+                            )
+                    else:
                         async with SessionLocal() as db:
                             paper_chunks = await self._retrieve_paper_chunks(
-                                db, paper_infos, retrieval_embedding
+                                db, scope, retrieval_embedding
                             )
-                        scope = paper_infos
+
+                        if scope is not paper_infos and not paper_chunks:
+                            # A targeted paper whose every chunk sits at or
+                            # beyond intra_paper_ceiling (the single-paper SQL
+                            # cutoff -- see _retrieve_paper_chunks) retrieves
+                            # nothing, and chat_agent then answers ungrounded
+                            # -- a worse failure than the misattribution this
+                            # feature fixes. Re-querying the untargeted scope
+                            # keeps the answer grounded, same as if targeting
+                            # had never fired. SINGLE-paper scope only: a
+                            # multi-paper scope reports absent papers instead
+                            # (handled above) -- discarding a resolved SET
+                            # here because one member came back empty would
+                            # rebuild the answer from papers the user never
+                            # named.
+                            async with SessionLocal() as db:
+                                paper_chunks = await self._retrieve_paper_chunks(
+                                    db, paper_infos, retrieval_embedding
+                                )
+                            scope = paper_infos
 
             yield {
                 "event": "retrieving",
@@ -490,6 +555,7 @@ class ChatService:
                 prior_messages=all_prior,
                 paper_chunks=paper_chunks,
                 papers=paper_metas,
+                absent_papers=absent_titles,
             )
 
             # Stream response

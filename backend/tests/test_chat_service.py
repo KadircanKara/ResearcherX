@@ -1076,3 +1076,190 @@ async def test_multi_paper_scope_with_every_paper_rejected_returns_no_chunks():
     chunks, absent = await _run_multi(rows, papers=[("a", "A"), ("b", "B")])
     assert chunks == []
     assert sorted(absent) == ["A", "B"]
+
+
+async def test_lexical_rung_scopes_without_calling_the_targeter(
+    db_session: AsyncSession, project: Project, conversation_with_message
+):
+    """The lexical rung is free, so it runs even under the budget gate that
+    guards the LLM rung -- scoping to a paper the user literally named is a
+    correctness matter at any library size. total_chunks is mocked to 5, well
+    UNDER max_context_chunks (60): if the lexical rung were moved behind that
+    same budget gate, it would never fire here and the assertion below would
+    fail (seen['scope'] would never be populated because the targeter is
+    stubbed to raise and _retrieve_multi_paper_chunks would never be called
+    either)."""
+    from app.db.models import Paper
+    from app.services.chat_service import ChatService, PaperInfo
+
+    conv = conversation_with_message
+    db_session.add(Paper(id="p1", project_id=project.id, title="P One", source="manual"))
+    db_session.add(Paper(id="p2", project_id=project.id, title="P Two", source="manual"))
+    await db_session.commit()
+
+    async def fake_stream(*args, **kwargs):
+        yield "answer"
+
+    svc = ChatService()
+    candidates = [PaperInfo(paper_id="p1", title="P One"), PaperInfo(paper_id="p2", title="P Two")]
+
+    async def _boom(*_a, **_k):
+        raise AssertionError("targeter must not run when the lexical rung resolved")
+
+    seen: dict = {}
+
+    async def _fake_multi(_db, scope, _emb):
+        seen["scope"] = [p.paper_id for p in scope]
+        return [], []
+
+    with (
+        patch.object(svc._embedding_svc, "embed", AsyncMock(return_value=[0.0] * 768)),
+        patch.object(svc, "_retrieve_history", AsyncMock(return_value=[])),
+        patch.object(svc, "_shortlist_papers", AsyncMock(return_value=(candidates, 5))),
+        patch.object(svc._targeter, "run", _boom),
+        patch.object(svc, "_retrieve_multi_paper_chunks", _fake_multi),
+        patch.object(svc._chat_agent, "stream", return_value=fake_stream()),
+        patch.object(svc._conv_svc, "save_message", AsyncMock()),
+        patch("app.services.chat_service.resolve_papers", lambda *_a, **_k: ["p1", "p2"]),
+    ):
+        async for _ in svc.respond(conv.id, "In P One and P Two, compare rewards."):
+            pass
+
+    assert seen["scope"] == ["p1", "p2"]
+
+
+async def test_targeter_rung_runs_when_the_lexical_rung_falls_through(
+    db_session: AsyncSession, project: Project, conversation_with_message
+):
+    """[] from the lexical rung is the normal "fall through" answer -- the
+    targeter must still get its turn when the corpus is over budget."""
+    from app.db.models import Paper
+    from app.services.chat_service import ChatService, PaperInfo
+
+    conv = conversation_with_message
+    db_session.add(Paper(id="p1", project_id=project.id, title="P One", source="manual"))
+    db_session.add(Paper(id="p2", project_id=project.id, title="P Two", source="manual"))
+    await db_session.commit()
+
+    async def fake_stream(*args, **kwargs):
+        yield "answer"
+
+    svc = ChatService()
+    candidates = [PaperInfo(paper_id="p1", title="P One"), PaperInfo(paper_id="p2", title="P Two")]
+
+    called: dict = {}
+
+    async def _fake_targeter(inp):
+        called["query"] = inp.query
+        return ["p1"]
+
+    with (
+        patch.object(svc._embedding_svc, "embed", AsyncMock(return_value=[0.0] * 768)),
+        patch.object(svc, "_retrieve_history", AsyncMock(return_value=[])),
+        patch.object(svc, "_shortlist_papers", AsyncMock(return_value=(candidates, 500))),
+        patch.object(svc._targeter, "run", _fake_targeter),
+        patch.object(svc, "_retrieve_paper_chunks", AsyncMock(return_value=[])),
+        patch.object(svc._chat_agent, "stream", return_value=fake_stream()),
+        patch.object(svc._conv_svc, "save_message", AsyncMock()),
+        patch("app.services.chat_service.resolve_papers", lambda *_a, **_k: []),
+    ):
+        async for _ in svc.respond(conv.id, "compare those two papers"):
+            pass
+
+    assert called["query"] == "compare those two papers"
+
+
+async def test_absent_titles_reach_the_chat_agent(
+    db_session: AsyncSession, project: Project, conversation_with_message
+):
+    """The whole point of Task 9's reporting half: a paper the user named but
+    that contributed no chunks must reach ChatAgentInput.absent_papers, not
+    vanish silently. If the service stopped threading absent_papers through,
+    captured['absent'] would default to [] (the field's own default) and this
+    would fail."""
+    from app.db.models import Paper
+    from app.services.chat_service import ChatService, PaperInfo
+
+    conv = conversation_with_message
+    db_session.add(Paper(id="p1", project_id=project.id, title="P One", source="manual"))
+    db_session.add(Paper(id="p2", project_id=project.id, title="P Two", source="manual"))
+    await db_session.commit()
+
+    svc = ChatService()
+    candidates = [PaperInfo(paper_id="p1", title="P One"), PaperInfo(paper_id="p2", title="P Two")]
+
+    async def _fake_multi(_db, _scope, _emb):
+        return [], ["P Two"]
+
+    captured: dict = {}
+
+    async def _fake_stream(inp):
+        captured["absent"] = inp.absent_papers
+        return
+        yield  # pragma: no cover - makes this an async generator
+
+    with (
+        patch.object(svc._embedding_svc, "embed", AsyncMock(return_value=[0.0] * 768)),
+        patch.object(svc, "_retrieve_history", AsyncMock(return_value=[])),
+        patch.object(svc, "_shortlist_papers", AsyncMock(return_value=(candidates, 5))),
+        patch.object(svc, "_retrieve_multi_paper_chunks", _fake_multi),
+        patch.object(svc._chat_agent, "stream", _fake_stream),
+        patch.object(svc._conv_svc, "save_message", AsyncMock()),
+        patch("app.services.chat_service.resolve_papers", lambda *_a, **_k: ["p1", "p2"]),
+    ):
+        async for _ in svc.respond(conv.id, "In P One and P Two, compare rewards."):
+            pass
+
+    assert captured["absent"] == ["P Two"]
+
+
+async def test_targeter_output_is_capped_at_max_resolved_papers(
+    db_session: AsyncSession, project: Project, conversation_with_message
+):
+    """Truncated, not discarded: the model ordered the list by its own
+    confidence, so the head is the best guess available. The lexical rung
+    discards instead, because an exact match has no ordering to trust. If the
+    `target_ids[: settings.max_resolved_papers]` slice were removed,
+    seen['scope'] would come back as all three ids instead of two."""
+    from app.db.models import Paper
+    from app.services.chat_service import ChatService, PaperInfo
+
+    conv = conversation_with_message
+    for pid, title in [("p1", "P One"), ("p2", "P Two"), ("p3", "P Three")]:
+        db_session.add(Paper(id=pid, project_id=project.id, title=title, source="manual"))
+    await db_session.commit()
+
+    async def fake_stream(*args, **kwargs):
+        yield "answer"
+
+    svc = ChatService()
+    candidates = [
+        PaperInfo(paper_id="p1", title="P One"),
+        PaperInfo(paper_id="p2", title="P Two"),
+        PaperInfo(paper_id="p3", title="P Three"),
+    ]
+
+    async def _fake_targeter(_inp):
+        return ["p1", "p2", "p3"]
+
+    seen: dict = {}
+
+    async def _fake_multi(_db, scope, _emb):
+        seen["scope"] = [p.paper_id for p in scope]
+        return [], []
+
+    with (
+        patch.object(settings, "max_resolved_papers", 2),
+        patch.object(svc._embedding_svc, "embed", AsyncMock(return_value=[0.0] * 768)),
+        patch.object(svc, "_retrieve_history", AsyncMock(return_value=[])),
+        patch.object(svc, "_shortlist_papers", AsyncMock(return_value=(candidates, 500))),
+        patch.object(svc._targeter, "run", _fake_targeter),
+        patch.object(svc, "_retrieve_multi_paper_chunks", _fake_multi),
+        patch.object(svc._chat_agent, "stream", return_value=fake_stream()),
+        patch.object(svc._conv_svc, "save_message", AsyncMock()),
+        patch("app.services.chat_service.resolve_papers", lambda *_a, **_k: []),
+    ):
+        async for _ in svc.respond(conv.id, "compare those papers"):
+            pass
+
+    assert seen["scope"] == ["p1", "p2"]

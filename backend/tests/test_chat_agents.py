@@ -8,6 +8,7 @@ from app.agents.chat_agent import (
     ChatAgentInput,
     ChunkContext,
     PaperMetaContext,
+    build_absent_block,
     build_papers_block,
 )
 
@@ -255,3 +256,54 @@ def test_system_prompt_never_names_the_papers_block_to_the_user():
     PAPERS is an internal prompt structure and must never reach the user."""
     assert "internal structure" in SYSTEM.lower()
     assert "never name it in a reply" in SYSTEM.lower()
+
+
+def test_absent_block_names_the_papers_that_contributed_nothing():
+    block = build_absent_block(["Robust MARL under Attack"])
+    assert "Robust MARL under Attack" in block
+
+
+def test_absent_block_is_empty_for_no_absent_papers():
+    assert build_absent_block([]) == ""
+
+
+async def test_stream_includes_the_absent_block_in_the_prompt():
+    """Drives respond()'s new wiring end to end at the agent boundary: if
+    absent_papers is not rendered into the prompt, the model has no way to
+    know a named paper contributed nothing."""
+    agent = ChatAgent()
+
+    async def aiter_list(items):
+        for item in items:
+            yield item
+
+    fake_chunk = MagicMock()
+    fake_chunk.choices = [MagicMock(delta=MagicMock(content="hi"))]
+    fake_stream = MagicMock()
+    fake_stream.__aiter__ = lambda self: aiter_list([fake_chunk])
+
+    fake_create = AsyncMock(return_value=fake_stream)
+    with patch("app.agents.chat_agent.create_chat_completion", new=fake_create):
+        async for _ in agent.stream(
+            ChatAgentInput(
+                query="compare them",
+                prior_messages=[],
+                paper_chunks=[],
+                absent_papers=["Robust MARL under Attack"],
+            )
+        ):
+            pass
+
+    sent = fake_create.await_args.kwargs["messages"][-1]["content"]
+    assert "Robust MARL under Attack" in sent
+
+
+def test_system_prompt_covers_papers_named_but_not_retrieved():
+    """Regression guard for the new paragraph, and for its position: it must
+    sit AFTER the PAPERS-block paragraph and BEFORE the disambiguation
+    paragraph -- the ordering of this section is empirically established
+    (see the inline 'ORDER IS DELIBERATE' comment) and must not move."""
+    absent_at = SYSTEM.index("PAPERS NAMED BUT NOT RETRIEVED")
+    papers_block_at = SYSTEM.index("The PAPERS block lists the title")
+    disambiguation_at = SYSTEM.index("When a question about authors, year, or venue")
+    assert papers_block_at < absent_at < disambiguation_at
