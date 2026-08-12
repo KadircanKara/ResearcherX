@@ -23,6 +23,7 @@ Anchoring on syntax kills a collision class structurally; a blocklist would
 rot on the next upload.
 """
 
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -109,3 +110,55 @@ def _contains_run(haystack: str, needle: str) -> bool:
     "rl a survey" from matching inside "curl a survey".
     """
     return f" {needle} " in f" {haystack} "
+
+
+# A name may only enter through an attribution construction. This is the whole
+# defence against the surname-collision class: "how", "park", "chen" and
+# "wang" are all real surnames on this corpus AND common English words, but
+# none of them appears inside "by ___" or "___ et al." in ordinary prose.
+#
+# The capture is deliberately greedy-but-short (1-3 capitalised words): it has
+# to reach "Van Der Berg" without swallowing the rest of the sentence.
+_ATTRIBUTION_RES = (
+    re.compile(r"\bauthored\s+by\s+((?:[A-Z][\w''-]*\s*){1,3})"),
+    re.compile(r"\bby\s+((?:[A-Z][\w''-]*\s*){1,3})"),
+    re.compile(r"\b([A-Z][\w''-]*)\s+et\s+al\b"),
+    re.compile(r"\b([A-Z][\w''-]*)['']s\b"),
+)
+
+
+def _attributed_names(question: str) -> list[str]:
+    """Capitalised name spans introduced by an attribution construction.
+
+    Runs against the ORIGINAL question, never the normalized one: the
+    capitalisation requirement is the second guard, and normalising first
+    would destroy the evidence it depends on.
+    """
+    names: list[str] = []
+    for pattern in _ATTRIBUTION_RES:
+        for match in pattern.finditer(question):
+            span = match.group(1).strip()
+            if span:
+                names.append(span)
+    return names
+
+
+def match_by_author(question: str, papers: Sequence[ResolvablePaper]) -> list[str]:
+    """Papers whose author list contains a name the question ATTRIBUTES.
+
+    Returns every paper the attributed names cover, in input order. Whether
+    several papers is a resolution or an ambiguity is `resolve_papers`'
+    decision, not this function's.
+    """
+    if not papers:
+        return []
+    name_tokens = {token for name in _attributed_names(question) for token in word_tokens(name)}
+    if not name_tokens:
+        return []
+
+    matched: list[str] = []
+    for paper in papers:
+        author_tokens = {token for author in paper.authors for token in word_tokens(author)}
+        if name_tokens & author_tokens:
+            matched.append(paper.paper_id)
+    return matched

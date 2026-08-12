@@ -1,5 +1,6 @@
 from app.services.paper_resolver import (
     ResolvablePaper,
+    match_by_author,
     match_by_title_span,
 )
 
@@ -87,3 +88,66 @@ def test_a_title_span_does_not_match_inside_a_longer_word():
         year=2022,
     )
     assert match_by_title_span("girl survey of methods", [short]) == []
+
+
+def test_matches_an_author_after_by():
+    assert match_by_author("What does the paper by Yanmaz argue?", LIBRARY) == ["p2"]
+
+
+def test_matches_an_author_in_et_al_form():
+    assert match_by_author("Summarise Guven et al.", LIBRARY) == ["p3"]
+
+
+def test_matches_an_author_in_possessive_form():
+    assert match_by_author("What is Hopper's paper about?", LIBRARY) == ["p1"]
+
+
+def test_matches_authored_by_form():
+    assert match_by_author("the one authored by Lovelace", LIBRARY) == ["p1"]
+
+
+def test_a_surname_colliding_with_a_common_word_does_not_match():
+    """THE load-bearing regression. 'How' is a real surname on the live corpus
+    and opens a large share of all questions. Only an attribution construction
+    may introduce a name, so a bare 'How' can never resolve one."""
+    how = ResolvablePaper(
+        paper_id="p9", title="Some Unrelated Title", authors=("Ada How",), year=2022
+    )
+    assert match_by_author("How do these two papers differ?", [how, *LIBRARY]) == []
+
+
+def test_a_lowercase_name_inside_an_attribution_does_not_match():
+    """Capitalisation is checked against the ORIGINAL question: 'by park' is
+    ordinary prose, 'by Park' is an attribution."""
+    park = ResolvablePaper(paper_id="p8", title="Another Title", authors=("Jae Park",), year=2020)
+    assert match_by_author("walking by park benches", [park]) == []
+    assert match_by_author("the study by Park", [park]) == ["p8"]
+
+
+def test_matches_diacritics_folded():
+    assert match_by_author(
+        "the paper by Yanmaz",
+        [ResolvablePaper(paper_id="pX", title="T", authors=("Evşen Yanmaz",), year=2021)],
+    ) == ["pX"]
+
+
+def test_an_author_on_several_papers_returns_all_of_them():
+    """The matcher reports every paper the name covers; deciding whether that
+    is a resolution or an ambiguity belongs to resolve_papers()."""
+    a = ResolvablePaper(paper_id="pa", title="First", authors=("Evsen Yanmaz",), year=2020)
+    b = ResolvablePaper(paper_id="pb", title="Second", authors=("Evsen Yanmaz",), year=2021)
+    assert match_by_author("papers by Yanmaz", [a, b]) == ["pa", "pb"]
+
+
+def test_no_attribution_construction_returns_nothing():
+    assert match_by_author("Yanmaz swarm coordination results", LIBRARY) == []
+
+
+def test_the_capitalisation_guard_is_checked_against_the_original_question():
+    """Removing the [A-Z] anchor from the attribution regexes must break this.
+    'by wang' is ordinary prose ("passed by wang stalls"); 'by Wang' is an
+    attribution. Only the original question carries that distinction --
+    normalising first would destroy the evidence this guard depends on."""
+    wang = ResolvablePaper(paper_id="pw", title="Some Title", authors=("Lei Wang",), year=2020)
+    assert match_by_author("we walked by wang market yesterday", [wang]) == []
+    assert match_by_author("the method by Wang", [wang]) == ["pw"]
