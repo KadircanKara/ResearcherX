@@ -15,6 +15,7 @@ from evals.retrieval.metrics import (
     order_statistic_risk,
     recall_at_k,
     recommended_point,
+    rescued_count,
     separating_threshold,
     sweep,
     simulate_retrieval,
@@ -36,6 +37,20 @@ def _s(title: str, text: str, dist: float, paper_id: str | None = None) -> Score
     care about the distinction; pass it explicitly for a test that needs a
     paper_id different from its title (e.g. two papers sharing a title)."""
     return Scored(paper_id=paper_id or title, paper_title=title, chunk_text=text, distance=dist)
+
+
+def _case(answer_contains: str) -> Case:
+    """A Case whose paper is "A" and whose only requirement is that the
+    chunk text contain `answer_contains` -- the minimal Case the
+    rescued_count tests need, matching the paper_title="A" used in the
+    hybrid Scored fixtures below."""
+    return Case(
+        id="hybrid-case",
+        kind="content",
+        question="q",
+        paper_title_contains="A",
+        expect_substrings=(answer_contains,),
+    )
 
 
 def test_simulate_retrieval_takes_a_global_top_k_not_per_paper():
@@ -421,3 +436,66 @@ def test_order_statistic_risk_raises_without_at_least_one_case_each_side():
         order_statistic_risk(n_positives=0, n_negatives=3)
     with pytest.raises(ValueError):
         order_statistic_risk(n_positives=3, n_negatives=0)
+
+
+# --- rescued_count -----------------------------------------------------------
+
+
+def test_rescued_counts_only_sparse_only_admissions():
+    """`rescued` is the number that justifies hybrid retrieval at all: how
+    many positives have their answering chunk admitted ONLY by the sparse
+    arm. A chunk the dense arm also found is not a rescue -- hybrid merely
+    reordered it, which the recall figure already reflects."""
+    case = _case(answer_contains="reward table")
+    rescued = Scored(
+        paper_id="p1",
+        paper_title="A",
+        chunk_text="the reward table lists",
+        distance=None,
+        chunk_id="c1",
+        d_rank=None,
+        s_rank=1,
+    )
+    assert rescued_count([(case, [rescued])], k=60) == 1
+
+
+def test_a_chunk_found_by_both_arms_is_not_a_rescue():
+    case = _case(answer_contains="reward table")
+    both = Scored(
+        paper_id="p1",
+        paper_title="A",
+        chunk_text="the reward table lists",
+        distance=0.4,
+        chunk_id="c1",
+        d_rank=3,
+        s_rank=1,
+    )
+    assert rescued_count([(case, [both])], k=60) == 0
+
+
+def test_a_rescue_outside_the_budget_does_not_count():
+    """A chunk the sparse arm admitted but that fusion ranked past k never
+    reaches the model, so it rescued nothing."""
+    case = _case(answer_contains="reward table")
+    filler = [
+        Scored(
+            paper_id="p1",
+            paper_title="A",
+            chunk_text=f"filler {i}",
+            distance=0.1,
+            chunk_id=f"f{i}",
+            d_rank=i + 1,
+            s_rank=None,
+        )
+        for i in range(3)
+    ]
+    rescued = Scored(
+        paper_id="p1",
+        paper_title="A",
+        chunk_text="the reward table lists",
+        distance=None,
+        chunk_id="c1",
+        d_rank=None,
+        s_rank=1,
+    )
+    assert rescued_count([(case, filler + [rescued])], k=3) == 0

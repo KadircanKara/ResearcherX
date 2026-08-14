@@ -21,7 +21,23 @@ class Scored:
     paper_id: str
     paper_title: str
     chunk_text: str
-    distance: float
+    # `float | None`: a sparse-only admission (hybrid arm) has no cosine
+    # distance. Every distance-space function below (simulate_retrieval,
+    # best_satisfying_distance, noise_floor, sweep, separating_threshold, ...)
+    # still types this as float and will raise TypeError on None -- by
+    # design, NOT an oversight. Those functions must keep consuming the
+    # DENSE arm exclusively (plain `_chunks_for`, never `_hybrid_chunks_for`).
+    # The hybrid arm may only be fed to `recall_at_k`, `mean_reciprocal_rank`,
+    # `rescued_count`, and the targeted survival cut -- none of which touch
+    # `.distance`. See rescued_count's docstring and run_eval.py's --hybrid
+    # branch for the enforcement.
+    distance: float | None
+    # Hybrid-only. `distance`/`d_rank` are None for a chunk the dense arm
+    # never returned -- a sparse-only admission, which is the entire point of
+    # the hybrid arm.
+    chunk_id: str = ""
+    d_rank: int | None = None
+    s_rank: int | None = None
 
 
 @dataclass(frozen=True)
@@ -91,6 +107,32 @@ def mean_reciprocal_rank(case_chunks: list[tuple[Case, list[Scored]]], k: int) -
         if rank is not None:
             total += 1.0 / rank
     return total / len(case_chunks)
+
+
+def rescued_count(case_chunks: list[tuple[Case, list[Scored]]], k: int) -> int:
+    """Positives whose satisfying chunk reached the model ONLY via the sparse arm.
+
+    This is the number that justifies hybrid retrieval. `recall@k` can improve
+    from reordering alone; `rescued` counts the cases where dense retrieval
+    did not return the answering chunk at all and the lexical arm did. If it
+    is zero, `ts_rank_cd` is not adding a signal and the change should not
+    ship (the next lever would be a real BM25 index, which is a base-image
+    change -- see the design doc).
+
+    `chunks` must already be in FUSED order; only the first `k` count, because
+    only those reach the model. Deliberately does not touch `.distance` --
+    the whole reason this function exists separately from the distance-space
+    metrics above is that a sparse-only admission has none.
+    """
+    rescued = 0
+    for case, chunks in case_chunks:
+        for chunk in chunks[:k]:
+            if not chunk_satisfies(case, chunk.paper_title, chunk.chunk_text):
+                continue
+            if chunk.d_rank is None and chunk.s_rank is not None:
+                rescued += 1
+            break
+    return rescued
 
 
 def best_satisfying_distance(case: Case, chunks: list[Scored]) -> float | None:
