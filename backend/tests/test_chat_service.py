@@ -266,12 +266,60 @@ async def test_hybrid_binds_both_pool_sizes():
 
 
 async def test_a_sparse_only_chunk_can_outrank_a_dense_chunk():
-    """The whole point. 'c2' is absent from the dense arm entirely -- the
-    distance gate rejected it -- and is sparse rank 1. At the default 70/30
-    weights and k=60, RRF(w=0.3, rank=1) = 0.3/61 ~= 0.00492 only exceeds
-    RRF(w=0.7, rank=d) once d > 82.3 (0.7/(60+d) < 0.3/61) -- so a sparse
-    rank-1 hit only overtakes a dense hit once the dense hit is this deep in
-    its own pool. d_rank=100 sits comfortably past that crossover."""
+    """The wiring, not the arithmetic -- `fuse_rrf` itself is unit-tested in
+    test_hybrid_ranker.py. Production only ever hands the fusion CONTIGUOUS
+    per-arm ranks: the SQL's ROW_NUMBER() OVER (...) emits 1..N with no gaps,
+    and the FULL OUTER JOIN carries every row of both arms back. This fixture
+    mirrors that shape -- 100 contiguous dense rows (ranks 1..100) plus one
+    sparse-only row (absent from the dense arm entirely, the distance gate
+    rejected it) at sparse rank 1.
+
+    At the default 70/30 weights and k=60, RRF(w=0.3, rank=1) = 0.3/61 ~=
+    0.00492 exceeds RRF(w=0.7, rank=d) once d > 82.3, so the sparse-only
+    chunk outranks dense ranks 83-100 and must still reach the model despite
+    never appearing in the dense arm at all.
+    """
+    from app.services.chat_service import ChatService, PaperInfo
+
+    svc = ChatService()
+    dense_rows = [
+        {
+            "id": f"d{i}",
+            "paper_id": "p1",
+            "chunk_index": i,
+            "text": f"dense {i}",
+            "distance": 0.1 + i * 0.001,
+            "d_rank": i,
+            "s_rank": None,
+        }
+        for i in range(1, 101)
+    ]
+    sparse_row = {
+        "id": "sparse-only",
+        "paper_id": "p1",
+        "chunk_index": 999,
+        "text": "lexical",
+        "distance": None,
+        "d_rank": None,
+        "s_rank": 1,
+    }
+    mock_db = _hybrid_db([*dense_rows, sparse_row])
+    papers = [PaperInfo(paper_id="p1", title="A"), PaperInfo(paper_id="p2", title="B")]
+
+    with patch.object(settings, "max_context_chunks", 200):
+        chunks = await svc._retrieve_paper_chunks(mock_db, papers, [0.0] * 768, "reward table")
+
+    assert "lexical" in [c.text for c in chunks]
+
+
+async def test_a_both_arms_chunk_outranks_a_dense_only_top_hit():
+    """The join's central property: one row can carry BOTH ranks, and both
+    RRF terms are summed. 'c1' is dense rank 3 AND sparse rank 1
+    (score = 0.7/63 + 0.3/61 ~= 0.01111 + 0.00492 = 0.01603); 'c2' is the
+    dense arm's OWN rank-1 hit and sparse-absent (score = 0.7/61 ~= 0.01148).
+    c1's combined score beats c2's dense-only score even though c2 outranks
+    c1 in the dense arm alone -- proving both terms are actually summed, not
+    just the higher one kept."""
     from app.services.chat_service import ChatService, PaperInfo
 
     svc = ChatService()
@@ -281,32 +329,36 @@ async def test_a_sparse_only_chunk_can_outrank_a_dense_chunk():
                 "id": "c1",
                 "paper_id": "p1",
                 "chunk_index": 0,
-                "text": "dense",
-                "distance": 0.4,
-                "d_rank": 100,
-                "s_rank": None,
+                "text": "both arms",
+                "distance": 0.42,
+                "d_rank": 3,
+                "s_rank": 1,
             },
             {
                 "id": "c2",
                 "paper_id": "p1",
                 "chunk_index": 1,
-                "text": "lexical",
-                "distance": None,
-                "d_rank": None,
-                "s_rank": 1,
+                "text": "dense only",
+                "distance": 0.30,
+                "d_rank": 1,
+                "s_rank": None,
             },
         ]
     )
     papers = [PaperInfo(paper_id="p1", title="A"), PaperInfo(paper_id="p2", title="B")]
 
-    chunks = await svc._retrieve_paper_chunks(mock_db, papers, [0.0] * 768, "reward table")
+    chunks = await svc._retrieve_paper_chunks(mock_db, papers, [0.0] * 768, "q")
 
-    assert [c.text for c in chunks] == ["lexical", "dense"]
+    assert [c.text for c in chunks] == ["both arms", "dense only"]
 
 
 async def test_citations_are_numbered_contiguously_after_fusion():
     """`n` is the citation marker the model cites. Fusion reorders rows, so
-    the numbering has to follow the fused order, not the row order."""
+    the numbering has to follow the fused order, not the row order. Pinned
+    to (n, text) pairs -- a bare `[c.n for c in chunks] == [1, 2]` is just
+    `enumerate(rows, 1)` and would pass under any fusion order, including
+    none (see test_single_paper_scope_applies_the_delta_cut for the same
+    failure mode)."""
     from app.services.chat_service import ChatService, PaperInfo
 
     svc = ChatService()
@@ -318,7 +370,7 @@ async def test_citations_are_numbered_contiguously_after_fusion():
                 "chunk_index": 0,
                 "text": "dense",
                 "distance": 0.4,
-                "d_rank": 5,
+                "d_rank": 1,
                 "s_rank": None,
             },
             {
@@ -336,7 +388,10 @@ async def test_citations_are_numbered_contiguously_after_fusion():
 
     chunks = await svc._retrieve_paper_chunks(mock_db, papers, [0.0] * 768, "q")
 
-    assert [c.n for c in chunks] == [1, 2]
+    # Both at position 1 in their own arm: dense's 0.7 weight beats sparse's
+    # 0.3 weight at the same rank, so "dense" (c1) fuses ahead of "lexical"
+    # (c2). This pins WHICH row got WHICH number, not just the count.
+    assert [(c.n, c.text) for c in chunks] == [(1, "dense"), (2, "lexical")]
 
 
 async def test_single_paper_scope_applies_the_rank_window():
@@ -371,9 +426,15 @@ async def test_multi_paper_scope_does_not_apply_the_rank_window():
 
 
 async def test_the_budget_is_applied_before_the_rank_window():
-    """Order is load-bearing: the budget is the one invariant that keeps chat
-    working at any library size, and the cut may only shrink what the budget
-    already bounded."""
+    """NOT a proof of ordering. Both cuts are prefix slices, and prefix
+    slicing is commutative -- `seq[:a][:b] == seq[:b][:a]` whenever both
+    bounds are within range, which they are here. Swapping the two lines in
+    `_retrieve_paper_chunks` would leave this test green. It exists only to
+    pin the budget's own value (10, not 999) under a scope that also has a
+    rank window in play; the ordering itself is structural (see the
+    docstring and the comment above the budget slice in
+    `_retrieve_paper_chunks`) and is not, and cannot be, verified by any
+    test built from two prefix slices."""
     from app.services.chat_service import ChatService, PaperInfo
 
     svc = ChatService()

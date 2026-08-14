@@ -289,28 +289,6 @@ def _vec_str(embedding: list[float]) -> str:
     return "[" + ",".join(str(x) for x in embedding) + "]"
 
 
-def _ranked_ids(rows, attr: str) -> list:
-    """Build the Sequence[K] `fuse_rrf` expects, where POSITION carries the
-    row's own `d_rank`/`s_rank` value rather than its position among however
-    many rows this call happens to hold.
-
-    In production this is lossless and a no-op in effect: the hybrid SQL's
-    ROW_NUMBER() OVER (...) assigns each arm's rows a contiguous 1..N, and the
-    FULL OUTER JOIN carries every one of them back, so sorting by rank already
-    reproduces exact position. It only matters when the rank sequence has
-    gaps -- unrealistic in one live query, but real between mocked test rows
-    -- because sorting-then-taking-list-index silently discards the gap and
-    collapses every rank down to a dense 1..N, which is a different (and
-    wrong) input to a rank-damped formula like RRF. The gaps are filled with
-    unique sentinels so they occupy a position without ever being mistaken
-    for a real chunk id.
-    """
-    ranked = {getattr(r, attr): r.id for r in rows if getattr(r, attr) is not None}
-    if not ranked:
-        return []
-    return [ranked.get(rank, object()) for rank in range(1, max(ranked) + 1)]
-
-
 class ChatService:
     def __init__(self) -> None:
         self._embedding_svc = EmbeddingService()
@@ -730,6 +708,10 @@ class ChatService:
 
         if not settings.hybrid_retrieval:
             rows = await self._dense_only_rows(db, ids, qvec, threshold)
+            # Re-applied in Python on purpose. LIMIT bounds what crosses the wire;
+            # this bounds what reaches the model. The budget is the single
+            # invariant that keeps chat working at any library size, so it must
+            # not depend on a SQL clause surviving a future edit to the query.
             rows = rows[: settings.max_context_chunks]
             if single_paper:
                 rows = rows[
@@ -741,8 +723,14 @@ class ChatService:
 
         rows = await self._hybrid_rows(db, ids, qvec, query_text, threshold)
         by_id = {row.id: row for row in rows}
-        dense_ranked = _ranked_ids(rows, "d_rank")
-        sparse_ranked = _ranked_ids(rows, "s_rank")
+        dense_ranked = [
+            row.id
+            for row in sorted((r for r in rows if r.d_rank is not None), key=lambda r: r.d_rank)
+        ]
+        sparse_ranked = [
+            row.id
+            for row in sorted((r for r in rows if r.s_rank is not None), key=lambda r: r.s_rank)
+        ]
         fused = fuse_rrf(
             dense_ranked,
             sparse_ranked,
@@ -750,11 +738,6 @@ class ChatService:
             w_sparse=settings.hybrid_sparse_weight,
             k=settings.hybrid_rrf_k,
         )
-        # _ranked_ids pads gaps with sentinels so a row's RANK VALUE (not its
-        # position among the rows this call happens to have) drives the RRF
-        # score. Drop the sentinels before applying by_id -- they exist only
-        # to hold a position open, never as a `paper_chunk_embeddings` row.
-        fused = [(key, score) for key, score in fused if key in by_id]
         # Budget FIRST, cut second -- same ordering the dense path documents
         # above. LIMIT bounds what crosses the wire; this bounds what reaches
         # the model, and the cut may only shrink what the budget bounded.
@@ -813,10 +796,6 @@ class ChatService:
                 "max_chunks": settings.max_context_chunks,
             },
         )
-        # Re-applied in Python on purpose. LIMIT bounds what crosses the wire;
-        # this bounds what reaches the model. The budget is the single
-        # invariant that keeps chat working at any library size, so it must
-        # not depend on a SQL clause surviving a future edit to the query.
         return result.fetchall()
 
     async def _hybrid_rows(
