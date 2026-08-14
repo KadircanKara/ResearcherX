@@ -128,6 +128,50 @@ class Settings(BaseSettings):
     # nudge after any embedding-model change.
     intra_paper_delta: float = 0.20
 
+    # --- Hybrid retrieval -------------------------------------------------
+    #
+    # Dense-only ranking buries lexically-exact chunks. Measured: the chunk
+    # holding a paper's reward table ranked 53rd globally behind 40 chunks
+    # from 18 other papers in the same domain, and 771st under a different
+    # phrasing of the same question. See the max_context_chunks block above,
+    # which raised the budget 40 -> 60 as slack around that failure without
+    # fixing it.
+    #
+    # False restores the pre-2026-08-15 dense-only path EXACTLY. It is both
+    # the eval harness's A/B control arm and production's kill switch, which
+    # is why intra_paper_delta below is not deleted: it still governs the cut
+    # whenever this is False.
+    hybrid_retrieval: bool = True
+
+    # Weighted RRF: score = w_dense/(k + rank_dense) + w_sparse/(k + rank_sparse).
+    #
+    # These weight RANKS, not scores, and that is not a stylistic choice.
+    # Cosine distance is bounded [0, 2] and comparable across queries;
+    # ts_rank_cd is unbounded and depends on query length and corpus
+    # statistics. A weighted sum of the raw values is arithmetic on
+    # incompatible units, and per-query normalization makes a chunk's score
+    # depend on which other chunks came back.
+    hybrid_dense_weight: float = 0.7
+    hybrid_sparse_weight: float = 0.3
+
+    # RRF's rank-damping constant. 60 is the value from Cormack et al. (2009)
+    # and every mainstream implementation since. It flattens the top of both
+    # arms so a single arm's rank-1 chunk cannot dominate the fusion.
+    hybrid_rrf_k: int = 60
+
+    # Per-arm candidate bounds. The dense pool is generous because the dense
+    # arm is already gated by an absolute distance cutoff; the sparse pool IS
+    # the sparse arm's entire admission rule, since ts_rank_cd has no
+    # cross-query-comparable magnitude to threshold on.
+    hybrid_dense_pool: int = 200
+    hybrid_sparse_pool: int = 100
+
+    # Single-paper cut under hybrid. Replaces intra_paper_delta, which is a
+    # distance-space rule (best + delta) and has no meaning against a fused
+    # rank. TUNED BY THE SWEEP -- see the measured block in
+    # evals/retrieval/README.md before changing it.
+    intra_paper_rank_window: int = 30
+
     # Hard ceiling on chunks sent to the chat model in one turn.
     #
     # The retrieval budget must be a function of the CONTEXT WINDOW, never of
@@ -221,16 +265,21 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def _check_intra_paper_relationship(self) -> "Settings":
         """Guards for the single-paper scope constants (see the "single-paper
-        scope" block above). Construction-time, not on the prod-only
-        validate_for_environment() gate below, because a bad value here is
-        NOT prod-only: the delta sweep documented in
-        evals/retrieval/README.md sets `INTRA_PAPER_DELTA` as a DEV env
-        override (`docker compose exec -T -e INTRA_PAPER_DELTA=$d`), which
-        never reaches validate_for_environment() (it returns immediately
+        scope" block above), and now also for the hybrid retrieval constants
+        (see the "Hybrid retrieval" block above) for the same reason.
+        Construction-time, not on the prod-only validate_for_environment()
+        gate below, because a bad value here is NOT prod-only: the delta
+        sweep documented in evals/retrieval/README.md sets `INTRA_PAPER_DELTA`
+        as a DEV env override (`docker compose exec -T -e INTRA_PAPER_DELTA=$d`),
+        which never reaches validate_for_environment() (it returns immediately
         unless ENVIRONMENT=prod) — a mistyped sweep point used to surface
-        only as `survival@cut 0.00` with no diagnostic. The shipped defaults
-        (delta 0.20, ceiling 0.85 against threshold 0.75) pass both checks
-        below, so this never blocks a normal dev or test boot.
+        only as `survival@cut 0.00` with no diagnostic. The hybrid sweep runs
+        the same way (`docker compose exec -e` overrides), so a mistyped
+        hybrid weight or rank window would fail just as silently without
+        these checks. The shipped defaults (delta 0.20, ceiling 0.85 against
+        threshold 0.75, dense/sparse weights 0.7/0.3, rrf_k 60, pools 200/100,
+        rank window 30) pass all checks below, so this never blocks a normal
+        dev or test boot.
         """
         if self.intra_paper_delta < 0:
             raise ValueError(
@@ -244,6 +293,37 @@ class Settings(BaseSettings):
                 "INTRA_PAPER_CEILING is below SIMILARITY_THRESHOLD (single-paper "
                 "scope would silently become STRICTER than global scope, the "
                 "opposite of its purpose as a looser noise floor)"
+            )
+        if self.hybrid_dense_weight < 0 or self.hybrid_sparse_weight < 0:
+            raise ValueError(
+                "HYBRID_DENSE_WEIGHT/HYBRID_SPARSE_WEIGHT must be >= 0 "
+                "(a negative weight makes one arm actively demote the chunks "
+                "it ranks highest)"
+            )
+        if abs((self.hybrid_dense_weight + self.hybrid_sparse_weight) - 1.0) > 1e-9:
+            raise ValueError(
+                "HYBRID_DENSE_WEIGHT + HYBRID_SPARSE_WEIGHT must equal 1.0 "
+                "(RRF is linear, so weights summing to anything else still "
+                "'work' -- they silently rescale every fused score and the "
+                "configured ratio is not the ratio that runs)"
+            )
+        if self.hybrid_rrf_k <= 0:
+            raise ValueError(
+                "HYBRID_RRF_K must be >= 1 (k=0 makes rank 1 worth 1/1 and "
+                "rank 2 worth 1/2, so one arm's best chunk dominates the "
+                "fusion; k < 0 divides by zero at rank |k|)"
+            )
+        if self.hybrid_dense_pool <= 0 or self.hybrid_sparse_pool <= 0:
+            raise ValueError(
+                "HYBRID_DENSE_POOL/HYBRID_SPARSE_POOL must be >= 1 "
+                "(a pool of 0 silently disables that arm)"
+            )
+        if self.intra_paper_rank_window <= 0:
+            raise ValueError(
+                "INTRA_PAPER_RANK_WINDOW must be >= 1 (a window of 0 empties "
+                "every single-paper retrieval, and a single-paper project has "
+                "no untargeted scope to fall back to, so the model would "
+                "answer ungrounded)"
             )
         return self
 

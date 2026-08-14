@@ -86,3 +86,46 @@ def test_settings_construct_normally_with_shipped_defaults():
     transitively app.core.config) at collection time. A regression here
     would fail every test in the suite, not just this one."""
     Settings()  # must not raise
+
+
+def test_hybrid_weights_must_sum_to_one():
+    """The weights are a 70/30 split of one unit of ranking authority. Two
+    weights summing to 1.3 still 'work' arithmetically -- RRF is linear -- so
+    nothing would fail, the fused scores would just be uniformly inflated and
+    the ratio would silently be something other than what was configured."""
+    with pytest.raises(ValidationError):
+        Settings(hybrid_dense_weight=0.7, hybrid_sparse_weight=0.5)
+
+
+def test_hybrid_weights_may_not_be_negative():
+    with pytest.raises(ValidationError):
+        Settings(hybrid_dense_weight=1.3, hybrid_sparse_weight=-0.3)
+
+
+def test_hybrid_rrf_k_must_be_positive():
+    """k=0 makes the rank-1 term 1/1 and rank-2 term 1/2 -- a fusion so steep
+    that the top chunk of either arm dominates everything. Negative k divides
+    by zero at rank |k|."""
+    with pytest.raises(ValidationError):
+        Settings(hybrid_rrf_k=0)
+
+
+def test_hybrid_pools_must_be_positive():
+    with pytest.raises(ValidationError):
+        Settings(hybrid_sparse_pool=0)
+
+
+def test_intra_paper_rank_window_must_be_positive():
+    """Window 0 empties every single-paper retrieval, and a single-paper
+    project has no untargeted scope to fall back to -- the model would answer
+    ungrounded. Same failure mode as a negative intra_paper_delta."""
+    with pytest.raises(ValidationError):
+        Settings(intra_paper_rank_window=0)
+
+
+def test_shipped_hybrid_defaults_are_valid():
+    """The defaults must never block a normal dev or test boot."""
+    settings = Settings()
+    assert settings.hybrid_retrieval is True
+    assert settings.hybrid_dense_weight == 0.7
+    assert settings.hybrid_sparse_weight == 0.3
