@@ -22,6 +22,7 @@ from app.db.models import Paper
 from app.db.session import SessionLocal
 from app.services.conversation_service import ConversationService
 from app.services.embedding_service import EmbeddingService
+from app.services.hybrid_ranker import fuse_rrf, keep_within_rank_window
 from app.services.intra_paper_ranker import keep_within_paper
 
 _HISTORY_TOP_K = 5
@@ -288,6 +289,28 @@ def _vec_str(embedding: list[float]) -> str:
     return "[" + ",".join(str(x) for x in embedding) + "]"
 
 
+def _ranked_ids(rows, attr: str) -> list:
+    """Build the Sequence[K] `fuse_rrf` expects, where POSITION carries the
+    row's own `d_rank`/`s_rank` value rather than its position among however
+    many rows this call happens to hold.
+
+    In production this is lossless and a no-op in effect: the hybrid SQL's
+    ROW_NUMBER() OVER (...) assigns each arm's rows a contiguous 1..N, and the
+    FULL OUTER JOIN carries every one of them back, so sorting by rank already
+    reproduces exact position. It only matters when the rank sequence has
+    gaps -- unrealistic in one live query, but real between mocked test rows
+    -- because sorting-then-taking-list-index silently discards the gap and
+    collapses every rank down to a dense 1..N, which is a different (and
+    wrong) input to a rank-damped formula like RRF. The gaps are filled with
+    unique sentinels so they occupy a position without ever being mistaken
+    for a real chunk id.
+    """
+    ranked = {getattr(r, attr): r.id for r in rows if getattr(r, attr) is not None}
+    if not ranked:
+        return []
+    return [ranked.get(rank, object()) for rank in range(1, max(ranked) + 1)]
+
+
 class ChatService:
     def __init__(self) -> None:
         self._embedding_svc = EmbeddingService()
@@ -455,7 +478,7 @@ class ChatService:
 
                     async with SessionLocal() as db:
                         paper_chunks = await self._retrieve_paper_chunks(
-                            db, scope, retrieval_embedding
+                            db, scope, retrieval_embedding, retrieval_query
                         )
 
                     if scope is not paper_infos and not paper_chunks:
@@ -468,7 +491,7 @@ class ChatService:
                         # grounded, same as if targeting had never fired.
                         async with SessionLocal() as db:
                             paper_chunks = await self._retrieve_paper_chunks(
-                                db, paper_infos, retrieval_embedding
+                                db, paper_infos, retrieval_embedding, retrieval_query
                             )
                         scope = paper_infos
 
@@ -630,6 +653,7 @@ class ChatService:
         db: AsyncSession,
         paper_infos: list[PaperInfo],
         query_embedding: list[float],
+        query_text: str,
     ) -> list[ChunkContext]:
         """Retrieve the nearest chunks from `paper_infos`, ranked by distance.
 
@@ -676,6 +700,24 @@ class ChatService:
         0.25, the then-current value -- kept 24/24, 44/44 and 64/64 chunks of
         the nearest paper (see the CEILING measurement on intra_paper_ceiling
         in app/core/config.py).
+
+        HYBRID (settings.hybrid_retrieval, default on): the query grows a
+        second, LEXICAL arm and the two are fused by weighted RRF. Admission
+        is DISJUNCTIVE -- a chunk qualifies by passing the dense distance gate
+        OR by landing in the sparse arm's top-N -- because the failure this
+        fixes is a chunk the dense gate rejects. Gating on dense distance
+        before fusing would make the sparse arm decorative.
+
+        The cut changes with it. `intra_paper_delta` is a distance-space rule
+        (`best + delta`) and has no meaning against a fused rank, so under
+        hybrid the single-paper cut is `intra_paper_rank_window`. The delta
+        survives for `hybrid_retrieval=False`, which reproduces the
+        pre-2026-08-15 path exactly and is both the eval harness's control arm
+        and production's kill switch.
+
+        A stopword-only question degrades for free: websearch_to_tsquery
+        returns an empty query, `@@` matches nothing, the sparse arm is empty,
+        and RRF collapses to the dense ordering.
         """
         if not paper_infos:
             return []
@@ -684,6 +726,65 @@ class ChatService:
         threshold = settings.intra_paper_ceiling if single_paper else settings.similarity_threshold
         qvec = _vec_str(query_embedding)
         paper_title_map = {p.paper_id: p.title for p in paper_infos}
+        ids = json.dumps([p.paper_id for p in paper_infos])
+
+        if not settings.hybrid_retrieval:
+            rows = await self._dense_only_rows(db, ids, qvec, threshold)
+            rows = rows[: settings.max_context_chunks]
+            if single_paper:
+                rows = rows[
+                    : keep_within_paper(
+                        [row.distance for row in rows], delta=settings.intra_paper_delta
+                    )
+                ]
+            return self._to_chunk_contexts(rows, paper_title_map)
+
+        rows = await self._hybrid_rows(db, ids, qvec, query_text, threshold)
+        by_id = {row.id: row for row in rows}
+        dense_ranked = _ranked_ids(rows, "d_rank")
+        sparse_ranked = _ranked_ids(rows, "s_rank")
+        fused = fuse_rrf(
+            dense_ranked,
+            sparse_ranked,
+            w_dense=settings.hybrid_dense_weight,
+            w_sparse=settings.hybrid_sparse_weight,
+            k=settings.hybrid_rrf_k,
+        )
+        # _ranked_ids pads gaps with sentinels so a row's RANK VALUE (not its
+        # position among the rows this call happens to have) drives the RRF
+        # score. Drop the sentinels before applying by_id -- they exist only
+        # to hold a position open, never as a `paper_chunk_embeddings` row.
+        fused = [(key, score) for key, score in fused if key in by_id]
+        # Budget FIRST, cut second -- same ordering the dense path documents
+        # above. LIMIT bounds what crosses the wire; this bounds what reaches
+        # the model, and the cut may only shrink what the budget bounded.
+        fused = fused[: settings.max_context_chunks]
+        if single_paper:
+            fused = fused[
+                : keep_within_rank_window(
+                    [score for _, score in fused], window=settings.intra_paper_rank_window
+                )
+            ]
+        return self._to_chunk_contexts([by_id[key] for key, _ in fused], paper_title_map)
+
+    def _to_chunk_contexts(self, rows, paper_title_map: dict[str, str]) -> list[ChunkContext]:
+        """Number citations contiguously over the FINAL order.
+
+        `n` is the marker the model cites, so it must follow the order the
+        model sees -- after fusion and after every cut, never the row order.
+        """
+        return [
+            ChunkContext(
+                n=i,
+                paper_id=row.paper_id,
+                title=paper_title_map.get(row.paper_id, ""),
+                chunk_index=row.chunk_index,
+                text=row.text,
+            )
+            for i, row in enumerate(rows, 1)
+        ]
+
+    async def _dense_only_rows(self, db: AsyncSession, ids: str, qvec: str, threshold: float):
         # `paper_chunk_embeddings` is global, so this query MUST be scoped to
         # the project. The ids ride in as one jsonb param rather than an IN
         # list: 100 papers would otherwise need 100 bind params, and asyncpg
@@ -693,7 +794,7 @@ class ChatService:
                 SELECT value AS paper_id
                 FROM jsonb_array_elements_text(CAST(:ids AS jsonb))
             )
-            SELECT c.paper_id, c.chunk_index, c.text,
+            SELECT c.id, c.paper_id, c.chunk_index, c.text,
                    (c.embedding <=> CAST(:qvec AS vector)) AS distance
             FROM paper_chunk_embeddings c
             JOIN scope s ON s.paper_id = c.paper_id
@@ -706,7 +807,7 @@ class ChatService:
             sql,
             {
                 "qvec": qvec,
-                "ids": json.dumps([p.paper_id for p in paper_infos]),
+                "ids": ids,
                 "model": settings.embedding_model,
                 "threshold": threshold,
                 "max_chunks": settings.max_context_chunks,
@@ -716,23 +817,78 @@ class ChatService:
         # this bounds what reaches the model. The budget is the single
         # invariant that keeps chat working at any library size, so it must
         # not depend on a SQL clause surviving a future edit to the query.
-        rows = result.fetchall()[: settings.max_context_chunks]
-        # Applied AFTER the budget slice, never before: the budget is the one
-        # invariant that keeps chat working at any library size, and the cut
-        # may only shrink what it already bounded.
-        if single_paper:
-            rows = rows[
-                : keep_within_paper(
-                    [row.distance for row in rows], delta=settings.intra_paper_delta
-                )
-            ]
-        return [
-            ChunkContext(
-                n=i,
-                paper_id=row.paper_id,
-                title=paper_title_map.get(row.paper_id, ""),
-                chunk_index=row.chunk_index,
-                text=row.text,
+        return result.fetchall()
+
+    async def _hybrid_rows(
+        self, db: AsyncSession, ids: str, qvec: str, qtext: str, threshold: float
+    ):
+        """Both arms in ONE round trip, each carrying its own rank.
+
+        The dense arm keeps the absolute distance gate exactly as tuned. The
+        sparse arm's admission is its top-N (`hybrid_sparse_pool`), because
+        `ts_rank_cd` has no cross-query-comparable magnitude to threshold on.
+        The FULL OUTER JOIN is what makes admission disjunctive: a chunk in
+        either arm reaches Python, with a NULL rank for the arm that missed
+        it.
+
+        Ranking stops at the ranks. Fusion, the budget and the cut are Python,
+        so `evals/retrieval/run_eval.py --hybrid` can import and measure the
+        exact policy that ships.
+        """
+        sql = text("""
+            WITH scope AS (
+                SELECT value AS paper_id
+                FROM jsonb_array_elements_text(CAST(:ids AS jsonb))
+            ),
+            q AS (
+                SELECT websearch_to_tsquery('english', :qtext) AS tsq
+            ),
+            dense AS (
+                SELECT c.id, c.paper_id, c.chunk_index, c.text,
+                       (c.embedding <=> CAST(:qvec AS vector)) AS distance,
+                       ROW_NUMBER() OVER (
+                           ORDER BY c.embedding <=> CAST(:qvec AS vector)
+                       ) AS d_rank
+                FROM paper_chunk_embeddings c
+                JOIN scope s ON s.paper_id = c.paper_id
+                WHERE c.model = :model
+                  AND (c.embedding <=> CAST(:qvec AS vector)) < :threshold
+                ORDER BY distance ASC
+                LIMIT :dense_pool
+            ),
+            sparse AS (
+                SELECT c.id, c.paper_id, c.chunk_index, c.text,
+                       ROW_NUMBER() OVER (
+                           ORDER BY ts_rank_cd(c.tsv, q.tsq) DESC
+                       ) AS s_rank
+                FROM paper_chunk_embeddings c
+                JOIN scope s ON s.paper_id = c.paper_id
+                CROSS JOIN q
+                WHERE c.model = :model
+                  AND c.tsv @@ q.tsq
+                ORDER BY ts_rank_cd(c.tsv, q.tsq) DESC
+                LIMIT :sparse_pool
             )
-            for i, row in enumerate(rows, 1)
-        ]
+            SELECT COALESCE(d.id, sp.id)                   AS id,
+                   COALESCE(d.paper_id, sp.paper_id)       AS paper_id,
+                   COALESCE(d.chunk_index, sp.chunk_index) AS chunk_index,
+                   COALESCE(d.text, sp.text)               AS text,
+                   d.distance                              AS distance,
+                   d.d_rank                                AS d_rank,
+                   sp.s_rank                                AS s_rank
+            FROM dense d
+            FULL OUTER JOIN sparse sp ON sp.id = d.id
+        """)
+        result = await db.execute(
+            sql,
+            {
+                "qvec": qvec,
+                "qtext": qtext,
+                "ids": ids,
+                "model": settings.embedding_model,
+                "threshold": threshold,
+                "dense_pool": settings.hybrid_dense_pool,
+                "sparse_pool": settings.hybrid_sparse_pool,
+            },
+        )
+        return result.fetchall()
