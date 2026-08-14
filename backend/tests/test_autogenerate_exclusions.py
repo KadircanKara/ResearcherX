@@ -9,6 +9,8 @@ it, because the failure is silent: a future `make revision` would emit
 it, and retrieval would degrade to dense-only with no error anywhere.
 """
 
+from sqlalchemy import Column, MetaData, Table, Text
+
 from app.db.autogenerate import include_object
 
 
@@ -55,3 +57,30 @@ def test_a_tsv_column_on_another_table_is_still_compared():
         include_object(_Obj("tsv"), "tsv", "column", True, None, parent_table="some_other_table")
         is True
     )
+
+
+def test_fallback_branch_scopes_by_column_table_when_no_parent_table_kwarg():
+    """alembic 1.18.5 never actually passes a `parent_table` keyword.
+
+    Traced live: `run_object_filters` in `alembic/autogenerate/api.py` calls
+    the object filter as `fn(object_, name, type_, reflected, compare_to)` --
+    five positional arguments, no kwargs at all -- and for the drop-column
+    case that matters here (`_compare_columns` in
+    `alembic/autogenerate/compare/tables.py`), `object_` is the real
+    `Column`, already bound to its table via `conn_table.c[cname]`. So the
+    branch production actually takes is `obj.table.name`, not the
+    `parent_table` kwarg -- and the four tests above, which all pass
+    `parent_table=` explicitly, never touch it. This test uses real
+    `sqlalchemy.Column`/`Table` objects (not a stub) so it can't pass by
+    accident the way a stub without `.table` did.
+    """
+    metadata = MetaData()
+    chunks_table = Table("paper_chunk_embeddings", metadata, Column("tsv", Text))
+    other_table = Table("some_other_table", metadata, Column("tsv", Text))
+
+    assert (
+        include_object(chunks_table.c["tsv"], "tsv", "column", True, None) is False
+    )  # excluded: same table + column as the guard
+    assert (
+        include_object(other_table.c["tsv"], "tsv", "column", True, None) is True
+    )  # still compared: same column name, different table
