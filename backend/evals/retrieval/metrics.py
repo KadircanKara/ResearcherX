@@ -22,15 +22,16 @@ class Scored:
     paper_title: str
     chunk_text: str
     # `float | None`: a sparse-only admission (hybrid arm) has no cosine
-    # distance. Every distance-space function below (simulate_retrieval,
-    # best_satisfying_distance, noise_floor, sweep, separating_threshold, ...)
-    # still types this as float and will raise TypeError on None -- by
-    # design, NOT an oversight. Those functions must keep consuming the
-    # DENSE arm exclusively (plain `_chunks_for`, never `_hybrid_chunks_for`).
-    # The hybrid arm may only be fed to `recall_at_k`, `mean_reciprocal_rank`,
-    # `rescued_count`, and the targeted survival cut -- none of which touch
-    # `.distance`. See rescued_count's docstring and run_eval.py's --hybrid
-    # branch for the enforcement.
+    # distance. Every distance-space function below (best_satisfying_distance,
+    # noise_floor, sweep, separating_threshold, and simulate_retrieval's
+    # DEFAULT presorted=False path) still types this as float and will raise
+    # TypeError on None -- by design, NOT an oversight. Those functions must
+    # keep consuming the DENSE arm exclusively (plain `_chunks_for`, never
+    # `_hybrid_chunks_for`). The hybrid arm may only be fed to `recall_at_k`
+    # / `mean_reciprocal_rank` with `presorted=True` (see simulate_retrieval's
+    # docstring), `rescued_count` / `rescue_eligible_count`, and the targeted
+    # survival cut -- none of which touch `.distance` on a hybrid list. See
+    # run_eval.py's --hybrid branch for the enforcement.
     distance: float | None
     # Hybrid-only. `distance`/`d_rank` are None for a chunk the dense arm
     # never returned -- a sparse-only admission, which is the entire point of
@@ -47,7 +48,7 @@ class SweepRow:
     off_topic_false_accept: float
 
 
-def simulate_retrieval(chunks: list[Scored], k: int) -> list[Scored]:
+def simulate_retrieval(chunks: list[Scored], k: int, *, presorted: bool = False) -> list[Scored]:
     """Reproduce the SET of chunks chat_service._retrieve_paper_chunks fetches:
     a GLOBAL top-k across the whole project, nearest first.
 
@@ -57,7 +58,19 @@ def simulate_retrieval(chunks: list[Scored], k: int) -> list[Scored]:
     did until 2026-08-10, gave every paper its own budget regardless of library
     size, which is why recall@k here was structurally close to invariant under
     corpus growth.
+
+    `presorted=True` skips the distance sort and takes `chunks[:k]` as-is.
+    This is the hybrid arm's path: `chunks` there is already in FUSED rank
+    order (from `run_eval._hybrid_chunks_for`/`fuse_rrf`) and may contain
+    `distance=None` entries (sparse-only admissions) that `sorted(..., key=
+    lambda c: c.distance)` would raise `TypeError` on — and even without the
+    None values, re-sorting by the real, partially-missing cosine distance
+    would destroy the fused order that is the entire point of measuring the
+    hybrid arm. The dense path's behavior (the default, `presorted=False`) is
+    unchanged.
     """
+    if presorted:
+        return chunks[:k]
     return sorted(chunks, key=lambda c: c.distance)[:k]
 
 
@@ -69,7 +82,9 @@ def first_satisfying_rank(case: Case, retrieved: list[Scored]) -> int | None:
     return None
 
 
-def recall_at_k(case_chunks: list[tuple[Case, list[Scored]]], k: int) -> float:
+def recall_at_k(
+    case_chunks: list[tuple[Case, list[Scored]]], k: int, *, presorted: bool = False
+) -> float:
     """Fraction of cases with a satisfying chunk within the global top-k.
 
     This is the retrieval CEILING, not what production returns: no distance
@@ -77,18 +92,24 @@ def recall_at_k(case_chunks: list[tuple[Case, list[Scored]]], k: int) -> float:
     `similarity_threshold` before top-k (see `sweep`), so production recall is
     always <= this number. Do not report this figure as "what production
     achieves" — pair it with `sweep`'s content_recall column for that.
+
+    `presorted` is forwarded to `simulate_retrieval` — see its docstring.
+    Pass `presorted=True` for the hybrid arm's already-fused chunk lists.
     """
     if not case_chunks:
         raise ValueError("no cases to score")
     hits = sum(
         1
         for case, chunks in case_chunks
-        if first_satisfying_rank(case, simulate_retrieval(chunks, k)) is not None
+        if first_satisfying_rank(case, simulate_retrieval(chunks, k, presorted=presorted))
+        is not None
     )
     return hits / len(case_chunks)
 
 
-def mean_reciprocal_rank(case_chunks: list[tuple[Case, list[Scored]]], k: int) -> float:
+def mean_reciprocal_rank(
+    case_chunks: list[tuple[Case, list[Scored]]], k: int, *, presorted: bool = False
+) -> float:
     """Mean of 1/rank over each case's first satisfying chunk, ranked by
     `simulate_retrieval`'s distance order (nearest first, across the whole
     project).
@@ -98,12 +119,15 @@ def mean_reciprocal_rank(case_chunks: list[tuple[Case, list[Scored]]], k: int) -
     so a chunk's rank here is the same position it lands in the LLM's prompt.
     Like `recall_at_k`, no distance cutoff is applied, so this is still a
     ceiling, not what `similarity_threshold` filtering leaves production with.
+
+    `presorted` is forwarded to `simulate_retrieval` — see its docstring.
+    Pass `presorted=True` for the hybrid arm's already-fused chunk lists.
     """
     if not case_chunks:
         raise ValueError("no cases to score")
     total = 0.0
     for case, chunks in case_chunks:
-        rank = first_satisfying_rank(case, simulate_retrieval(chunks, k))
+        rank = first_satisfying_rank(case, simulate_retrieval(chunks, k, presorted=presorted))
         if rank is not None:
             total += 1.0 / rank
     return total / len(case_chunks)
@@ -133,6 +157,33 @@ def rescued_count(case_chunks: list[tuple[Case, list[Scored]]], k: int) -> int:
                 rescued += 1
             break
     return rescued
+
+
+def rescue_eligible_count(dense_case_chunks: list[tuple[Case, list[Scored]]], k: int) -> int:
+    """Positives whose answering chunk is ABSENT from the dense arm's own
+    admitted set within `k` — the only cases a sparse-only admission could
+    possibly rescue.
+
+    `rescued_count` alone is a misleading headline on its own: with dense
+    recall well under 1.0, most positives are already dense hits and are
+    mechanically ineligible to register a rescue (their first satisfying
+    chunk came from the dense arm, so `rescued_count`'s `d_rank is None`
+    check can never fire for them). Reporting `rescued_count` without this
+    denominator reads as "hybrid barely helps" when the true statement may be
+    "hybrid rescued every case dense actually missed" — very different
+    verdicts for the same numerator.
+
+    Takes DENSE `Scored` lists (plain distances, from `_chunks_for`) and
+    reuses `simulate_retrieval`'s ordinary distance-sorted top-k — the same
+    admitted-set definition `recall_at_k` already uses for the dense arm — so
+    this denominator is directly comparable to the dense recall figure
+    reported alongside it.
+    """
+    eligible = 0
+    for case, chunks in dense_case_chunks:
+        if first_satisfying_rank(case, simulate_retrieval(chunks, k)) is None:
+            eligible += 1
+    return eligible
 
 
 def best_satisfying_distance(case: Case, chunks: list[Scored]) -> float | None:
