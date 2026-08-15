@@ -313,7 +313,7 @@ question against production's own gate (`distance < similarity_threshold`,
    budget therefore requires `w_s·(k+60) > w_d·(k+1)`. At the shipped
    `0.7 / 0.3` weights that inequality is `0.3(k+60) > 0.7(k+1)` →
    `17.3 > 0.4k` → **k < 43.25**, i.e. the largest usable integer k is 43.
-   It is false for `k = 60` (18 vs 42.7) and true for `k ≤ 43`. The sweep
+   It is false for `k = 60` (36 vs 42.7) and true for `k ≤ 43`. The sweep
    below (rescued=2 at k=30, rescued=0 at k=60) is consistent with that
    crossover but does not by itself pin it — the arithmetic does.
    **`rescued = 0` at the default constants was a parameter artifact, not
