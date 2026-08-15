@@ -154,10 +154,21 @@ class Settings(BaseSettings):
     hybrid_dense_weight: float = 0.7
     hybrid_sparse_weight: float = 0.3
 
-    # RRF's rank-damping constant. 60 is the value from Cormack et al. (2009)
-    # and every mainstream implementation since. It flattens the top of both
-    # arms so a single arm's rank-1 chunk cannot dominate the fusion.
-    hybrid_rrf_k: int = 60
+    # RRF's rank-damping constant. Cormack et al. (2009)'s k=60 is the
+    # textbook default, but it is WRONG here, not a matter of taste -- it was
+    # measured to interact badly with two OTHER constants on this corpus.
+    # The dense arm saturates hybrid_dense_pool (200) on all 30 golden-set
+    # positives, so at k=60 a sparse-arm rank-1 chunk scores w_sparse/(k+1) =
+    # 0.3/61 = 0.00492, which ties a dense chunk around rank ~82 -- past the
+    # max_context_chunks (60) budget. With the shipped 0.7/0.3 weights and
+    # that budget, k=60 makes the sparse arm mathematically incapable of ever
+    # entering the budget at all: measured as rescued=0 at every k=60 sweep
+    # point. k=30 unblocks it (the admission inequality flips around k≈35).
+    # Measured effect (0.7/0.3, k=30 vs k=60): recall@60 0.87 -> 0.93, MRR
+    # 0.527 -> 0.562, survival@cut unchanged at 1.00, and 2 of the 4
+    # rescue-eligible cases are recovered by genuine sparse-only admissions
+    # (d_rank=None). See "Measured — 2026-08-15" in evals/retrieval/README.md.
+    hybrid_rrf_k: int = 30
 
     # Per-arm candidate bounds. The dense pool is generous because the dense
     # arm is already gated by an absolute distance cutoff; the sparse pool IS
@@ -277,7 +288,7 @@ class Settings(BaseSettings):
         the same way (`docker compose exec -e` overrides), so a mistyped
         hybrid weight or rank window would fail just as silently without
         these checks. The shipped defaults (delta 0.20, ceiling 0.85 against
-        threshold 0.75, dense/sparse weights 0.7/0.3, rrf_k 60, pools 200/100,
+        threshold 0.75, dense/sparse weights 0.7/0.3, rrf_k 30, pools 200/100,
         rank window 30) pass all checks below, so this never blocks a normal
         dev or test boot.
         """
