@@ -160,10 +160,20 @@ class Settings(BaseSettings):
     # The dense arm saturates hybrid_dense_pool (200) on all 30 golden-set
     # positives, so at k=60 a sparse-arm rank-1 chunk scores w_sparse/(k+1) =
     # 0.3/61 = 0.00492, which ties a dense chunk around rank ~82 -- past the
-    # max_context_chunks (60) budget. With the shipped 0.7/0.3 weights and
-    # that budget, k=60 makes the sparse arm mathematically incapable of ever
-    # entering the budget at all: measured as rescued=0 at every k=60 sweep
-    # point. k=30 unblocks it (the admission inequality flips around k≈35).
+    # max_context_chunks (60) budget. At the shipped 0.7/0.3 weights and that
+    # budget, k=60 keeps the sparse arm mathematically incapable of entering
+    # the budget: measured as rescued=0 at every k=60 sweep point AT THOSE
+    # WEIGHTS (other swept weights, e.g. 0.6/0.4 and 0.5/0.5, DO reach
+    # rescued=2 at k=60 -- see the sweep table in evals/retrieval/README.md;
+    # this scoping is about the shipped weights, not k=60 in general).
+    #
+    # The admission inequality is w_sparse*(k + max_context_chunks) >
+    # w_dense*(k + 1). At 0.7/0.3 and max_context_chunks=60 that is
+    # 0.3(k+60) > 0.7(k+1) => 17.3 > 0.4k => k < 43.25, i.e. the largest
+    # usable integer k is 43. The sweep (rescued=2 at k=30, rescued=0 at
+    # k=60) is CONSISTENT with that crossover but does not by itself pin it
+    # -- the arithmetic above does. k=30 keeps 13 ranks of margin under that
+    # ceiling, not "around k≈35".
     # Measured effect (0.7/0.3, k=30 vs k=60): recall@60 0.87 -> 0.93, MRR
     # 0.527 -> 0.562, survival@cut unchanged at 1.00, and 2 of the 4
     # rescue-eligible cases are recovered by genuine sparse-only admissions

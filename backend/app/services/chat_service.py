@@ -460,13 +460,24 @@ class ChatService:
                         )
 
                     if scope is not paper_infos and not paper_chunks:
-                        # A targeted paper whose every chunk sits at or beyond
-                        # intra_paper_ceiling (the single-paper SQL cutoff --
-                        # see _retrieve_paper_chunks) retrieves nothing, and
+                        # A targeted paper can still retrieve nothing, and
                         # chat_agent then answers ungrounded -- a worse
                         # failure than the misattribution this feature fixes.
                         # Re-querying the untargeted scope keeps the answer
                         # grounded, same as if targeting had never fired.
+                        #
+                        # Under dense-only retrieval (hybrid_retrieval=False)
+                        # this fires exactly when every chunk of the targeted
+                        # paper sits at or beyond intra_paper_ceiling (the
+                        # single-paper SQL cutoff -- see
+                        # _retrieve_paper_chunks). Under hybrid retrieval the
+                        # sparse arm has NO distance gate, so a paper whose
+                        # every chunk sits beyond the ceiling can still be
+                        # admitted via a lexical match -- a sparse-only
+                        # admission is treated as grounded here, same as any
+                        # other chunk. This branch therefore fires strictly
+                        # LESS often than it did before hybrid retrieval
+                        # shipped, not under the same condition.
                         async with SessionLocal() as db:
                             paper_chunks = await self._retrieve_paper_chunks(
                                 db, paper_infos, retrieval_embedding, retrieval_query
@@ -838,14 +849,14 @@ class ChatService:
             sparse AS (
                 SELECT c.id, c.paper_id, c.chunk_index, c.text,
                        ROW_NUMBER() OVER (
-                           ORDER BY ts_rank_cd(c.tsv, q.tsq) DESC
+                           ORDER BY ts_rank_cd(c.tsv, q.tsq) DESC, c.id
                        ) AS s_rank
                 FROM paper_chunk_embeddings c
                 JOIN scope s ON s.paper_id = c.paper_id
                 CROSS JOIN q
                 WHERE c.model = :model
                   AND c.tsv @@ q.tsq
-                ORDER BY ts_rank_cd(c.tsv, q.tsq) DESC
+                ORDER BY ts_rank_cd(c.tsv, q.tsq) DESC, c.id
                 LIMIT :sparse_pool
             )
             SELECT COALESCE(d.id, sp.id)                   AS id,

@@ -274,10 +274,17 @@ async def test_a_sparse_only_chunk_can_outrank_a_dense_chunk():
     sparse-only row (absent from the dense arm entirely, the distance gate
     rejected it) at sparse rank 1.
 
-    At the default 70/30 weights and k=60, RRF(w=0.3, rank=1) = 0.3/61 ~=
-    0.00492 exceeds RRF(w=0.7, rank=d) once d > 82.3, so the sparse-only
-    chunk outranks dense ranks 83-100 and must still reach the model despite
-    never appearing in the dense arm at all.
+    At the default 70/30 weights and k=30 (the shipped default, not the
+    textbook k=60), RRF(w=0.3, rank=1) = 0.3/31 ~= 0.00968 exceeds
+    RRF(w=0.7, rank=d) once d > 42.33, so the sparse-only chunk outranks
+    dense ranks 43-100.
+
+    Asserted by POSITION, not membership: this test uses multi-paper scope
+    (two papers) with `max_context_chunks` patched to 200, so with 101 rows
+    total every row is returned regardless of fusion order and a bare
+    membership check (`"lexical" in [...]`) would be a tautology that cannot
+    fail for the reason the test name claims. Asserting that "lexical" sits
+    ahead of the dense rank-100 row is what actually exercises fusion order.
     """
     from app.services.chat_service import ChatService, PaperInfo
 
@@ -309,17 +316,19 @@ async def test_a_sparse_only_chunk_can_outrank_a_dense_chunk():
     with patch.object(settings, "max_context_chunks", 200):
         chunks = await svc._retrieve_paper_chunks(mock_db, papers, [0.0] * 768, "reward table")
 
-    assert "lexical" in [c.text for c in chunks]
+    texts = [c.text for c in chunks]
+    assert texts.index("lexical") < texts.index("dense 100")
 
 
 async def test_a_both_arms_chunk_outranks_a_dense_only_top_hit():
     """The join's central property: one row can carry BOTH ranks, and both
-    RRF terms are summed. 'c1' is dense rank 3 AND sparse rank 1
-    (score = 0.7/63 + 0.3/61 ~= 0.01111 + 0.00492 = 0.01603); 'c2' is the
-    dense arm's OWN rank-1 hit and sparse-absent (score = 0.7/61 ~= 0.01148).
-    c1's combined score beats c2's dense-only score even though c2 outranks
-    c1 in the dense arm alone -- proving both terms are actually summed, not
-    just the higher one kept."""
+    RRF terms are summed. At the shipped k=30 (not the textbook k=60): 'c1'
+    is dense rank 3 AND sparse rank 1 (score = 0.7/33 + 0.3/31 ~= 0.02121 +
+    0.00968 = 0.03089); 'c2' is the dense arm's OWN rank-1 hit and
+    sparse-absent (score = 0.7/31 ~= 0.02258). c1's combined score beats
+    c2's dense-only score even though c2 outranks c1 in the dense arm alone
+    -- proving both terms are actually summed, not just the higher one
+    kept."""
     from app.services.chat_service import ChatService, PaperInfo
 
     svc = ChatService()

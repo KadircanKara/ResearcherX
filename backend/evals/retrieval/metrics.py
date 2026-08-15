@@ -114,11 +114,18 @@ def mean_reciprocal_rank(
     `simulate_retrieval`'s distance order (nearest first, across the whole
     project).
 
-    Since 2026-08-10 this also matches production's own order: chat_service.py
-    fetches with `ORDER BY distance ASC LIMIT :max_chunks` and never re-sorts,
-    so a chunk's rank here is the same position it lands in the LLM's prompt.
-    Like `recall_at_k`, no distance cutoff is applied, so this is still a
-    ceiling, not what `similarity_threshold` filtering leaves production with.
+    Since 2026-08-10 this also matches production's own order for the DENSE
+    path: chat_service.py's dense-only query fetches with
+    `ORDER BY distance ASC LIMIT :max_chunks` and never re-sorts, so a
+    chunk's rank here is the same position it lands in the LLM's prompt.
+    That is no longer production's only path: under hybrid retrieval
+    (`settings.hybrid_retrieval`, the shipped default), chat_service.py fuses
+    a dense and a sparse arm by weighted RRF and ranks by the FUSED order,
+    not by distance -- this function's distance-sorted order then describes
+    only the dense-only baseline (`hybrid_retrieval=False`), not what
+    production actually returns. Like `recall_at_k`, no distance cutoff is
+    applied, so this is still a ceiling, not what `similarity_threshold`
+    filtering leaves production with.
 
     `presorted` is forwarded to `simulate_retrieval` — see its docstring.
     Pass `presorted=True` for the hybrid arm's already-fused chunk lists.

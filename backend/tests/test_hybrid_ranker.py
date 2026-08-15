@@ -57,13 +57,34 @@ def test_sparse_agreement_can_outrank_a_better_dense_chunk():
     assert [key for key, _ in fused] == ["b", "a"]
 
 
-def test_ties_break_deterministically_by_dense_rank():
-    """Two chunks with identical fused scores must not reorder between runs;
-    a nondeterministic retrieval order makes the eval harness unrepeatable."""
+def test_matching_rank_order_reproduces_regardless_of_input_order():
+    """NOT a score-tie test -- 'a'/'b' at the same rank in both arms score
+    0.5/61 vs 0.5/62, which are unequal, so this never exercises the
+    tie-break tuple at all. What it verifies instead: `fuse_rrf` is a pure
+    function of (dense_ranked, sparse_ranked), so feeding the same relative
+    order back in a different input order reproduces the same relative
+    output order -- i.e. it is not accidentally keying off dict/set
+    iteration order. See test_exact_score_ties_break_by_dense_then_sparse_
+    then_insertion_order below for an actual tie."""
     first = fuse_rrf(["a", "b"], ["a", "b"], w_dense=0.5, w_sparse=0.5, k=60)
     second = fuse_rrf(["b", "a"], ["b", "a"], w_dense=0.5, w_sparse=0.5, k=60)
     assert [key for key, _ in first] == ["a", "b"]
     assert [key for key, _ in second] == ["b", "a"]
+
+
+def test_exact_score_ties_break_by_dense_then_sparse_then_insertion_order():
+    """A genuine tie: 'a' is dense rank 1 / sparse rank 2 and 'b' is dense
+    rank 2 / sparse rank 1, so both score 0.5/61 + 0.5/62 exactly -- unlike
+    the same-order case above, this cannot be told apart by score alone.
+    Ties are now reachable in production too (see the `, c.id` tiebreaker
+    added to the sparse CTE's ORDER BY), so this must pin the documented
+    resolution: dense rank first, which puts 'a' (dense rank 1) ahead of
+    'b' (dense rank 2)."""
+    fused = fuse_rrf(["a", "b"], ["b", "a"], w_dense=0.5, w_sparse=0.5, k=60)
+    a_score = 0.5 / 61 + 0.5 / 62
+    b_score = 0.5 / 62 + 0.5 / 61
+    assert a_score == b_score
+    assert [key for key, _ in fused] == ["a", "b"]
 
 
 def test_duplicate_keys_within_one_arm_take_the_best_rank():

@@ -129,3 +129,4 @@ def test_shipped_hybrid_defaults_are_valid():
     assert settings.hybrid_retrieval is True
     assert settings.hybrid_dense_weight == 0.7
     assert settings.hybrid_sparse_weight == 0.3
+    assert settings.hybrid_rrf_k == 30

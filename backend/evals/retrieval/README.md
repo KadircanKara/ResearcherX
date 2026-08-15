@@ -311,7 +311,11 @@ question against production's own gate (`distance < similarity_threshold`,
    sparse-only chunk at sparse rank 1 scores `w_s/(k+1)`; the dense chunk at
    the budget edge scores `w_d/(k+60)`. Sparse-only admission into a 60-chunk
    budget therefore requires `w_s·(k+60) > w_d·(k+1)`. At the shipped
-   `0.3 / 0.7` that is false for `k = 60` (36 vs 42.7) and true for `k ≤ ~35`.
+   `0.7 / 0.3` weights that inequality is `0.3(k+60) > 0.7(k+1)` →
+   `17.3 > 0.4k` → **k < 43.25**, i.e. the largest usable integer k is 43.
+   It is false for `k = 60` (18 vs 42.7) and true for `k ≤ 43`. The sweep
+   below (rescued=2 at k=30, rescued=0 at k=60) is consistent with that
+   crossover but does not by itself pin it — the arithmetic does.
    **`rescued = 0` at the default constants was a parameter artifact, not
    evidence against lexical retrieval** — see the sweep.
 2. **`websearch_to_tsquery` ANDs every term**, so a full-sentence question
@@ -473,8 +477,11 @@ every point in the parameter space.
   actually demands. At the owner's stated `0.7 / 0.3` weights, `k = 60`
   blocks sparse-only admission arithmetically, which is what produced the
   `rescued = 0` reading; `k = 30` unblocks it and buys recall 0.87 → 0.93 and
-  MRR 0.527 → 0.562 at zero cost. The admission inequality flips at
-  `k ≈ 35`, so 30 keeps a small margin; 20 or 10 also work and are not better.
+  MRR 0.527 → 0.562 at zero cost. The admission inequality
+  (`w_sparse·(k + max_context_chunks) > w_dense·(k + 1)`) flips at
+  `k < 43.25`, i.e. the largest usable integer k is 43; 30 keeps 13 ranks of
+  margin under that ceiling, not "around k≈35". 20 or 10 also work and are
+  not better.
 - **Weights: keep `0.7 / 0.3`.** For the record, `0.5 / 0.5` at any `k`
   reaches the same recall and the best MRR in the sweep (0.608 vs 0.562), and
   is the point to consider if MRR is worth more than staying with the stated

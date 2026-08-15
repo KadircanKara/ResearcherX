@@ -132,14 +132,14 @@ _HYBRID_SQL = text("""
     sparse AS (
         SELECT c.id, c.paper_id, c.text,
                ROW_NUMBER() OVER (
-                   ORDER BY ts_rank_cd(c.tsv, q.tsq) DESC
+                   ORDER BY ts_rank_cd(c.tsv, q.tsq) DESC, c.id
                ) AS s_rank
         FROM paper_chunk_embeddings c
         JOIN scope s ON s.paper_id = c.paper_id
         CROSS JOIN q
         WHERE c.model = :model
           AND c.tsv @@ q.tsq
-        ORDER BY ts_rank_cd(c.tsv, q.tsq) DESC
+        ORDER BY ts_rank_cd(c.tsv, q.tsq) DESC, c.id
         LIMIT :sparse_pool
     )
     SELECT COALESCE(d.id, sp.id)             AS chunk_id,
@@ -190,14 +190,14 @@ _HYBRID_SQL_PAPER = text("""
     sparse AS (
         SELECT c.id, c.paper_id, c.text,
                ROW_NUMBER() OVER (
-                   ORDER BY ts_rank_cd(c.tsv, q.tsq) DESC
+                   ORDER BY ts_rank_cd(c.tsv, q.tsq) DESC, c.id
                ) AS s_rank
         FROM paper_chunk_embeddings c
         JOIN scope s ON s.paper_id = c.paper_id
         CROSS JOIN q
         WHERE c.model = :model
           AND c.tsv @@ q.tsq
-        ORDER BY ts_rank_cd(c.tsv, q.tsq) DESC
+        ORDER BY ts_rank_cd(c.tsv, q.tsq) DESC, c.id
         LIMIT :sparse_pool
     )
     SELECT COALESCE(d.id, sp.id)             AS chunk_id,
@@ -742,7 +742,7 @@ async def main() -> None:  # noqa: PLR0912, PLR0915 — a report script, not a l
                     # short-circuit above.
                     if args.hybrid and not case.is_negative:
                         scoped_dense = _scope_to_paper(chunks, case.paper_title_contains or "")
-                        paper_id = next(iter({c.paper_id for c in scoped_dense}))
+                        paper_id = scoped_dense[0].paper_id
                         hybrid_paper_chunks = await _hybrid_chunks_for(
                             db,
                             svc,
@@ -860,6 +860,23 @@ async def main() -> None:  # noqa: PLR0912, PLR0915 — a report script, not a l
             rescue_budget = settings.max_context_chunks
             h_rescued = rescued_count(hybrid_positives, rescue_budget)
             h_eligible = rescue_eligible_count(positives, rescue_budget)
+            # rescued_count fires on whichever satisfying chunk is FIRST in
+            # fused order for a case; rescue_eligible_count asks whether ANY
+            # satisfying chunk is absent from the dense arm's own top-k. With
+            # substring ground truth a case can be dense-hit (so ineligible)
+            # yet still register a rescue via a DIFFERENT sparse-only
+            # satisfying chunk elsewhere in the fused order -- so rescued can
+            # in principle exceed eligible. It does not on the current
+            # corpus, but that is a corpus fact, not a guarantee the two
+            # predicates enforce, so surface it loudly rather than silently
+            # printing a >1.0 ratio or clamping it away.
+            if h_rescued > h_eligible:
+                print(
+                    f"  WARNING: rescued ({h_rescued}) > eligible ({h_eligible}) -- "
+                    "a case registered a rescue via a sparse-only chunk while also "
+                    "being a dense hit through a different chunk; see the comment "
+                    "above this check"
+                )
             print(
                 f"hybrid arm (w_dense={settings.hybrid_dense_weight} "
                 f"w_sparse={settings.hybrid_sparse_weight} rrf_k={settings.hybrid_rrf_k} "
@@ -877,6 +894,7 @@ async def main() -> None:  # noqa: PLR0912, PLR0915 — a report script, not a l
             )
         else:
             print("hybrid arm: skipped — no positive cases scored (see ERRORS above)")
+            print()
 
     # Column width derived from the actual ids so a long case id can never
     # collide with the next column (a fixed 28-char width collided in
