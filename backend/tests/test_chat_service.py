@@ -1286,3 +1286,66 @@ async def test_single_paper_scope_with_empty_sql_result_returns_empty():
     chunks = await svc._retrieve_paper_chunks(mock_db, [paper], [0.0] * 768, "q")
 
     assert chunks == []
+
+
+async def test_a_misattributed_marker_is_stripped_before_the_citation_array_is_built(
+    db_session: AsyncSession, project: Project, conversation_with_message
+):
+    """The strip-then-renumber ordering, asserted end to end.
+
+    The evidence is one paper's chunk; the answer enumerates two papers and
+    hangs that marker off both. The chip list is built from the renumbering
+    map, so a marker stripped AFTER renumbering would leave a chip pointing at
+    a claim that no longer cites it, and would consume a number in the visible
+    sequence. Here the second item loses its marker and the persisted array
+    carries exactly one entry, numbered [1].
+    """
+    from app.agents.chat_agent import ChunkContext
+    from app.db.models import Paper
+    from app.services.chat_service import ChatService
+
+    conv = conversation_with_message
+    owner = Paper(
+        project_id=project.id,
+        title="Cooperative Multi-Target Search with UAV Swarms",
+        source="manual",
+    )
+    other = Paper(
+        project_id=project.id,
+        title="Deep Reinforcement Learning for Trajectory Path Planning",
+        source="manual",
+    )
+    db_session.add_all([owner, other])
+    await db_session.commit()
+    await db_session.refresh(owner)
+
+    answer = (
+        "1. Cooperative Multi-Target Search with UAV Swarms: the reward is shaped [1].\n"
+        "2. Deep Reinforcement Learning for Trajectory Path Planning: penalties too [1].\n"
+    )
+
+    async def fake_stream(*args, **kwargs):
+        yield answer
+
+    svc = ChatService()
+    save = AsyncMock()
+    chunks = [ChunkContext(n=1, paper_id=owner.id, title=owner.title, chunk_index=0, text="reward")]
+
+    with (
+        patch.object(svc._embedding_svc, "embed", AsyncMock(return_value=[0.0] * 768)),
+        patch.object(svc, "_retrieve_history", AsyncMock(return_value=[])),
+        patch.object(svc._reformulator, "run", AsyncMock(return_value="Test question")),
+        patch.object(svc, "_shortlist_papers", AsyncMock(return_value=([], 0))),
+        patch.object(svc, "_retrieve_paper_chunks", AsyncMock(return_value=chunks)),
+        patch.object(svc._chat_agent, "stream", return_value=fake_stream()),
+        patch.object(svc._conv_svc, "save_message", save),
+    ):
+        async for _ in svc.respond(conv.id, "Test question"):
+            pass
+
+    persisted_text, citations = save.await_args.args[3], save.await_args.args[4]
+    assert persisted_text.splitlines()[0].endswith("the reward is shaped [1].")
+    assert persisted_text.splitlines()[1].endswith("penalties too.")
+    assert [c["n"] for c in citations] == [1]
+    assert citations[0]["paper_id"] == owner.id
+

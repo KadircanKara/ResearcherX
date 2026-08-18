@@ -20,6 +20,10 @@ from app.core.config import settings
 from app.core.logging import log
 from app.db.models import Paper
 from app.db.session import SessionLocal
+from app.services.citation_attribution import (
+    split_prose_segments,
+    strip_misattributed_citations,
+)
 from app.services.conversation_service import ConversationService
 from app.services.embedding_service import EmbeddingService
 from app.services.hybrid_ranker import fuse_rrf, keep_within_rank_window
@@ -157,37 +161,6 @@ def needs_paper_metadata(question: str, prior_messages: list[dict]) -> bool:
     return False
 
 
-# A fence opens with ``` or ~~~ — both are valid markdown fences, and remark
-# (the frontend's markdown renderer) treats either as <pre><code>. The
-# backreference (\1) means a fence can only be closed by the SAME delimiter
-# it opened with — a ``` fence is never closed by ~~~ or vice versa. A fence
-# with no matching closing delimiter runs to the end of the text rather than
-# falling through to be reinterpreted as (part of) an inline span. Fences are
-# located in a pass of their own, before inline spans are considered at all,
-# so a stray or unpaired backtick elsewhere in the answer can never pair
-# across a fence delimiter. See renumber_citations' docstring for why a
-# single combined pattern got this wrong.
-_FENCE_RE = re.compile(r"(```|~~~).*?(?:\1|\Z)", re.DOTALL)
-
-# Inline spans are matched only within the prose _FENCE_RE leaves behind, so
-# a backtick bordering a fence can no longer be mistaken for the other half
-# of an inline span.
-_INLINE_CODE_RE = re.compile(r"`[^`\n]*`")
-
-# Known gap, left deliberately: a four-space indented run is markdown code
-# too (remark renders it as <pre><code>, same as a fence), but this guard
-# does not detect it. Whether an indented run is code or list-item
-# continuation content depends on the enclosing list's nesting column, which
-# needs list-context state this function does not track — and this chat's
-# system prompt asks for "-" bullets and fenced code, not indented blocks, so
-# nested-bullet content is the routine case and a genuine indented code block
-# is not. Treating indentation as code by itself would risk the opposite,
-# worse failure: a nested bullet's citation silently skipped from the numbered
-# sequence ([1], [3], no [2]) rather than merely mis-renumbered. See
-# test_an_indented_code_block_is_a_documented_gap_not_detected_as_code for the
-# accepted current behaviour.
-
-
 def renumber_citations(text: str, max_n: int) -> tuple[str, dict[int, int]]:
     """Renumber an answer's citation markers to 1..N by first appearance.
 
@@ -203,57 +176,19 @@ def renumber_citations(text: str, max_n: int) -> tuple[str, dict[int, int]]:
     pre-existing bug where an out-of-range `arr[99]` became
     `arr[source unavailable]` inside a fenced block.
 
-    Fences and inline spans are found in two separate passes rather than one
-    combined pattern. A single alternation tried left to right lets an
-    unterminated fence fall through to the inline alternative — consuming two
-    of its three backticks as an empty span — and lets a stray backtick
-    earlier in the answer pair with a fence's own opening backtick; both leak
-    a fenced marker out into renumbering. Locating fences first, over the
-    whole text, with "no closing ``` " meaning "runs to end of text" rather
-    than "not a fence", removes both failure modes: fence boundaries never
-    depend on where a stray backtick happens to sit, and an answer truncated
-    mid-snippet — an observed occurrence, not a hypothetical: a chat reply
-    hit `finish_reason=length` mid-sentence on 2026-08-10 — still treats
-    everything after the opening fence as code.
-
-    Markdown has more than one code form, and this guard has to agree with
-    whichever ones the client also treats as code — a form the backend
-    renumbers inside but the frontend renders as <pre><code> corrupts
-    exactly the bytes the two sides agree are code. `_FENCE_RE` accordingly
-    accepts ~~~ fences as well as ``` ones. Four-space indented blocks are
-    the one markdown code form this guard still does not detect — see the
-    comment above `_FENCE_RE` for why that gap is deliberate, not an
-    oversight.
+    What counts as code — ``` and ~~~ fences, unterminated fences, inline
+    spans, and the deliberate four-space-indented gap — is decided by
+    `citation_attribution.segment_offsets`, which owns that guard for every
+    pass that rewrites markers. Its docstring records why fences and inline
+    spans are located in two passes rather than one alternation.
 
     Returns the rewritten text and the old→new map, ordered by new number.
     """
-    # Stage 1: split the whole text on fenced blocks. An unterminated fence
-    # consumes to the end of the text instead of un-matching.
-    segments: list[tuple[str, bool]] = []  # (text, is_code)
-    cursor = 0
-    for match in _FENCE_RE.finditer(text):
-        if match.start() > cursor:
-            segments.append((text[cursor : match.start()], False))
-        segments.append((match.group(0), True))
-        cursor = match.end()
-    segments.append((text[cursor:], False))
-
-    # Stage 2: within what Stage 1 left as prose, split on inline spans. Code
-    # segments pass through untouched — a fence is never re-examined here, so
-    # a backtick bordering one cannot pair across the boundary.
-    with_inline: list[tuple[str, bool]] = []
-    for body, is_code in segments:
-        if is_code:
-            with_inline.append((body, True))
-            continue
-        inner_cursor = 0
-        for match in _INLINE_CODE_RE.finditer(body):
-            if match.start() > inner_cursor:
-                with_inline.append((body[inner_cursor : match.start()], False))
-            with_inline.append((match.group(0), True))
-            inner_cursor = match.end()
-        with_inline.append((body[inner_cursor:], False))
-    segments = with_inline
+    # The code guard is shared with strip_misattributed_citations, never
+    # duplicated: it is subtle enough that two copies will diverge, and a
+    # divergence corrupts exactly the bytes the backend and frontend must
+    # agree are code.
+    segments = split_prose_segments(text)
 
     # First pass: assign numbers in order of appearance across prose only, so
     # a marker buried in a code block cannot claim a number.
@@ -516,7 +451,25 @@ class ChatService:
             # sees. This also replaces out-of-range markers, so it subsumes
             # the validation pass that used to live here.
             max_n = len(paper_chunks)
-            clean_response, renumbered = renumber_citations(response_text, max_n)
+
+            # Strip BEFORE renumbering — the order is load-bearing.
+            # renumber_citations assigns 1..N by first appearance and the chip
+            # list is built from `renumbered`, so a marker stripped afterwards
+            # would leave a chip pointing at a claim that no longer cites it,
+            # and would consume a number in the visible sequence.
+            attributed_response, misattributed = strip_misattributed_citations(
+                response_text,
+                chunk_papers={c.n: c.paper_id for c in paper_chunks},
+                paper_titles={p.paper_id: p.title for p in paper_infos},
+            )
+            if misattributed:
+                log.info(
+                    "citation_misattributed",
+                    conversation_id=conversation_id,
+                    stripped=len(misattributed),
+                )
+
+            clean_response, renumbered = renumber_citations(attributed_response, max_n)
 
             # Ordered by the NEW number so the chip row reads 1, 2, 3 left to
             # right. `renumbered` maps catalog position → new number, which is
