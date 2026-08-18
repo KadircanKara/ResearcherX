@@ -279,6 +279,12 @@ class Settings(BaseSettings):
     # generous default costs nothing on a model that does not think.
     paper_targeter_max_tokens: int = 3000
 
+    # One boolean, nothing else. Sized like query_reformulator_max_tokens: the
+    # answer is a single JSON field, and the schema-in-prompt is what makes it
+    # parse. A reasoning model bills thinking against this budget invisibly
+    # (see chat_answer_max_tokens) — raise it there, not here, if one is used.
+    scope_widener_max_tokens: int = 200
+
     # Abuse limits (decision D3): anonymous per-IP quotas + a global daily
     # cap; the owner API key (X-API-Key header) bypasses both. The cap is
     # the real DoS backstop for the Groq quota.
