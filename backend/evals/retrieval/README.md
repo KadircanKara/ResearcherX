@@ -600,6 +600,67 @@ bottom counts mentioned papers whose own nearest chunk lands in
 `[similarity_threshold, intra_paper_ceiling)` — the only papers the status quo
 and policy A can possibly treat differently, so it bounds the whole question.
 
+### The REAL comparison arm (`comparison_set.json`)
+
+The two pairings above are SYNTHETIC: the golden set's questions each ask
+about one paper, and the second mention is bolted on. That left the regime
+that actually motivates `@A ... @B` unmeasured — the 2026-08-18 block below
+records it as its own biggest gap. `comparison_set.json` closes it. It holds
+real "how do @A and @B differ" questions, authored from the corpus, whose
+answer is genuinely SPLIT across two papers.
+
+    docker compose exec -T backend python -m evals.retrieval.mention_eval \
+      --project-id <uuid> --per-case            # comparisons run by default
+    ... --comparison-set <path>                 # a different case file
+    ... --skip-comparisons                      # synthetic pairings only
+
+**It is a NEW file, not an addition to `golden_set.json`.** Every number in
+this README's "Measured" blocks is denominated in that set's 30 positives and
+12 negatives; adding cases to it would silently invalidate all of them. The
+synthetic pairings are kept for the same reason — they are what the
+2026-08-18 numbers were taken with.
+
+**The schema** (loader: `comparison_set.py`, `load_comparison_set`). Each
+case carries `id`, `question`, and then TWO of everything:
+`paper_a_title_contains` / `expect_a_substrings` and
+`paper_b_title_contains` / `expect_b_substrings`. Ground truth is per SIDE
+because the question's answer is per side: "did paper A's half reach the
+model" and "did paper B's" are different questions, and a comparison where
+only one half arrived is exactly the failure this arm exists to catch.
+`ComparisonCase.side("a")` projects one half into a `golden_set.Case`, so
+`chunk_satisfies` / `first_satisfying_rank` score it unchanged — the matching
+predicate is shared, never reimplemented. The loader rejects a case whose two
+needles nest (`"Partial Replanning"` vs `"Partial Replanning for …"` name one
+paper), and the harness additionally rejects at run time a case whose two
+needles resolve to the same paper *in this corpus*, or whose named paper holds
+no chunk containing its substrings — those reach `ERRORS`, never a score.
+
+**Authoring rules.** Substrings are copied literally out of
+`paper_chunk_embeddings.text` and every one must be verified against the
+corpus before the case ships (`chunk_satisfies` needs ALL of a side's
+substrings in ONE chunk, so multi-substring sides must be checked for
+co-occurrence, not just presence). Prefer pairs that genuinely DISAGREE — a
+question where retrieving only one paper produces a confidently wrong answer
+is the one worth measuring. A shared title keyword is not evidence that two
+papers discuss the same thing; read the chunks. Fewer real cases beat more
+invented ones: a case whose "answer" is not in the paper poisons every future
+measurement.
+
+**The metrics** (its own table, because the synthetic arms' `ans-zero` /
+`other share` have no meaning here — both papers are answering papers).
+`repr` is unchanged. `both` is the fraction of questions where BOTH halves of
+the answer reached the budget — the headline. `side surv` is the same thing
+denominated in sides (2 per case), so one lost half reads as one lost side
+rather than one lost case. `shut out` is the fraction of cases where a paper
+the USER named contributed zero chunks — a distinct failure from the answer
+being missed, because the user typed both mentions. `min share` is the share
+of the delivered budget held by the LESS represented named paper: 0.0 means
+one was shut out, 0.5 means an even split. Unlike `other share`, a small value
+here is a defect, not a cost. The `gate band` table gains a
+`comparison paper (real)` row: each named paper's own nearest chunk measured
+against the BLENDED question that names both — the datum the synthetic arms
+structurally cannot produce.
+
 ### Measured — 2026-08-18 (multi-mention gate)
 
 - corpus: **4527 chunks / 100 papers** (project `fa2ab869…52922`) — the same
@@ -770,6 +831,76 @@ lower bound together. Check the printed `gates:` header changes across points,
 or every row is one configuration measured N times. One run costs one
 embedding call per case (~42) and ~14 queries per case.
 
+### Measured — 2026-08-18b (REAL two-paper comparisons)
+
+Same corpus, model, gates and arms as the 2026-08-18 block above; the
+synthetic pairings re-ran identically, so these rows are directly comparable
+to that block's. New input: **10 real comparison questions**
+(`comparison_set.json`), each naming two papers that genuinely differ on the
+thing asked, with per-paper ground truth for each half. Zero `ERRORS` — every
+case's two papers resolved uniquely and every substring was found in a chunk
+of the paper it was attributed to.
+
+| arm | repr | both | side surv | shut out | mean kept | min share |
+|---|---|---|---|---|---|---|
+| status-quo (0.75 flat) | 1.00 | **1.00** | 1.00 | 0.00 | 55.6 | 0.39 |
+| policy-A (0.85 flat) | 1.00 | **1.00** | 1.00 | 0.00 | 56.4 | 0.39 |
+| policy-B (per-paper, admit 0.75) | 1.00 | **1.00** | 1.00 | 0.00 | 55.8 | 0.47 |
+| policy-B\* (per-paper, admit 0.85) | 1.00 | **1.00** | 1.00 | 0.00 | 55.8 | 0.47 |
+
+Gate band, the row the synthetic arms could not produce:
+
+| role | n | in band | worst nearest-chunk |
+|---|---|---|---|
+| answer paper (single-paper question) | 30 | 0 | 0.6163 |
+| **comparison paper (real, blended query)** | **20** | **0** | **0.4364** |
+
+**1. The hypothesis behind the gap was wrong, in the safe direction.** The
+2026-08-18 block reasoned that a real comparison question "embeds a blended
+query under which BOTH papers' nearest-chunk distances could sit higher than
+anything measured here — exactly the regime where the 0.75/0.85 band would
+start to matter." The opposite happens. Across 20 named-paper slots the worst
+nearest chunk is **0.4364**, against 0.6163 for the single-paper questions:
+naming both papers in one question pulls BOTH of them *closer*, because the
+question text carries vocabulary from each. Zero comparison papers land in the
+band, so the gate choice is even more academic on real comparisons than on the
+synthetic pairs. This does not generalize beyond a single-topic corpus — every
+pair here shares a research area, which is why a blended query still lands
+near both — but the specific worry that motivated the gap is not what happens.
+
+**2. No named paper was ever shut out, and no half of an answer was ever
+lost.** `shut out` 0.00 and `both` 1.00 in all four arms. The failure this arm
+was built to detect — the user names two papers, one of them contributes
+nothing, and the model answers half the question with total confidence — did
+not occur once on this corpus.
+
+**3. Real comparisons split the budget far more evenly than synthetic pairs,
+without any policy change.** `min share` 0.39 under the status quo means the
+less-represented named paper still holds ~22 of 60 chunks; the synthetic
+`seeded` pairing's non-answering paper held 0.27 of the budget and the
+`nearest` pairing's 0.42. The floor is not what produces this — the raw
+ranking does, because both papers are genuinely relevant to the query. Policy
+B's per-paper query raises it to 0.47 (near-even) at no measured benefit,
+since both halves already survive everywhere.
+
+**4. The deepest surviving half sat at rank 35 of 60** (`coverage-area-
+decomposition`, side A), with `drl-map-input-representation` next at 28. Two
+cases therefore have less than half the budget in reserve; a smaller
+`max_context_chunks` would start losing halves of comparisons well before it
+started losing single-paper answers (worst intra-rank there is 18, per
+2026-08-12). That is the margin worth watching, not the gate.
+
+**What this arm still does not cover.** Ten questions on one 100-paper,
+single-topic corpus with one embedding model. Every pair shares a research
+area — cross-domain comparisons ("compare @a UAV paper and @a compiler
+paper") are not represented and are exactly where a blended query could
+plausibly land far from both. Answer QUALITY is not measured: `both` says both
+halves reached the model, not that the model used them or attributed them
+correctly. Only two mentions, as with the synthetic arms. And the floor policy
+itself is still not isolated — the arm measures the whole path, so it cannot
+say which chunks the floor pinned versus which the ranking would have
+delivered anyway.
+
 ## Scoping is no longer measured here
 
 This section used to document `shortlist_eval.py`: a harness that measured
@@ -826,6 +957,12 @@ regenerated on every re-index, so id-based truth would rot immediately.
 `kind` is `content`, `metadata`, `figure`, or `off_topic`. A case passes when a
 retrieved chunk is from the expected paper **and** contains **every** listed
 substring.
+
+**Do not add two-paper comparison questions here.** They go in
+`comparison_set.json`, which has its own loader, its own schema (two title
+needles, two substring lists) and its own arm — see "The REAL comparison arm"
+above. Editing `golden_set.json` changes the denominator of every "Measured"
+block in this file.
 
 **Verify your substring exists in the target paper before adding it** — not
 just anywhere in the corpus. A count across the whole corpus can be nonzero

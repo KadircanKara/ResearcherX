@@ -36,6 +36,19 @@ returned. Three arms are measured:
                instead, which separates "which gate admits the PAPER" from
                "which gate retains its CHUNKS". Free — same fetches as B.
 
+THREE PAIRINGS, AND ONE OF THEM IS REAL. `nearest` and `seeded` bolt a
+SYNTHETIC second mention onto a golden-set case that asks about one paper;
+they are kept unchanged because every number recorded in README.md's
+"Measured — 2026-08-18" block was taken with them, and dropping them would
+break comparability. The `real` pairing runs `comparison_set.json` instead:
+genuine "how do @A and @B differ" questions whose answer is SPLIT across two
+papers, with per-paper ground truth for each half. That is the regime the
+2026-08-18 measurement listed as its biggest gap — a blended query under which
+BOTH papers' nearest-chunk distances can sit higher than anything the
+single-paper questions produce. Its results are reported separately, with
+per-SIDE survival, because a comparison in which only one half of the answer
+reached the model is a failure that a single `survived` boolean hides.
+
 POLICY B IS SIMULATED HERE. It never shipped, so there is no production
 function to import for its admission decision or its merge; both live in
 `mention_metrics.py` and are labelled as harness code. Everything policy B
@@ -61,21 +74,28 @@ from app.services.embedding_service import EmbeddingService
 from app.services.hybrid_ranker import fuse_rrf, keep_within_rank_window
 from app.services.intra_paper_ranker import keep_within_paper
 from app.services.mention_ranker import apply_per_paper_floor
+from evals.retrieval.comparison_set import ComparisonCase, load_comparison_set
 from evals.retrieval.golden_set import Case, chunk_satisfies, load_golden_set
 from evals.retrieval.mention_metrics import (
+    ComparisonOutcome,
     MentionOutcome,
     PaperBest,
     admitted_papers,
     answer_paper_zero_rate,
     both_represented_rate,
+    both_sides_survived_rate,
+    comparison_survival_regressions,
     count_by_paper,
     count_in_band,
     mean_kept,
+    mean_minority_share,
     mean_second_paper_share,
     merge_round_robin,
     nearest_other,
     representation_rate,
     seeded_other,
+    shut_out_rate,
+    side_survival_rate,
     survival_rate,
     survival_regressions,
     worst_kept,
@@ -83,6 +103,7 @@ from evals.retrieval.mention_metrics import (
 from evals.retrieval.metrics import Scored, first_satisfying_rank
 
 _DEFAULT_SET = Path(__file__).parent / "golden_set.json"
+_DEFAULT_COMPARISON_SET = Path(__file__).parent / "comparison_set.json"
 
 # Pair CONSTRUCTION, not retrieval: no distance cutoff and no LIMIT, because
 # the second mention is chosen from the whole project the way a user picking
@@ -440,6 +461,66 @@ async def _case_status(db, case: Case, papers: list[PaperBest]) -> tuple[str | N
     return paper.paper_id, None
 
 
+async def _resolve_side(db, case: ComparisonCase, side: str, papers: list[PaperBest]):
+    """(paper_id, error) for one side of a comparison case.
+
+    Same three gates `_case_status` applies to a golden-set positive — the
+    named paper must exist, must be unambiguous, and must actually hold a chunk
+    containing the expected text — applied to the projected side, so the two
+    files cannot disagree about what "winnable" means. A defect in the
+    comparison set must reach `errors`, never be scored as a retrieval miss.
+    """
+    projected = case.side(side)
+    needle = (projected.paper_title_contains or "").lower()
+    matches = [p for p in papers if needle in p.title.lower()]
+    if not matches:
+        return None, f"side {side}: no paper matching {projected.paper_title_contains!r}"
+    if len(matches) > 1:
+        return None, (
+            f"side {side}: paper_title_contains {projected.paper_title_contains!r} matches "
+            f"{len(matches)} distinct papers — not distinctive enough to name one mention"
+        )
+    paper = matches[0]
+    texts = (
+        await db.execute(
+            _PAPER_TEXT_SQL, {"model": settings.embedding_model, "paper_id": paper.paper_id}
+        )
+    ).fetchall()
+    if not any(chunk_satisfies(projected, paper.title, r.chunk_text) for r in texts):
+        return None, (
+            f"side {side}: paper matching {projected.paper_title_contains!r} found, but no "
+            f"chunk of it contains {list(projected.expect_substrings)!r}"
+        )
+    return paper.paper_id, None
+
+
+async def _comparison_status(
+    db, case: ComparisonCase, papers: list[PaperBest]
+) -> tuple[dict[str, str] | None, list[str]]:
+    """({side: paper_id}, errors) for a comparison case.
+
+    Both sides must resolve AND resolve to different papers: two needles
+    landing on one paper would make the case a single-paper question wearing a
+    comparison's clothes, and every representation metric would report a
+    perfect score while measuring nothing new. The loader already rejects
+    needles that nest, but two genuinely different needles can still hit one
+    title in a corpus the loader has never seen.
+    """
+    resolved: dict[str, str] = {}
+    errors: list[str] = []
+    for side in case.sides:
+        paper_id, error = await _resolve_side(db, case, side, papers)
+        if error is not None:
+            errors.append(f"{case.id}: {error}")
+        else:
+            resolved[side] = paper_id
+    if errors:
+        return None, errors
+    if len(set(resolved.values())) < len(resolved):
+        return None, [f"{case.id}: both title needles resolve to the SAME paper in this corpus"]
+    return resolved, []
+
+
 def _scope_for(
     case: Case, papers: list[PaperBest], answer_paper_id: str | None, pairing: str
 ) -> list[str] | None:
@@ -491,6 +572,26 @@ def _outcome(
     )
 
 
+def _comparison_outcome(
+    case: ComparisonCase,
+    arm: Arm,
+    side_paper: dict[str, str],
+    scope_ids: list[str],
+    kept: list,
+) -> ComparisonOutcome:
+    ranks = {side: first_satisfying_rank(case.side(side), kept) for side in case.sides}
+    return ComparisonOutcome(
+        case_id=case.id,
+        config=arm.name,
+        scope=tuple(scope_ids),
+        kept_total=len(kept),
+        kept_by_paper=count_by_paper(kept, lambda c: c.paper_id),
+        side_paper=dict(side_paper),
+        side_survived={side: rank is not None for side, rank in ranks.items()},
+        side_rank=ranks,
+    )
+
+
 def _fmt(value: float | None, digits: int = 2) -> str:
     return "-" if value is None else f"{value:.{digits}f}"
 
@@ -519,6 +620,74 @@ def _report_slice(title: str, outcomes: list[MentionOutcome], arms: list[Arm]) -
         lost = survival_regressions(baseline, rows)
         if lost:
             print(f"  REGRESSION vs {arms[0].name} under {arm.name}: {', '.join(sorted(lost))}")
+
+
+def _report_comparisons(outcomes: list[ComparisonOutcome], arms: list[Arm]) -> None:
+    """The REAL-comparison arm.
+
+    `both` is the headline: the fraction of questions where both halves of the
+    answer reached the model. `side surv` splits that per side so a
+    half-answered comparison is visible as one lost side rather than one lost
+    case. `shut out` counts cases where a paper the USER named contributed
+    nothing at all — the instruction being visibly ignored, which is a distinct
+    failure from the answer being missed. `min share` is the balance of the
+    delivered budget between the two named papers (0.5 = even).
+    """
+    n = len({o.case_id for o in outcomes})
+    print(f"\nREAL comparison questions, both papers named by the case   (n={n})")
+    if not outcomes:
+        print("  (no comparison cases ran — see ERRORS)")
+        return
+    print(
+        f"{'arm':<14}{'repr':>8}{'both':>8}{'side surv':>11}{'shut out':>10}"
+        f"{'mean kept':>11}{'min share':>11}"
+    )
+    baseline = [o for o in outcomes if o.config == arms[0].name]
+    for arm in arms:
+        rows = [o for o in outcomes if o.config == arm.name]
+        if not rows:
+            continue
+        print(
+            f"{arm.name:<14}{_fmt(representation_rate(rows)):>8}"
+            f"{_fmt(both_sides_survived_rate(rows)):>8}"
+            f"{_fmt(side_survival_rate(rows)):>11}"
+            f"{_fmt(shut_out_rate(rows)):>10}"
+            f"{_fmt(mean_kept(rows), 1):>11}"
+            f"{_fmt(mean_minority_share(rows)):>11}"
+        )
+    for arm in arms[1:]:
+        rows = [o for o in outcomes if o.config == arm.name]
+        lost = comparison_survival_regressions(baseline, rows)
+        if lost:
+            print(f"  REGRESSION vs {arms[0].name} under {arm.name}: {', '.join(sorted(lost))}")
+
+
+def _report_comparison_per_case(outcomes: list[ComparisonOutcome], arms: list[Arm]) -> None:
+    if not outcomes:
+        return
+    case_ids = sorted({o.case_id for o in outcomes})
+    width = max(34, max(len(cid) for cid in case_ids) + 1)
+    print("\nper-case (real comparisons) — 'keptA/keptB  rankA,rankB' (. = never reached)")
+    header = f"{'case':<{width}}"
+    for arm in arms:
+        header += f"{arm.name:>22}"
+    print(header)
+    for case_id in case_ids:
+        line = f"{case_id:<{width}}"
+        for arm in arms:
+            match = next(
+                (o for o in outcomes if o.case_id == case_id and o.config == arm.name), None
+            )
+            if match is None:
+                line += f"{'-':>22}"
+                continue
+            kept = "/".join(str(match.kept_by_paper.get(pid, 0)) for pid in match.scope)
+            ranks = ",".join(
+                "." if match.side_rank[side] is None else str(match.side_rank[side])
+                for side in sorted(match.side_rank)
+            )
+            line += f"{f'{kept}  {ranks}':>22}"
+        print(line)
 
 
 def _report_negatives(outcomes: list[MentionOutcome], arms: list[Arm]) -> None:
@@ -557,6 +726,11 @@ def _report_band(pairs: list[dict], lo: float, hi: float) -> None:
         ("second mention (nearest)", [p for p in pairs if p["role"] == "second-nearest"]),
         ("second mention (seeded)", [p for p in pairs if p["role"] == "second-seeded"]),
         ("off_topic anchor + second", [p for p in pairs if p["role"].startswith("negative")]),
+        # The row the 2026-08-18 measurement could not produce: a paper named
+        # in a REAL comparison, measured against the BLENDED question that
+        # names both. If a genuine two-paper query pushes either paper's
+        # nearest chunk into the band, the gate choice stops being academic.
+        ("comparison paper (real)", [p for p in pairs if p["role"].startswith("comparison")]),
     ]
     for label, rows in roles:
         values = [r["best"] for r in rows]
@@ -597,6 +771,17 @@ async def main() -> None:  # noqa: PLR0912 — a report script, not a library AP
         help="scope the corpus to one project's papers, matching production's own scoping",
     )
     parser.add_argument("--set", type=Path, default=_DEFAULT_SET)
+    parser.add_argument(
+        "--comparison-set",
+        type=Path,
+        default=_DEFAULT_COMPARISON_SET,
+        help="real two-paper comparison questions (the non-synthetic arm)",
+    )
+    parser.add_argument(
+        "--skip-comparisons",
+        action="store_true",
+        help="run only the synthetic pairings, e.g. to reproduce a pre-2026-08-18 number",
+    )
     parser.add_argument("--json", type=Path, default=None, help="also dump per-case results here")
     parser.add_argument(
         "--per-case",
@@ -606,11 +791,13 @@ async def main() -> None:  # noqa: PLR0912 — a report script, not a library AP
     args = parser.parse_args()
 
     cases = load_golden_set(args.set)
+    comparisons = [] if args.skip_comparisons else load_comparison_set(args.comparison_set)
     svc = EmbeddingService()
     arms = _arms()
     pairings = ("nearest", "seeded")
 
     outcomes: list[MentionOutcome] = []
+    comparison_outcomes: list[ComparisonOutcome] = []
     # One row per (case, mentioned paper): the paper's own nearest chunk, which
     # is what every gate under measurement actually tests. Feeds _report_band.
     pairs: list[dict] = []
@@ -661,6 +848,38 @@ async def main() -> None:  # noqa: PLR0912 — a report script, not a library AP
                     )
                     outcomes.append(_outcome(case, arm, pairing, scope_ids, answer_paper_id, kept))
 
+        for comparison in comparisons:
+            # The blended question is embedded ONCE and drives both the scope
+            # resolution and every arm, exactly as a production turn would:
+            # the whole point of this arm is the query vector that sits between
+            # two papers rather than on one.
+            embedding = await svc.embed(comparison.question, task_type="RETRIEVAL_QUERY")
+            qvec = _vec(embedding)
+            papers = await _paper_bests(db, qvec, args.project_id)
+            side_paper, case_errors = await _comparison_status(db, comparison, papers)
+            if side_paper is None:
+                errors.extend(case_errors)
+                continue
+            best_by_id = {p.paper_id: p.best for p in papers}
+            scope_ids = [side_paper[side] for side in comparison.sides]
+            for side in comparison.sides:
+                pairs.append(
+                    {
+                        "case_id": comparison.id,
+                        "pairing": "real",
+                        "role": f"comparison-{side}",
+                        "paper_id": side_paper[side],
+                        "best": best_by_id.get(side_paper[side]),
+                    }
+                )
+            for arm in arms:
+                kept = await _run_arm(
+                    db, arm, qvec=qvec, qtext=comparison.question, scope_ids=scope_ids
+                )
+                comparison_outcomes.append(
+                    _comparison_outcome(comparison, arm, side_paper, scope_ids, kept)
+                )
+
     print(
         f"\ncorpus: {corpus_note}   model: {settings.embedding_model}   project: {args.project_id}"
     )
@@ -671,6 +890,10 @@ async def main() -> None:  # noqa: PLR0912 — a report script, not a library AP
         f"hybrid={settings.hybrid_retrieval}"
     )
     print("(two mentions per case; policy B's admission and merge are SIMULATED in the harness)")
+    print(
+        f"({len(cases)} golden-set cases x 2 SYNTHETIC pairings, "
+        f"{len(comparisons)} REAL comparison questions)"
+    )
 
     if errors:
         print("\nERRORS (golden-set problems, not retrieval failures):")
@@ -687,6 +910,11 @@ async def main() -> None:  # noqa: PLR0912 — a report script, not a library AP
         )
         if args.per_case:
             _report_per_case(positives, arms, pairing)
+
+    if not args.skip_comparisons:
+        _report_comparisons(comparison_outcomes, arms)
+        if args.per_case:
+            _report_comparison_per_case(comparison_outcomes, arms)
 
     negatives = [o for o in outcomes if o.answer_paper_id is None and o.pairing == "nearest"]
     _report_negatives(negatives, arms)
@@ -722,6 +950,19 @@ async def main() -> None:  # noqa: PLR0912 — a report script, not a library AP
                             "answer_survived": o.answer_survived,
                         }
                         for o in outcomes
+                    ],
+                    "comparison_outcomes": [
+                        {
+                            "case_id": o.case_id,
+                            "config": o.config,
+                            "scope": list(o.scope),
+                            "kept_total": o.kept_total,
+                            "kept_by_paper": o.kept_by_paper,
+                            "side_paper": o.side_paper,
+                            "side_survived": o.side_survived,
+                            "side_rank": o.side_rank,
+                        }
+                        for o in comparison_outcomes
                     ],
                 },
                 indent=2,

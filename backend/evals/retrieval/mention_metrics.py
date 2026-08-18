@@ -18,9 +18,32 @@ from __future__ import annotations
 import random
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
-from typing import TypeVar
+from typing import Protocol, TypeVar, runtime_checkable
 
 T = TypeVar("T")
+
+
+@runtime_checkable
+class ScopedOutcome(Protocol):
+    """What the scope-shaped aggregates below actually need.
+
+    A Protocol rather than a base class because two unrelated result types
+    satisfy it: `MentionOutcome` (one answering paper plus a synthetic second
+    mention) and `ComparisonOutcome` (two answering papers, a real comparison
+    question). Representation and budget size mean exactly the same thing for
+    both, and forking `mean_kept` into two copies would let the synthetic arms'
+    numbers and the real arm's stop being comparable — which is the entire
+    reason the synthetic arms are kept.
+    """
+
+    @property
+    def scope(self) -> tuple[str, ...]: ...
+
+    @property
+    def kept_total(self) -> int: ...
+
+    @property
+    def represented(self) -> int: ...
 
 
 @dataclass(frozen=True)
@@ -158,6 +181,111 @@ class MentionOutcome:
         return self.kept_total - self.answer_paper_chunks
 
 
+@dataclass(frozen=True)
+class ComparisonOutcome:
+    """One (real comparison case, configuration) result.
+
+    The difference from `MentionOutcome` is not cosmetic: a comparison question
+    has TWO answering papers, so "did the answer survive" is two independent
+    questions and a case where only one side survived is the exact failure this
+    arm exists to detect. Collapsing that into one boolean — the shape
+    `MentionOutcome` uses — would report a half-answered comparison as a
+    success.
+    """
+
+    case_id: str
+    config: str
+    scope: tuple[str, ...]
+    kept_total: int
+    kept_by_paper: dict[str, int]
+    # side key ("a"/"b") -> the paper it names, whether its expected text
+    # reached the budget, and at what 1-based rank (None = never).
+    side_paper: dict[str, str]
+    side_survived: dict[str, bool]
+    side_rank: dict[str, int | None]
+
+    @property
+    def represented(self) -> int:
+        return sum(1 for pid in self.scope if self.kept_by_paper.get(pid, 0) > 0)
+
+    @property
+    def both_survived(self) -> bool:
+        return bool(self.side_survived) and all(self.side_survived.values())
+
+    @property
+    def minority_share(self) -> float | None:
+        """Share of the delivered budget held by the LESS represented named
+        paper. 0.0 means one named paper was shut out entirely, 0.5 means the
+        budget split evenly. None when nothing was delivered.
+
+        This is the comparison-arm analogue of `mean_second_paper_share`, but
+        it is a BALANCE measure rather than a noise measure: on a real
+        comparison both papers are supposed to be in context, so a small share
+        is a defect here and merely a cost there.
+        """
+        if self.kept_total <= 0:
+            return None
+        return min(self.kept_by_paper.get(pid, 0) for pid in self.scope) / self.kept_total
+
+
+def both_sides_survived_rate(outcomes: Sequence[ComparisonOutcome]) -> float | None:
+    """Fraction of comparison cases where BOTH papers' answering text reached
+    the budget — the headline metric of this arm."""
+    if not outcomes:
+        return None
+    return sum(1 for o in outcomes if o.both_survived) / len(outcomes)
+
+
+def side_survival_rate(outcomes: Sequence[ComparisonOutcome]) -> float | None:
+    """Fraction of SIDES (2 per case) whose answering text reached the budget.
+
+    Denominated in sides for the same reason `representation_rate` is
+    denominated in paper-slots: it separates "one half of one comparison was
+    lost" from "both halves of one comparison were lost".
+    """
+    sides = sum(len(o.side_survived) for o in outcomes)
+    if not sides:
+        return None
+    return sum(sum(1 for ok in o.side_survived.values() if ok) for o in outcomes) / sides
+
+
+def shut_out_rate(outcomes: Sequence[ComparisonOutcome]) -> float | None:
+    """Fraction of cases where at least one NAMED paper contributed zero
+    chunks. The user typed both `@` mentions; a zero here is the instruction
+    being visibly ignored, regardless of whether the answer survived."""
+    if not outcomes:
+        return None
+    return sum(1 for o in outcomes if o.represented < len(o.scope)) / len(outcomes)
+
+
+def mean_minority_share(outcomes: Sequence[ComparisonOutcome]) -> float | None:
+    """Mean `minority_share`, averaged over cases that delivered anything.
+
+    Cases delivering nothing are skipped rather than counted as 0.0, matching
+    `mean_second_paper_share`: an empty result is a representation failure and
+    is already reported by `shut_out_rate`.
+    """
+    scored = [o.minority_share for o in outcomes if o.minority_share is not None]
+    if not scored:
+        return None
+    return sum(scored) / len(scored)
+
+
+def comparison_survival_regressions(
+    baseline: Sequence[ComparisonOutcome], candidate: Sequence[ComparisonOutcome]
+) -> list[str]:
+    """`case_id:side` labels that survived under `baseline` and do not under
+    `candidate` — per SIDE, because losing one half of a comparison is the
+    regression that a per-case boolean would hide."""
+    base = {(o.case_id, side): ok for o in baseline for side, ok in o.side_survived.items()}
+    lost: list[str] = []
+    for outcome in candidate:
+        for side, ok in outcome.side_survived.items():
+            if base.get((outcome.case_id, side)) is True and ok is False:
+                lost.append(f"{outcome.case_id}:{side}")
+    return lost
+
+
 def count_by_paper(items: Iterable[T], paper_of: Callable[[T], str]) -> dict[str, int]:
     counts: dict[str, int] = {}
     for item in items:
@@ -166,7 +294,7 @@ def count_by_paper(items: Iterable[T], paper_of: Callable[[T], str]) -> dict[str
     return counts
 
 
-def representation_rate(outcomes: Sequence[MentionOutcome]) -> float | None:
+def representation_rate(outcomes: Sequence[ScopedOutcome]) -> float | None:
     """Fraction of MENTIONED papers contributing at least one chunk.
 
     Denominated in paper-slots, not cases: with a floor of 5 and two mentions,
@@ -179,7 +307,7 @@ def representation_rate(outcomes: Sequence[MentionOutcome]) -> float | None:
     return sum(o.represented for o in outcomes) / slots
 
 
-def both_represented_rate(outcomes: Sequence[MentionOutcome]) -> float | None:
+def both_represented_rate(outcomes: Sequence[ScopedOutcome]) -> float | None:
     """Fraction of cases where EVERY mentioned paper contributed a chunk."""
     if not outcomes:
         return None
@@ -219,13 +347,13 @@ def mean_second_paper_share(outcomes: Sequence[MentionOutcome]) -> float | None:
     return sum(o.second_paper_chunks / o.kept_total for o in scored) / len(scored)
 
 
-def mean_kept(outcomes: Sequence[MentionOutcome]) -> float | None:
+def mean_kept(outcomes: Sequence[ScopedOutcome]) -> float | None:
     if not outcomes:
         return None
     return sum(o.kept_total for o in outcomes) / len(outcomes)
 
 
-def worst_kept(outcomes: Sequence[MentionOutcome]) -> int | None:
+def worst_kept(outcomes: Sequence[ScopedOutcome]) -> int | None:
     return max((o.kept_total for o in outcomes), default=None)
 
 
