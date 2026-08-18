@@ -16,6 +16,10 @@ class MessageOut(BaseModel):
     role: str
     content: str
     citations: list[dict]  # raw JSON — CitationOut shape, validated at write time
+    # Paper ids the user scoped this turn to. IDS ONLY: titles are resolved on
+    # read (see conversation_service.retitle_citations for the same rule), so a
+    # paper renamed in the Papers tab relabels every past turn that named it.
+    mentions: list[str] = Field(default_factory=list)
     created_at: datetime
     model_config = {"from_attributes": True}
 
@@ -43,3 +47,6 @@ class ConversationDetailOut(BaseModel):
 
 class ChatRequest(BaseModel):
     content: str = Field(min_length=1, max_length=4000)
+    # Capped so a crafted request cannot turn the scope into the whole library
+    # by another name. Re-enforced here as well as client-side.
+    mentioned_paper_ids: list[str] = Field(default_factory=list, max_length=10)

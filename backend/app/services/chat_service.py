@@ -225,7 +225,12 @@ class ChatService:
         self._chat_agent = ChatAgent()
         self._conv_svc = ConversationService()
 
-    async def respond(self, conversation_id: str, user_content: str) -> AsyncGenerator[dict, None]:
+    async def respond(
+        self,
+        conversation_id: str,
+        user_content: str,
+        mentioned_paper_ids: list[str] | None = None,
+    ) -> AsyncGenerator[dict, None]:
         """Yield SSE event dicts for one user message."""
         try:
             yield {"event": "thinking", "data": "{}"}

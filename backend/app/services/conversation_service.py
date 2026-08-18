@@ -118,6 +118,28 @@ class ConversationService:
         )
         return {paper_id: title for paper_id, title in result.all()}
 
+    async def validate_mentions(
+        self, db: AsyncSession, project_id: str, paper_ids: list[str]
+    ) -> list[str]:
+        """Dedupe and confirm every id is a paper of THIS project.
+
+        A scoping boundary, not input hygiene. Papers are project-scoped and
+        membership is checked per project, so an id from elsewhere would read
+        another project's chunks into this answer. Raises ValueError, which the
+        router turns into a 400 — the caller never learns whether the id exists
+        somewhere else.
+        """
+        deduped = list(dict.fromkeys(paper_ids))
+        if not deduped:
+            return []
+        rows = await db.execute(
+            select(Paper.id).where(Paper.project_id == project_id, Paper.id.in_(deduped))
+        )
+        known = {row[0] for row in rows.all()}
+        if len(known) != len(deduped):
+            raise ValueError("unknown paper id in mentions")
+        return deduped
+
     async def save_message(
         self,
         db: AsyncSession,
@@ -125,12 +147,14 @@ class ConversationService:
         role: str,
         content: str,
         citations: list[dict] | None = None,
+        mentions: list[str] | None = None,
     ) -> ChatMessage:
         msg = ChatMessage(
             conversation_id=conversation_id,
             role=role,
             content=content,
             citations=citations or [],
+            mentions=mentions or [],
         )
         db.add(msg)
         # Touch updated_at on the conversation (drives sidebar ordering)

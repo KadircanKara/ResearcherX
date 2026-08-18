@@ -238,3 +238,70 @@ async def test_a_deleted_papers_citation_keeps_the_title_it_was_written_with(
         headers={"X-Dev-User-Id": you.id},
     )
     assert resp.json()["messages"][0]["citations"][0]["title"] == "Title at answer time"
+
+
+async def test_a_mention_from_another_project_is_rejected(
+    client: AsyncClient, you: User, project: Project, db_session: AsyncSession
+):
+    """Scoping boundary, not input hygiene: papers are project-scoped and
+    membership is checked per project, so an unvalidated id would pull another
+    project's chunks into this answer."""
+    from app.db.models import Paper
+
+    other = Project(owner_id=you.id, title="Other project", topic_keywords=[])
+    db_session.add(other)
+    await db_session.flush()
+    foreign = Paper(project_id=other.id, title="Foreign paper", source="manual")
+    db_session.add(foreign)
+    conv = ChatConversation(project_id=project.id, title="Mention test", created_by=you.id)
+    db_session.add(conv)
+    await db_session.flush()
+    db_session.add(ChatMessage(conversation_id=conv.id, role="user", content="Initial"))
+    await db_session.commit()
+
+    with patch("app.services.conversation_service._embed_message", new=AsyncMock()):
+        resp = await client.post(
+            f"/v1/projects/{project.id}/conversations/{conv.id}/messages",
+            json={"content": "What does it say?", "mentioned_paper_ids": [foreign.id]},
+            headers={"X-Dev-User-Id": you.id},
+        )
+
+    assert resp.status_code == 400
+
+
+async def test_mentions_are_persisted_on_the_user_message_and_returned(
+    client: AsyncClient, you: User, project: Project, db_session: AsyncSession
+):
+    from app.db.models import Paper
+
+    paper = Paper(project_id=project.id, title="Mentioned paper", source="manual")
+    db_session.add(paper)
+    conv = ChatConversation(project_id=project.id, title="Mention test", created_by=you.id)
+    db_session.add(conv)
+    await db_session.flush()
+    db_session.add(ChatMessage(conversation_id=conv.id, role="user", content="Initial"))
+    await db_session.commit()
+
+    async def fake_respond(conversation_id, user_content, mentioned_paper_ids):
+        yield {"event": "done", "data": json.dumps({"citations": []})}
+
+    with (
+        patch("app.api.v1.chat.chat_service.respond", new=fake_respond),
+        patch("app.services.conversation_service._embed_message", new=AsyncMock()),
+    ):
+        await client.post(
+            f"/v1/projects/{project.id}/conversations/{conv.id}/messages",
+            json={
+                "content": "What reward does it use?",
+                "mentioned_paper_ids": [paper.id, paper.id],
+            },
+            headers={"X-Dev-User-Id": you.id},
+        )
+
+    detail = await client.get(
+        f"/v1/projects/{project.id}/conversations/{conv.id}",
+        headers={"X-Dev-User-Id": you.id},
+    )
+    last_user = [m for m in detail.json()["messages"] if m["role"] == "user"][-1]
+    # Deduped, and ids only — never titles, which go stale on rename.
+    assert last_user["mentions"] == [paper.id]
