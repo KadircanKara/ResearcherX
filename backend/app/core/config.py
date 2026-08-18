@@ -326,6 +326,13 @@ class Settings(BaseSettings):
     # generic connection error.
     latex_compile_timeout: int = 60
 
+    # Compiled-artifact cache bounds. IN-PROCESS MEMORY, which is only valid
+    # because uvicorn runs a single worker (see security.py's docstring for
+    # the same dependency). Both bounds apply: a PDF is comfortably over a
+    # megabyte, so an entry count alone does not bound memory.
+    latex_cache_entries: int = 32
+    latex_cache_bytes: int = 256 * 1024 * 1024
+
     @field_validator("cors_origins", mode="before")
     @classmethod
     def _split_cors(cls, v: object) -> object:
