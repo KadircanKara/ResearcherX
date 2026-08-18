@@ -35,9 +35,18 @@ def apply_per_paper_floor(
 
     `budget` is a hard ceiling and is applied last: the floor may only change
     WHICH items are kept, never how many.
+
+    When floor * len(scope) exceeds budget, the pin loop saturates mid-round
+    and deterministically favours papers earlier in `scope`.
+
+    The function is defensive about a duplicated paper id in `scope` — if the
+    same id appears twice, it is treated as a single entry.
     """
     if floor <= 0:
         return list(ordered[:budget])
+
+    # Dedupe scope, order-preserving, so a duplicate id cannot cause duplication
+    scope = list(dict.fromkeys(scope))
 
     per_paper: dict[str, list[T]] = {paper_id: [] for paper_id in scope}
     for item in ordered:
@@ -45,18 +54,21 @@ def apply_per_paper_floor(
         if bucket is not None:
             bucket.append(item)
 
+    pinned_ids: set[int] = set()
     pinned: list[T] = []
     for rank in range(floor):
         for paper_id in scope:
             items = per_paper.get(paper_id) or []
             if rank < len(items) and len(pinned) < budget:
-                pinned.append(items[rank])
+                item = items[rank]
+                pinned.append(item)
+                pinned_ids.add(id(item))
 
-    pinned_ids = {id(item) for item in pinned}
     kept = list(pinned)
     for item in ordered:
         if len(kept) >= budget:
             break
         if id(item) not in pinned_ids:
             kept.append(item)
+            pinned_ids.add(id(item))
     return kept

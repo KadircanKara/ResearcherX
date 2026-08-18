@@ -89,3 +89,50 @@ def test_no_floor_means_plain_truncation():
     )
 
     assert _papers(kept) == "aaab"
+
+
+def test_the_floor_interleaves_papers_rather_than_exhausting_one_at_a_time():
+    """Round-robin is the guarantee this function provides. This test pins
+    it: two papers with floor=2 each should produce A's best, B's best,
+    A's second, B's second — not A's two, then B's two."""
+    ordered = _chunks("aabbaa")
+
+    kept = apply_per_paper_floor(
+        ordered, paper_of=lambda c: c[0], scope=["a", "b"], floor=2, budget=4
+    )
+
+    # With round-robin: a0, b0, a1, b1
+    # If it was sequential: a0, a1, b0, b1
+    # We verify the interleaved order by checking the exact sequence
+    assert _papers(kept) == "abab"
+
+
+def test_duplicated_paper_id_in_scope_does_not_duplicate_items():
+    """When scope contains the same id twice, it should not cause items to
+    be pinned twice or appear multiple times in the output."""
+    ordered = _chunks("aab")
+
+    kept = apply_per_paper_floor(
+        ordered, paper_of=lambda c: c[0], scope=["a", "a"], floor=1, budget=5
+    )
+
+    # Even though "a" appears twice in scope, it should only contribute once
+    # to the floor. The output should have each item at most once.
+    assert len(kept) == 3  # a0, a1, b0
+    assert _papers(kept).count("a") == 2  # not 3
+    assert kept.count(ordered[0]) == 1  # a0 appears exactly once
+
+
+def test_repeated_object_in_ordered_appears_at_most_once():
+    """When the same object appears twice in the ordered list, it should
+    appear at most once in the output (only the first occurrence counts)."""
+    # Create a list where the same object appears twice
+    a0 = ("a", 0)
+    a1 = ("a", 1)
+    ordered = [a0, a1, a0]  # a0 appears at positions 0 and 2
+
+    kept = apply_per_paper_floor(ordered, paper_of=lambda c: c[0], scope=["a"], floor=1, budget=5)
+
+    # The object a0 should appear exactly once in the output
+    assert kept.count(a0) == 1
+    assert len(kept) == 2  # only a0 and a1
