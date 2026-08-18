@@ -291,7 +291,13 @@ class ChatService:
             # query below to this project and labels citations by title.
             paper_infos = [PaperInfo(paper_id=p.id, title=p.title) for p in paper_rows]
 
-            mentioned = list(mentioned_paper_ids or [])
+            # Deduped, order-preserving. The API layer already dedupes before
+            # calling respond(), so this is unreachable today -- but a
+            # duplicated id would double-join the jsonb scope CTE (every
+            # chunk returned twice) and flip `single_paper` to False,
+            # silently swapping the distance gate. apply_per_paper_floor is
+            # already defensive about this; retrieval should be too.
+            mentioned = list(dict.fromkeys(mentioned_paper_ids or []))
             scope = paper_infos
             widened = False
             mentioned_infos = []
@@ -333,37 +339,26 @@ class ChatService:
                                 mentioned_titles=[p.title for p in mentioned_infos],
                             )
                         )
-                        scope = mentioned_infos
+                        paper_chunks, widened = await self._retrieve_mentioned_chunks(
+                            mentioned_infos,
+                            paper_infos,
+                            retrieval_embedding,
+                            retrieval_query,
+                            widened,
+                        )
+                        scope = paper_infos if widened else mentioned_infos
+                    elif mentioned:
+                        # Every mentioned paper vanished between validation
+                        # and this turn (deleted mid-flight). There is
+                        # nothing left to scope to, so this retrieves the
+                        # whole library -- which IS widening, and the event
+                        # must say so rather than silently reporting the
+                        # untouched widened=False from above.
+                        widened = True
                         async with SessionLocal() as db:
                             paper_chunks = await self._retrieve_paper_chunks(
-                                db, mentioned_infos, retrieval_embedding, retrieval_query
+                                db, paper_infos, retrieval_embedding, retrieval_query
                             )
-                        paper_chunks = apply_per_paper_floor(
-                            paper_chunks,
-                            paper_of=lambda c: c.paper_id,
-                            scope=[p.paper_id for p in mentioned_infos],
-                            floor=settings.mention_per_paper_floor,
-                            budget=settings.max_context_chunks,
-                        )
-                        if widened or not paper_chunks:
-                            # Not widening on an empty scope would answer from
-                            # nothing: a paper can be mentioned before its
-                            # ingest finished. Answering wider than asked beats
-                            # answering ungrounded.
-                            widened = True
-                            async with SessionLocal() as db:
-                                fill = await self._retrieve_paper_chunks(
-                                    db, paper_infos, retrieval_embedding, retrieval_query
-                                )
-                            pinned_keys = {(c.paper_id, c.chunk_index) for c in paper_chunks}
-                            budget = settings.max_context_chunks - len(paper_chunks)
-                            extra = [
-                                c for c in fill if (c.paper_id, c.chunk_index) not in pinned_keys
-                            ][:budget]
-                            paper_chunks = self._renumber_chunks(paper_chunks + extra)
-                            scope = paper_infos
-                        else:
-                            paper_chunks = self._renumber_chunks(paper_chunks)
                     else:
                         async with SessionLocal() as db:
                             paper_chunks = await self._retrieve_paper_chunks(
@@ -463,6 +458,54 @@ class ChatService:
                 "data": json.dumps({"message": "Chat failed. Please try again."}),
             }
 
+    async def _retrieve_mentioned_chunks(
+        self,
+        scope: list[PaperInfo],
+        all_papers: list[PaperInfo],
+        embedding: list[float],
+        query_text: str,
+        widened: bool,
+    ) -> tuple[list[ChunkContext], bool]:
+        """Retrieve chunks for a turn scoped to explicitly @-mentioned papers.
+
+        Scopes to `scope` (the papers the user named) and guarantees each a
+        floor via `apply_per_paper_floor`. Then folds in the rest of
+        `all_papers` when `widened` is True OR the floor comes back
+        completely empty -- a paper can be mentioned before its ingest
+        finished, and answering from nothing is worse than answering wider
+        than asked; that empty-floor case FORCES widened True regardless of
+        what the caller passed in, which is why the flag is returned, not
+        just consumed.
+
+        Returns the final chunks, renumbered over their FINAL order (`n`
+        must follow what the model is actually shown -- two lists pinned +
+        filled both start their own `n` at 1, so skipping this step lets two
+        excerpts share a citation marker), and the widened flag as it was
+        ACTUALLY applied. `budget` is a hard ceiling applied AFTER the pinned
+        floor, so the floor can never itself blow past
+        `settings.max_context_chunks`.
+        """
+        async with SessionLocal() as db:
+            paper_chunks = await self._retrieve_paper_chunks(db, scope, embedding, query_text)
+        paper_chunks = apply_per_paper_floor(
+            paper_chunks,
+            paper_of=lambda c: c.paper_id,
+            scope=[p.paper_id for p in scope],
+            floor=settings.mention_per_paper_floor,
+            budget=settings.max_context_chunks,
+        )
+        if widened or not paper_chunks:
+            widened = True
+            async with SessionLocal() as db:
+                fill = await self._retrieve_paper_chunks(db, all_papers, embedding, query_text)
+            pinned_keys = {(c.paper_id, c.chunk_index) for c in paper_chunks}
+            budget = settings.max_context_chunks - len(paper_chunks)
+            extra = [c for c in fill if (c.paper_id, c.chunk_index) not in pinned_keys][:budget]
+            paper_chunks = self._renumber_chunks(paper_chunks + extra)
+        else:
+            paper_chunks = self._renumber_chunks(paper_chunks)
+        return paper_chunks, widened
+
     async def _retrieve_history(
         self,
         db: AsyncSession,
@@ -505,9 +548,9 @@ class ChatService:
         """Retrieve the nearest chunks from `paper_infos`, ranked by distance.
 
         `paper_infos` is the retrieval SCOPE the caller decided on -- the
-        whole project's papers by default, or the single paper the targeter
-        picked. This method has no opinion on which; it just ranks whatever
-        scope it is given.
+        whole project's papers by default, or the paper(s) the user explicitly
+        @-mentioned. This method has no opinion on which; it just ranks
+        whatever scope it is given.
 
         ONE query, and no per-paper ceiling. Cosine similarity spreads the
         result across papers by itself when scope is the whole library:
@@ -527,7 +570,7 @@ class ChatService:
 
         SINGLE-PAPER SCOPE IS DIFFERENT, and it is detected here rather than
         passed in: one paper in `paper_infos` means the user already named the
-        paper (the targeter picked it, or the project holds only that one), so
+        paper (an explicit @ mention, or the project holds only that one), so
         an absolute cosine cutoff tuned for beating OTHER papers is the wrong
         instrument. Two changes apply, and only together:
           - the SQL cutoff becomes `intra_paper_ceiling` (looser, a noise

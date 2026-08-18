@@ -1027,13 +1027,14 @@ async def test_widening_pins_the_mentioned_papers_and_fills_globally(
         return [chunk(1, other)]
 
     svc = ChatService()
+    stream = MagicMock(return_value=fake_stream())
 
     with (
         patch.object(svc._embedding_svc, "embed", AsyncMock(return_value=[0.0] * 768)),
         patch.object(svc, "_retrieve_history", AsyncMock(return_value=[])),
         patch.object(svc._widener, "run", AsyncMock(return_value=True)),
         patch.object(svc, "_retrieve_paper_chunks", fake_retrieve),
-        patch.object(svc._chat_agent, "stream", return_value=fake_stream()),
+        patch.object(svc._chat_agent, "stream", stream),
         patch.object(svc._conv_svc, "save_message", AsyncMock()),
     ):
         events = [ev async for ev in svc.respond(conv.id, "and others?", [named.id])]
@@ -1044,6 +1045,16 @@ async def test_widening_pins_the_mentioned_papers_and_fills_globally(
     assert retrieving["scoped"] is True and retrieving["widened"] is True
     # The count follows what the USER named, not the widened scope.
     assert retrieving["scoped_count"] == 1
+
+    # Both fake_retrieve calls return a chunk numbered n=1 (each is its own
+    # catalog of one). Merging pinned + fill without renumbering would hand
+    # the model two excerpts both claiming citation marker [1] -- only
+    # _renumber_chunks makes `n` follow the FINAL merged order. Mutation
+    # tested: deleting the _renumber_chunks calls in respond() leaves this
+    # assertion failing ([1, 1] instead of [1, 2]) while every other test in
+    # this file still passes.
+    agent_input = stream.call_args.args[0]
+    assert [c.n for c in agent_input.paper_chunks] == [1, 2]
 
 
 async def test_mentions_with_no_chunks_at_all_fall_back_to_the_library(
@@ -1130,3 +1141,71 @@ async def test_the_scope_titles_reach_the_chat_agent(
     agent_input = stream.call_args.args[0]
     assert agent_input.scope_titles == ["Named Paper"]
     assert agent_input.scope_widened is False
+
+
+async def test_widened_fill_is_capped_at_the_context_budget(
+    db_session: AsyncSession, project: Project, conversation_with_message
+):
+    """The budget is a hard ceiling across PINNED FLOOR + GLOBAL FILL
+    together, not just over the fill alone.
+
+    Mutation tested: deleting the `[:budget]` slice on the fill in
+    `_retrieve_mentioned_chunks` leaves this failing (7 chunks instead of 3)
+    while every other test in this file still passes -- the floor call
+    alone never returns enough rows to trip `max_context_chunks` in any
+    other test, so nothing else exercises this ceiling once pinned and
+    filled chunks are combined.
+    """
+    from app.agents.chat_agent import ChunkContext
+    from app.db.models import Paper
+    from app.services.chat_service import ChatService
+
+    conv = conversation_with_message
+    papers = [Paper(project_id=project.id, title=f"Paper {i}", source="manual") for i in range(3)]
+    db_session.add_all(papers)
+    await db_session.commit()
+    for p in papers:
+        await db_session.refresh(p)
+    named = papers[0]
+
+    async def fake_stream(*args, **kwargs):
+        yield "answer"
+
+    def pinned_chunk(i):
+        return ChunkContext(
+            n=1, paper_id=named.id, title=named.title, chunk_index=i, text=f"pinned{i}"
+        )
+
+    def fill_chunk(i):
+        return ChunkContext(
+            n=1, paper_id=papers[1].id, title=papers[1].title, chunk_index=100 + i, text=f"fill{i}"
+        )
+
+    calls = []
+
+    async def fake_retrieve(db, scope, embedding, query_text):
+        calls.append([p.paper_id for p in scope])
+        if len(calls) == 1:
+            # The floor call: 2 chunks pinned to the mentioned paper.
+            return [pinned_chunk(0), pinned_chunk(1)]
+        # The widened fill: 5 more chunks, all distinct from the pinned
+        # ones, deliberately more than the remaining budget can hold.
+        return [fill_chunk(i) for i in range(5)]
+
+    svc = ChatService()
+    stream = MagicMock(return_value=fake_stream())
+
+    with (
+        patch.object(settings, "max_context_chunks", 3),
+        patch.object(svc._embedding_svc, "embed", AsyncMock(return_value=[0.0] * 768)),
+        patch.object(svc, "_retrieve_history", AsyncMock(return_value=[])),
+        patch.object(svc._widener, "run", AsyncMock(return_value=True)),
+        patch.object(svc, "_retrieve_paper_chunks", fake_retrieve),
+        patch.object(svc._chat_agent, "stream", stream),
+        patch.object(svc._conv_svc, "save_message", AsyncMock()),
+    ):
+        async for _ in svc.respond(conv.id, "and others?", [named.id]):
+            pass
+
+    agent_input = stream.call_args.args[0]
+    assert len(agent_input.paper_chunks) == 3
