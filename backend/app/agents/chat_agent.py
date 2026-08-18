@@ -127,6 +127,28 @@ def build_papers_block(papers: list[PaperMetaContext]) -> str:
     return "PAPERS ASSIGNED TO THIS PROJECT:\n" + "\n".join(lines)
 
 
+def build_scope_block(titles: list[str], widened: bool) -> str:
+    """Tell the model what the USER restricted this turn to.
+
+    Without it the model cannot distinguish a narrow evidence set from a thin
+    one, and SYSTEM's "the assigned papers do not appear to cover this" rule
+    fires as a false statement about the whole library.
+
+    Collapses whitespace in each title for the same reason build_papers_block
+    does: a title carrying a newline could otherwise forge a line of this
+    block.
+    """
+    if not titles:
+        return ""
+    lines = "\n".join(f"- {' '.join(t.split())}" for t in titles)
+    tail = (
+        "Excerpts from other papers are also provided; use them for comparison."
+        if widened
+        else "Answer from these. Excerpts from other papers are not available this turn."
+    )
+    return f"SCOPE: the user restricted this question to:\n{lines}\n{tail}"
+
+
 class ChatAgentInput(BaseModel):
     query: str
     prior_messages: list[dict]  # [{"role": "user"|"assistant", "content": "..."}]
@@ -137,6 +159,10 @@ class ChatAgentInput(BaseModel):
     # even built -- this model has no opinion on that decision, only on how
     # to render whatever PaperMetaContext list it is handed.
     papers: list[PaperMetaContext] = Field(default_factory=list)
+    # Titles the user named with "@" this turn, and whether the widener let the
+    # rest of the library in beside them. Empty means unscoped.
+    scope_titles: list[str] = Field(default_factory=list)
+    scope_widened: bool = False
 
 
 class ChatAgent:
@@ -162,6 +188,9 @@ class ChatAgent:
         papers_block = build_papers_block(inp.papers)
         if papers_block:
             blocks.append(papers_block)
+        scope_block = build_scope_block(inp.scope_titles, inp.scope_widened)
+        if scope_block:
+            blocks.append(scope_block)
         blocks.append(context_block)
         messages.append(
             {

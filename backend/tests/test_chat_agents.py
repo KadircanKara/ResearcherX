@@ -255,3 +255,31 @@ def test_system_prompt_never_names_the_papers_block_to_the_user():
     PAPERS is an internal prompt structure and must never reach the user."""
     assert "internal structure" in SYSTEM.lower()
     assert "never name it in a reply" in SYSTEM.lower()
+
+
+def test_the_scope_block_names_every_mentioned_paper():
+    from app.agents.chat_agent import build_scope_block
+
+    block = build_scope_block(["Paper A", "Paper B"], widened=False)
+
+    assert "Paper A" in block and "Paper B" in block
+    # Without this the model reports the LIBRARY does not cover something that
+    # was merely out of scope — its existing "the assigned papers do not appear
+    # to cover this" rule cannot tell a narrow evidence set from a thin one.
+    assert "not available" in block
+
+
+def test_a_widened_scope_says_so():
+    from app.agents.chat_agent import build_scope_block
+
+    block = build_scope_block(["Paper A"], widened=True)
+
+    assert "Paper A" in block
+    assert "other papers" in block
+    assert "not available" not in block
+
+
+def test_no_mentions_produces_no_scope_block():
+    from app.agents.chat_agent import build_scope_block
+
+    assert build_scope_block([], widened=False) == ""
