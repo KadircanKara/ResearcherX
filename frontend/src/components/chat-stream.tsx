@@ -121,6 +121,7 @@ export function ChatStream({
     scoped: boolean;
     scoped_count: number;
     widened: boolean;
+    empty_mentions: string[];
   } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -201,6 +202,7 @@ export function ChatStream({
                 scoped: ev.scoped,
                 scoped_count: ev.scoped_count,
                 widened: ev.widened,
+                empty_mentions: ev.empty_mentions ?? [],
               });
             } else if (ev.type === "delta") {
               setStatus("streaming");
@@ -356,6 +358,18 @@ export function ChatStream({
             {status === "retrieving" && (retrievingInfo
               ? `Retrieving from ${retrievingInfo.paper_count} paper${retrievingInfo.paper_count !== 1 ? "s" : ""}…`
               : "Retrieving…")}
+            {/* A paper the user NAMED that returned nothing. Kept visible
+                through streaming, not just the retrieval phase: the answer is
+                being written from fewer papers than were asked for, and that
+                is exactly when the reader needs to know. The durable record is
+                the answer itself — the model is instructed to say so — since
+                this flag is not persisted with the message. */}
+            {(status === "retrieving" || status === "streaming") &&
+              !!retrievingInfo?.empty_mentions?.length && (
+                <span className="ml-2 text-xs text-amber-600 dark:text-amber-500">
+                  no excerpts from {retrievingInfo.empty_mentions.join(", ")}
+                </span>
+              )}
             {status === "retrieving" && retrievingInfo?.scoped && (
               <span className="ml-2 text-xs text-muted-foreground">
                 {retrievingInfo.scoped_count === 0

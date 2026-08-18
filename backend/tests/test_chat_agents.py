@@ -283,3 +283,28 @@ def test_no_mentions_produces_no_scope_block():
     from app.agents.chat_agent import build_scope_block
 
     assert build_scope_block([], widened=False) == ""
+
+
+def test_a_mentioned_paper_with_no_excerpts_is_marked_in_the_scope_block():
+    """A named paper can return ZERO chunks — its best chunk sits outside the
+    distance gate, or it was never ingested. The model is still told the user
+    named it, so without a marker it cannot tell "this paper says nothing about
+    X" from "I was given nothing from this paper", and it will invent the
+    former. Naming the gap is what lets it say so."""
+    from app.agents.chat_agent import build_scope_block
+
+    block = build_scope_block(["Paper A", "Paper B"], widened=False, empty_titles=["Paper B"])
+
+    assert "- Paper A" in block
+    assert "- Paper B — no excerpts retrieved" in block
+    assert "no excerpts were retrieved" in block
+
+
+def test_scope_block_without_empty_papers_is_unchanged():
+    """The common case must not grow a word: every mentioned paper contributed."""
+    from app.agents.chat_agent import build_scope_block
+
+    assert build_scope_block(["Paper A"], widened=False) == build_scope_block(
+        ["Paper A"], widened=False, empty_titles=[]
+    )
+    assert "no excerpts" not in build_scope_block(["Paper A"], widened=False)

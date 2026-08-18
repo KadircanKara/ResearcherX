@@ -1495,3 +1495,81 @@ async def test_a_grouped_citation_marker_survives_the_whole_pipeline(
     assert persisted_text == "Both agree [1], [2] but the third differs [3]."
     assert [c["n"] for c in citations] == [1, 2, 3]
     assert [c["chunk_index"] for c in citations] == [2, 3, 1]
+
+
+async def test_a_mentioned_paper_that_returns_nothing_is_reported_not_hidden(
+    db_session: AsyncSession, project: Project, conversation_with_message
+):
+    """ "Compare @A and @B" where B's chunks all fall outside the distance gate
+    answers from A alone. Today that is invisible: the event says scoped to 2
+    papers and the model is handed both titles with no hint that one produced
+    nothing. Both the wire and the prompt now name the gap."""
+    from app.agents.chat_agent import ChunkContext
+    from app.db.models import Paper
+    from app.services.chat_service import ChatService
+
+    conv = conversation_with_message
+    a = Paper(project_id=project.id, title="Paper A", source="manual")
+    b = Paper(project_id=project.id, title="Paper B", source="manual")
+    db_session.add_all([a, b])
+    await db_session.commit()
+    await db_session.refresh(a)
+    await db_session.refresh(b)
+
+    async def fake_stream(*args, **kwargs):
+        yield "answer"
+
+    # Only A comes back — B's chunks were excluded by the gate.
+    chunks = [ChunkContext(n=1, paper_id=a.id, title=a.title, chunk_index=0, text="t")]
+    stream = MagicMock(return_value=fake_stream())
+    svc = ChatService()
+
+    with (
+        patch.object(svc._embedding_svc, "embed", AsyncMock(return_value=[0.0] * 768)),
+        patch.object(svc, "_retrieve_history", AsyncMock(return_value=[])),
+        patch.object(svc._widener, "run", AsyncMock(return_value=False)),
+        patch.object(svc, "_retrieve_mentioned_chunks", AsyncMock(return_value=(chunks, False))),
+        patch.object(svc._chat_agent, "stream", stream),
+        patch.object(svc._conv_svc, "save_message", AsyncMock()),
+    ):
+        events = [ev async for ev in svc.respond(conv.id, "compare them", [a.id, b.id])]
+
+    retrieving = json.loads(next(e for e in events if e["event"] == "retrieving")["data"])
+    assert retrieving["empty_mentions"] == ["Paper B"]
+    assert retrieving["scoped_count"] == 2
+
+    agent_input = stream.call_args.args[0]
+    assert agent_input.scope_empty_titles == ["Paper B"]
+
+
+async def test_no_empty_mentions_are_reported_when_every_named_paper_contributes(
+    db_session: AsyncSession, project: Project, conversation_with_message
+):
+    from app.agents.chat_agent import ChunkContext
+    from app.db.models import Paper
+    from app.services.chat_service import ChatService
+
+    conv = conversation_with_message
+    paper = Paper(project_id=project.id, title="Paper A", source="manual")
+    db_session.add(paper)
+    await db_session.commit()
+    await db_session.refresh(paper)
+
+    async def fake_stream(*args, **kwargs):
+        yield "answer"
+
+    chunks = [ChunkContext(n=1, paper_id=paper.id, title=paper.title, chunk_index=0, text="t")]
+    svc = ChatService()
+
+    with (
+        patch.object(svc._embedding_svc, "embed", AsyncMock(return_value=[0.0] * 768)),
+        patch.object(svc, "_retrieve_history", AsyncMock(return_value=[])),
+        patch.object(svc._widener, "run", AsyncMock(return_value=False)),
+        patch.object(svc, "_retrieve_mentioned_chunks", AsyncMock(return_value=(chunks, False))),
+        patch.object(svc._chat_agent, "stream", return_value=fake_stream()),
+        patch.object(svc._conv_svc, "save_message", AsyncMock()),
+    ):
+        events = [ev async for ev in svc.respond(conv.id, "q", [paper.id])]
+
+    retrieving = json.loads(next(e for e in events if e["event"] == "retrieving")["data"])
+    assert retrieving["empty_mentions"] == []

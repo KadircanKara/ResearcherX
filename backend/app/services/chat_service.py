@@ -367,6 +367,15 @@ class ChatService:
                 # not.
                 widened = True
 
+            # Papers the user named that contributed NOTHING. Reachable today:
+            # a mentioned paper whose nearest chunk falls outside the distance
+            # gate returns zero rows, and the per-paper floor cannot pin what
+            # SQL never returned. Silence about it is the harm -- the answer
+            # reads as a confident one-paper reply to a two-paper question --
+            # so it is named to the model and to the user rather than dropped.
+            contributing = {c.paper_id for c in paper_chunks}
+            empty_titles = [p.title for p in mentioned_infos if p.paper_id not in contributing]
+
             yield {
                 "event": "retrieving",
                 "data": json.dumps(
@@ -378,6 +387,7 @@ class ChatService:
                         # which becomes the whole project once widening fires.
                         "scoped_count": len(mentioned_infos) if mentioned else 0,
                         "widened": widened,
+                        "empty_mentions": empty_titles,
                     }
                 ),
             }
@@ -394,6 +404,7 @@ class ChatService:
                 # 100 titles would say nothing and cost ~2k tokens.
                 scope_titles=[p.title for p in mentioned_infos],
                 scope_widened=widened,
+                scope_empty_titles=empty_titles,
             )
 
             # Stream response

@@ -146,6 +146,8 @@ export type ChatEvent =
       /** How many papers the user named. Stays put when widening fires. */
       scoped_count: number;
       widened: boolean;
+      /** Titles of mentioned papers that returned no chunks at all. */
+      empty_mentions: string[];
     }
   | { type: "delta"; text: string }
   | { type: "done"; citations: ChatCitation[] }
