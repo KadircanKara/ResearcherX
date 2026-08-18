@@ -128,9 +128,19 @@ def build_papers_block(papers: list[PaperMetaContext]) -> str:
 
 
 def build_scope_block(
-    titles: list[str], widened: bool, empty_titles: list[str] | None = None
+    titles: list[str],
+    widened: bool,
+    empty_titles: list[str] | None = None,
+    scope_source: str = "mention",
 ) -> str:
-    """Tell the model what the USER restricted this turn to.
+    """Tell the model what this turn was restricted to, and by what.
+
+    `scope_source` is the PROVENANCE and it is not decoration. "mention" means
+    the user picked these papers in the composer; "resolved" means the
+    question's own words named them (`paper_resolver`) and the user picked
+    nothing. Saying "the user restricted this question to" about a resolved
+    scope is simply false, and a model told the user made a choice they did
+    not make will defend that choice back at them.
 
     Without it the model cannot distinguish a narrow evidence set from a thin
     one, and SYSTEM's "the assigned papers do not appear to cover this" rule
@@ -166,7 +176,12 @@ def build_scope_block(
             " Where a paper is marked no excerpts were retrieved, say that nothing from it"
             " was available rather than describing what it does or does not contain."
         )
-    return "SCOPE: the user restricted this question to:\n" + "\n".join(lines) + f"\n{tail}"
+    header = (
+        "SCOPE: the question names these papers:"
+        if scope_source == "resolved"
+        else "SCOPE: the user restricted this question to:"
+    )
+    return header + "\n" + "\n".join(lines) + f"\n{tail}"
 
 
 class ChatAgentInput(BaseModel):
@@ -183,6 +198,10 @@ class ChatAgentInput(BaseModel):
     # rest of the library in beside them. Empty means unscoped.
     scope_titles: list[str] = Field(default_factory=list)
     scope_widened: bool = False
+    # How the scope was set: "mention" (the user picked them) or "resolved"
+    # (the question's own words named them). Defaults to "mention" so every
+    # existing caller keeps its current wording.
+    scope_source: str = "mention"
     # Mentioned papers that returned no chunks at all. Marked in the SCOPE
     # block so the model reports the gap instead of describing a paper it was
     # handed nothing from.
@@ -212,7 +231,9 @@ class ChatAgent:
         papers_block = build_papers_block(inp.papers)
         if papers_block:
             blocks.append(papers_block)
-        scope_block = build_scope_block(inp.scope_titles, inp.scope_widened, inp.scope_empty_titles)
+        scope_block = build_scope_block(
+            inp.scope_titles, inp.scope_widened, inp.scope_empty_titles, inp.scope_source
+        )
         if scope_block:
             blocks.append(scope_block)
         blocks.append(context_block)

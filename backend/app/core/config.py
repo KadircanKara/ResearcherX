@@ -229,6 +229,23 @@ class Settings(BaseSettings):
     # allocation: relevance still decides everything above it.
     mention_per_paper_floor: int = 5
 
+    # Most papers one QUESTION may name before the resolver drops its whole
+    # result and lets retrieval run globally (`paper_resolver._capped`).
+    #
+    # NOT a retrieval budget and not a truncation point — an over-large
+    # resolution is DISCARDED, because answering about an arbitrary subset of
+    # the papers the user named is worse than searching everything. So this
+    # number is "how many papers a sentence can plausibly name outright",
+    # nothing more.
+    #
+    # 3, well under the mention cap of 10 (`ChatRequest.mentioned_paper_ids`),
+    # and deliberately so: an `@` mention is an explicit act of picking, while
+    # a resolution is inferred from syntax the user did not intend as markup.
+    # Four or more titles matched out of one sentence is far more likely a
+    # library of near-identical titles colliding than a genuine four-way
+    # comparison, and falling through costs only a wider search.
+    max_resolved_papers: int = 3
+
     # Output budget for one chat answer. PROVIDER-SPECIFIC, like the
     # similarity threshold above — re-measure when LLM_MODEL changes.
     #

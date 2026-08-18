@@ -308,3 +308,25 @@ def test_scope_block_without_empty_papers_is_unchanged():
         ["Paper A"], widened=False, empty_titles=[]
     )
     assert "no excerpts" not in build_scope_block(["Paper A"], widened=False)
+
+
+def test_a_resolved_scope_block_does_not_claim_the_user_restricted_the_turn():
+    """PROVENANCE, not decoration. A resolved scope was set by the words in
+    the question -- the user picked nothing. Telling the model "the user
+    restricted this question to" is a false statement about the user, and a
+    model told they made a choice will defend that choice back at them."""
+    from app.agents.chat_agent import build_scope_block
+
+    block = build_scope_block(["Paper A"], widened=False, scope_source="resolved")
+
+    assert "the user restricted" not in block
+    assert "the question names these papers" in block
+    assert "- Paper A" in block
+
+
+def test_a_mention_scope_block_keeps_the_user_wording():
+    from app.agents.chat_agent import build_scope_block
+
+    assert "SCOPE: the user restricted this question to:" in build_scope_block(
+        ["Paper A"], widened=False
+    )
