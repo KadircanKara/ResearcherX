@@ -6,7 +6,10 @@ execution and the engine flags do not close it:
 - `-no-shell-escape` blocks `\\write18`, but not LuaTeX's `\\directlua`.
   LuaTeX's `--safer` would, and it aborts every real compile of a normal
   preamble (`luaotfload.lua:105: error("safer_option used")`) -- so the flag
-  that would help is unusable.
+  that would help is unusable. (This service does not offer lualatex as an
+  engine -- see `_ENGINE_FLAG` below for why -- but the point generalizes:
+  no engine's own flags are a trustworthy boundary, which is why the
+  containment below has to be the container, not the flags.)
 - File READS survive every engine flag. `\\input{/app/.env}` pulls secrets
   straight into the compiled PDF.
 - A ten-line macro exhausts RAM or spins forever, usually by accident.
@@ -23,6 +26,8 @@ poison.
 
 import base64
 import json
+import os
+import signal
 import subprocess
 import tempfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -32,6 +37,10 @@ from pathlib import Path
 # (a recursive macro), not the rare one.
 COMPILE_TIMEOUT = 30
 SYNCTEX_TIMEOUT = 10
+
+# LaTeX source is text; a request claiming more than this is a mistake or an
+# attempt to make us buffer a huge body before compilation even starts.
+MAX_CONTENT_LENGTH = 5 * 1024 * 1024
 
 # latexmk engine flag per document engine. latexmk rather than a bare engine
 # call because a paper has citations and cross-references: without its rerun
@@ -76,24 +85,44 @@ def compile_tex(body: dict) -> dict:
     with tempfile.TemporaryDirectory(prefix="rx-latex-") as tmp:
         directory = Path(tmp)
         (directory / _MASTER).write_text(body.get("source", ""), encoding="utf-8")
+        # subprocess.run(..., timeout=) -- and Popen.communicate(timeout=) on
+        # its own -- only kills the DIRECT child (latexmk). latexmk in turn
+        # runs the real engine (pdflatex/xelatex) as a further child process,
+        # so a plain timeout leaves that engine running. Reproduced live:
+        # after a 30s timeout returned the "stopped" response below, the
+        # engine was still running at 99.9% CPU, orphaned to PID 1, TIME
+        # still climbing. With a fixed `cpus` budget, a couple of runaway
+        # documents -- the common case per this module's docstring, not the
+        # rare one -- permanently pin the container's entire CPU allowance
+        # and starve every later compile into timing out too, each leaking
+        # another orphan, until something restarts the container: a
+        # self-inflicted DoS from ordinary use of the timeout this code
+        # exists to enforce. `start_new_session=True` puts latexmk and
+        # everything IT spawns into a new process group, so killing that
+        # GROUP (not just latexmk's own PID) is what actually stops the
+        # compute rather than just stopping our view of it.
+        proc = subprocess.Popen(
+            [
+                "latexmk",
+                flag,
+                "-synctex=1",
+                "-interaction=nonstopmode",
+                "-no-shell-escape",
+                "-halt-on-error",
+                _MASTER,
+            ],
+            cwd=directory,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
         try:
-            proc = subprocess.run(
-                [
-                    "latexmk",
-                    flag,
-                    "-synctex=1",
-                    "-interaction=nonstopmode",
-                    "-no-shell-escape",
-                    "-halt-on-error",
-                    _MASTER,
-                ],
-                cwd=directory,
-                capture_output=True,
-                text=True,
-                timeout=COMPILE_TIMEOUT,
-            )
-            log_text = proc.stdout + proc.stderr
+            stdout, stderr = proc.communicate(timeout=COMPILE_TIMEOUT)
+            log_text = stdout + stderr
         except subprocess.TimeoutExpired:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            proc.communicate()  # reap, do not leave a zombie
             return {
                 "ok": False,
                 "log": f"Compilation exceeded {COMPILE_TIMEOUT}s and was stopped.",
@@ -176,14 +205,26 @@ def query_synctex(body: dict) -> dict:
                 "-o", f"{body['page']}:{body['x']}:{body['y']}:{pdf}",
                 "-d", str(directory),
             ]
+        # Same process-group treatment as compile_tex's subprocess call, for
+        # consistency: synctex is much less likely to fork a runaway child,
+        # but the next person reading this file should not have to work out
+        # why one of the two subprocess calls here is guarded against
+        # leaving an orphan behind and the other is not.
+        proc = subprocess.Popen(
+            args,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
         try:
-            proc = subprocess.run(
-                args, capture_output=True, text=True, timeout=SYNCTEX_TIMEOUT
-            )
+            stdout, _stderr = proc.communicate(timeout=SYNCTEX_TIMEOUT)
         except subprocess.TimeoutExpired:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            proc.communicate()  # reap, do not leave a zombie
             return {"found": False}
 
-        records = _records(proc.stdout)
+        records = _records(stdout)
         if direction == "forward":
             boxes = [r for r in records if "Page" in r and "x" in r and "y" in r]
             if not boxes:
@@ -232,7 +273,27 @@ class Handler(BaseHTTPRequestHandler):
         self._send(404, {"error": "not found"})
 
     def do_POST(self) -> None:
-        length = int(self.headers.get("Content-Length") or 0)
+        # All three malformed-header cases are guarded BEFORE the body is
+        # ever read: an unparseable header would otherwise reach rfile.read()
+        # as an uncaught exception (a raw connection drop instead of the
+        # clean JSON every other path returns, plus a full traceback dumped
+        # to container logs by socketserver's default handler -- routing
+        # around both the internals-free 500 below and log_message's
+        # override). A negative length is parseable but must never reach
+        # rfile.read(): read(-1) on a live socket blocks until the peer
+        # closes, hanging the thread. A too-large length is rejected before
+        # buffering that many bytes at all.
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            self._send(400, {"error": "invalid content-length"})
+            return
+        if length < 0:
+            self._send(400, {"error": "invalid content-length"})
+            return
+        if length > MAX_CONTENT_LENGTH:
+            self._send(413, {"error": "request too large"})
+            return
         try:
             body = json.loads(self.rfile.read(length) or b"{}")
         except json.JSONDecodeError:

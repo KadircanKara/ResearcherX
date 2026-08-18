@@ -28,12 +28,18 @@ COPY app.py ./
 # the rootfs read-only on top of it.
 USER 1000:1000
 
-# TeX writes caches at runtime -- luaotfload's font cache above all -- and the
-# rootfs is read-only, so every writable path must point at the tmpfs. Without
-# this, pdflatex mostly survives but xelatex and lualatex fail on an unwritable
-# font cache, which is a broken engine rather than a broken document and would
-# surface as "the compiler is broken" to the user. /home/texlive is mode 700
-# and on the read-only layer, so HOME moves too.
+# TeX writes caches at runtime -- font caches above all -- and the rootfs is
+# read-only, so every writable path must point at the tmpfs. Without this,
+# pdflatex mostly survives but xelatex fails on an unwritable font cache,
+# which is a broken engine rather than a broken document and would surface
+# as "the compiler is broken" to the user. /home/texlive is mode 700 and on
+# the read-only layer, so HOME moves too.
+#
+# This service does NOT offer lualatex (see the comment above _ENGINE_FLAG
+# in app.py): widening this block to the whole TEXMF family was tried
+# specifically to fix it and did not -- luaotfload still refuses to run for
+# reasons unrelated to what's writable here. Do not read this ENV block as
+# lualatex support; it exists for pdflatex/xelatex.
 ENV HOME=/tmp \
     TMPDIR=/tmp \
     TEXMFHOME=/tmp/texmf-home \
