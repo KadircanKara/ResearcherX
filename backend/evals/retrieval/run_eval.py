@@ -8,6 +8,12 @@ not installed and file-path invocation drops cwd from sys.path.
 One query per case pulls EVERY chunk with its cosine distance; all scoring
 happens in evals.retrieval.metrics, so the threshold sweep costs no extra queries.
 
+SCOPE HERE IS AT MOST ONE PAPER. `_scope_to_paper` / `_scope_to_nearest_paper`
+never assemble a multi-paper scope, so this module measures neither the
+multi-mention SQL gate nor `apply_per_paper_floor` -- it does not import
+`app.services.mention_ranker` at all. `evals.retrieval.mention_eval` is the
+module that does; see "Measured -- 2026-08-18" in README.md.
+
 CRITICAL, --hybrid mode: `metrics.Scored.distance` is `float | None` because a
 sparse-only admission has no cosine distance. `_hybrid_chunks_for`'s raw
 output must NEVER reach a distance-sorting code path (`simulate_retrieval`'s
