@@ -43,9 +43,13 @@ function MentionedContent({ content, mentions, papers }: {
   papers: Paper[];
 }) {
   if (mentions.length === 0) return <>{content}</>;
-  // Titles are resolved from ids at RENDER time, so a paper renamed in the
-  // Papers tab relabels every past turn that named it — the same rule the
-  // citation chips follow.
+  // Each id is resolved to its CURRENT title at render time, then matched
+  // against the message's frozen `content` string below. This does NOT make
+  // a rename "relabel every past turn" the way citation chips do: `content`
+  // is a historical record of what the user typed and is never rewritten,
+  // so after a rename the text still holds the OLD title. The highlight
+  // then simply stops matching (the mention keeps working for retrieval
+  // SCOPE, which is id-based) rather than tracking the new name.
   const titles = mentions
     .map((id) => papers.find((p) => p.id === id)?.title)
     .filter((t): t is string => Boolean(t));

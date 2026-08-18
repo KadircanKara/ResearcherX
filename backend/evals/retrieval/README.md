@@ -558,9 +558,13 @@ rather than arbitrated between; see CLAUDE.md and
 argument.
 
 `run_eval.py` below still measures whether the answering chunk reaches the
-context budget once a scope is chosen (global, or single/multi-paper via
-`--targeted`); there is no longer a paper-scoping layer above it to measure
-separately.
+context budget once a scope is chosen (global, or SINGLE-paper via
+`--targeted` — see "Targeted mode" below; `_scope_to_paper` and
+`_scope_to_nearest_paper` only ever scope to one paper). Multi-mention scope,
+including the `apply_per_paper_floor` round-robin policy, is NOT measured by
+this harness — `run_eval.py` does not import `mention_ranker` (see the
+"Multi-paper scope" bullet in CLAUDE.md). There is no longer a paper-scoping
+layer above it to measure separately.
 
 ## Adding a case
 
