@@ -1,0 +1,105 @@
+"""Talks to the sandboxed compile service.
+
+Every failure here degrades rather than raises: a compile that cannot run is
+reported to the user as a failed compile with a generic message, and a sync
+query that cannot be answered returns None so the editor keeps working without
+navigation. The chat pipeline's fail-open convention, applied to a different
+subsystem.
+"""
+
+import base64
+from dataclasses import dataclass
+
+import httpx
+
+from app.core.config import settings
+from app.core.logging import log
+
+
+@dataclass(frozen=True)
+class CompileResult:
+    ok: bool
+    log: str
+    pdf: bytes | None
+    synctex_gz: bytes | None
+
+
+@dataclass(frozen=True)
+class PdfPosition:
+    page: int
+    x: float
+    y: float
+    width: float
+    height: float
+
+
+_UNAVAILABLE = "The LaTeX compiler is unavailable. Please try again."
+
+
+async def _post(path: str, payload: dict) -> dict | None:
+    try:
+        async with httpx.AsyncClient(timeout=settings.latex_compile_timeout) as client:
+            response = await client.post(f"{settings.latex_compiler_url}{path}", json=payload)
+            response.raise_for_status()
+            return response.json()
+    except Exception as exc:
+        # str(exc) stays in the server log and never reaches the client.
+        log.warning("latex_compiler_unavailable", path=path, error=str(exc)[:200])
+        return None
+
+
+async def compile_source(source: str, engine: str) -> CompileResult:
+    payload = await _post("/compile", {"source": source, "engine": engine})
+    if payload is None:
+        return CompileResult(ok=False, log=_UNAVAILABLE, pdf=None, synctex_gz=None)
+    pdf_b64 = payload.get("pdf_b64")
+    synctex_b64 = payload.get("synctex_b64")
+    return CompileResult(
+        ok=bool(payload.get("ok")),
+        log=payload.get("log") or "",
+        pdf=base64.b64decode(pdf_b64) if pdf_b64 else None,
+        synctex_gz=base64.b64decode(synctex_b64) if synctex_b64 else None,
+    )
+
+
+def _artifacts(source: str, pdf: bytes, synctex_gz: bytes) -> dict:
+    return {
+        "source": source,
+        "pdf_b64": base64.b64encode(pdf).decode(),
+        "synctex_b64": base64.b64encode(synctex_gz).decode(),
+    }
+
+
+async def synctex_forward(
+    source: str, pdf: bytes, synctex_gz: bytes, line: int
+) -> PdfPosition | None:
+    payload = await _post(
+        "/synctex", {**_artifacts(source, pdf, synctex_gz), "direction": "forward", "line": line}
+    )
+    if not payload or not payload.get("found"):
+        return None
+    return PdfPosition(
+        page=int(payload["page"]),
+        x=float(payload["x"]),
+        y=float(payload["y"]),
+        width=float(payload.get("width") or 0),
+        height=float(payload.get("height") or 0),
+    )
+
+
+async def synctex_reverse(
+    source: str, pdf: bytes, synctex_gz: bytes, page: int, x: float, y: float
+) -> int | None:
+    payload = await _post(
+        "/synctex",
+        {
+            **_artifacts(source, pdf, synctex_gz),
+            "direction": "reverse",
+            "page": page,
+            "x": x,
+            "y": y,
+        },
+    )
+    if not payload or not payload.get("found"):
+        return None
+    return int(payload["line"])

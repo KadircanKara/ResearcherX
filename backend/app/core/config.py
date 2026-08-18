@@ -316,6 +316,16 @@ class Settings(BaseSettings):
     # accepted and marked degraded. attempts = 1 initial + max_search_retries.
     max_search_retries: int = 2
 
+    # The sandboxed LaTeX compile service (see the latex-compiler/ image).
+    # A URL rather than a hardcoded host so the prod compose file can point
+    # at the same service under a different project name.
+    latex_compiler_url: str = "http://latex-compiler:8080"
+    # Client-side ceiling. Deliberately LONGER than the compiler's own 30s
+    # compile timeout: the service returns a clean "exceeded 30s" log, and a
+    # client that gave up first would replace that useful message with a
+    # generic connection error.
+    latex_compile_timeout: int = 60
+
     @field_validator("cors_origins", mode="before")
     @classmethod
     def _split_cors(cls, v: object) -> object:
