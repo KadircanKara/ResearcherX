@@ -348,23 +348,23 @@ class ChatService:
                             widened,
                         )
                         scope = paper_infos if widened else mentioned_infos
-                    elif mentioned:
-                        # Every mentioned paper vanished between validation
-                        # and this turn (deleted mid-flight). There is
-                        # nothing left to scope to, so this retrieves the
-                        # whole library -- which IS widening, and the event
-                        # must say so rather than silently reporting the
-                        # untouched widened=False from above.
-                        widened = True
-                        async with SessionLocal() as db:
-                            paper_chunks = await self._retrieve_paper_chunks(
-                                db, paper_infos, retrieval_embedding, retrieval_query
-                            )
                     else:
                         async with SessionLocal() as db:
                             paper_chunks = await self._retrieve_paper_chunks(
                                 db, paper_infos, retrieval_embedding, retrieval_query
                             )
+
+            if mentioned and not mentioned_infos:
+                # The user named papers and NONE of them could be scoped to:
+                # every one was deleted between validation and this turn, the
+                # embedding call failed so retrieval never ran, or the project
+                # holds no papers at all. Whatever reached the model is the
+                # whole library (or nothing), never the named papers -- so the
+                # event reports widened, consistent with every other
+                # fall-back-to-global path. Reporting `scoped` with
+                # widened=False would tell the UI a scope was applied that was
+                # not.
+                widened = True
 
             yield {
                 "event": "retrieving",
@@ -471,41 +471,109 @@ class ChatService:
 
         Scopes to `scope` (the papers the user named) and guarantees each a
         floor via `apply_per_paper_floor`. Then folds in the rest of
-        `all_papers` when `widened` is True OR the floor comes back
+        `all_papers` when `widened` is True OR the scoped query comes back
         completely empty -- a paper can be mentioned before its ingest
         finished, and answering from nothing is worse than answering wider
-        than asked; that empty-floor case FORCES widened True regardless of
+        than asked; that empty-scope case FORCES widened True regardless of
         what the caller passed in, which is why the flag is returned, not
         just consumed.
+
+        THE CANDIDATE POOL IS BIGGER THAN THE BUDGET, and that is what makes
+        the floor real. `_retrieve_paper_chunks` truncates to
+        `settings.max_context_chunks` by default, so handing its result to
+        `apply_per_paper_floor` with the SAME number as the budget makes the
+        floor a no-op: the ranking has already dropped the second mentioned
+        paper before the floor is ever asked to protect it, and the floor can
+        only reorder what survived. Measured against the shipped function:
+        60 candidates all from paper A, scope [A, B], floor 5, budget 60 ->
+        60 kept, papers ['A'] -- "compare @A and @B" returning nothing from B,
+        the exact failure the floor exists for.
+
+        The pool is `max_context_chunks + floor * len(scope)`: enough headroom
+        that every scoped paper's first `floor` chunks can be present in the
+        candidate list even when another paper owns the entire top of the
+        ranking, and nothing more. It is a function of the CONTEXT WINDOW and
+        of how many papers the USER named (capped at 10 by
+        `ChatRequest.mentioned_paper_ids`, so <= 60 + 50 = 110 rows), never of
+        library size -- per-paper allocation keyed on library size is what once
+        pulled 191 chunks and killed every turn on `context_length_exceeded`.
+        The pool is the CANDIDATE bound only; the final ceiling is still
+        exactly `settings.max_context_chunks`, applied here in Python.
+
+        WIDENING PINS THE FLOOR, NOT EVERYTHING THE SCOPED QUERY RETURNED.
+        Pinning the whole scoped result leaves `max_context_chunks - len(...)`
+        == 0 whenever the named papers fill the budget on their own (four
+        golden-set questions do exactly that -- evals/retrieval/README.md), so
+        no library chunk ever lands while the SCOPE block still tells the model
+        "Excerpts from other papers are also provided". The returned flag
+        therefore reports what ACTUALLY happened: widened is True only when a
+        chunk from OUTSIDE the mention scope landed, or when the scope was
+        empty and the turn genuinely ran over the whole library.
 
         Returns the final chunks, renumbered over their FINAL order (`n`
         must follow what the model is actually shown -- two lists pinned +
         filled both start their own `n` at 1, so skipping this step lets two
         excerpts share a citation marker), and the widened flag as it was
-        ACTUALLY applied. `budget` is a hard ceiling applied AFTER the pinned
-        floor, so the floor can never itself blow past
-        `settings.max_context_chunks`.
+        ACTUALLY applied.
         """
+        floor = settings.mention_per_paper_floor
+        budget = settings.max_context_chunks
+        scope_ids = [p.paper_id for p in scope]
+
         async with SessionLocal() as db:
-            paper_chunks = await self._retrieve_paper_chunks(db, scope, embedding, query_text)
-        paper_chunks = apply_per_paper_floor(
-            paper_chunks,
+            candidates = await self._retrieve_paper_chunks(
+                db,
+                scope,
+                embedding,
+                query_text,
+                pool_limit=budget + floor * len(scope),
+            )
+
+        if not (widened or not candidates):
+            # Narrow: floor first, then the rest of the budget by relevance,
+            # all inside the papers the user named.
+            return self._renumber_chunks(
+                apply_per_paper_floor(
+                    candidates,
+                    paper_of=lambda c: c.paper_id,
+                    scope=scope_ids,
+                    floor=floor,
+                    budget=budget,
+                )
+            ), False
+
+        # Widened: pin ONLY the floor, so the global fill has room to land.
+        # `min(...)` keeps the pin inside the budget when floor * papers would
+        # exceed it (reachable only with a small max_context_chunks).
+        pinned = apply_per_paper_floor(
+            candidates,
             paper_of=lambda c: c.paper_id,
-            scope=[p.paper_id for p in scope],
-            floor=settings.mention_per_paper_floor,
-            budget=settings.max_context_chunks,
+            scope=scope_ids,
+            floor=floor,
+            budget=min(floor * len(scope), budget),
         )
-        if widened or not paper_chunks:
-            widened = True
+        pinned_keys = {(c.paper_id, c.chunk_index) for c in pinned}
+        remaining = budget - len(pinned)
+        extra: list[ChunkContext] = []
+        if remaining > 0:
             async with SessionLocal() as db:
-                fill = await self._retrieve_paper_chunks(db, all_papers, embedding, query_text)
-            pinned_keys = {(c.paper_id, c.chunk_index) for c in paper_chunks}
-            budget = settings.max_context_chunks - len(paper_chunks)
-            extra = [c for c in fill if (c.paper_id, c.chunk_index) not in pinned_keys][:budget]
-            paper_chunks = self._renumber_chunks(paper_chunks + extra)
-        else:
-            paper_chunks = self._renumber_chunks(paper_chunks)
-        return paper_chunks, widened
+                # `+ len(pinned)`: the fill spans the whole library, so up to
+                # len(pinned) of its rows are the already-pinned chunks and get
+                # dropped below. Asking for that many extra rows is what stops
+                # the budget coming back short. Bounded by the same reasoning as
+                # the scoped pool above.
+                fill = await self._retrieve_paper_chunks(
+                    db,
+                    all_papers,
+                    embedding,
+                    query_text,
+                    pool_limit=budget + len(pinned),
+                )
+            extra = [c for c in fill if (c.paper_id, c.chunk_index) not in pinned_keys][:remaining]
+
+        named = set(scope_ids)
+        widened = not candidates or any(c.paper_id not in named for c in extra)
+        return self._renumber_chunks(pinned + extra), widened
 
     async def _retrieve_history(
         self,
@@ -545,6 +613,7 @@ class ChatService:
         paper_infos: list[PaperInfo],
         query_embedding: list[float],
         query_text: str,
+        pool_limit: int | None = None,
     ) -> list[ChunkContext]:
         """Retrieve the nearest chunks from `paper_infos`, ranked by distance.
 
@@ -609,9 +678,19 @@ class ChatService:
         A stopword-only question degrades for free: websearch_to_tsquery
         returns an empty query, `@@` matches nothing, the sparse arm is empty,
         and RRF collapses to the dense ordering.
+
+        `pool_limit` bounds the CANDIDATE list this returns and defaults to
+        `settings.max_context_chunks`, i.e. every existing caller is unchanged
+        byte for byte. The mention path passes a larger number so that
+        `apply_per_paper_floor` -- not this truncation -- is what applies the
+        real budget; see `_retrieve_mentioned_chunks`, which explains why a
+        pool equal to the budget makes the per-paper floor a no-op. This method
+        never returns more than `pool_limit` rows, so a caller that passes
+        nothing still cannot exceed the context budget.
         """
         if not paper_infos:
             return []
+        pool = pool_limit if pool_limit is not None else settings.max_context_chunks
         # See the docstring: scope size, not a flag, decides the policy.
         single_paper = len(paper_infos) == 1
         threshold = settings.intra_paper_ceiling if single_paper else settings.similarity_threshold
@@ -620,12 +699,12 @@ class ChatService:
         ids = json.dumps([p.paper_id for p in paper_infos])
 
         if not settings.hybrid_retrieval:
-            rows = await self._dense_only_rows(db, ids, qvec, threshold)
+            rows = await self._dense_only_rows(db, ids, qvec, threshold, pool)
             # Re-applied in Python on purpose. LIMIT bounds what crosses the wire;
             # this bounds what reaches the model. The budget is the single
             # invariant that keeps chat working at any library size, so it must
             # not depend on a SQL clause surviving a future edit to the query.
-            rows = rows[: settings.max_context_chunks]
+            rows = rows[:pool]
             if single_paper:
                 rows = rows[
                     : keep_within_paper(
@@ -634,7 +713,7 @@ class ChatService:
                 ]
             return self._to_chunk_contexts(rows, paper_title_map)
 
-        rows = await self._hybrid_rows(db, ids, qvec, query_text, threshold)
+        rows = await self._hybrid_rows(db, ids, qvec, query_text, threshold, pool)
         by_id = {row.id: row for row in rows}
         dense_ranked = [
             row.id
@@ -654,7 +733,7 @@ class ChatService:
         # Budget FIRST, cut second -- same ordering the dense path documents
         # above. LIMIT bounds what crosses the wire; this bounds what reaches
         # the model, and the cut may only shrink what the budget bounded.
-        fused = fused[: settings.max_context_chunks]
+        fused = fused[:pool]
         if single_paper:
             fused = fused[
                 : keep_within_rank_window(
@@ -688,7 +767,9 @@ class ChatService:
             for i, row in enumerate(rows, 1)
         ]
 
-    async def _dense_only_rows(self, db: AsyncSession, ids: str, qvec: str, threshold: float):
+    async def _dense_only_rows(
+        self, db: AsyncSession, ids: str, qvec: str, threshold: float, pool: int
+    ):
         # `paper_chunk_embeddings` is global, so this query MUST be scoped to
         # the project. The ids ride in as one jsonb param rather than an IN
         # list: 100 papers would otherwise need 100 bind params, and asyncpg
@@ -714,13 +795,13 @@ class ChatService:
                 "ids": ids,
                 "model": settings.embedding_model,
                 "threshold": threshold,
-                "max_chunks": settings.max_context_chunks,
+                "max_chunks": pool,
             },
         )
         return result.fetchall()
 
     async def _hybrid_rows(
-        self, db: AsyncSession, ids: str, qvec: str, qtext: str, threshold: float
+        self, db: AsyncSession, ids: str, qvec: str, qtext: str, threshold: float, pool: int
     ):
         """Both arms in ONE round trip, each carrying its own rank.
 
@@ -734,6 +815,17 @@ class ChatService:
         Ranking stops at the ranks. Fusion, the budget and the cut are Python,
         so `evals/retrieval/run_eval.py --hybrid` can import and measure the
         exact policy that ships.
+
+        `pool` is the caller's candidate bound, and only the DENSE arm's LIMIT
+        rises to meet it: that arm is a candidate pool (already gated by an
+        absolute distance cutoff), so capping it below what the caller asked
+        for would silently shrink the pool mid-query. The sparse LIMIT stays
+        exactly `hybrid_sparse_pool` because it is not a candidate bound at
+        all -- it IS the sparse arm's entire admission rule, since ts_rank_cd
+        has no cross-query-comparable magnitude to threshold on, so raising it
+        would change which lexical chunks are admitted. At the shipped
+        constants (dense 200 against a <= 110 pool) the `max()` returns 200
+        unchanged and nothing about the tuned fusion moves.
         """
         sql = text("""
             WITH scope AS (
@@ -787,7 +879,7 @@ class ChatService:
                 "ids": ids,
                 "model": settings.embedding_model,
                 "threshold": threshold,
-                "dense_pool": settings.hybrid_dense_pool,
+                "dense_pool": max(settings.hybrid_dense_pool, pool),
                 "sparse_pool": settings.hybrid_sparse_pool,
             },
         )

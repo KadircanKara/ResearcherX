@@ -16,9 +16,16 @@ class MessageOut(BaseModel):
     role: str
     content: str
     citations: list[dict]  # raw JSON — CitationOut shape, validated at write time
-    # Paper ids the user scoped this turn to. IDS ONLY: titles are resolved on
-    # read (see conversation_service.retitle_citations for the same rule), so a
-    # paper renamed in the Papers tab relabels every past turn that named it.
+    # Paper ids the user scoped this turn to. IDS ONLY, and nothing records
+    # which substring of `content` belonged to which id.
+    #
+    # A rename does NOT relabel mention text, unlike citation chips: chips are
+    # relabelled server-side at read time (conversation_service.retitle_citations)
+    # because their titles are carried in the citation JSON, but `content` is
+    # the literal string the user typed and is never rewritten. After a rename
+    # the old title stays in the text and the frontend's highlight simply stops
+    # matching it. The ids keep working for SCOPE regardless — that is what
+    # they are for.
     mentions: list[str] = Field(default_factory=list)
     created_at: datetime
     model_config = {"from_attributes": True}

@@ -45,6 +45,29 @@ def test_the_budget_is_never_exceeded():
     assert len(kept) == 4
 
 
+def test_the_ceiling_does_not_cannibalise_the_floor():
+    """The budget bounds the OUTPUT; it must not eat the guarantee.
+
+    `test_the_budget_is_never_exceeded` above only counts, so a no-op floor
+    (`return list(ordered[:budget])`) satisfies it — which is exactly the
+    shape that shipped through `_retrieve_paper_chunks`'s own truncation and
+    made the floor unobservable in production. This pins the pairing the
+    feature actually promises: at the ceiling, B is still represented even
+    though every one of its chunks ranks below the cut.
+    """
+    ordered = _chunks("a" * 60 + "b" * 10)
+
+    kept = apply_per_paper_floor(
+        ordered, paper_of=lambda c: c[0], scope=["a", "b"], floor=5, budget=60
+    )
+
+    assert len(kept) == 60
+    assert _papers(kept).count("b") == 5
+    assert _papers(kept).count("a") == 55
+    # And the pinned five are B's OWN best, not an arbitrary five.
+    assert [i for p, i in kept if p == "b"] == [60, 61, 62, 63, 64]
+
+
 def test_a_paper_with_fewer_chunks_than_the_floor_does_not_steal_slots():
     """b has one chunk. Its floor is one, not two, and the spare slot goes back
     to the distance fill rather than being held empty."""

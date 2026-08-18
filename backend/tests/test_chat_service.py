@@ -1020,7 +1020,11 @@ async def test_widening_pins_the_mentioned_papers_and_fills_globally(
 
     calls = []
 
-    async def fake_retrieve(db, scope, embedding, query_text):
+    async def fake_retrieve(db, scope, embedding, query_text, pool_limit=None):
+        # `pool_limit` mirrors the real signature: the mention path asks for a
+        # bigger CANDIDATE pool than the budget so `apply_per_paper_floor` is
+        # what applies the ceiling. This double ignores it -- it returns a
+        # fixed list -- but must accept it.
         calls.append([p.paper_id for p in scope])
         if len(calls) == 1:
             return [chunk(1, named)]
@@ -1077,7 +1081,11 @@ async def test_mentions_with_no_chunks_at_all_fall_back_to_the_library(
 
     scopes = []
 
-    async def fake_retrieve(db, scope, embedding, query_text):
+    async def fake_retrieve(db, scope, embedding, query_text, pool_limit=None):
+        # `pool_limit` mirrors the real signature: the mention path asks for a
+        # bigger CANDIDATE pool than the budget so `apply_per_paper_floor` is
+        # what applies the ceiling. This double ignores it -- it returns a
+        # fixed list -- but must accept it.
         scopes.append([p.paper_id for p in scope])
         return []
 
@@ -1183,7 +1191,11 @@ async def test_widened_fill_is_capped_at_the_context_budget(
 
     calls = []
 
-    async def fake_retrieve(db, scope, embedding, query_text):
+    async def fake_retrieve(db, scope, embedding, query_text, pool_limit=None):
+        # `pool_limit` mirrors the real signature: the mention path asks for a
+        # bigger CANDIDATE pool than the budget so `apply_per_paper_floor` is
+        # what applies the ceiling. This double ignores it -- it returns a
+        # fixed list -- but must accept it.
         calls.append([p.paper_id for p in scope])
         if len(calls) == 1:
             # The floor call: 2 chunks pinned to the mentioned paper.
@@ -1209,3 +1221,232 @@ async def test_widened_fill_is_capped_at_the_context_budget(
 
     agent_input = stream.call_args.args[0]
     assert len(agent_input.paper_chunks) == 3
+
+
+class _FakeSessionLocal:
+    """Stands in for `chat_service.SessionLocal` so `_retrieve_mentioned_chunks`
+    runs its REAL `_retrieve_paper_chunks` against a mock row source.
+
+    Every other mention test patches `_retrieve_paper_chunks` itself, which is
+    exactly why the floor's no-op went unnoticed: the bug lived in the
+    interaction between that method's own truncation and the floor's budget,
+    and a mocked retriever cannot express it.
+    """
+
+    def __init__(self, db):
+        self._db = db
+
+    def __call__(self):
+        return self
+
+    async def __aenter__(self):
+        return self._db
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+def _ranked_db(rows: list) -> MagicMock:
+    """Fake AsyncSession returning `rows` in rank order, LIMIT ignored.
+
+    Ignoring LIMIT is deliberate and matches `_mock_db_returning`: the service
+    must bound its own output, and the pool it asks for has to be visible in
+    Python rather than trusted to SQL.
+    """
+    mock_result = MagicMock()
+    mock_result.fetchall.return_value = rows
+    mock_db = MagicMock()
+    mock_db.execute = AsyncMock(return_value=mock_result)
+    return mock_db
+
+
+def _row(i: int, paper_id: str) -> MagicMock:
+    return MagicMock(
+        id=f"c{i}",
+        paper_id=paper_id,
+        chunk_index=i,
+        text=f"chunk {i}",
+        distance=0.1 + i * 0.0001,
+        d_rank=i + 1,
+        s_rank=None,
+    )
+
+
+async def test_the_per_paper_floor_fires_on_a_production_shaped_candidate_list():
+    """The floor must survive `_retrieve_paper_chunks`'s OWN truncation.
+
+    PRODUCTION SHAPE, and that is the whole point: the scoped query returns
+    MORE candidates than the budget, and the second mentioned paper's chunks
+    all rank below the cut. `_retrieve_paper_chunks` used to truncate to
+    `max_context_chunks` before `apply_per_paper_floor` ever saw the list, so
+    the floor was handed 60 chunks of A with a budget of 60 and could only
+    reorder them -- B was already gone. "Compare @A and @B" then answered with
+    nothing from B, the exact failure the floor exists to prevent.
+
+    test_mention_ranker.py could not catch this: it calls the floor directly
+    with len(ordered) > budget, a shape production could not produce.
+    """
+    from app.services.chat_service import ChatService, PaperInfo
+
+    svc = ChatService()
+    budget = settings.max_context_chunks
+    floor = settings.mention_per_paper_floor
+    # A owns the entire top of the ranking; B starts only after the budget.
+    rows = [_row(i, "pA") for i in range(budget)] + [_row(budget + i, "pB") for i in range(10)]
+    scope = [PaperInfo(paper_id="pA", title="A"), PaperInfo(paper_id="pB", title="B")]
+
+    with patch("app.services.chat_service.SessionLocal", _FakeSessionLocal(_ranked_db(rows))):
+        chunks, widened = await svc._retrieve_mentioned_chunks(
+            scope, scope, [0.0] * 768, "compare them", False
+        )
+
+    assert widened is False
+    # The ceiling is still exactly max_context_chunks, applied in Python.
+    assert len(chunks) == budget
+    # The guarantee: B is represented despite ranking entirely below the cut.
+    assert sum(1 for c in chunks if c.paper_id == "pB") == floor
+    assert sum(1 for c in chunks if c.paper_id == "pA") == budget - floor
+    # `n` follows the FINAL order the model is shown.
+    assert [c.n for c in chunks] == list(range(1, budget + 1))
+
+
+async def test_the_candidate_pool_never_scales_with_library_size():
+    """The pool is a function of the BUDGET and of how many papers the USER
+    named -- never of the library.
+
+    Per-paper allocation keyed on library size is what once pulled 191 chunks
+    and killed every turn on `context_length_exceeded`. Raising the candidate
+    pool to make the floor real is the obvious place to reintroduce that by the
+    back door, so the bound is pinned here: two mentions against a 300-paper
+    project ask for exactly the same number of candidates as two mentions
+    against a two-paper project.
+    """
+    from app.agents.chat_agent import ChunkContext
+    from app.services.chat_service import ChatService, PaperInfo
+
+    svc = ChatService()
+    scope = [PaperInfo(paper_id="pA", title="A"), PaperInfo(paper_id="pB", title="B")]
+    pools: list[int | None] = []
+
+    async def recording_retrieve(db, papers, embedding, query_text, pool_limit=None):
+        pools.append(pool_limit)
+        return [ChunkContext(n=1, paper_id="pA", title="A", chunk_index=0, text="t")]
+
+    for library in (
+        scope,
+        scope + [PaperInfo(paper_id=f"p{i}", title=f"P{i}") for i in range(300)],
+    ):
+        with patch.object(svc, "_retrieve_paper_chunks", recording_retrieve):
+            await svc._retrieve_mentioned_chunks(scope, library, [0.0] * 768, "q", False)
+
+    expected = settings.max_context_chunks + settings.mention_per_paper_floor * len(scope)
+    assert pools == [expected, expected]
+
+
+async def test_a_widened_turn_that_lands_no_library_chunk_is_not_reported_widened(
+    db_session: AsyncSession, project: Project, conversation_with_message
+):
+    """The model must never be told it has library excerpts it does not have.
+
+    The widener fires on comparative questions, and four golden-set questions
+    keep the entire 60-chunk budget inside a single paper (evals/retrieval/
+    README.md). Pinning the whole scoped result left `max_context_chunks -
+    len(pinned)` == 0, so no library chunk could land -- while `widened` stayed
+    True and `build_scope_block` told the model "Excerpts from other papers are
+    also provided; use them for comparison."
+
+    Pinning only the FLOOR is what leaves room, and the flag now reports what
+    ACTUALLY happened: no chunk from outside the mention scope means not
+    widened, whatever the widener asked for.
+    """
+    from app.agents.chat_agent import ChunkContext, build_scope_block
+    from app.db.models import Paper
+    from app.services.chat_service import ChatService
+
+    conv = conversation_with_message
+    papers = [Paper(project_id=project.id, title=f"Paper {i}", source="manual") for i in range(3)]
+    db_session.add_all(papers)
+    await db_session.commit()
+    for p in papers:
+        await db_session.refresh(p)
+    named = papers[0]
+
+    async def fake_stream(*args, **kwargs):
+        yield "answer"
+
+    budget = settings.max_context_chunks
+
+    def chunk(i):
+        return ChunkContext(
+            n=i + 1, paper_id=named.id, title=named.title, chunk_index=i, text=f"c{i}"
+        )
+
+    # The named paper fills the budget on its own, and it is ALSO the nearest
+    # paper globally -- so the library fill returns nothing the mention scope
+    # did not already hold. That is the reachable case: near-duplicate content
+    # in one paper, no comparable chunk anywhere else in the project.
+    owned = [chunk(i) for i in range(budget)]
+
+    async def fake_retrieve(db, scope, embedding, query_text, pool_limit=None):
+        return list(owned)
+
+    svc = ChatService()
+    stream = MagicMock(return_value=fake_stream())
+
+    with (
+        patch.object(svc._embedding_svc, "embed", AsyncMock(return_value=[0.0] * 768)),
+        patch.object(svc, "_retrieve_history", AsyncMock(return_value=[])),
+        patch.object(svc._reformulator, "run", AsyncMock(return_value="q")),
+        patch.object(svc._widener, "run", AsyncMock(return_value=True)),
+        patch.object(svc, "_retrieve_paper_chunks", fake_retrieve),
+        patch.object(svc._chat_agent, "stream", stream),
+        patch.object(svc._conv_svc, "save_message", AsyncMock()),
+    ):
+        events = [ev async for ev in svc.respond(conv.id, "compare them", [named.id])]
+
+    agent_input = stream.call_args.args[0]
+    # What the PROMPT says, which is the thing that misled the model.
+    assert agent_input.scope_widened is False
+    assert "also provided" not in build_scope_block(
+        agent_input.scope_titles, agent_input.scope_widened
+    )
+    # And the SSE, which is what the badge renders.
+    retrieving = json.loads(next(e for e in events if e["event"] == "retrieving")["data"])
+    assert retrieving["widened"] is False
+    # Pinning only the floor must not COST context: the global fill puts the
+    # named paper's remaining chunks back by relevance.
+    assert len(agent_input.paper_chunks) == budget
+
+
+async def test_mentions_that_resolve_to_nothing_report_widened(
+    db_session: AsyncSession, project: Project, conversation_with_message
+):
+    """Papers were named but none could be scoped to -- here because the
+    embedding call failed, so retrieval never ran at all. Reporting
+    `scoped: true, widened: false` claims a scope that was never applied; the
+    UI rendered "scoped to 0 papers" while retrieval was global."""
+    from app.db.models import Paper
+    from app.services.chat_service import ChatService
+
+    conv = conversation_with_message
+    paper = Paper(project_id=project.id, title="Named Paper", source="manual")
+    db_session.add(paper)
+    await db_session.commit()
+    await db_session.refresh(paper)
+
+    async def fake_stream(*args, **kwargs):
+        yield "answer"
+
+    svc = ChatService()
+
+    with (
+        patch.object(svc._embedding_svc, "embed", AsyncMock(side_effect=RuntimeError("down"))),
+        patch.object(svc._chat_agent, "stream", return_value=fake_stream()),
+        patch.object(svc._conv_svc, "save_message", AsyncMock()),
+    ):
+        events = [ev async for ev in svc.respond(conv.id, "q", [paper.id])]
+
+    retrieving = json.loads(next(e for e in events if e["event"] == "retrieving")["data"])
+    assert retrieving["scoped"] is True
+    assert retrieving["scoped_count"] == 0
+    assert retrieving["widened"] is True
