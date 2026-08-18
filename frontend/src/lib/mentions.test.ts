@@ -1,0 +1,87 @@
+import { describe, expect, it } from "vitest";
+import {
+  findMentionQuery,
+  insertMention,
+  matchPapers,
+  reconcileMentions,
+  type Mention,
+} from "./mentions";
+import type { Paper } from "./types";
+
+const paper = (id: string, title: string) => ({ id, title }) as Paper;
+
+describe("findMentionQuery", () => {
+  it("finds the query when @ starts a word", () => {
+    expect(findMentionQuery("tell me about @coop", 19)).toEqual({ query: "coop", start: 14 });
+  });
+
+  it("ignores @ inside a word, so an email address never opens the dropdown", () => {
+    expect(findMentionQuery("mail me@example.com", 19)).toBeNull();
+  });
+
+  it("closes the query at whitespace", () => {
+    expect(findMentionQuery("@coop search now", 16)).toBeNull();
+  });
+
+  it("finds a bare @ with no query yet", () => {
+    expect(findMentionQuery("what about @", 12)).toEqual({ query: "", start: 11 });
+  });
+});
+
+describe("insertMention", () => {
+  it("replaces the @query with the full title and a trailing space", () => {
+    const out = insertMention("tell me about @coop", 14, 19, "Cooperative Search");
+    expect(out.text).toBe("tell me about @Cooperative Search ");
+    expect(out.caret).toBe(out.text.length);
+  });
+});
+
+describe("reconcileMentions", () => {
+  const a: Mention = { paperId: "p1", title: "Cooperative Search" };
+  const b: Mention = { paperId: "p2", title: "Federated Sky" };
+
+  it("keeps a mention while its @title is present", () => {
+    expect(reconcileMentions("about @Cooperative Search now", [a])).toEqual([a]);
+  });
+
+  it("drops a mention whose text was deleted", () => {
+    expect(reconcileMentions("about nothing", [a])).toEqual([]);
+  });
+
+  it("drops a mention whose text was partially deleted", () => {
+    expect(reconcileMentions("about @Cooperative Sea", [a])).toEqual([]);
+  });
+
+  it("keeps two papers sharing a title only while both occurrences stand", () => {
+    const dupA: Mention = { paperId: "p1", title: "Same Title" };
+    const dupB: Mention = { paperId: "p2", title: "Same Title" };
+    expect(reconcileMentions("@Same Title and @Same Title", [dupA, dupB])).toEqual([dupA, dupB]);
+    expect(reconcileMentions("@Same Title alone", [dupA, dupB])).toEqual([dupA]);
+  });
+
+  it("never invents a mention from a hand-typed title", () => {
+    // Only a dropdown selection binds an id. Ambiguity is never resolved by
+    // guessing — the same rule the backend follows everywhere.
+    expect(reconcileMentions("@Cooperative Search", [])).toEqual([]);
+  });
+});
+
+describe("matchPapers", () => {
+  const papers = [
+    paper("p1", "Cooperative Multi-Target Search"),
+    paper("p2", "Federated Learning in the Sky"),
+    paper("p3", "Deep RL for Cooperative Control"),
+  ];
+
+  it("matches case-insensitively anywhere in the title", () => {
+    expect(matchPapers(papers, "cooperative").map((p) => p.id)).toEqual(["p1", "p3"]);
+  });
+
+  it("ranks an earlier match position first", () => {
+    expect(matchPapers(papers, "co")[0].id).toBe("p1");
+  });
+
+  it("returns everything for an empty query, capped", () => {
+    expect(matchPapers(papers, "", 2)).toHaveLength(2);
+  });
+});
