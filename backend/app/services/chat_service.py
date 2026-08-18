@@ -367,10 +367,11 @@ class ChatService:
                 # not.
                 widened = True
 
-            # Papers the user named that contributed NOTHING. Reachable today:
-            # a mentioned paper whose nearest chunk falls outside the distance
-            # gate returns zero rows, and the per-paper floor cannot pin what
-            # SQL never returned. Silence about it is the harm -- the answer
+            # Papers the user named that contributed NOTHING. One cause is
+            # left, now that the candidate guarantee has removed rank
+            # domination as the other: a mentioned paper whose nearest chunk
+            # falls outside the distance gate returns zero rows from every
+            # query, guaranteed or not. Silence about it is the harm -- the answer
             # reads as a confident one-paper reply to a two-paper question --
             # so it is named to the model and to the user rather than dropped.
             contributing = {c.paper_id for c in paper_chunks}
@@ -498,27 +499,44 @@ class ChatService:
         what the caller passed in, which is why the flag is returned, not
         just consumed.
 
-        THE CANDIDATE POOL IS BIGGER THAN THE BUDGET, and that is what makes
-        the floor real. `_retrieve_paper_chunks` truncates to
-        `settings.max_context_chunks` by default, so handing its result to
-        `apply_per_paper_floor` with the SAME number as the budget makes the
-        floor a no-op: the ranking has already dropped the second mentioned
-        paper before the floor is ever asked to protect it, and the floor can
-        only reorder what survived. Measured against the shipped function:
-        60 candidates all from paper A, scope [A, B], floor 5, budget 60 ->
-        60 kept, papers ['A'] -- "compare @A and @B" returning nothing from B,
+        THE FLOOR CAN ONLY PIN WHAT WAS FETCHED, so the fetch -- not the
+        floor -- is where the representation guarantee has to live.
+        `apply_per_paper_floor` reorders CANDIDATES; a paper whose chunks the
+        candidate query never returned cannot be pinned at all. Handing it a
+        candidate list truncated to the budget makes it a strict no-op: 60
+        candidates all from paper A, scope [A, B], floor 5, budget 60 -> 60
+        kept, papers ['A'] -- "compare @A and @B" returning nothing from B,
         the exact failure the floor exists for.
 
-        The pool is `max_context_chunks + floor * len(scope)`: enough headroom
-        that every scoped paper's first `floor` chunks can be present in the
-        candidate list even when another paper owns the entire top of the
-        ranking, and nothing more. It is a function of the CONTEXT WINDOW and
-        of how many papers the USER named (capped at 10 by
+        A BIGGER POOL WAS THE FIRST ATTEMPT AND IT IS NOT A GUARANTEE. Asking
+        for `max_context_chunks + floor * len(scope)` candidates only rescues
+        a second paper whose best chunk happens to sit within `floor *
+        len(scope)` ranks of the budget edge. Measured on the 100-paper corpus
+        (2026-08-18, .superpowers/multi-mention-measurement.md): with a pool of
+        70, `hybrid-split-federated`'s second mentioned paper first appears at
+        fused rank 72 and `nemo-mobility`'s at rank 91 -- both comfortably
+        INSIDE the 0.75 distance gate, both contributing zero chunks. The
+        headroom is a function of how badly one paper dominates the ranking,
+        which is not a quantity anything controls.
+
+        THE GUARANTEE IS STRUCTURAL INSTEAD: `guarantee_per_paper` makes
+        `_retrieve_paper_chunks` fetch every scoped paper's OWN nearest
+        `floor` chunks as candidates whatever their global rank, and append
+        them AFTER the ranked pool so they are present without outranking
+        anything. Rank domination therefore cannot defeat the floor, and the
+        pool goes back to exactly the budget: the extra cost is bounded at
+        `floor * len(scope)` rows -- a function of the CONTEXT WINDOW and of
+        how many papers the USER named (capped at 10 by
         `ChatRequest.mentioned_paper_ids`, so <= 60 + 50 = 110 rows), never of
-        library size -- per-paper allocation keyed on library size is what once
+        library size. Per-paper allocation keyed on library size is what once
         pulled 191 chunks and killed every turn on `context_length_exceeded`.
-        The pool is the CANDIDATE bound only; the final ceiling is still
+        Both numbers are CANDIDATE bounds only; the final ceiling is still
         exactly `settings.max_context_chunks`, applied here in Python.
+
+        The guarantee does NOT reopen the distance gate: a guaranteed row
+        still has to clear the same cutoff, so a paper whose nearest chunk
+        misses the gate still contributes nothing. That is the gate's
+        decision, measured separately and deliberately left alone.
 
         WIDENING PINS THE FLOOR, NOT EVERYTHING THE SCOPED QUERY RETURNED.
         Pinning the whole scoped result leaves `max_context_chunks - len(...)`
@@ -546,7 +564,8 @@ class ChatService:
                 scope,
                 embedding,
                 query_text,
-                pool_limit=budget + floor * len(scope),
+                pool_limit=budget,
+                guarantee_per_paper=floor,
             )
 
         if not (widened or not candidates):
@@ -634,6 +653,7 @@ class ChatService:
         query_embedding: list[float],
         query_text: str,
         pool_limit: int | None = None,
+        guarantee_per_paper: int = 0,
     ) -> list[ChunkContext]:
         """Retrieve the nearest chunks from `paper_infos`, ranked by distance.
 
@@ -699,14 +719,45 @@ class ChatService:
         returns an empty query, `@@` matches nothing, the sparse arm is empty,
         and RRF collapses to the dense ordering.
 
-        `pool_limit` bounds the CANDIDATE list this returns and defaults to
+        `pool_limit` bounds the RANKED candidate list and defaults to
         `settings.max_context_chunks`, i.e. every existing caller is unchanged
-        byte for byte. The mention path passes a larger number so that
-        `apply_per_paper_floor` -- not this truncation -- is what applies the
-        real budget; see `_retrieve_mentioned_chunks`, which explains why a
-        pool equal to the budget makes the per-paper floor a no-op. This method
-        never returns more than `pool_limit` rows, so a caller that passes
-        nothing still cannot exceed the context budget.
+        byte for byte.
+
+        `guarantee_per_paper` adds a REPRESENTATION guarantee on top of that
+        ranked list: every paper in `paper_infos` contributes its own nearest
+        `guarantee_per_paper` chunks as candidates whatever their global rank.
+        It exists because a global ranking is free to be owned end to end by
+        one paper -- measured at fused ranks 72 and 91 for a second mentioned
+        paper well inside the distance gate (see `_retrieve_mentioned_chunks`)
+        -- and `apply_per_paper_floor` cannot pin a row this method never
+        returned.
+
+        Three properties of the guarantee, all load-bearing:
+
+        - IT IS PRESENCE, NOT PROMOTION. The guaranteed rows are appended
+          AFTER the ranked list, in per-paper rank order, so the floor can pin
+          them while the relevance fill still reaches every genuinely
+          better-ranked chunk first. Injecting them INTO the ranking would
+          need a rank they have not earned: under hybrid the ranking is a
+          fused RRF score, and a synthetic rank there would either outrank
+          real candidates or be arbitrary. Leaving them out of `fuse_rrf`
+          entirely is the only honest option -- a paper's own top chunk by
+          distance says nothing about how it compares to another paper's
+          chunks after fusion.
+        - IT DOES NOT TOUCH THE GATE. The guarantee query carries the same
+          `threshold` as the ranked query, so it can rescue a paper losing to
+          rank domination and never one losing to the distance cutoff. Zero of
+          30 golden-set answer papers sit in the contested [0.75, 0.85) band,
+          so the gate is measured as not being the problem.
+        - IT IS INERT FOR A SINGLE-PAPER SCOPE, and must be: with one paper
+          in scope nothing can starve it, its own top chunks already ARE the
+          top of the ranking, and the single-paper cut
+          (`intra_paper_rank_window` / `intra_paper_delta`) is a deliberate
+          policy the guarantee has no business overriding.
+
+        This method never returns more than `pool_limit + guarantee_per_paper
+        * len(paper_infos)` rows, so a caller that passes neither still cannot
+        exceed the context budget.
         """
         if not paper_infos:
             return []
@@ -714,6 +765,7 @@ class ChatService:
         # See the docstring: scope size, not a flag, decides the policy.
         single_paper = len(paper_infos) == 1
         threshold = settings.intra_paper_ceiling if single_paper else settings.similarity_threshold
+        guarantee = 0 if single_paper else max(0, guarantee_per_paper)
         qvec = _vec_str(query_embedding)
         paper_title_map = {p.paper_id: p.title for p in paper_infos}
         ids = json.dumps([p.paper_id for p in paper_infos])
@@ -731,6 +783,7 @@ class ChatService:
                         [row.distance for row in rows], delta=settings.intra_paper_delta
                     )
                 ]
+            rows = await self._with_guaranteed_rows(db, rows, ids, qvec, threshold, guarantee)
             return self._to_chunk_contexts(rows, paper_title_map)
 
         rows = await self._hybrid_rows(db, ids, qvec, query_text, threshold, pool)
@@ -760,7 +813,103 @@ class ChatService:
                     [score for _, score in fused], window=settings.intra_paper_rank_window
                 )
             ]
-        return self._to_chunk_contexts([by_id[key] for key, _ in fused], paper_title_map)
+        ranked = [by_id[key] for key, _ in fused]
+        ranked = await self._with_guaranteed_rows(db, ranked, ids, qvec, threshold, guarantee)
+        return self._to_chunk_contexts(ranked, paper_title_map)
+
+    async def _with_guaranteed_rows(
+        self, db: AsyncSession, ranked: list, ids: str, qvec: str, threshold: float, guarantee: int
+    ) -> list:
+        """`ranked` plus each scoped paper's own nearest `guarantee` chunks.
+
+        A no-op at `guarantee <= 0`, which is every non-mention turn: the
+        global path issues exactly the query it always did and this method
+        returns its argument unchanged.
+
+        The extras go at the TAIL, ordered by their own per-paper rank so a
+        truncation further down starves no paper before any other -- the same
+        round-robin fairness `apply_per_paper_floor` applies to the pins, for
+        the same reason. Tail position is what keeps the guarantee honest:
+        being a candidate is not being a good candidate.
+
+        The per-paper cap is re-applied here even though the SQL already
+        enforces it, for the reason the budget is re-applied in Python above:
+        the bound on how much context a mention turn can pull must not depend
+        on a SQL clause surviving a future edit.
+        """
+        if guarantee <= 0:
+            return ranked
+        rows = await self._guaranteed_rows(db, ids, qvec, threshold, guarantee)
+        seen = {row.id for row in ranked}
+        taken: dict[str, int] = {}
+        extras = []
+        for row in rows:
+            if row.id in seen or taken.get(row.paper_id, 0) >= guarantee:
+                continue
+            taken[row.paper_id] = taken.get(row.paper_id, 0) + 1
+            extras.append(row)
+        return list(ranked) + extras
+
+    async def _guaranteed_rows(
+        self, db: AsyncSession, ids: str, qvec: str, threshold: float, guarantee: int
+    ):
+        """Each scoped paper's own nearest `guarantee` chunks, whatever their
+        global rank.
+
+        `PARTITION BY c.paper_id` is the whole point: the window restarts per
+        paper, so the result is bounded at `guarantee * len(scope)` rows and is
+        completely independent of how much of the global ranking any one paper
+        owns. That independence is the guarantee -- a bigger global pool only
+        ever buys a bounded amount of rank domination, and rank domination has
+        no bound.
+
+        A SEPARATE query from the ranked one, deliberately. Folding the window
+        function into `_dense_only_rows` / `_hybrid_rows` would make every
+        un-mentioned turn -- the default, and the overwhelming majority -- pay
+        to rank-number a whole 4,500-chunk library per partition for a
+        guarantee it never asked for, and would put the two shapes one edit
+        away from diverging. This runs only when a caller names papers (<= 10
+        of them, `ChatRequest.mentioned_paper_ids`), returns <= 50 rows, and
+        hits the same index over the same scope as the ranked query. One extra
+        round trip on a mention turn is not measurable next to the LLM call it
+        feeds.
+
+        `< :threshold` is the SAME cutoff the ranked query used. The guarantee
+        rescues a paper from losing the RANKING, never from failing the gate.
+        """
+        sql = text("""
+            WITH scope AS (
+                SELECT value AS paper_id
+                FROM jsonb_array_elements_text(CAST(:ids AS jsonb))
+            ),
+            ranked AS (
+                SELECT c.id, c.paper_id, c.chunk_index, c.text,
+                       (c.embedding <=> CAST(:qvec AS vector)) AS distance,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY c.paper_id
+                           ORDER BY c.embedding <=> CAST(:qvec AS vector), c.id
+                       ) AS p_rank
+                FROM paper_chunk_embeddings c
+                JOIN scope s ON s.paper_id = c.paper_id
+                WHERE c.model = :model
+                  AND (c.embedding <=> CAST(:qvec AS vector)) < :threshold
+            )
+            SELECT id, paper_id, chunk_index, text, distance, p_rank
+            FROM ranked
+            WHERE p_rank <= :guarantee
+            ORDER BY p_rank ASC, distance ASC
+        """)
+        result = await db.execute(
+            sql,
+            {
+                "qvec": qvec,
+                "ids": ids,
+                "model": settings.embedding_model,
+                "threshold": threshold,
+                "guarantee": guarantee,
+            },
+        )
+        return result.fetchall()
 
     def _renumber_chunks(self, chunks: list[ChunkContext]) -> list[ChunkContext]:
         """Re-number after the floor and the fill have reordered the list.

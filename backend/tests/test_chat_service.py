@@ -3,6 +3,7 @@
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 import pytest_asyncio
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -1020,7 +1021,9 @@ async def test_widening_pins_the_mentioned_papers_and_fills_globally(
 
     calls = []
 
-    async def fake_retrieve(db, scope, embedding, query_text, pool_limit=None):
+    async def fake_retrieve(
+        db, scope, embedding, query_text, pool_limit=None, guarantee_per_paper=0
+    ):
         # `pool_limit` mirrors the real signature: the mention path asks for a
         # bigger CANDIDATE pool than the budget so `apply_per_paper_floor` is
         # what applies the ceiling. This double ignores it -- it returns a
@@ -1081,7 +1084,9 @@ async def test_mentions_with_no_chunks_at_all_fall_back_to_the_library(
 
     scopes = []
 
-    async def fake_retrieve(db, scope, embedding, query_text, pool_limit=None):
+    async def fake_retrieve(
+        db, scope, embedding, query_text, pool_limit=None, guarantee_per_paper=0
+    ):
         # `pool_limit` mirrors the real signature: the mention path asks for a
         # bigger CANDIDATE pool than the budget so `apply_per_paper_floor` is
         # what applies the ceiling. This double ignores it -- it returns a
@@ -1191,7 +1196,9 @@ async def test_widened_fill_is_capped_at_the_context_budget(
 
     calls = []
 
-    async def fake_retrieve(db, scope, embedding, query_text, pool_limit=None):
+    async def fake_retrieve(
+        db, scope, embedding, query_text, pool_limit=None, guarantee_per_paper=0
+    ):
         # `pool_limit` mirrors the real signature: the mention path asks for a
         # bigger CANDIDATE pool than the budget so `apply_per_paper_floor` is
         # what applies the ceiling. This double ignores it -- it returns a
@@ -1310,6 +1317,201 @@ async def test_the_per_paper_floor_fires_on_a_production_shaped_candidate_list()
     assert [c.n for c in chunks] == list(range(1, budget + 1))
 
 
+def _sequenced_db(*batches: list) -> MagicMock:
+    """Fake AsyncSession returning a DIFFERENT row list per execute() call.
+
+    `_ranked_db` returns the same rows to every query, which cannot express
+    the shape this file now has to test: the RANKED query and the per-paper
+    GUARANTEE query are two different queries returning two different row
+    sets, and the whole bug is that the second one is the only place a
+    rank-dominated paper appears.
+    """
+    results = []
+    for rows in batches:
+        result = MagicMock()
+        result.fetchall.return_value = rows
+        results.append(result)
+    mock_db = MagicMock()
+    mock_db.execute = AsyncMock(side_effect=results)
+    return mock_db
+
+
+def _guaranteed_row(i: int, paper_id: str, p_rank: int) -> MagicMock:
+    return MagicMock(
+        id=f"g{i}",
+        paper_id=paper_id,
+        chunk_index=i,
+        text=f"guaranteed {i}",
+        distance=0.6 + i * 0.0001,
+        p_rank=p_rank,
+    )
+
+
+async def test_a_mentioned_paper_below_the_pool_edge_still_reaches_the_model():
+    """Rank domination must not be able to defeat the floor. FAILS pre-fix.
+
+    THE MEASURED BUG (.superpowers/multi-mention-measurement.md, 2026-08-18,
+    100-paper corpus): a bigger candidate pool is not a representation
+    guarantee, because how far down the ranking a mentioned paper's best chunk
+    lands is not a quantity anything bounds. `hybrid-split-federated`'s second
+    mentioned paper first appears at fused rank 72 and `nemo-mobility`'s at
+    rank 91, against a pool of 70 -- both INSIDE the 0.75 distance gate
+    (0.6925 and 0.6837), both contributing zero chunks.
+    `test_the_per_paper_floor_fires_on_a_production_shaped_candidate_list`
+    above cannot catch this: it puts B at ranks 60-69, i.e. inside the old
+    pool's headroom, which is exactly the case the headroom did rescue.
+
+    Here B does not appear in the ranked query AT ALL. The only way it reaches
+    the model is the per-paper guarantee query, so pre-fix this test sees 60
+    chunks of A and zero of B.
+    """
+    from app.services.chat_service import ChatService, PaperInfo
+
+    svc = ChatService()
+    budget = settings.max_context_chunks
+    floor = settings.mention_per_paper_floor
+    # The RANKED query: A owns every candidate the budget can hold, and B is
+    # nowhere in it — the rank-domination case, not the pool-edge case.
+    ranked = [_row(i, "pA") for i in range(budget)]
+    # The GUARANTEE query: each paper's OWN nearest `floor` chunks, round
+    # robin by per-paper rank, exactly as the SQL orders them. A's are the
+    # rows the ranked query already returned; B's are new.
+    guaranteed = []
+    for rank in range(1, floor + 1):
+        guaranteed.append(MagicMock(id=f"c{rank - 1}", paper_id="pA", p_rank=rank))
+        guaranteed.append(_guaranteed_row(rank, "pB", rank))
+    scope = [PaperInfo(paper_id="pA", title="A"), PaperInfo(paper_id="pB", title="B")]
+
+    db = _sequenced_db(ranked, guaranteed)
+    with patch("app.services.chat_service.SessionLocal", _FakeSessionLocal(db)):
+        chunks, widened = await svc._retrieve_mentioned_chunks(
+            scope, scope, [0.0] * 768, "compare them", False
+        )
+
+    assert widened is False
+    # The ceiling is still exactly max_context_chunks, applied in Python.
+    assert len(chunks) == budget
+    assert sum(1 for c in chunks if c.paper_id == "pB") == floor
+    assert sum(1 for c in chunks if c.paper_id == "pA") == budget - floor
+    # Citation numbering follows the FINAL order shown to the model.
+    assert [c.n for c in chunks] == list(range(1, budget + 1))
+    # It was the per-paper window query that rescued B, at the SAME distance
+    # gate the ranked query used — the guarantee never reopens the gate.
+    assert db.execute.await_count == 2
+    sql, params = db.execute.await_args_list[1].args
+    assert "PARTITION BY c.paper_id" in str(sql)
+    assert params["guarantee"] == floor
+    assert params["threshold"] == settings.similarity_threshold
+
+
+@pytest.mark.parametrize("hybrid", [True, False])
+async def test_the_global_path_issues_exactly_the_candidate_query_it_always_did(hybrid):
+    """The non-mention path is the default for every un-mentioned turn, and
+    the guarantee must be invisible to it.
+
+    Not a style point: the guarantee query is a `ROW_NUMBER() OVER (PARTITION
+    BY paper_id ...)` over the whole scope, and the whole scope on the global
+    path is the entire library. Folding it into the shipped candidate query
+    would make every ordinary turn rank-number thousands of chunks per
+    partition for a guarantee nothing asked for. One query, no window over
+    paper_id, no `guarantee` bind — on BOTH retrieval paths.
+    """
+    from app.services.chat_service import ChatService, PaperInfo
+
+    svc = ChatService()
+    papers = [PaperInfo(paper_id=f"p{i}", title=f"P{i}") for i in range(3)]
+    mock_db = _mock_db_returning_no_rows()
+
+    with patch.object(settings, "hybrid_retrieval", hybrid):
+        await svc._retrieve_paper_chunks(mock_db, papers, [0.0] * 768, "q")
+
+    assert mock_db.execute.await_count == 1
+    sql, params = mock_db.execute.call_args.args
+    assert "PARTITION BY c.paper_id" not in str(sql)
+    assert "guarantee" not in params
+
+
+@pytest.mark.parametrize("hybrid", [True, False])
+async def test_a_single_paper_scope_never_issues_the_guarantee_query(hybrid):
+    """With one paper in scope nothing can starve it — its own top chunks ARE
+    the top of the ranking — and the single-paper cut
+    (`intra_paper_rank_window` / `intra_paper_delta`) is a deliberate policy
+    a representation guarantee has no business overriding. So the guarantee
+    is inert there even when a caller asks for it.
+    """
+    from app.services.chat_service import ChatService, PaperInfo
+
+    svc = ChatService()
+    mock_db = _mock_db_returning_no_rows()
+
+    with patch.object(settings, "hybrid_retrieval", hybrid):
+        await svc._retrieve_paper_chunks(
+            mock_db,
+            [PaperInfo(paper_id="p1", title="Only")],
+            [0.0] * 768,
+            "q",
+            guarantee_per_paper=settings.mention_per_paper_floor,
+        )
+
+    assert mock_db.execute.await_count == 1
+    assert "PARTITION BY c.paper_id" not in str(mock_db.execute.call_args.args[0])
+
+
+async def test_the_guarantee_query_runs_on_the_dense_only_kill_switch_too():
+    """`hybrid_retrieval=False` is production's kill switch and the eval
+    harness's control arm. A representation guarantee that only holds under
+    hybrid would make flipping the switch silently drop a mentioned paper.
+    """
+    from app.services.chat_service import ChatService, PaperInfo
+
+    svc = ChatService()
+    budget = settings.max_context_chunks
+    floor = settings.mention_per_paper_floor
+    ranked = [_row(i, "pA") for i in range(budget)]
+    guaranteed = [_guaranteed_row(r, "pB", r) for r in range(1, floor + 1)]
+    scope = [PaperInfo(paper_id="pA", title="A"), PaperInfo(paper_id="pB", title="B")]
+
+    db = _sequenced_db(ranked, guaranteed)
+    with (
+        patch.object(settings, "hybrid_retrieval", False),
+        patch("app.services.chat_service.SessionLocal", _FakeSessionLocal(db)),
+    ):
+        chunks, _ = await svc._retrieve_mentioned_chunks(
+            scope, scope, [0.0] * 768, "compare them", False
+        )
+
+    assert db.execute.await_count == 2
+    assert "tsv" not in str(db.execute.await_args_list[0].args[0])
+    assert sum(1 for c in chunks if c.paper_id == "pB") == floor
+
+
+async def test_a_guaranteed_candidate_never_outranks_a_genuinely_better_chunk():
+    """Presence, not promotion. A guaranteed row is appended to the TAIL of
+    the ranked list, so the floor can pin it while the relevance fill still
+    reaches every better-ranked chunk first.
+
+    Mutation tested: putting the extras at the HEAD instead leaves this test
+    failing (the guaranteed rows take the first `n`s and the model reads them
+    as the most relevant excerpts) while every representation assertion above
+    still passes.
+    """
+    from app.services.chat_service import ChatService, PaperInfo
+
+    svc = ChatService()
+    floor = settings.mention_per_paper_floor
+    ranked = [_row(i, "pA") for i in range(3)]
+    guaranteed = [_guaranteed_row(r, "pB", r) for r in range(1, floor + 1)]
+    papers = [PaperInfo(paper_id="pA", title="A"), PaperInfo(paper_id="pB", title="B")]
+
+    db = _sequenced_db(ranked, guaranteed)
+    chunks = await svc._retrieve_paper_chunks(
+        db, papers, [0.0] * 768, "q", guarantee_per_paper=floor
+    )
+
+    assert [c.paper_id for c in chunks] == ["pA"] * 3 + ["pB"] * floor
+    assert [c.n for c in chunks] == list(range(1, 3 + floor + 1))
+
+
 async def test_the_candidate_pool_never_scales_with_library_size():
     """The pool is a function of the BUDGET and of how many papers the USER
     named -- never of the library.
@@ -1326,10 +1528,12 @@ async def test_the_candidate_pool_never_scales_with_library_size():
 
     svc = ChatService()
     scope = [PaperInfo(paper_id="pA", title="A"), PaperInfo(paper_id="pB", title="B")]
-    pools: list[int | None] = []
+    asked: list[tuple[int | None, int]] = []
 
-    async def recording_retrieve(db, papers, embedding, query_text, pool_limit=None):
-        pools.append(pool_limit)
+    async def recording_retrieve(
+        db, papers, embedding, query_text, pool_limit=None, guarantee_per_paper=0
+    ):
+        asked.append((pool_limit, guarantee_per_paper))
         return [ChunkContext(n=1, paper_id="pA", title="A", chunk_index=0, text="t")]
 
     for library in (
@@ -1339,8 +1543,12 @@ async def test_the_candidate_pool_never_scales_with_library_size():
         with patch.object(svc, "_retrieve_paper_chunks", recording_retrieve):
             await svc._retrieve_mentioned_chunks(scope, library, [0.0] * 768, "q", False)
 
-    expected = settings.max_context_chunks + settings.mention_per_paper_floor * len(scope)
-    assert pools == [expected, expected]
+    # The ranked pool is exactly the budget, and the representation guarantee
+    # is per MENTIONED paper -- so the total candidate bound is
+    # `budget + floor * len(scope)` either way, and `len(scope)` is capped at
+    # 10 by the API. Neither number moves when the library grows 150x.
+    expected = (settings.max_context_chunks, settings.mention_per_paper_floor)
+    assert asked == [expected, expected]
 
 
 async def test_a_widened_turn_that_lands_no_library_chunk_is_not_reported_widened(
@@ -1387,7 +1595,9 @@ async def test_a_widened_turn_that_lands_no_library_chunk_is_not_reported_widene
     # in one paper, no comparable chunk anywhere else in the project.
     owned = [chunk(i) for i in range(budget)]
 
-    async def fake_retrieve(db, scope, embedding, query_text, pool_limit=None):
+    async def fake_retrieve(
+        db, scope, embedding, query_text, pool_limit=None, guarantee_per_paper=0
+    ):
         return list(owned)
 
     svc = ChatService()
