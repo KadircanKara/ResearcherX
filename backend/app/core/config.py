@@ -244,6 +244,20 @@ class Settings(BaseSettings):
     # this number as having solved anything.
     max_context_chunks: int = 60
 
+    # Chunks each MENTIONED paper is guaranteed before the rest of the budget
+    # fills by distance.
+    #
+    # This exists because the USER named the papers. Plain global top-k inside
+    # a scope is the right policy when an algorithm chose that scope — cosine
+    # similarity spreads a global query across papers by itself. It is the
+    # wrong policy for an explicit instruction: "compare @A and @B" can
+    # legitimately rank 60 chunks of A above the first chunk of B, and
+    # answering with nothing from B reads as ignoring what the user asked for.
+    #
+    # Small on purpose. The floor is a REPRESENTATION guarantee, not an
+    # allocation: relevance still decides everything above it.
+    mention_per_paper_floor: int = 5
+
     # Output budget for one chat answer. PROVIDER-SPECIFIC, like the
     # similarity threshold above — re-measure when LLM_MODEL changes.
     #
