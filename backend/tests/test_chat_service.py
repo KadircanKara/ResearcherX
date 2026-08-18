@@ -1783,3 +1783,306 @@ async def test_no_empty_mentions_are_reported_when_every_named_paper_contributes
 
     retrieving = json.loads(next(e for e in events if e["event"] == "retrieving")["data"])
     assert retrieving["empty_mentions"] == []
+
+
+# --- Resolved scope: the QUESTION named the papers, the user picked nothing ---
+#
+# Everything below guards the precedence rule and the never-guess property.
+# The resolver's own matching rules are pinned in tests/test_paper_resolver.py;
+# these tests are about the WIRING.
+
+_RESOLVER_LIBRARY = (
+    "Breaking the Deadly Triad in Offline Reinforcement Learning",
+    "Lazy Agents and Credit Assignment in Multi-Agent RL",
+    "A Survey of Deep Reinforcement Learning for UAV Swarms",
+)
+
+
+async def _papers_for_resolver(db_session: AsyncSession, project: Project, titles=None):
+    from app.db.models import Paper
+
+    rows = [
+        Paper(project_id=project.id, title=t, source="manual")
+        for t in (titles if titles is not None else _RESOLVER_LIBRARY)
+    ]
+    db_session.add_all(rows)
+    await db_session.commit()
+    for r in rows:
+        await db_session.refresh(r)
+    return rows
+
+
+async def test_a_question_naming_a_paper_by_title_scopes_retrieval_to_it(
+    db_session: AsyncSession, project: Project, conversation_with_message
+):
+    """The whole point of the lexical rung: the user typed the identifying
+    words, so the turn is scoped WITHOUT anything guessing and without an
+    "@" mention. The event reports how it happened and quotes the phrase."""
+    from app.agents.chat_agent import ChunkContext
+    from app.services.chat_service import ChatService
+
+    conv = conversation_with_message
+    papers = await _papers_for_resolver(db_session, project)
+
+    async def fake_stream(*args, **kwargs):
+        yield "answer"
+
+    svc = ChatService()
+    chunks = [
+        ChunkContext(n=1, paper_id=papers[0].id, title=papers[0].title, chunk_index=0, text="t")
+    ]
+    retrieve = AsyncMock(return_value=chunks)
+
+    with (
+        patch.object(svc._embedding_svc, "embed", AsyncMock(return_value=[0.0] * 768)),
+        patch.object(svc, "_retrieve_history", AsyncMock(return_value=[])),
+        patch.object(svc._widener, "run", AsyncMock(return_value=False)),
+        patch.object(svc, "_retrieve_paper_chunks", retrieve),
+        patch.object(svc._chat_agent, "stream", return_value=fake_stream()),
+        patch.object(svc._conv_svc, "save_message", AsyncMock()),
+    ):
+        events = [
+            ev
+            async for ev in svc.respond(
+                conv.id, "What does Breaking the Deadly Triad say about Q?", []
+            )
+        ]
+
+    scoped = retrieve.await_args.args[1]
+    assert [p.paper_id for p in scoped] == [papers[0].id]
+
+    retrieving = json.loads(next(e for e in events if e["event"] == "retrieving")["data"])
+    assert retrieving["scoped"] is True
+    assert retrieving["scoped_count"] == 1
+    assert retrieving["scope_source"] == "resolved"
+    # The reader's own words, not the title we picked -- that is what tells
+    # them what to change to search wider.
+    assert retrieving["scope_evidence"] == ["breaking the deadly triad"]
+
+
+async def test_a_mention_wins_and_the_resolver_is_never_consulted(
+    db_session: AsyncSession, project: Project, conversation_with_message
+):
+    """THE PRECEDENCE LOCK. The question names paper[0] by a full title span
+    -- it would resolve on its own -- while the user "@"-mentioned paper[1].
+    The mention takes the turn whole: the resolver is not called at all, so
+    there is no path by which a resolved id could widen, narrow or merge into
+    a scope the user picked."""
+    from app.agents.chat_agent import ChunkContext
+    from app.services import chat_service as chat_service_module
+    from app.services.chat_service import ChatService
+
+    conv = conversation_with_message
+    papers = await _papers_for_resolver(db_session, project)
+
+    async def fake_stream(*args, **kwargs):
+        yield "answer"
+
+    svc = ChatService()
+    chunks = [
+        ChunkContext(n=1, paper_id=papers[1].id, title=papers[1].title, chunk_index=0, text="t")
+    ]
+    retrieve = AsyncMock(return_value=chunks)
+    resolver = MagicMock(side_effect=AssertionError("the resolver must not run for a mention turn"))
+
+    with (
+        patch.object(chat_service_module, "resolve_papers_with_evidence", resolver),
+        patch.object(svc._embedding_svc, "embed", AsyncMock(return_value=[0.0] * 768)),
+        patch.object(svc, "_retrieve_history", AsyncMock(return_value=[])),
+        patch.object(svc._widener, "run", AsyncMock(return_value=False)),
+        patch.object(svc, "_retrieve_paper_chunks", retrieve),
+        patch.object(svc._chat_agent, "stream", return_value=fake_stream()),
+        patch.object(svc._conv_svc, "save_message", AsyncMock()),
+    ):
+        events = [
+            ev
+            async for ev in svc.respond(
+                conv.id,
+                "What does Breaking the Deadly Triad say about Q?",
+                [papers[1].id],
+            )
+        ]
+
+    resolver.assert_not_called()
+    scoped = retrieve.await_args.args[1]
+    assert [p.paper_id for p in scoped] == [papers[1].id]
+
+    retrieving = json.loads(next(e for e in events if e["event"] == "retrieving")["data"])
+    assert retrieving["scope_source"] == "mention"
+    assert retrieving["scope_evidence"] == []
+
+
+async def test_an_ambiguous_question_falls_through_to_global_retrieval(
+    db_session: AsyncSession, project: Project, conversation_with_message
+):
+    """One span, two titles. The rung declines ENTIRELY rather than picking a
+    best candidate -- retrieval runs over the whole library, which is the
+    correct fall-through and the property that separates this from the
+    deleted LLM targeter."""
+    from app.services.chat_service import ChatService
+
+    conv = conversation_with_message
+    papers = await _papers_for_resolver(
+        db_session,
+        project,
+        titles=(
+            "Lazy Agents and Credit Assignment in Multi-Agent RL",
+            "Lazy Agents and Credit Assignment Revisited",
+            "A Survey of Deep Reinforcement Learning for UAV Swarms",
+        ),
+    )
+
+    async def fake_stream(*args, **kwargs):
+        yield "answer"
+
+    svc = ChatService()
+    retrieve = AsyncMock(return_value=[])
+    widener = AsyncMock(return_value=False)
+
+    with (
+        patch.object(svc._embedding_svc, "embed", AsyncMock(return_value=[0.0] * 768)),
+        patch.object(svc, "_retrieve_history", AsyncMock(return_value=[])),
+        patch.object(svc._widener, "run", widener),
+        patch.object(svc, "_retrieve_paper_chunks", retrieve),
+        patch.object(svc._chat_agent, "stream", return_value=fake_stream()),
+        patch.object(svc._conv_svc, "save_message", AsyncMock()),
+    ):
+        events = [
+            ev
+            async for ev in svc.respond(
+                conv.id, "What about Lazy Agents and Credit Assignment?", []
+            )
+        ]
+
+    assert {p.paper_id for p in retrieve.await_args.args[1]} == {p.id for p in papers}
+    widener.assert_not_awaited()
+
+    retrieving = json.loads(next(e for e in events if e["event"] == "retrieving")["data"])
+    assert retrieving["scoped"] is False
+    assert retrieving["scope_source"] == "mention"
+    assert retrieving["scope_evidence"] == []
+
+
+async def test_a_resolved_scope_runs_the_widener_and_takes_the_mention_path(
+    db_session: AsyncSession, project: Project, conversation_with_message
+):
+    """The retrieval MECHANICS are identical to a mention scope -- same
+    `_retrieve_mentioned_chunks`, so same per-paper floor, same candidate
+    guarantee, same budget ceiling. The widener runs too: it can only ADD the
+    library, and a scope the user never clicked is exactly where a too-narrow
+    turn does damage."""
+    from app.agents.chat_agent import ChunkContext
+    from app.services.chat_service import ChatService
+
+    conv = conversation_with_message
+    papers = await _papers_for_resolver(db_session, project)
+
+    async def fake_stream(*args, **kwargs):
+        yield "answer"
+
+    svc = ChatService()
+    chunks = [
+        ChunkContext(n=1, paper_id=papers[0].id, title=papers[0].title, chunk_index=0, text="t")
+    ]
+    scoped_retrieve = AsyncMock(return_value=(chunks, True))
+    widener = AsyncMock(return_value=True)
+
+    with (
+        patch.object(svc._embedding_svc, "embed", AsyncMock(return_value=[0.0] * 768)),
+        patch.object(svc, "_retrieve_history", AsyncMock(return_value=[])),
+        patch.object(svc._widener, "run", widener),
+        patch.object(svc, "_retrieve_mentioned_chunks", scoped_retrieve),
+        patch.object(svc._chat_agent, "stream", return_value=fake_stream()),
+        patch.object(svc._conv_svc, "save_message", AsyncMock()),
+    ):
+        events = [
+            ev
+            async for ev in svc.respond(
+                conv.id, "What does Breaking the Deadly Triad say about Q?", []
+            )
+        ]
+
+    widener.assert_awaited_once()
+    assert widener.await_args.args[0].mentioned_titles == [papers[0].title]
+    assert [p.paper_id for p in scoped_retrieve.await_args.args[0]] == [papers[0].id]
+
+    retrieving = json.loads(next(e for e in events if e["event"] == "retrieving")["data"])
+    assert retrieving["scope_source"] == "resolved"
+    assert retrieving["widened"] is True
+
+
+async def test_the_resolved_scope_reaches_the_chat_agent_with_its_provenance(
+    db_session: AsyncSession, project: Project, conversation_with_message
+):
+    """The SCOPE block must not tell the model the user restricted a turn the
+    user never restricted."""
+    from app.agents.chat_agent import ChunkContext
+    from app.services.chat_service import ChatService
+
+    conv = conversation_with_message
+    papers = await _papers_for_resolver(db_session, project)
+
+    async def fake_stream(*args, **kwargs):
+        yield "answer"
+
+    svc = ChatService()
+    chunks = [
+        ChunkContext(n=1, paper_id=papers[0].id, title=papers[0].title, chunk_index=0, text="t")
+    ]
+    stream = MagicMock(return_value=fake_stream())
+
+    with (
+        patch.object(svc._embedding_svc, "embed", AsyncMock(return_value=[0.0] * 768)),
+        patch.object(svc, "_retrieve_history", AsyncMock(return_value=[])),
+        patch.object(svc._widener, "run", AsyncMock(return_value=False)),
+        patch.object(svc, "_retrieve_mentioned_chunks", AsyncMock(return_value=(chunks, False))),
+        patch.object(svc._chat_agent, "stream", stream),
+        patch.object(svc._conv_svc, "save_message", AsyncMock()),
+    ):
+        async for _ in svc.respond(conv.id, "What does Breaking the Deadly Triad say?", []):
+            pass
+
+    agent_input = stream.call_args.args[0]
+    assert agent_input.scope_titles == [papers[0].title]
+    assert agent_input.scope_source == "resolved"
+
+
+async def test_the_resolver_reads_the_users_words_not_the_reformulated_query(
+    db_session: AsyncSession, project: Project, conversation_with_message
+):
+    """Every guard in the resolver reads what the USER typed. Resolving from
+    the reformulation would put an LLM back in charge of scope through the
+    side door -- here the reformulator invents a title span for a paper the
+    user never named, and it must change nothing."""
+    from app.services.chat_service import ChatService
+
+    conv = conversation_with_message
+    await _papers_for_resolver(db_session, project)
+    # The reformulator only runs on a turn with history, which is also the
+    # only shape where it can invent words the user never typed.
+    db_session.add(
+        ChatMessage(conversation_id=conv.id, role="assistant", content="An earlier answer.")
+    )
+    await db_session.commit()
+
+    async def fake_stream(*args, **kwargs):
+        yield "answer"
+
+    svc = ChatService()
+    retrieve = AsyncMock(return_value=[])
+    reformulated = "What does Breaking the Deadly Triad say about offline data?"
+
+    with (
+        patch.object(svc._embedding_svc, "embed", AsyncMock(return_value=[0.0] * 768)),
+        patch.object(svc, "_retrieve_history", AsyncMock(return_value=[])),
+        patch.object(svc._reformulator, "run", AsyncMock(return_value=reformulated)),
+        patch.object(svc._widener, "run", AsyncMock(return_value=False)),
+        patch.object(svc, "_retrieve_paper_chunks", retrieve),
+        patch.object(svc._chat_agent, "stream", return_value=fake_stream()),
+        patch.object(svc._conv_svc, "save_message", AsyncMock()),
+    ):
+        events = [ev async for ev in svc.respond(conv.id, "and what about that one?", [])]
+
+    assert len(retrieve.await_args.args[1]) == 3
+    retrieving = json.loads(next(e for e in events if e["event"] == "retrieving")["data"])
+    assert retrieving["scoped"] is False

@@ -143,11 +143,23 @@ export type ChatEvent =
       paper_count: number;
       history_hits: number;
       scoped: boolean;
-      /** How many papers the user named. Stays put when widening fires. */
+      /** How many papers were named. Stays put when widening fires. */
       scoped_count: number;
       widened: boolean;
-      /** Titles of mentioned papers that returned no chunks at all. */
+      /** Titles of scoped papers that returned no chunks at all. */
       empty_mentions: string[];
+      /**
+       * How the scope was set: "mention" (the user picked the papers with
+       * "@") or "resolved" (the question's own words named them, and the
+       * user picked nothing).
+       */
+      scope_source?: "mention" | "resolved";
+      /**
+       * For a resolved scope, the phrases from the question that named the
+       * papers. Shown to the reader — a turn scoped without a click has to
+       * say what caused it. Empty for a mention scope.
+       */
+      scope_evidence?: string[];
     }
   | { type: "delta"; text: string }
   | { type: "done"; citations: ChatCitation[] }

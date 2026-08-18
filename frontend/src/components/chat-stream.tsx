@@ -122,6 +122,8 @@ export function ChatStream({
     scoped_count: number;
     widened: boolean;
     empty_mentions: string[];
+    scope_source: "mention" | "resolved";
+    scope_evidence: string[];
   } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -203,6 +205,8 @@ export function ChatStream({
                 scoped_count: ev.scoped_count,
                 widened: ev.widened,
                 empty_mentions: ev.empty_mentions ?? [],
+                scope_source: ev.scope_source ?? "mention",
+                scope_evidence: ev.scope_evidence ?? [],
               });
             } else if (ev.type === "delta") {
               setStatus("streaming");
@@ -337,6 +341,34 @@ export function ChatStream({
         </div>
       )}
 
+      {/* Resolved scope banner.
+          Deliberately NOT inside the status indicator, which the streaming
+          bubble replaces the moment the first token lands. The user picked
+          nothing this turn — the words they typed narrowed the search — so
+          this is the only place they can learn the answer was written from
+          part of the library, and it has to outlive retrieval to be read at
+          all. A mention scope needs no such banner: the chips are still in
+          their own composer.
+          It quotes their OWN phrase, not the paper title: the title is what
+          we picked, the phrase is what they typed, and only the phrase tells
+          them what to change to search wider. */}
+      {status !== "idle" &&
+        retrievingInfo?.scope_source === "resolved" &&
+        retrievingInfo.scoped_count > 0 && (
+          <div className="flex justify-start">
+            <div className="rounded-full border border-border px-3 py-1 text-xs text-muted-foreground">
+              {retrievingInfo.scope_evidence.length
+                ? `matched ${retrievingInfo.scope_evidence
+                    .map((e) => `“${e}”`)
+                    .join(", ")} in your question — `
+                : "your question named papers — "}
+              {`searching ${retrievingInfo.scoped_count} paper${
+                retrievingInfo.scoped_count === 1 ? "" : "s"
+              }${retrievingInfo.widened ? " + the rest of the library" : " only"}`}
+            </div>
+          </div>
+        )}
+
       {/* Streaming assistant bubble */}
       {streamingText && (
         <div className="flex justify-start">
@@ -370,19 +402,24 @@ export function ChatStream({
                   no excerpts from {retrievingInfo.empty_mentions.join(", ")}
                 </span>
               )}
-            {status === "retrieving" && retrievingInfo?.scoped && (
-              <span className="ml-2 text-xs text-muted-foreground">
-                {retrievingInfo.scoped_count === 0
-                  ? // Papers were mentioned but none could be scoped to (all
-                    // deleted, or retrieval could not run). The backend reports
-                    // this widened; "scoped to 0 papers" would claim a scope
-                    // that was never applied.
-                    "mentions unavailable — searching the library"
-                  : `scoped to ${retrievingInfo.scoped_count} paper${
-                      retrievingInfo.scoped_count === 1 ? "" : "s"
-                    }${retrievingInfo.widened ? " + library" : ""}`}
-              </span>
-            )}
+            {/* Mention scope only. A RESOLVED scope gets its own banner
+                above, which survives into streaming — this indicator does
+                not. */}
+            {status === "retrieving" &&
+              retrievingInfo?.scoped &&
+              retrievingInfo.scope_source !== "resolved" && (
+                <span className="ml-2 text-xs text-muted-foreground">
+                  {retrievingInfo.scoped_count === 0
+                    ? // Papers were mentioned but none could be scoped to (all
+                      // deleted, or retrieval could not run). The backend reports
+                      // this widened; "scoped to 0 papers" would claim a scope
+                      // that was never applied.
+                      "mentions unavailable — searching the library"
+                    : `scoped to ${retrievingInfo.scoped_count} paper${
+                        retrievingInfo.scoped_count === 1 ? "" : "s"
+                      }${retrievingInfo.widened ? " + library" : ""}`}
+                </span>
+              )}
           </div>
         </div>
       )}

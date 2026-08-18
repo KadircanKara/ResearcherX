@@ -30,6 +30,7 @@ from app.services.embedding_service import EmbeddingService
 from app.services.hybrid_ranker import fuse_rrf, keep_within_rank_window
 from app.services.intra_paper_ranker import keep_within_paper
 from app.services.mention_ranker import apply_per_paper_floor
+from app.services.paper_resolver import ResolvablePaper, resolve_papers_with_evidence
 
 _HISTORY_TOP_K = 5
 
@@ -126,15 +127,15 @@ def needs_paper_metadata(question: str, prior_messages: list[dict]) -> bool:
     others -- and "how" alone opens a large share of all questions). The
     list of collisions grows with every paper added, silently, with nothing
     to flag when a new author erodes the saving again. It also bought less
-    than it cost: retrieval scope is set only by the explicit "@" mentions
-    the user picks -- nothing resolves a natural-language reference like
-    "Kara's paper" to a paper id at the retrieval layer, so naming the
-    author in the answer-time block never fixed that; it only let the model
-    repeat a name for chunks it had already been handed some other way (an
-    explicit mention, or the whole library). Do not reintroduce corpus
-    tokens to "fix" this gap without solving that retrieval-layer problem
-    first, or the same three collision classes
-    return.
+    than it cost: naming the author in the ANSWER-TIME block never scoped
+    anything; it only let the model repeat a name for chunks it had already
+    been handed some other way. The retrieval-layer half of that problem is
+    now solved by `paper_resolver`, which does resolve "Kara's paper" to a
+    paper id -- and note how: on the ATTRIBUTION CONSTRUCTION ("by X",
+    "X et al.", "X's paper"), never on a bare corpus token, which is exactly
+    what makes it survive the collisions this list could not. Do not
+    reintroduce corpus tokens here to "fix" the remaining gap, or the same
+    three collision classes return.
 
     A pronoun-only follow-up such as "and that one?" carries no keyword or
     year at all, so the previous USER message is consulted. One turn only:
@@ -292,6 +293,18 @@ class ChatService:
             # This project's paper ids + titles: scopes the global top-k chunk
             # query below to this project and labels citations by title.
             paper_infos = [PaperInfo(paper_id=p.id, title=p.title) for p in paper_rows]
+            # The resolver's own view of the library. Adapted here, at the
+            # boundary, because `paper_resolver` is pure by contract: it takes
+            # no ORM row and no PaperInfo, so the eval harness can import it.
+            resolvables = [
+                ResolvablePaper(
+                    paper_id=p.id,
+                    title=p.title,
+                    authors=tuple(p.authors or []),
+                    year=p.year,
+                )
+                for p in paper_rows
+            ]
 
             # Deduped, order-preserving. The API layer already dedupes before
             # calling respond(), so this is unreachable today -- but a
@@ -303,6 +316,18 @@ class ChatService:
             scope = paper_infos
             widened = False
             mentioned_infos = []
+            # Papers the QUESTION named outright, when the user named none.
+            # `scope_source` is what the SSE event and the SCOPE block report;
+            # `resolved_evidence` is the reader's receipt for a scope nobody
+            # clicked.
+            resolved_infos: list[PaperInfo] = []
+            resolved_evidence: list[str] = []
+            scope_source = "mention"
+            # The papers actually scoped to, whichever way they were named.
+            # Everything downstream of the retrieval call reads this, so a
+            # resolved turn gets the same SCOPE block, the same empty-paper
+            # reporting and the same event shape as a mentioned one.
+            scope_infos: list[PaperInfo] = []
 
             if query_embedding is not None:
                 async with SessionLocal() as db:
@@ -332,23 +357,71 @@ class ChatService:
                     by_id = {p.paper_id: p for p in paper_infos}
                     mentioned_infos = [by_id[pid] for pid in mentioned if pid in by_id]
 
-                    if mentioned_infos:
+                    if not mentioned:
+                        # AN "@" MENTION ALWAYS WINS, so the resolver is
+                        # consulted only when the user picked nothing at all.
+                        # Keyed on `mentioned`, not `mentioned_infos`: a turn
+                        # whose every mention was deleted still expressed an
+                        # explicit choice, and the "mentions unavailable"
+                        # path below owns it. The two are never merged — a
+                        # resolved id may not widen or narrow a picked scope.
+                        #
+                        # Run against `user_content`, NEVER the reformulated
+                        # query. Every guard in the resolver reads the words
+                        # and the capitalisation the USER typed; the
+                        # reformulation is model output, and resolving from it
+                        # would put an LLM back in charge of scope through the
+                        # side door.
+                        resolution = resolve_papers_with_evidence(
+                            user_content,
+                            resolvables,
+                            max_papers=settings.max_resolved_papers,
+                        )
+                        resolved_infos = [
+                            by_id[pid] for pid in resolution.paper_ids if pid in by_id
+                        ]
+                        resolved_evidence = list(resolution.evidence)
+                        if resolved_infos:
+                            scope_source = "resolved"
+
+                    # One path for both, because the retrieval MECHANICS are
+                    # identical once a scope exists: same per-paper floor, same
+                    # candidate guarantee, same budget ceiling. Only the
+                    # provenance differs, and that is carried in scope_source.
+                    scope_infos = mentioned_infos or resolved_infos
+
+                    if scope_infos:
                         # The widener may only ADD the library. It has no vote
                         # on whether the named papers are retrieved.
+                        #
+                        # IT RUNS FOR A RESOLVED SCOPE TOO. Its contract is
+                        # "the question named these papers; does the turn ALSO
+                        # need the rest of the library", and a resolved scope
+                        # satisfies the premise as literally as a mention does
+                        # — the user typed the identifying words. The asymmetry
+                        # settles it: the widener can only make a turn wider,
+                        # and failing open makes it narrower-by-default anyway,
+                        # so its worst case is a slightly broader search. A
+                        # scope the user never clicked is exactly where a
+                        # too-narrow turn does the damage that got the LLM
+                        # targeter deleted, so denying it the one mechanism
+                        # that adds the library back would make a resolved
+                        # scope STRICTER than the same question with an "@"
+                        # mention. That is backwards.
                         widened = await self._widener.run(
                             WidenerInput(
                                 query=user_content,
-                                mentioned_titles=[p.title for p in mentioned_infos],
+                                mentioned_titles=[p.title for p in scope_infos],
                             )
                         )
                         paper_chunks, widened = await self._retrieve_mentioned_chunks(
-                            mentioned_infos,
+                            scope_infos,
                             paper_infos,
                             retrieval_embedding,
                             retrieval_query,
                             widened,
                         )
-                        scope = paper_infos if widened else mentioned_infos
+                        scope = paper_infos if widened else scope_infos
                     else:
                         async with SessionLocal() as db:
                             paper_chunks = await self._retrieve_paper_chunks(
@@ -375,7 +448,7 @@ class ChatService:
             # reads as a confident one-paper reply to a two-paper question --
             # so it is named to the model and to the user rather than dropped.
             contributing = {c.paper_id for c in paper_chunks}
-            empty_titles = [p.title for p in mentioned_infos if p.paper_id not in contributing]
+            empty_titles = [p.title for p in scope_infos if p.paper_id not in contributing]
 
             yield {
                 "event": "retrieving",
@@ -383,12 +456,21 @@ class ChatService:
                     {
                         "paper_count": len(scope),
                         "history_hits": len(history_hits),
-                        "scoped": bool(mentioned),
-                        # How many papers the USER named — not len(scope),
-                        # which becomes the whole project once widening fires.
-                        "scoped_count": len(mentioned_infos) if mentioned else 0,
+                        "scoped": bool(mentioned or resolved_infos),
+                        # How many papers were NAMED — not len(scope), which
+                        # becomes the whole project once widening fires.
+                        "scoped_count": len(scope_infos),
                         "widened": widened,
                         "empty_mentions": empty_titles,
+                        # HOW the scope was set. A turn scoped without the user
+                        # clicking anything has to say so, and say what in
+                        # their own words caused it — otherwise it is the
+                        # "why did it only search that paper?" complaint that
+                        # got the LLM targeter deleted, with no way to act on
+                        # it. Empty evidence on a mention turn: the user
+                        # already knows, they picked them.
+                        "scope_source": scope_source,
+                        "scope_evidence": resolved_evidence,
                     }
                 ),
             }
@@ -400,12 +482,15 @@ class ChatService:
                 prior_messages=all_prior,
                 paper_chunks=paper_chunks,
                 papers=paper_metas,
-                # The papers the USER named, always — never `scope`, which is
-                # the whole project once widening fires. A SCOPE block listing
-                # 100 titles would say nothing and cost ~2k tokens.
-                scope_titles=[p.title for p in mentioned_infos],
+                # The papers NAMED, always — never `scope`, which is the whole
+                # project once widening fires. A SCOPE block listing 100 titles
+                # would say nothing and cost ~2k tokens.
+                scope_titles=[p.title for p in scope_infos],
                 scope_widened=widened,
                 scope_empty_titles=empty_titles,
+                # Provenance, so the block cannot claim the user restricted a
+                # turn they never restricted.
+                scope_source=scope_source,
             )
 
             # Stream response
@@ -488,9 +573,15 @@ class ChatService:
         query_text: str,
         widened: bool,
     ) -> tuple[list[ChunkContext], bool]:
-        """Retrieve chunks for a turn scoped to explicitly @-mentioned papers.
+        """Retrieve chunks for a turn scoped to explicitly NAMED papers.
 
-        Scopes to `scope` (the papers the user named) and guarantees each a
+        One path for both provenances — "@" mentions the user picked and the
+        papers `paper_resolver` found named in the question itself — because
+        the mechanics are identical once a scope exists. Only the wording of
+        the SCOPE block and of the SSE event differs, and neither is decided
+        here. Do not fork a parallel path for the resolver.
+
+        Scopes to `scope` (the papers that were named) and guarantees each a
         floor via `apply_per_paper_floor`. Then folds in the rest of
         `all_papers` when `widened` is True OR the scoped query comes back
         completely empty -- a paper can be mentioned before its ingest
