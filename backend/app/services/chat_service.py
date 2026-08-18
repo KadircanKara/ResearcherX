@@ -31,13 +31,6 @@ from app.services.intra_paper_ranker import keep_within_paper
 
 _HISTORY_TOP_K = 5
 
-# Papers offered to the targeter. Sized by measurement, not by prompt budget:
-# on the question this feature exists to fix, the correct paper ranked 6th by
-# nearest-chunk distance. Questions whose target ranks below this generally
-# name no paper at all (measured at 17th and 51st), where the honest answer is
-# "none" anyway.
-_TARGETER_CANDIDATES = 10
-
 _CITATION_RE = re.compile(r"\[(\d+)\]")
 
 # Words that make a question possibly about a paper's authors, year or venue.
@@ -349,7 +342,7 @@ class ChatService:
 
                     async with SessionLocal() as db:
                         candidates, total_chunks = await self._shortlist_papers(
-                            db, paper_infos, retrieval_embedding, _TARGETER_CANDIDATES
+                            db, paper_infos, retrieval_embedding, retrieval_query
                         )
 
                     # Scope retrieval to one paper when the question might be
@@ -539,12 +532,24 @@ class ChatService:
         db: AsyncSession,
         paper_infos: list[PaperInfo],
         query_embedding: list[float],
-        limit: int,
+        query_text: str,
     ) -> tuple[list[PaperInfo], int]:
-        """Rank this project's papers by their nearest chunk.
+        """Shortlist candidate papers for the targeter, from two arms.
 
-        Returns at most `limit` papers, nearest first, plus the project's
-        TOTAL chunk count across every paper — two answers from one query.
+        DENSE arm: papers ranked by their nearest chunk, capped at
+        `targeter_dense_candidates`. LEXICAL arm: the same papers ranked by
+        ts_rank_cd over their TITLES, capped at `targeter_lexical_candidates`.
+        The lexical hits are UNIONED onto the dense list — appended, never
+        fused — so the arm can only add candidates. Also returns the project's
+        TOTAL chunk count across every paper, which is what decides whether
+        targeting is worth an LLM call at all.
+
+        The two arms see different things and that is the point. Nearest-chunk
+        distance ranks on body text; a question that identifies its paper by a
+        property of the TITLE ranks its target wherever the body happens to
+        fall — 28th of 100, measured live. See `targeter_dense_candidates` in
+        config.py for the full measurement and for why this is a union rather
+        than an RRF fusion.
 
         No SQL LIMIT, on purpose. The GROUP BY already scans the project's
         chunks either way, so a LIMIT would save only the transfer of a few
@@ -587,8 +592,76 @@ class ChatService:
         rows = result.fetchall()
         by_id = {p.paper_id: p for p in paper_infos}
         total_chunks = sum(r.n_chunks for r in rows)
-        candidates = [by_id[r.paper_id] for r in rows if r.paper_id in by_id][:limit]
+        candidates = [by_id[r.paper_id] for r in rows if r.paper_id in by_id][
+            : settings.targeter_dense_candidates
+        ]
+
+        chosen = {p.paper_id for p in candidates}
+        for paper_id in await self._lexical_title_matches(db, paper_infos, query_text):
+            if paper_id not in chosen and paper_id in by_id:
+                candidates.append(by_id[paper_id])
+                chosen.add(paper_id)
         return candidates, total_chunks
+
+    async def _lexical_title_matches(
+        self,
+        db: AsyncSession,
+        paper_infos: list[PaperInfo],
+        query_text: str,
+    ) -> list[str]:
+        """Paper ids whose TITLE matches the question lexically, best first.
+
+        OR-of-lexemes, deliberately, where the rest of this codebase uses
+        `websearch_to_tsquery`: that ANDs every term, so a question of a dozen
+        words matches no title at all — measured at 22 of 30 golden-set
+        questions matching nothing even against full chunk text, and a title
+        is a handful of words. The OR is what makes a partial title match
+        rank; `ts_rank_cd` is what keeps the noise below the real hit.
+
+        Titles are read from `papers`, not from `paper_infos`, so a title
+        corrected in the Papers tab takes effect on the next question with no
+        re-index — unlike the chunk embeddings, which are frozen at ingest.
+
+        Fail-open: the arm returns nothing on any error. It exists to ADD
+        candidates the dense arm missed; a broken lexical query must degrade
+        to the dense-only shortlist, not fail the turn.
+        """
+        if not query_text.strip():
+            return []
+        # A query of pure stopwords produces an empty tsvector, string_agg
+        # then returns NULL, and `@@ NULL` is NULL — no rows, no error.
+        sql = text("""
+            WITH scope AS (
+                SELECT value AS paper_id
+                FROM jsonb_array_elements_text(CAST(:ids AS jsonb))
+            ),
+            q AS (
+                SELECT (
+                    SELECT string_agg(lexeme, ' | ')
+                    FROM unnest(to_tsvector('english', :question))
+                )::tsquery AS tq
+            )
+            SELECT p.id AS paper_id
+            FROM papers p
+            JOIN scope s ON s.paper_id = p.id
+            CROSS JOIN q
+            WHERE to_tsvector('english', p.title) @@ q.tq
+            ORDER BY ts_rank_cd(to_tsvector('english', p.title), q.tq) DESC, p.id ASC
+            LIMIT :limit
+        """)
+        try:
+            result = await db.execute(
+                sql,
+                {
+                    "ids": json.dumps([p.paper_id for p in paper_infos]),
+                    "question": query_text,
+                    "limit": settings.targeter_lexical_candidates,
+                },
+            )
+            return [r.paper_id for r in result.fetchall()]
+        except Exception as exc:
+            log.warning("lexical_title_arm_failed_open", error=str(exc)[:200])
+            return []
 
     async def _retrieve_paper_chunks(
         self,

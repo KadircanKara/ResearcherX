@@ -1,0 +1,46 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "id": "live-867dd8c5",
+      "question": "What reward function does the RL planner in the paper that compares evolutionary algorithms against reinforcement learning?",
+      "paper_title_contains": "Cooperative Multi-Target Search",
+      "note": "The live failure this set exists for. Dense nearest-chunk ranked the target 28th of 100; the targeter scoped retrieval to a wrong paper and the answer was grounded in it."
+    },
+    {
+      "id": "evo-vs-rl",
+      "question": "In the paper comparing evolutionary strategies with reinforcement learning for UAV swarm search, what is the fitness function?",
+      "paper_title_contains": "Cooperative Multi-Target Search"
+    },
+    {
+      "id": "data-harvesting",
+      "question": "What does the wireless data harvesting path planning paper use for its state representation?",
+      "paper_title_contains": "Wireless Data Harvesting"
+    },
+    {
+      "id": "federated-sky",
+      "question": "How does the federated learning in the sky paper schedule power allocation?",
+      "paper_title_contains": "Federated Learning in the Sky"
+    },
+    {
+      "id": "graph-conflict",
+      "question": "What does the graph convolutional conflict resolution paper assume about airspace?",
+      "paper_title_contains": "Conflict Resolution with Graph"
+    },
+    {
+      "id": "energy-random-access",
+      "question": "What constraint does the energy sustainable random access paper enforce?",
+      "paper_title_contains": "Energy Sustainable Multi-UAV"
+    },
+    {
+      "id": "ground-surveillance",
+      "question": "In the deep RL ground surveillance swarming paper, how many agents are simulated?",
+      "paper_title_contains": "Ground Surveillance"
+    },
+    {
+      "id": "nested-federated",
+      "question": "What tiers does the hierarchical nested personalized federated learning paper define?",
+      "paper_title_contains": "Hierarchical Nested Personalized"
+    }
+  ]
+}

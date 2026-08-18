@@ -626,18 +626,30 @@ async def test_retrieve_paper_chunks_numbers_citations_contiguously_after_cappin
     assert [c.n for c in chunks] == list(range(1, 41))
 
 
-def _mock_db_returning_shortlist(rows: list[tuple[str, float, int]]) -> MagicMock:
-    """Fake AsyncSession returning (paper_id, best, n_chunks) rows.
+def _mock_db_returning_shortlist(
+    rows: list[tuple[str, float, int]],
+    lexical: list[str] | None = None,
+) -> MagicMock:
+    """Fake AsyncSession answering both shortlist arms.
 
-    Deliberately returns them in the order given, ignoring any ORDER BY, so
-    the tests prove what the service does with the rows rather than what
-    Postgres would have done for it.
+    The dense arm gets (paper_id, best, n_chunks) rows; the lexical title arm
+    gets `lexical` paper ids, in the order given. Which query is which is
+    decided by looking for ts_rank_cd in the SQL — neither arm's ranking runs
+    here, so the tests prove what the service does with the rows rather than
+    what Postgres would have done for it.
     """
-    mock_rows = [MagicMock(paper_id=p, best=b, n_chunks=n) for p, b, n in rows]
-    mock_result = MagicMock()
-    mock_result.fetchall.return_value = mock_rows
+    dense_result = MagicMock()
+    dense_result.fetchall.return_value = [
+        MagicMock(paper_id=p, best=b, n_chunks=n) for p, b, n in rows
+    ]
+    lexical_result = MagicMock()
+    lexical_result.fetchall.return_value = [MagicMock(paper_id=p) for p in (lexical or [])]
+
+    async def execute(sql, params=None):
+        return lexical_result if "ts_rank_cd" in str(sql) else dense_result
+
     mock_db = MagicMock()
-    mock_db.execute = AsyncMock(return_value=mock_result)
+    mock_db.execute = AsyncMock(side_effect=execute)
     return mock_db
 
 
@@ -648,7 +660,8 @@ async def test_shortlist_papers_returns_nearest_first_capped_at_limit():
     mock_db = _mock_db_returning_shortlist([("p0", 0.30, 10), ("p1", 0.31, 20), ("p2", 0.32, 30)])
     papers = [PaperInfo(paper_id=f"p{i}", title=f"Paper {i}") for i in range(3)]
 
-    candidates, _ = await svc._shortlist_papers(mock_db, papers, [0.0] * 768, 2)
+    with patch.object(settings, "targeter_dense_candidates", 2):
+        candidates, _ = await svc._shortlist_papers(mock_db, papers, [0.0] * 768, "a question")
 
     assert [c.paper_id for c in candidates] == ["p0", "p1"]
     assert [c.title for c in candidates] == ["Paper 0", "Paper 1"]
@@ -668,16 +681,19 @@ async def test_shortlist_papers_counts_chunks_across_the_whole_project():
     mock_db = _mock_db_returning_shortlist([("p0", 0.30, 10), ("p1", 0.31, 20), ("p2", 0.32, 30)])
     papers = [PaperInfo(paper_id=f"p{i}", title=f"Paper {i}") for i in range(3)]
 
-    _, total = await svc._shortlist_papers(mock_db, papers, [0.0] * 768, 2)
+    _, total = await svc._shortlist_papers(mock_db, papers, [0.0] * 768, "a question")
 
     assert total == 60
 
 
-async def test_shortlist_papers_issues_one_scoped_query():
-    """One query, scoped to this project's papers and this embedding model.
+async def test_shortlist_papers_scopes_both_arms_to_this_projects_papers():
+    """Both arms are scoped to this project, and only the dense one is
+    embedding-model bound.
 
     paper_chunk_embeddings is global; an unscoped ranking would rank another
-    project's papers as candidates for this project's question.
+    project's papers as candidates for this project's question. The lexical
+    arm reads `papers`, which carries no embedding — a title index is not tied
+    to a vector space, so it takes the id scope but no model filter.
     """
     from app.services.chat_service import ChatService, PaperInfo
 
@@ -686,12 +702,17 @@ async def test_shortlist_papers_issues_one_scoped_query():
     papers = [PaperInfo(paper_id=f"p{i}", title=f"Paper {i}") for i in range(3)]
 
     with patch.object(settings, "embedding_model", "test-embed-model"):
-        await svc._shortlist_papers(mock_db, papers, [0.0] * 768, 10)
+        await svc._shortlist_papers(mock_db, papers, [0.0] * 768, "a question")
 
-    assert mock_db.execute.await_count == 1
-    _, params = mock_db.execute.call_args.args
-    assert json.loads(params["ids"]) == ["p0", "p1", "p2"]
-    assert params["model"] == "test-embed-model"
+    assert mock_db.execute.await_count == 2
+    dense_sql, dense_params = mock_db.execute.await_args_list[0].args
+    lexical_sql, lexical_params = mock_db.execute.await_args_list[1].args
+    assert json.loads(dense_params["ids"]) == ["p0", "p1", "p2"]
+    assert dense_params["model"] == "test-embed-model"
+    assert json.loads(lexical_params["ids"]) == ["p0", "p1", "p2"]
+    assert lexical_params["question"] == "a question"
+    assert "model" not in lexical_params
+    assert "ts_rank_cd" in str(lexical_sql) and "ts_rank_cd" not in str(dense_sql)
 
 
 async def test_shortlist_papers_skips_rows_for_unknown_papers():
@@ -709,7 +730,7 @@ async def test_shortlist_papers_skips_rows_for_unknown_papers():
     mock_db = _mock_db_returning_shortlist([("ghost", 0.20, 5), ("p0", 0.30, 10)])
     papers = [PaperInfo(paper_id="p0", title="Paper 0"), PaperInfo(paper_id="p1", title="Paper 1")]
 
-    candidates, total = await svc._shortlist_papers(mock_db, papers, [0.0] * 768, 10)
+    candidates, total = await svc._shortlist_papers(mock_db, papers, [0.0] * 768, "a question")
 
     assert [c.paper_id for c in candidates] == ["p0"]
     assert total == 15
@@ -884,7 +905,7 @@ async def test_shortlist_papers_returns_early_for_a_single_paper():
     mock_db.execute = AsyncMock()
     papers = [PaperInfo(paper_id="p0", title="Paper 0")]
 
-    result = await svc._shortlist_papers(mock_db, papers, [0.0] * 768, 10)
+    result = await svc._shortlist_papers(mock_db, papers, [0.0] * 768, "a question")
 
     assert result == ([], 0)
     mock_db.execute.assert_not_awaited()
@@ -1349,3 +1370,156 @@ async def test_a_misattributed_marker_is_stripped_before_the_citation_array_is_b
     assert [c["n"] for c in citations] == [1]
     assert citations[0]["paper_id"] == owner.id
 
+
+async def test_the_lexical_title_arm_adds_a_paper_the_dense_arm_buried():
+    """The failure this arm exists for, in miniature.
+
+    Nearest-chunk distance ranks on BODY text. A question that names its paper
+    by a property of the TITLE ranked its target 28th of 100 live (conversation
+    867dd8c5), outside any sane dense cap, so the targeter could only name a
+    wrong paper and retrieval was scoped to it. The lexical arm ranks the same
+    papers by their titles, which is the signal the dense arm cannot see.
+    """
+    from app.services.chat_service import ChatService, PaperInfo
+
+    svc = ChatService()
+    mock_db = _mock_db_returning_shortlist(
+        [("p0", 0.30, 10), ("p1", 0.31, 20), ("p2", 0.32, 30)],
+        lexical=["p9"],
+    )
+    papers = [PaperInfo(paper_id=f"p{i}", title=f"Paper {i}") for i in range(10)]
+
+    with patch.object(settings, "targeter_dense_candidates", 2):
+        candidates, _ = await svc._shortlist_papers(mock_db, papers, [0.0] * 768, "a question")
+
+    assert [c.paper_id for c in candidates] == ["p0", "p1", "p9"]
+    assert candidates[-1].title == "Paper 9"
+
+
+async def test_the_lexical_arm_is_unioned_after_the_dense_arm_never_fused():
+    """Union, not fusion, and dense order is preserved.
+
+    Fusing the two arms 50/50 by RRF was measured on the golden set and DROPPED
+    candidate recall 28/30 -> 24/30: a lexical rank exists for papers the dense
+    arm was right to bury, and fusion lets those displace real hits. A union
+    can only add.
+    """
+    from app.services.chat_service import ChatService, PaperInfo
+
+    svc = ChatService()
+    mock_db = _mock_db_returning_shortlist(
+        [("p0", 0.30, 10), ("p1", 0.31, 20)],
+        lexical=["p1", "p0"],  # both already dense hits, in the opposite order
+    )
+    papers = [PaperInfo(paper_id=f"p{i}", title=f"Paper {i}") for i in range(2)]
+
+    candidates, _ = await svc._shortlist_papers(mock_db, papers, [0.0] * 768, "a question")
+
+    assert [c.paper_id for c in candidates] == ["p0", "p1"]
+
+
+async def test_the_lexical_arm_skips_ids_that_are_not_in_this_projects_papers():
+    """Defence in depth: the arm's own SQL scopes by id, so a foreign id can
+    only arrive if that scope ever breaks — and it must not be labelled with a
+    title this project does not have."""
+    from app.services.chat_service import ChatService, PaperInfo
+
+    svc = ChatService()
+    mock_db = _mock_db_returning_shortlist([("p0", 0.30, 10)], lexical=["ghost"])
+    papers = [PaperInfo(paper_id="p0", title="Paper 0"), PaperInfo(paper_id="p1", title="Paper 1")]
+
+    candidates, _ = await svc._shortlist_papers(mock_db, papers, [0.0] * 768, "a question")
+
+    assert [c.paper_id for c in candidates] == ["p0"]
+
+
+async def test_the_lexical_arm_is_capped_by_settings():
+    from app.services.chat_service import ChatService, PaperInfo
+
+    svc = ChatService()
+    mock_db = _mock_db_returning_shortlist([("p0", 0.30, 10)], lexical=[])
+    papers = [PaperInfo(paper_id=f"p{i}", title=f"Paper {i}") for i in range(3)]
+
+    with patch.object(settings, "targeter_lexical_candidates", 4):
+        await svc._shortlist_papers(mock_db, papers, [0.0] * 768, "a question")
+
+    _, lexical_params = mock_db.execute.await_args_list[1].args
+    assert lexical_params["limit"] == 4
+
+
+async def test_a_broken_lexical_arm_degrades_to_the_dense_shortlist():
+    """Fail-open. The arm exists to ADD candidates; a failing query must leave
+    the dense shortlist standing, not fail the turn."""
+    from app.services.chat_service import ChatService, PaperInfo
+
+    svc = ChatService()
+    dense_result = MagicMock()
+    dense_result.fetchall.return_value = [MagicMock(paper_id="p0", best=0.3, n_chunks=10)]
+
+    async def execute(sql, params=None):
+        if "ts_rank_cd" in str(sql):
+            raise RuntimeError("text search configuration missing")
+        return dense_result
+
+    mock_db = MagicMock()
+    mock_db.execute = AsyncMock(side_effect=execute)
+    papers = [PaperInfo(paper_id="p0", title="Paper 0"), PaperInfo(paper_id="p1", title="Paper 1")]
+
+    candidates, total = await svc._shortlist_papers(mock_db, papers, [0.0] * 768, "a question")
+
+    assert [c.paper_id for c in candidates] == ["p0"]
+    assert total == 10
+
+
+async def test_an_empty_question_skips_the_lexical_query_entirely():
+    """No lexemes, no query. Reformulation can return an empty-ish string, and
+    a tsquery built from nothing matches nothing anyway."""
+    from app.services.chat_service import ChatService, PaperInfo
+
+    svc = ChatService()
+    mock_db = _mock_db_returning_shortlist([("p0", 0.30, 10)])
+    papers = [PaperInfo(paper_id="p0", title="Paper 0"), PaperInfo(paper_id="p1", title="Paper 1")]
+
+    candidates, _ = await svc._shortlist_papers(mock_db, papers, [0.0] * 768, "   ")
+
+    assert mock_db.execute.await_count == 1
+    assert [c.paper_id for c in candidates] == ["p0"]
+
+
+async def test_the_shortlist_is_built_from_the_reformulated_query_text(
+    db_session: AsyncSession, project: Project, conversation_with_message
+):
+    """The lexical arm must see the same text the dense arm's embedding came
+    from. A pronoun-only follow-up ('and that one?') carries no title words at
+    all; the reformulated query is what does."""
+    from app.db.models import Paper
+    from app.services.chat_service import ChatService
+
+    conv = conversation_with_message
+    for i in range(3):
+        db_session.add(Paper(project_id=project.id, title=f"Paper {i}", source="manual"))
+    # A prior turn, so reformulation runs at all: a first turn is already
+    # standalone and is skipped (see the reformulation-gating tests above).
+    db_session.add(ChatMessage(conversation_id=conv.id, role="assistant", content="Earlier answer"))
+    db_session.add(ChatMessage(conversation_id=conv.id, role="user", content="and that one?"))
+    await db_session.commit()
+
+    async def fake_stream(*args, **kwargs):
+        yield "answer"
+
+    svc = ChatService()
+    shortlist = AsyncMock(return_value=([], 0))
+
+    with (
+        patch.object(svc._embedding_svc, "embed", AsyncMock(return_value=[0.0] * 768)),
+        patch.object(svc, "_retrieve_history", AsyncMock(return_value=[])),
+        patch.object(svc._reformulator, "run", AsyncMock(return_value="the evolutionary paper")),
+        patch.object(svc, "_shortlist_papers", shortlist),
+        patch.object(svc, "_retrieve_paper_chunks", AsyncMock(return_value=[])),
+        patch.object(svc._chat_agent, "stream", return_value=fake_stream()),
+        patch.object(svc._conv_svc, "save_message", AsyncMock()),
+    ):
+        async for _ in svc.respond(conv.id, "and that one?"):
+            pass
+
+    assert shortlist.await_args.args[3] == "the evolutionary paper"

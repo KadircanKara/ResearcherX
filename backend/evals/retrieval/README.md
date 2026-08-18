@@ -525,6 +525,65 @@ measured N times. The weights must sum to exactly 1.0 or `Settings` refuses
 to start. One run is ~one embedding call per case plus one per targeted
 positive (~72 calls on this set), so a full grid is not free.
 
+## Scoping harness (`shortlist_eval.py`)
+
+`run_eval.py` measures whether the answering CHUNK reached the budget. It
+cannot see the failure one layer above: retrieval scoped to the wrong PAPER
+returns plenty of chunks, all from that paper, and every chunk-level metric
+looks healthy while the answer is grounded in the wrong work.
+
+    docker compose exec -T backend python -m evals.retrieval.shortlist_eval --project-id <uuid>
+    docker compose exec -T backend python -m evals.retrieval.shortlist_eval --project-id <uuid> --no-llm
+
+It imports production's own `ChatService._shortlist_papers`, so it cannot
+measure a shortlist policy production does not run. `--no-llm` reports
+candidate recall only and makes no targeter calls.
+
+Two case sets, and the split is the point:
+
+- **golden** — `golden_set.json` positives, content-worded. Most name no paper
+  at all, so the correct targeter outcome for them is `empty` (unscoped), not
+  `correct`.
+- **scope** — `scope_set.json`, title-referential ("the paper that compares
+  evolutionary algorithms against reinforcement learning"). These identify one
+  paper, by a property of its TITLE.
+
+Read `WRONG` as the harm metric: a paper missing from the candidate list only
+hurts if the targeter then names a paper that does not hold the answer.
+Abstaining is safe.
+
+### Measured — 2026-08-18
+
+Live 100-paper project, before and after the lexical title arm was unioned
+into the shortlist:
+
+    config                     golden recall   scope recall   golden WRONG   scope WRONG
+    dense 10 (before)              28/30           7/8          12/30           1/8
+    dense 10 + lexical 10          29/30           8/8          10-11/30         0/8
+    all 100 titles offered         30/30           8/8          10/30            0/8
+
+The live failure (conversation `867dd8c5`, `scope_set.json` case
+`live-867dd8c5`): the target paper ranked **28th of 100** by nearest-chunk
+distance, outside the dense cap, so the targeter named a wrong paper and
+retrieval was scoped to it. Under the lexical arm the same paper is offered
+and picked correctly.
+
+Two findings worth keeping:
+
+- **RRF fusion of the two arms is wrong here; union is right.** Fusing 50/50
+  dropped golden candidate recall 28/30 → 24/30 — a lexical rank exists for
+  papers the dense arm was right to bury. A union can only add.
+- **Offering all 100 titles buys one golden case over the union** for ~2,900
+  extra input tokens per targeted turn, and is O(N) in library size (~23k
+  tokens at 1,000 papers). Not shipped.
+
+`golden WRONG` at 10-11/30 is a STANDING DEFECT, not a consequence of this
+change: the targeter names a paper on content questions that identify none,
+where the safe answer is `empty`. Expanding the candidate list barely moves it
+(12 → 10-11, with abstentions rising 8 → 10-12). It needs its own fix; the
+existing `chat_service` fallback cannot catch it, since that re-queries
+unscoped only when the scoped retrieval returns ZERO chunks.
+
 ## Adding a case
 
 Edit `golden_set.json`. Ground truth is **substrings, not chunk ids** — ids are
