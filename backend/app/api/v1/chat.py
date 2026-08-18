@@ -14,7 +14,7 @@ from app.db.session import get_session
 from app.schemas.chat import ChatRequest, ConversationDetailOut, ConversationOut
 from app.services import project_service
 from app.services.chat_service import ChatService
-from app.services.conversation_service import ConversationService
+from app.services.conversation_service import ConversationService, retitle_citations
 
 router = APIRouter(tags=["chat"])
 
@@ -63,7 +63,17 @@ async def get_conversation(
     conv = await _conv_svc.get_conversation(db, conversation_id)
     if conv is None or conv.project_id != project_id:
         raise HTTPException(status_code=404, detail="Conversation not found")
-    return ConversationDetailOut.model_validate(conv)
+
+    # Citation titles are resolved against the papers table on every read, not
+    # served from the snapshot stored with the message. Renaming a paper in the
+    # Papers tab has to reach every chip and hover card that points at it, in
+    # every past conversation — see retitle_citations for why that is a read
+    # concern and not a backfill.
+    detail = ConversationDetailOut.model_validate(conv)
+    titles = await _conv_svc.current_paper_titles(db, project_id)
+    for message in detail.messages:
+        message.citations = retitle_citations(message.citations, titles)
+    return detail
 
 
 @router.delete("/projects/{project_id}/conversations/{conversation_id}", status_code=204)

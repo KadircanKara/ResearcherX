@@ -147,3 +147,94 @@ async def test_send_message_requires_auth(
         json={"content": "snoop"},
     )
     assert resp.status_code == 404
+
+
+async def test_a_renamed_paper_retitles_its_citations_in_past_conversations(
+    client: AsyncClient, you: User, project: Project, db_session: AsyncSession
+):
+    """The whole point: a title fixed in the Papers tab reaches old chips.
+
+    The stored citation is a snapshot taken when the answer was written. Its
+    chunk_index and snippet must stay pinned to the text the model was shown,
+    but the title is a label for a paper that still exists — so it is resolved
+    against the papers table on every read.
+    """
+    from app.db.models import Paper
+
+    paper = Paper(project_id=project.id, title="Old typo'd title", source="manual")
+    db_session.add(paper)
+    await db_session.flush()
+
+    conv = ChatConversation(project_id=project.id, title="Retitle test", created_by=you.id)
+    db_session.add(conv)
+    await db_session.flush()
+    db_session.add(
+        ChatMessage(
+            conversation_id=conv.id,
+            role="assistant",
+            content="Grounded here [1].",
+            citations=[
+                {
+                    "n": 1,
+                    "paper_id": paper.id,
+                    "title": "Old typo'd title",
+                    "chunk_index": 3,
+                    "snippet": "the excerpt as shown to the model",
+                }
+            ],
+        )
+    )
+    await db_session.commit()
+
+    paper.title = "Corrected title"
+    await db_session.commit()
+
+    resp = await client.get(
+        f"/v1/projects/{project.id}/conversations/{conv.id}",
+        headers={"X-Dev-User-Id": you.id},
+    )
+    assert resp.status_code == 200
+    citation = resp.json()["messages"][0]["citations"][0]
+    assert citation["title"] == "Corrected title"
+    # Evidence fields stay pinned to what the model was actually shown.
+    assert citation["chunk_index"] == 3
+    assert citation["snippet"] == "the excerpt as shown to the model"
+
+    # A GET must not write. The snapshot on the row is left as it was.
+    stored = (
+        await db_session.execute(select(ChatMessage).where(ChatMessage.conversation_id == conv.id))
+    ).scalar_one()
+    await db_session.refresh(stored)
+    assert stored.citations[0]["title"] == "Old typo'd title"
+
+
+async def test_a_deleted_papers_citation_keeps_the_title_it_was_written_with(
+    client: AsyncClient, you: User, project: Project, db_session: AsyncSession
+):
+    """No current title means no paper. The stored label beats a blank chip."""
+    conv = ChatConversation(project_id=project.id, title="Orphan test", created_by=you.id)
+    db_session.add(conv)
+    await db_session.flush()
+    db_session.add(
+        ChatMessage(
+            conversation_id=conv.id,
+            role="assistant",
+            content="Grounded here [1].",
+            citations=[
+                {
+                    "n": 1,
+                    "paper_id": "a-paper-that-no-longer-exists",
+                    "title": "Title at answer time",
+                    "chunk_index": 0,
+                    "snippet": "excerpt",
+                }
+            ],
+        )
+    )
+    await db_session.commit()
+
+    resp = await client.get(
+        f"/v1/projects/{project.id}/conversations/{conv.id}",
+        headers={"X-Dev-User-Id": you.id},
+    )
+    assert resp.json()["messages"][0]["citations"][0]["title"] == "Title at answer time"
