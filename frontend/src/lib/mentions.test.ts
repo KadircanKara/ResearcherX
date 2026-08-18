@@ -85,3 +85,58 @@ describe("matchPapers", () => {
     expect(matchPapers(papers, "", 2)).toHaveLength(2);
   });
 });
+
+describe("reconcileMentions – overlapping titles (fix round 1)", () => {
+  it("overlap: longest title claims the span, shorter one cannot reuse it", () => {
+    const shorter: Mention = { paperId: "p1", title: "Search" };
+    const longer: Mention = { paperId: "p2", title: "Search Methods" };
+    // Both bound, text contains the longer title → only the longer mention survives
+    const result = reconcileMentions("@Search Methods", [shorter, longer]);
+    expect(result).toEqual([longer]);
+  });
+
+  it("non-overlap regression: @Search followed by prose must keep the mention", () => {
+    const mention: Mention = { paperId: "p1", title: "Search" };
+    // User typed @Search (bound), then added " Methods are useful" as prose
+    expect(reconcileMentions("@Search Methods are useful", [mention])).toEqual([mention]);
+  });
+
+  it("identical titles still match by count: two bound, two occurrences → both survive", () => {
+    const m1: Mention = { paperId: "p1", title: "Identity" };
+    const m2: Mention = { paperId: "p2", title: "Identity" };
+    expect(reconcileMentions("@Identity and @Identity", [m1, m2])).toEqual([m1, m2]);
+  });
+
+  it("identical titles by count: two bound, one occurrence → only first survives", () => {
+    const m1: Mention = { paperId: "p1", title: "Identity" };
+    const m2: Mention = { paperId: "p2", title: "Identity" };
+    expect(reconcileMentions("@Identity only", [m1, m2])).toEqual([m1]);
+  });
+
+  it("original order preserved: three mentions in input order, not sorted order", () => {
+    // Bind in order: short, long, medium. Sorted would be: long, medium, short.
+    const short: Mention = { paperId: "p1", title: "X" };
+    const long: Mention = { paperId: "p2", title: "Extra Long Title" };
+    const medium: Mention = { paperId: "p3", title: "Medium" };
+    const input = [short, long, medium];
+    // All three are present in the text without overlap
+    const text = "@X and @Extra Long Title with @Medium here";
+    const result = reconcileMentions(text, input);
+    // Result must be in INPUT order, not sorted order
+    expect(result).toEqual([short, long, medium]);
+  });
+});
+
+describe("insertMention – fix round 1", () => {
+  it("with trailing text already starting with a space: exactly one space between title and text", () => {
+    const out = insertMention("look at @coop please respond", 8, 13, "Cooperative Search");
+    expect(out.text).toBe("look at @Cooperative Search please respond");
+    expect(out.caret).toBe("look at @Cooperative Search ".length);
+  });
+
+  it("at end of text: trailing space is added", () => {
+    const out = insertMention("look at @coop", 8, 13, "Cooperative Search");
+    expect(out.text).toBe("look at @Cooperative Search ");
+    expect(out.caret).toBe(out.text.length);
+  });
+});

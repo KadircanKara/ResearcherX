@@ -38,8 +38,10 @@ export function insertMention(
   caret: number,
   title: string
 ): { text: string; caret: number } {
-  const next = `${text.slice(0, start)}@${title} ${text.slice(caret)}`;
-  return { text: next, caret: start + title.length + 2 };
+  const after = text.slice(caret);
+  const space = after.length > 0 && /\s/.test(after[0]) ? '' : ' ';
+  const next = `${text.slice(0, start)}@${title}${space}${after}`;
+  return { text: next, caret: start + 1 + title.length + 1 };
 }
 
 /**
@@ -49,30 +51,46 @@ export function insertMention(
  * silently, so a mention is instead re-derived from the text on each change.
  * Two papers sharing a title are matched by occurrence COUNT, so both survive
  * only while both occurrences do.
+ *
+ * When two mentions have overlapping titles (e.g., "Search" and "Search Methods"),
+ * the longer one matches first and claims its span, preventing the shorter one
+ * from matching within the same text region. Two papers with identical titles
+ * are still matched by count — both need separate occurrences to survive.
  */
 export function reconcileMentions(text: string, mentions: Mention[]): Mention[] {
-  const seen = new Map<string, number>();
-  const kept: Mention[] = [];
-  for (const mention of mentions) {
+  // Track which character spans have been claimed by matches
+  const consumed: Array<[start: number, end: number]> = [];
+
+  // Create array of (mention, originalIndex) and sort by descending title length
+  const indexed = mentions.map((m, i) => ({ mention: m, index: i }));
+  indexed.sort((a, b) => b.mention.title.length - a.mention.title.length);
+
+  // Track which original indices to keep
+  const kept = new Set<number>();
+
+  for (const { mention, index } of indexed) {
     const needle = `@${mention.title}`;
-    const used = seen.get(needle) ?? 0;
-    if (countOccurrences(text, needle) > used) {
-      seen.set(needle, used + 1);
-      kept.push(mention);
+    let searchFrom = 0;
+
+    for (;;) {
+      const at = text.indexOf(needle, searchFrom);
+      if (at === -1) break;
+
+      const end = at + needle.length;
+      const overlaps = consumed.some(([cStart, cEnd]) => at < cEnd && end > cStart);
+
+      if (!overlaps) {
+        consumed.push([at, end]);
+        kept.add(index);
+        break;
+      }
+
+      searchFrom = at + 1;
     }
   }
-  return kept;
-}
 
-function countOccurrences(haystack: string, needle: string): number {
-  let count = 0;
-  let from = 0;
-  for (;;) {
-    const at = haystack.indexOf(needle, from);
-    if (at === -1) return count;
-    count++;
-    from = at + needle.length;
-  }
+  // Return mentions in original order
+  return mentions.filter((_, i) => kept.has(i));
 }
 
 /** Papers whose title contains `query`, earliest match first. */
