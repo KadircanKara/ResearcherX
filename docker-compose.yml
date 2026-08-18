@@ -81,6 +81,14 @@ services:
   latex-compiler:
     build:
       context: ./latex-compiler
+    # Docker's tini as PID 1, purely to REAP. A compile timeout kills the
+    # engine's process group, but the grandchildren (sh -> pdflatex) are
+    # re-parented to PID 1 as they die, and a plain python3 entrypoint never
+    # waits on them: they linger as zombies, each holding a slot against
+    # `pids_limit: 64`. Measured at 4/64 after a single timeout, so repeated
+    # runaway documents exhaust the limit on zombies alone and every later
+    # compile fails to fork.
+    init: true
     read_only: true
     tmpfs:
       - /tmp
