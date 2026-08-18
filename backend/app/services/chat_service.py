@@ -21,6 +21,7 @@ from app.core.logging import log
 from app.db.models import Paper
 from app.db.session import SessionLocal
 from app.services.citation_attribution import (
+    expand_grouped_citations,
     split_prose_segments,
     strip_misattributed_citations,
 )
@@ -408,6 +409,14 @@ class ChatService:
             # sees. This also replaces out-of-range markers, so it subsumes
             # the validation pass that used to live here.
             max_n = len(paper_chunks)
+
+            # Expand grouped markers FIRST, before anything counts or rewrites
+            # them. "[8, 14]" is how the model writes two sources for one
+            # claim, and every later pass — the strip, renumbering, and the
+            # frontend's own marker regex — reads one number per bracket, so
+            # an unexpanded group reaches the reader carrying raw catalog
+            # positions and renders as prose with no chips.
+            response_text = expand_grouped_citations(response_text, max_n)
 
             # Strip BEFORE renumbering — the order is load-bearing.
             # renumber_citations assigns 1..N by first appearance and the chip

@@ -8,7 +8,10 @@ allowed to MISS a misattribution (status quo), never to strip a valid marker
 import json
 from pathlib import Path
 
-from app.services.citation_attribution import strip_misattributed_citations
+from app.services.citation_attribution import (
+    expand_grouped_citations,
+    strip_misattributed_citations,
+)
 
 # Two library papers. COOP is the one the live turn actually retrieved from.
 COOP = "985378c1"
@@ -202,3 +205,75 @@ def test_the_live_misattribution_is_stripped_item_by_item():
     assert sorted(stripped) == [2, 3, 4, 5]
     # The claims survive; only the false provenance goes.
     assert "penalties for violations and delays" in cleaned
+
+
+# --- grouped markers ---------------------------------------------------------
+#
+# The model emits "[8, 14]" for two sources on one claim. Every marker pattern
+# in this codebase — backend renumbering, the strip, and the frontend's own
+# MARKER regex — matches ONE number per bracket, so a grouped marker was
+# invisible to all three: it kept its raw catalog positions (numbers the reader
+# never sees and which point at nothing), earned no citation entries, and
+# rendered as prose with no chips. Found on 2026-08-18; pre-existing, not
+# introduced by mentions.
+
+
+def test_a_grouped_marker_is_expanded_into_separate_markers():
+    cleaned = expand_grouped_citations("Both agree [8, 14] here.", max_n=30)
+
+    # ", " on purpose: the frontend treats markers separated by whitespace and
+    # punctuation as ONE run, so the reader still sees a single group of chips.
+    assert cleaned == "Both agree [8], [14] here."
+
+
+def test_a_group_without_spaces_is_expanded_too():
+    assert expand_grouped_citations("see [1,2,3]", max_n=10) == "see [1], [2], [3]"
+
+
+def test_a_group_inside_a_fenced_block_is_untouched():
+    text = "1. Title\n```python\nmatrix[1, 2]\n```\n"
+
+    assert expand_grouped_citations(text, max_n=10) == text
+
+
+def test_a_group_inside_an_inline_code_span_is_untouched():
+    text = "index with `arr[1, 2]` please"
+
+    assert expand_grouped_citations(text, max_n=10) == text
+
+
+def test_a_bracketed_pair_that_cannot_be_citations_is_left_as_prose():
+    """A year range or a coordinate is not a citation. Gating on max_n is what
+    separates "[8, 14]" (real catalog positions) from "[2023, 2024]"."""
+    text = "covering [2023, 2024] and the pair [3, 99]"
+
+    # 3 is in range but 99 is not, so that group is not a citation run either.
+    assert expand_grouped_citations(text, max_n=30) == text
+
+
+def test_a_single_marker_is_untouched():
+    assert expand_grouped_citations("just [4] here", max_n=10) == "just [4] here"
+
+
+def test_expansion_makes_renumbering_see_every_grouped_source():
+    """The end-to-end failure: pre-fix, [8, 14] kept raw catalog positions in
+    the answer while [21] was renumbered to [1]."""
+    from app.services.chat_service import renumber_citations
+
+    expanded = expand_grouped_citations("Both agree [8, 14] but [21] differs.", max_n=30)
+    text, mapping = renumber_citations(expanded, 30)
+
+    assert text == "Both agree [1], [2] but [3] differs."
+    assert mapping == {8: 1, 14: 2, 21: 3}
+
+
+def test_expansion_lets_the_strip_see_a_misattributed_grouped_marker():
+    text = expand_grouped_citations(
+        "1. Federated Learning in the Sky: Aerial Networks cover this [2, 3].\n", max_n=5
+    )
+    cleaned, stripped = strip_misattributed_citations(
+        text, chunk_papers=ALL_COOP, paper_titles=TITLES
+    )
+
+    assert cleaned == "1. Federated Learning in the Sky: Aerial Networks cover this.\n"
+    assert sorted(stripped) == [2, 3]

@@ -1450,3 +1450,48 @@ async def test_mentions_that_resolve_to_nothing_report_widened(
     assert retrieving["scoped"] is True
     assert retrieving["scoped_count"] == 0
     assert retrieving["widened"] is True
+
+
+async def test_a_grouped_citation_marker_survives_the_whole_pipeline(
+    db_session: AsyncSession, project: Project, conversation_with_message
+):
+    """Pre-fix, "[8, 14]" reached the reader carrying raw CATALOG positions and
+    produced no chips: the strip, renumbering and the frontend marker regex all
+    read one number per bracket, so the group was invisible to every one of
+    them. Expansion happens before any of them count or rewrite markers."""
+    from app.agents.chat_agent import ChunkContext
+    from app.db.models import Paper
+    from app.services.chat_service import ChatService
+
+    conv = conversation_with_message
+    paper = Paper(project_id=project.id, title="Grouped Marker Paper", source="manual")
+    db_session.add(paper)
+    await db_session.commit()
+    await db_session.refresh(paper)
+
+    async def fake_stream(*args, **kwargs):
+        yield "Both agree [2, 3] but the third differs [1]."
+
+    chunks = [
+        ChunkContext(n=n, paper_id=paper.id, title=paper.title, chunk_index=n, text=f"c{n}")
+        for n in (1, 2, 3)
+    ]
+    svc = ChatService()
+    save = AsyncMock()
+
+    with (
+        patch.object(svc._embedding_svc, "embed", AsyncMock(return_value=[0.0] * 768)),
+        patch.object(svc, "_retrieve_history", AsyncMock(return_value=[])),
+        patch.object(svc._reformulator, "run", AsyncMock(return_value="q")),
+        patch.object(svc, "_retrieve_paper_chunks", AsyncMock(return_value=chunks)),
+        patch.object(svc._chat_agent, "stream", return_value=fake_stream()),
+        patch.object(svc._conv_svc, "save_message", save),
+    ):
+        async for _ in svc.respond(conv.id, "Test question"):
+            pass
+
+    persisted_text, citations = save.await_args.args[3], save.await_args.args[4]
+    # Every grouped source is renumbered by first appearance and carries a chip.
+    assert persisted_text == "Both agree [1], [2] but the third differs [3]."
+    assert [c["n"] for c in citations] == [1, 2, 3]
+    assert [c["chunk_index"] for c in citations] == [2, 3, 1]
