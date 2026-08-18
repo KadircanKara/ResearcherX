@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import type { ChatCitation, ChatEvent, ChatMessage } from "@/lib/types";
+import type { ChatCitation, ChatEvent, ChatMessage, Paper } from "@/lib/types";
 import { chatMessagesUrl, getConversation } from "@/lib/chat";
 import { getDevUserId } from "@/lib/api";
 import { CitationHoverCard, queryTermsFrom, resetChunkCache } from "@/components/citation-hover-card";
@@ -31,6 +31,75 @@ interface Props {
   onError?: (message: string) => void;
   /** Content of the message that was just submitted (optimistic display). */
   pendingContent?: string;
+  /** Paper ids the pending message was scoped to. */
+  pendingMentions?: string[];
+  /** Full paper list, for resolving mention ids to titles at render time. */
+  papers: Paper[];
+}
+
+function MentionedContent({ content, mentions, papers }: {
+  content: string;
+  mentions: string[];
+  papers: Paper[];
+}) {
+  if (mentions.length === 0) return <>{content}</>;
+  // Each id is resolved to its CURRENT title at render time, then matched
+  // against the message's frozen `content` string below. This does NOT make
+  // a rename "relabel every past turn" the way citation chips do: `content`
+  // is a historical record of what the user typed and is never rewritten,
+  // so after a rename the text still holds the OLD title. The highlight
+  // then simply stops matching (the mention keeps working for retrieval
+  // SCOPE, which is id-based) rather than tracking the new name.
+  const titles = mentions
+    .map((id) => papers.find((p) => p.id === id)?.title)
+    .filter((t): t is string => Boolean(t));
+  if (titles.length === 0) return <>{content}</>;
+  // Longest-first, same convention as reconcileMentions in lib/mentions.ts:
+  // otherwise a shorter co-mentioned title that prefixes a longer one (e.g.
+  // "RL" and "RL Survey") can steal the match and split the longer title in two.
+  const sortedTitles = [...titles].sort((a, b) => b.length - a.length);
+  const parts = content.split(new RegExp(`(${sortedTitles.map(escapeRegExp).map((t) => `@${t}`).join("|")})`));
+  return (
+    <>
+      {parts.map((part, i) =>
+        part.startsWith("@") && titles.some((t) => part === `@${t}`) ? (
+          // Rendered only inside the user bubble (bg-primary text-primary-foreground):
+          // bg-primary/10 + text-primary from the brief is blue-on-blue there and
+          // renders invisible. primary-foreground/20 keeps contrast against bg-primary.
+          <span key={i} className="rounded bg-primary-foreground/20 px-1 font-semibold text-primary-foreground">
+            {part}
+          </span>
+        ) : (
+          <span key={i}>{part}</span>
+        )
+      )}
+    </>
+  );
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Why a send was refused, in the user's terms.
+ *
+ * The two rejections a mention can cause are indistinguishable from "Request
+ * failed.", and both are the user's to fix: a 400 means a mentioned paper is
+ * no longer in the project (deleted in another tab between the pick and the
+ * send), a 422 means the scope is larger than the server accepts. Everything
+ * else stays deliberately generic — this says what the USER did, never what
+ * the server did internally.
+ */
+export function sendFailureMessage(status: number, mentionCount: number): string {
+  if (mentionCount === 0) return "Request failed.";
+  if (status === 400) {
+    return "A mentioned paper is no longer in this project. Remove the mention and send again.";
+  }
+  if (status === 422) {
+    return `This message scopes to ${mentionCount} papers, which is more than allowed. Remove some mentions and send again.`;
+  }
+  return "Request failed.";
 }
 
 export function ChatStream({
@@ -40,11 +109,20 @@ export function ChatStream({
   onDone,
   onError,
   pendingContent,
+  pendingMentions,
+  papers,
 }: Props) {
   const [messages, setMessages] = useState<ChatMessage[]>(initialMessages);
   const [streamingText, setStreamingText] = useState("");
   const [status, setStatus] = useState<"idle" | "thinking" | "retrieving" | "streaming">("idle");
-  const [retrievingInfo, setRetrievingInfo] = useState<{ paper_count: number; history_hits: number } | null>(null);
+  const [retrievingInfo, setRetrievingInfo] = useState<{
+    paper_count: number;
+    history_hits: number;
+    scoped: boolean;
+    scoped_count: number;
+    widened: boolean;
+    empty_mentions: string[];
+  } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
 
@@ -71,6 +149,9 @@ export function ChatStream({
     let cancelled = false;
     setStreamingText("");
     setStatus("thinking");
+    // Stale scope from a PRIOR turn must not survive into this one — a badge
+    // claiming a scope the current turn doesn't have is worse than no badge.
+    setRetrievingInfo(null);
     setError(null);
 
     const controller = new AbortController();
@@ -83,11 +164,11 @@ export function ChatStream({
         "Content-Type": "application/json",
         ...(uid ? { "X-Dev-User-Id": uid } : {}),
       },
-      body: JSON.stringify({ content: pendingContent }),
+      body: JSON.stringify({ content: pendingContent, mentioned_paper_ids: pendingMentions ?? [] }),
       signal: controller.signal,
     }).then(async (res) => {
       if (!res.ok || !res.body) {
-        const msg = "Request failed.";
+        const msg = sendFailureMessage(res.status, pendingMentions?.length ?? 0);
         setError(msg);
         setStatus("idle");
         onError?.(msg);
@@ -115,7 +196,14 @@ export function ChatStream({
               setStatus("thinking");
             } else if (ev.type === "retrieving") {
               setStatus("retrieving");
-              setRetrievingInfo({ paper_count: ev.paper_count, history_hits: ev.history_hits });
+              setRetrievingInfo({
+                paper_count: ev.paper_count,
+                history_hits: ev.history_hits,
+                scoped: ev.scoped,
+                scoped_count: ev.scoped_count,
+                widened: ev.widened,
+                empty_mentions: ev.empty_mentions ?? [],
+              });
             } else if (ev.type === "delta") {
               setStatus("streaming");
               setStreamingText((prev) => prev + ev.text);
@@ -149,7 +237,7 @@ export function ChatStream({
     });
 
     return () => { cancelled = true; controller.abort(); };
-  }, [pendingContent, projectId, conversationId]);
+  }, [pendingContent, pendingMentions, projectId, conversationId]);
 
   // The user message this answer replied to, for term highlighting. Resolving
   // conversation state is this component's job, not the card's.
@@ -218,7 +306,9 @@ export function ChatStream({
                 </ReactMarkdown>
               </div>
             ) : (
-              <p>{msg.content}</p>
+              <p>
+                <MentionedContent content={msg.content} mentions={msg.mentions} papers={papers} />
+              </p>
             )}
             {msg.role === "assistant" && msg.citations.length > 0 && (
               <div className="mt-2 flex flex-wrap gap-1">
@@ -268,6 +358,31 @@ export function ChatStream({
             {status === "retrieving" && (retrievingInfo
               ? `Retrieving from ${retrievingInfo.paper_count} paper${retrievingInfo.paper_count !== 1 ? "s" : ""}…`
               : "Retrieving…")}
+            {/* A paper the user NAMED that returned nothing. Kept visible
+                through streaming, not just the retrieval phase: the answer is
+                being written from fewer papers than were asked for, and that
+                is exactly when the reader needs to know. The durable record is
+                the answer itself — the model is instructed to say so — since
+                this flag is not persisted with the message. */}
+            {(status === "retrieving" || status === "streaming") &&
+              !!retrievingInfo?.empty_mentions?.length && (
+                <span className="ml-2 text-xs text-amber-600 dark:text-amber-500">
+                  no excerpts from {retrievingInfo.empty_mentions.join(", ")}
+                </span>
+              )}
+            {status === "retrieving" && retrievingInfo?.scoped && (
+              <span className="ml-2 text-xs text-muted-foreground">
+                {retrievingInfo.scoped_count === 0
+                  ? // Papers were mentioned but none could be scoped to (all
+                    // deleted, or retrieval could not run). The backend reports
+                    // this widened; "scoped to 0 papers" would claim a scope
+                    // that was never applied.
+                    "mentions unavailable — searching the library"
+                  : `scoped to ${retrievingInfo.scoped_count} paper${
+                      retrievingInfo.scoped_count === 1 ? "" : "s"
+                    }${retrievingInfo.widened ? " + library" : ""}`}
+              </span>
+            )}
           </div>
         </div>
       )}

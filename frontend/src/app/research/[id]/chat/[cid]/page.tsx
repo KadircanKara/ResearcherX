@@ -6,8 +6,11 @@ import { useParams, useSearchParams } from "next/navigation";
 import { ArrowLeft, Send } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ChatStream } from "@/components/chat-stream";
+import { MentionTextarea } from "@/components/mention-textarea";
 import { getConversation } from "@/lib/chat";
-import type { ChatConversationDetail } from "@/lib/types";
+import type { Mention } from "@/lib/mentions";
+import { listPapers } from "@/lib/projects";
+import type { ChatConversationDetail, Paper } from "@/lib/types";
 
 export default function ConversationPage() {
   const { id: projectId, cid } = useParams<{ id: string; cid: string }>();
@@ -20,6 +23,13 @@ export default function ConversationPage() {
   const [pendingContent, setPendingContent] = useState<string | undefined>(
     searchParams.get("q") ?? undefined
   );
+  const [mentions, setMentions] = useState<Mention[]>([]);
+  const [papers, setPapers] = useState<Paper[]>([]);
+  // ?m= carries the paper ids picked on the new-chat page, for the first
+  // message only — cleared once the pending message is confirmed.
+  const [pendingMentions, setPendingMentions] = useState<string[]>(
+    (searchParams.get("m") ?? "").split(",").filter(Boolean)
+  );
 
   useEffect(() => {
     getConversation(projectId, cid)
@@ -28,11 +38,33 @@ export default function ConversationPage() {
       .finally(() => setLoading(false));
   }, [projectId, cid]);
 
+  useEffect(() => {
+    listPapers(projectId).then(setPapers).catch(() => {});
+  }, [projectId]);
+
+  // What the composer held when the last message was sent. The textarea is
+  // cleared optimistically, so without this a rejected send (an unknown paper
+  // id, a scope over the server's cap, a dropped connection) destroys what the
+  // user typed and tells them nothing.
+  const [lastSent, setLastSent] = useState<{ text: string; mentions: Mention[] } | null>(null);
+
   function handleSend() {
     const q = input.trim();
     if (!q || pendingContent) return;
+    setLastSent({ text: q, mentions });
     setInput("");
+    setPendingMentions(mentions.map((m) => m.paperId));
+    setMentions([]);
     setPendingContent(q);
+  }
+
+  function handleSendFailed() {
+    if (!lastSent) return;
+    // Only into an empty composer. The textarea is disabled while a turn is in
+    // flight so this is the normal case, but restoring over something the user
+    // did manage to type would be a second way to lose text.
+    setInput((current) => (current.trim() ? current : lastSent.text));
+    setMentions((current) => (current.length ? current : lastSent.mentions));
   }
 
   if (loading) {
@@ -65,25 +97,23 @@ export default function ConversationPage() {
           conversationId={cid}
           initialMessages={detail.messages}
           pendingContent={pendingContent}
+          pendingMentions={pendingMentions}
+          papers={papers}
           onDone={() => setPendingContent(undefined)}
+          onError={handleSendFailed}
         />
       </div>
 
       {/* Input bar */}
       <div className="mt-4 flex gap-2 border-t border-border pt-4">
-        <textarea
-          rows={2}
+        <MentionTextarea
           value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey) {
-              e.preventDefault();
-              handleSend();
-            }
-          }}
-          placeholder="Ask a follow-up question…"
+          onChange={setInput}
+          mentions={mentions}
+          onMentionsChange={setMentions}
+          papers={papers}
           disabled={!!pendingContent}
-          className="flex-1 resize-none rounded-xl border border-border bg-background px-3 py-2 text-sm outline-none placeholder:text-muted-foreground disabled:opacity-50"
+          onSubmit={handleSend}
         />
         <Button
           size="sm"

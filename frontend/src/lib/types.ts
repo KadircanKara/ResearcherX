@@ -127,6 +127,8 @@ export interface ChatMessage {
   role: "user" | "assistant";
   content: string;
   citations: ChatCitation[];
+  /** Paper ids this turn was scoped to. Empty means global retrieval. */
+  mentions: string[];
   created_at: string;
 }
 
@@ -136,7 +138,17 @@ export interface ChatConversationDetail extends ChatConversation {
 
 export type ChatEvent =
   | { type: "thinking" }
-  | { type: "retrieving"; paper_count: number; history_hits: number }
+  | {
+      type: "retrieving";
+      paper_count: number;
+      history_hits: number;
+      scoped: boolean;
+      /** How many papers the user named. Stays put when widening fires. */
+      scoped_count: number;
+      widened: boolean;
+      /** Titles of mentioned papers that returned no chunks at all. */
+      empty_mentions: string[];
+    }
   | { type: "delta"; text: string }
   | { type: "done"; citations: ChatCitation[] }
   | { type: "error"; message: string };

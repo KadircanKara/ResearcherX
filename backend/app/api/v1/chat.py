@@ -107,12 +107,17 @@ async def send_message(
     if conv is None or conv.project_id != project_id:
         raise HTTPException(status_code=404, detail="Conversation not found")
 
+    try:
+        mentions = await _conv_svc.validate_mentions(db, project_id, payload.mentioned_paper_ids)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Unknown paper in mentions") from None
+
     # Persist the user message BEFORE starting the SSE stream.
     # ChatService.respond expects the message already in the conversation.
-    await _conv_svc.save_message(db, conversation_id, "user", payload.content)
+    await _conv_svc.save_message(db, conversation_id, "user", payload.content, mentions=mentions)
 
     async def event_stream() -> AsyncGenerator[dict, None]:
-        async for event in chat_service.respond(conversation_id, payload.content):
+        async for event in chat_service.respond(conversation_id, payload.content, mentions):
             yield event
 
     return EventSourceResponse(event_stream())

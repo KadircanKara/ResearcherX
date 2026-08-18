@@ -238,6 +238,59 @@ def _rewrite_run(run: str, keep: list[str]) -> str:
     return separator.join(keep)
 
 
+# A grouped marker: two or more catalog positions inside ONE bracket, which is
+# how the model writes two sources for a single claim ("[8, 14]"). Every marker
+# pattern in this system matches one number per bracket -- backend renumbering,
+# the strip above, and the FRONTEND's own MARKER regex in lib/citation-marks.ts
+# -- so before expansion a grouped marker was invisible to all three at once:
+# it kept its raw CATALOG positions in the delivered answer (numbers the reader
+# never sees, pointing at nothing), earned no entry in the citations array, and
+# rendered as prose with no chips.
+_GROUPED_RE = re.compile(r"\[(\d+(?:\s*,\s*\d+)+)\]")
+
+
+def expand_grouped_citations(text: str, max_n: int) -> str:
+    """Rewrite "[8, 14]" as "[8], [14]" so every pass can see both markers.
+
+    Expansion rather than teaching four separate patterns to parse groups: one
+    normalization at the front of the pipeline leaves renumbering, the strip
+    and the frontend all working on the single-number markers they already
+    handle correctly. It runs BEFORE the strip, so a grouped marker standing in
+    prose attributed to another paper is now strippable per-number.
+
+    ", " is the joiner because the frontend groups markers separated by
+    whitespace and punctuation into one run -- the reader still sees one group
+    of chips, and the hover card still steps through all of them.
+
+    GATED ON max_n, and that gate is the whole precision story: a bracketed
+    number pair is only a citation run if every number in it is a position the
+    catalog actually issued. Without it "[2023, 2024]" -- a year range in
+    ordinary prose -- would be expanded and then rewritten into two
+    "[source unavailable]" markers, mangling text that was never a citation.
+    A group holding even one out-of-range number is left entirely alone.
+
+    Code is never touched: `segment_offsets` owns that judgement for this
+    module, so `matrix[1, 2]` inside a fence or an inline span survives.
+    """
+    if max_n <= 0 or "," not in text:
+        return text
+
+    out: list[str] = []
+    cursor = 0
+    for seg_start, seg_end, is_code in segment_offsets(text):
+        if is_code:
+            continue
+        for match in _GROUPED_RE.finditer(text, seg_start, seg_end):
+            numbers = [int(part) for part in match.group(1).split(",")]
+            if not all(0 < n <= max_n for n in numbers):
+                continue
+            out.append(text[cursor : match.start()])
+            out.append(", ".join(f"[{n}]" for n in numbers))
+            cursor = match.end()
+    out.append(text[cursor:])
+    return "".join(out)
+
+
 def strip_misattributed_citations(
     text: str,
     *,

@@ -8,6 +8,12 @@ not installed and file-path invocation drops cwd from sys.path.
 One query per case pulls EVERY chunk with its cosine distance; all scoring
 happens in evals.retrieval.metrics, so the threshold sweep costs no extra queries.
 
+SCOPE HERE IS AT MOST ONE PAPER. `_scope_to_paper` / `_scope_to_nearest_paper`
+never assemble a multi-paper scope, so this module measures neither the
+multi-mention SQL gate nor `apply_per_paper_floor` -- it does not import
+`app.services.mention_ranker` at all. `evals.retrieval.mention_eval` is the
+module that does; see "Measured -- 2026-08-18" in README.md.
+
 CRITICAL, --hybrid mode: `metrics.Scored.distance` is `float | None` because a
 sparse-only admission has no cosine distance. `_hybrid_chunks_for`'s raw
 output must NEVER reach a distance-sorting code path (`simulate_retrieval`'s
@@ -158,7 +164,8 @@ _HYBRID_SQL = text("""
 # paper instead of the whole project. This is not an optimization -- it is
 # required for correctness. Production's `_retrieve_paper_chunks` issues the
 # hybrid query already scoped to `paper_infos`, so when scope is a single
-# paper (the targeter's case), THAT paper gets the entire `dense_pool`/
+# paper (a single `@` mention, or a single-paper project), THAT paper gets
+# the entire `dense_pool`/
 # `sparse_pool` to itself and its d_rank/s_rank are computed against only its
 # own chunks. Filtering `_HYBRID_SQL`'s project-wide result down to one paper
 # post-hoc would instead have that paper compete with 99 others for the same
@@ -433,7 +440,7 @@ async def _hybrid_chunks_for(
 
 def _scope_to_paper(chunks: list[Scored], title_contains: str) -> list[Scored]:
     """The chunks of the paper a case names, nearest first — what production
-    queries once the targeter has picked that paper."""
+    queries once a turn is scoped to that one paper."""
     needle = title_contains.lower()
     scoped = [c for c in chunks if needle in c.paper_title.lower()]
     return sorted(scoped, key=lambda c: c.distance)
@@ -442,9 +449,9 @@ def _scope_to_paper(chunks: list[Scored], title_contains: str) -> list[Scored]:
 def _scope_to_nearest_paper(chunks: list[Scored]) -> list[Scored]:
     """The chunks of whichever paper holds the globally nearest chunk.
 
-    Used for off_topic cases only: it simulates the targeter mis-firing on a
-    question the library cannot answer, which is the exact scenario
-    intra_paper_ceiling exists to contain.
+    Used for off_topic cases only: it simulates a user @-mentioning a paper
+    that turns out irrelevant to a question the library cannot answer, which
+    is the exact scenario intra_paper_ceiling exists to contain.
     """
     if not chunks:
         return []
@@ -667,8 +674,8 @@ async def main() -> None:  # noqa: PLR0912, PLR0915 — a report script, not a l
         "--targeted",
         action="store_true",
         help=(
-            "scope each case to its own paper, as the paper targeter does, and report "
-            "whether the answering chunk survives production's single-paper cut"
+            "scope each case to its own paper, as a single `@` mention does, and "
+            "report whether the answering chunk survives production's single-paper cut"
         ),
     )
     parser.add_argument(

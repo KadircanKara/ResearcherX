@@ -127,6 +127,48 @@ def build_papers_block(papers: list[PaperMetaContext]) -> str:
     return "PAPERS ASSIGNED TO THIS PROJECT:\n" + "\n".join(lines)
 
 
+def build_scope_block(
+    titles: list[str], widened: bool, empty_titles: list[str] | None = None
+) -> str:
+    """Tell the model what the USER restricted this turn to.
+
+    Without it the model cannot distinguish a narrow evidence set from a thin
+    one, and SYSTEM's "the assigned papers do not appear to cover this" rule
+    fires as a false statement about the whole library.
+
+    `empty_titles` are papers the user named that returned NO chunks -- their
+    nearest chunk fell outside the distance gate, or they were never ingested.
+    They are marked rather than dropped: the model is told the user named them,
+    so silence about them reads as "this paper does not discuss X" when the
+    truth is "I was handed nothing from it". Marking the gap is what lets the
+    model say so instead of inventing a reason. A named paper contributing
+    nothing is currently REACHABLE and silent -- see the multi-mention gate
+    note in CLAUDE.md.
+
+    Collapses whitespace in each title for the same reason build_papers_block
+    does: a title carrying a newline could otherwise forge a line of this
+    block.
+    """
+    if not titles:
+        return ""
+    empty = {" ".join(t.split()) for t in (empty_titles or [])}
+    lines = []
+    for title in titles:
+        clean = " ".join(title.split())
+        lines.append(f"- {clean} — no excerpts retrieved" if clean in empty else f"- {clean}")
+    tail = (
+        "Excerpts from other papers are also provided; use them for comparison."
+        if widened
+        else "Answer from these. Excerpts from other papers are not available this turn."
+    )
+    if empty:
+        tail += (
+            " Where a paper is marked no excerpts were retrieved, say that nothing from it"
+            " was available rather than describing what it does or does not contain."
+        )
+    return "SCOPE: the user restricted this question to:\n" + "\n".join(lines) + f"\n{tail}"
+
+
 class ChatAgentInput(BaseModel):
     query: str
     prior_messages: list[dict]  # [{"role": "user"|"assistant", "content": "..."}]
@@ -137,6 +179,14 @@ class ChatAgentInput(BaseModel):
     # even built -- this model has no opinion on that decision, only on how
     # to render whatever PaperMetaContext list it is handed.
     papers: list[PaperMetaContext] = Field(default_factory=list)
+    # Titles the user named with "@" this turn, and whether the widener let the
+    # rest of the library in beside them. Empty means unscoped.
+    scope_titles: list[str] = Field(default_factory=list)
+    scope_widened: bool = False
+    # Mentioned papers that returned no chunks at all. Marked in the SCOPE
+    # block so the model reports the gap instead of describing a paper it was
+    # handed nothing from.
+    scope_empty_titles: list[str] = Field(default_factory=list)
 
 
 class ChatAgent:
@@ -162,6 +212,9 @@ class ChatAgent:
         papers_block = build_papers_block(inp.papers)
         if papers_block:
             blocks.append(papers_block)
+        scope_block = build_scope_block(inp.scope_titles, inp.scope_widened, inp.scope_empty_titles)
+        if scope_block:
+            blocks.append(scope_block)
         blocks.append(context_block)
         messages.append(
             {

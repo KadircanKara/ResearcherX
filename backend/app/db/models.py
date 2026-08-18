@@ -202,6 +202,9 @@ class ChatMessage(Base):
     role: Mapped[str] = mapped_column(String(16))  # "user" | "assistant"
     content: Mapped[str] = mapped_column(Text)
     citations: Mapped[list] = mapped_column(JSON, default=list)
+    # Paper ids the user explicitly scoped this turn to (see
+    # docs — "@" mentions). Empty list means unscoped: retrieval was global.
+    mentions: Mapped[list] = mapped_column(JSON, default=list, server_default="[]")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
     conversation: Mapped[ChatConversation] = relationship(back_populates="messages")

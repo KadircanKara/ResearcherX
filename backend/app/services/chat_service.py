@@ -14,13 +14,14 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.chat_agent import ChatAgent, ChatAgentInput, ChunkContext, PaperMetaContext
-from app.agents.paper_targeter import PaperTargeterAgent, TargeterInput
 from app.agents.query_reformulator import QueryReformulatorAgent, ReformulatorInput
+from app.agents.scope_widener import ScopeWidenerAgent, WidenerInput
 from app.core.config import settings
 from app.core.logging import log
 from app.db.models import Paper
 from app.db.session import SessionLocal
 from app.services.citation_attribution import (
+    expand_grouped_citations,
     split_prose_segments,
     strip_misattributed_citations,
 )
@@ -28,6 +29,7 @@ from app.services.conversation_service import ConversationService
 from app.services.embedding_service import EmbeddingService
 from app.services.hybrid_ranker import fuse_rrf, keep_within_rank_window
 from app.services.intra_paper_ranker import keep_within_paper
+from app.services.mention_ranker import apply_per_paper_floor
 
 _HISTORY_TOP_K = 5
 
@@ -124,13 +126,14 @@ def needs_paper_metadata(question: str, prior_messages: list[dict]) -> bool:
     others -- and "how" alone opens a large share of all questions). The
     list of collisions grows with every paper added, silently, with nothing
     to flag when a new author erodes the saving again. It also bought less
-    than it cost: the paper TARGETER, which decides retrieval scoping, only
-    ever receives paper TITLES, so the system already cannot resolve
-    "Kara's paper" to a paper at the retrieval layer -- naming the author in
-    the answer-time block never fixed that; it only let the model repeat a
-    name for chunks it had already been handed some other way. Do not
-    reintroduce corpus tokens to "fix" this gap without solving that
-    retrieval-layer problem first, or the same three collision classes
+    than it cost: retrieval scope is set only by the explicit "@" mentions
+    the user picks -- nothing resolves a natural-language reference like
+    "Kara's paper" to a paper id at the retrieval layer, so naming the
+    author in the answer-time block never fixed that; it only let the model
+    repeat a name for chunks it had already been handed some other way (an
+    explicit mention, or the whole library). Do not reintroduce corpus
+    tokens to "fix" this gap without solving that retrieval-layer problem
+    first, or the same three collision classes
     return.
 
     A pronoun-only follow-up such as "and that one?" carries no keyword or
@@ -221,11 +224,16 @@ class ChatService:
     def __init__(self) -> None:
         self._embedding_svc = EmbeddingService()
         self._reformulator = QueryReformulatorAgent()
-        self._targeter = PaperTargeterAgent()
+        self._widener = ScopeWidenerAgent()
         self._chat_agent = ChatAgent()
         self._conv_svc = ConversationService()
 
-    async def respond(self, conversation_id: str, user_content: str) -> AsyncGenerator[dict, None]:
+    async def respond(
+        self,
+        conversation_id: str,
+        user_content: str,
+        mentioned_paper_ids: list[str] | None = None,
+    ) -> AsyncGenerator[dict, None]:
         """Yield SSE event dicts for one user message."""
         try:
             yield {"event": "thinking", "data": "{}"}
@@ -284,44 +292,25 @@ class ChatService:
             # This project's paper ids + titles: scopes the global top-k chunk
             # query below to this project and labels citations by title.
             paper_infos = [PaperInfo(paper_id=p.id, title=p.title) for p in paper_rows]
-            # Defaults to the whole project; narrowed below only when
-            # targeting picks one paper. Initialised here, unconditionally,
-            # so it is always defined at the 'retrieving' event below even
-            # when embedding failed or the project has no papers.
+
+            # Deduped, order-preserving. The API layer already dedupes before
+            # calling respond(), so this is unreachable today -- but a
+            # duplicated id would double-join the jsonb scope CTE (every
+            # chunk returned twice) and flip `single_paper` to False,
+            # silently swapping the distance gate. apply_per_paper_floor is
+            # already defensive about this; retrieval should be too.
+            mentioned = list(dict.fromkeys(mentioned_paper_ids or []))
             scope = paper_infos
+            widened = False
+            mentioned_infos = []
 
             if query_embedding is not None:
-                # Retrieve relevant history
                 async with SessionLocal() as db:
                     history_hits = await self._retrieve_history(
                         db, conversation_id, query_embedding
                     )
 
                 if paper_infos:
-                    # Reformulate only when there IS a conversation to resolve
-                    # against. A first turn is already standalone, so the call
-                    # would buy nothing and is skipped.
-                    #
-                    # Gate on prior_messages ALONE -- never on history_hits or
-                    # on reformulation_context below. conversation_service's
-                    # save_message() fires asyncio.create_task(_embed_message
-                    # (...)) for the user's own message before respond() runs,
-                    # so by the time _retrieve_history executes above, that
-                    # row is frequently already embedded and sitting in
-                    # conversation_message_embeddings. It then self-matches
-                    # its own query embedding at distance ~= 0 (comfortably
-                    # under similarity_threshold) and comes back as a
-                    # "history hit" -- even on a genuine first turn. Gating on
-                    # `prior_messages + history_hits` therefore raced that
-                    # background embedding task: whether the reformulator ran
-                    # on a first turn depended on embedding latency, not on
-                    # whether a prior turn actually existed. prior_messages is
-                    # immune to that race (it's read from conv.messages,
-                    # loaded before this turn's message was embedded), and
-                    # hits can only ever come from THIS conversation, so an
-                    # empty prior_messages means any hit IS the current
-                    # message. Do not "simplify" this back to
-                    # `if reformulation_context:`.
                     reformulation_context = prior_messages + history_hits
                     retrieval_query = user_content
                     if prior_messages:
@@ -340,77 +329,53 @@ class ChatService:
                         else query_embedding
                     )
 
-                    async with SessionLocal() as db:
-                        candidates, total_chunks = await self._shortlist_papers(
-                            db, paper_infos, retrieval_embedding, retrieval_query
-                        )
+                    by_id = {p.paper_id: p for p in paper_infos}
+                    mentioned_infos = [by_id[pid] for pid in mentioned if pid in by_id]
 
-                    # Scope retrieval to one paper when the question might be
-                    # about one paper. Skipped for single-paper projects: the
-                    # scope would be that one paper whether the targeter names
-                    # it or answers None, so targeting there is a guaranteed
-                    # no-op that still costs a full extra LLM call every turn
-                    # -- and "upload one PDF and ask about it" is the common
-                    # case. Also skipped when the whole library already fits
-                    # the context budget; that second skip is a COST decision,
-                    # not a correctness one -- with similarity_threshold in
-                    # play, scoping to one paper can still change which chunks
-                    # come back even under budget (a threshold-passing chunk
-                    # from another paper is not available once scoped). Small
-                    # projects deliberately keep that original misattribution
-                    # risk in exchange for skipping this LLM call.
-                    if (
-                        len(paper_infos) > 1
-                        and total_chunks > settings.max_context_chunks
-                        and candidates
-                    ):
-                        target_id = await self._targeter.run(
-                            TargeterInput(
-                                query=retrieval_query,
-                                candidates=[
-                                    {"paper_id": c.paper_id, "title": c.title} for c in candidates
-                                ],
-                                prior_messages=reformulation_context,
+                    if mentioned_infos:
+                        # The widener may only ADD the library. It has no vote
+                        # on whether the named papers are retrieved.
+                        widened = await self._widener.run(
+                            WidenerInput(
+                                query=user_content,
+                                mentioned_titles=[p.title for p in mentioned_infos],
                             )
                         )
-                        if target_id is not None:
-                            scope = [c for c in candidates if c.paper_id == target_id]
-                            log.info(
-                                "paper_targeted",
-                                conversation_id=conversation_id,
-                                paper_id=target_id,
-                                candidates=len(candidates),
-                            )
-
-                    async with SessionLocal() as db:
-                        paper_chunks = await self._retrieve_paper_chunks(
-                            db, scope, retrieval_embedding, retrieval_query
+                        paper_chunks, widened = await self._retrieve_mentioned_chunks(
+                            mentioned_infos,
+                            paper_infos,
+                            retrieval_embedding,
+                            retrieval_query,
+                            widened,
                         )
-
-                    if scope is not paper_infos and not paper_chunks:
-                        # A targeted paper can still retrieve nothing, and
-                        # chat_agent then answers ungrounded -- a worse
-                        # failure than the misattribution this feature fixes.
-                        # Re-querying the untargeted scope keeps the answer
-                        # grounded, same as if targeting had never fired.
-                        #
-                        # Under dense-only retrieval (hybrid_retrieval=False)
-                        # this fires exactly when every chunk of the targeted
-                        # paper sits at or beyond intra_paper_ceiling (the
-                        # single-paper SQL cutoff -- see
-                        # _retrieve_paper_chunks). Under hybrid retrieval the
-                        # sparse arm has NO distance gate, so a paper whose
-                        # every chunk sits beyond the ceiling can still be
-                        # admitted via a lexical match -- a sparse-only
-                        # admission is treated as grounded here, same as any
-                        # other chunk. This branch therefore fires strictly
-                        # LESS often than it did before hybrid retrieval
-                        # shipped, not under the same condition.
+                        scope = paper_infos if widened else mentioned_infos
+                    else:
                         async with SessionLocal() as db:
                             paper_chunks = await self._retrieve_paper_chunks(
                                 db, paper_infos, retrieval_embedding, retrieval_query
                             )
-                        scope = paper_infos
+
+            if mentioned and not mentioned_infos:
+                # The user named papers and NONE of them could be scoped to:
+                # every one was deleted between validation and this turn, the
+                # embedding call failed so retrieval never ran, or the project
+                # holds no papers at all. Whatever reached the model is the
+                # whole library (or nothing), never the named papers -- so the
+                # event reports widened, consistent with every other
+                # fall-back-to-global path. Reporting `scoped` with
+                # widened=False would tell the UI a scope was applied that was
+                # not.
+                widened = True
+
+            # Papers the user named that contributed NOTHING. One cause is
+            # left, now that the candidate guarantee has removed rank
+            # domination as the other: a mentioned paper whose nearest chunk
+            # falls outside the distance gate returns zero rows from every
+            # query, guaranteed or not. Silence about it is the harm -- the answer
+            # reads as a confident one-paper reply to a two-paper question --
+            # so it is named to the model and to the user rather than dropped.
+            contributing = {c.paper_id for c in paper_chunks}
+            empty_titles = [p.title for p in mentioned_infos if p.paper_id not in contributing]
 
             yield {
                 "event": "retrieving",
@@ -418,6 +383,12 @@ class ChatService:
                     {
                         "paper_count": len(scope),
                         "history_hits": len(history_hits),
+                        "scoped": bool(mentioned),
+                        # How many papers the USER named — not len(scope),
+                        # which becomes the whole project once widening fires.
+                        "scoped_count": len(mentioned_infos) if mentioned else 0,
+                        "widened": widened,
+                        "empty_mentions": empty_titles,
                     }
                 ),
             }
@@ -429,6 +400,12 @@ class ChatService:
                 prior_messages=all_prior,
                 paper_chunks=paper_chunks,
                 papers=paper_metas,
+                # The papers the USER named, always — never `scope`, which is
+                # the whole project once widening fires. A SCOPE block listing
+                # 100 titles would say nothing and cost ~2k tokens.
+                scope_titles=[p.title for p in mentioned_infos],
+                scope_widened=widened,
+                scope_empty_titles=empty_titles,
             )
 
             # Stream response
@@ -444,6 +421,14 @@ class ChatService:
             # sees. This also replaces out-of-range markers, so it subsumes
             # the validation pass that used to live here.
             max_n = len(paper_chunks)
+
+            # Expand grouped markers FIRST, before anything counts or rewrites
+            # them. "[8, 14]" is how the model writes two sources for one
+            # claim, and every later pass — the strip, renumbering, and the
+            # frontend's own marker regex — reads one number per bracket, so
+            # an unexpanded group reaches the reader carrying raw catalog
+            # positions and renders as prose with no chips.
+            response_text = expand_grouped_citations(response_text, max_n)
 
             # Strip BEFORE renumbering — the order is load-bearing.
             # renumber_citations assigns 1..N by first appearance and the chip
@@ -495,6 +480,140 @@ class ChatService:
                 "data": json.dumps({"message": "Chat failed. Please try again."}),
             }
 
+    async def _retrieve_mentioned_chunks(
+        self,
+        scope: list[PaperInfo],
+        all_papers: list[PaperInfo],
+        embedding: list[float],
+        query_text: str,
+        widened: bool,
+    ) -> tuple[list[ChunkContext], bool]:
+        """Retrieve chunks for a turn scoped to explicitly @-mentioned papers.
+
+        Scopes to `scope` (the papers the user named) and guarantees each a
+        floor via `apply_per_paper_floor`. Then folds in the rest of
+        `all_papers` when `widened` is True OR the scoped query comes back
+        completely empty -- a paper can be mentioned before its ingest
+        finished, and answering from nothing is worse than answering wider
+        than asked; that empty-scope case FORCES widened True regardless of
+        what the caller passed in, which is why the flag is returned, not
+        just consumed.
+
+        THE FLOOR CAN ONLY PIN WHAT WAS FETCHED, so the fetch -- not the
+        floor -- is where the representation guarantee has to live.
+        `apply_per_paper_floor` reorders CANDIDATES; a paper whose chunks the
+        candidate query never returned cannot be pinned at all. Handing it a
+        candidate list truncated to the budget makes it a strict no-op: 60
+        candidates all from paper A, scope [A, B], floor 5, budget 60 -> 60
+        kept, papers ['A'] -- "compare @A and @B" returning nothing from B,
+        the exact failure the floor exists for.
+
+        A BIGGER POOL WAS THE FIRST ATTEMPT AND IT IS NOT A GUARANTEE. Asking
+        for `max_context_chunks + floor * len(scope)` candidates only rescues
+        a second paper whose best chunk happens to sit within `floor *
+        len(scope)` ranks of the budget edge. Measured on the 100-paper corpus
+        (2026-08-18, .superpowers/multi-mention-measurement.md): with a pool of
+        70, `hybrid-split-federated`'s second mentioned paper first appears at
+        fused rank 72 and `nemo-mobility`'s at rank 91 -- both comfortably
+        INSIDE the 0.75 distance gate, both contributing zero chunks. The
+        headroom is a function of how badly one paper dominates the ranking,
+        which is not a quantity anything controls.
+
+        THE GUARANTEE IS STRUCTURAL INSTEAD: `guarantee_per_paper` makes
+        `_retrieve_paper_chunks` fetch every scoped paper's OWN nearest
+        `floor` chunks as candidates whatever their global rank, and append
+        them AFTER the ranked pool so they are present without outranking
+        anything. Rank domination therefore cannot defeat the floor, and the
+        pool goes back to exactly the budget: the extra cost is bounded at
+        `floor * len(scope)` rows -- a function of the CONTEXT WINDOW and of
+        how many papers the USER named (capped at 10 by
+        `ChatRequest.mentioned_paper_ids`, so <= 60 + 50 = 110 rows), never of
+        library size. Per-paper allocation keyed on library size is what once
+        pulled 191 chunks and killed every turn on `context_length_exceeded`.
+        Both numbers are CANDIDATE bounds only; the final ceiling is still
+        exactly `settings.max_context_chunks`, applied here in Python.
+
+        The guarantee does NOT reopen the distance gate: a guaranteed row
+        still has to clear the same cutoff, so a paper whose nearest chunk
+        misses the gate still contributes nothing. That is the gate's
+        decision, measured separately and deliberately left alone.
+
+        WIDENING PINS THE FLOOR, NOT EVERYTHING THE SCOPED QUERY RETURNED.
+        Pinning the whole scoped result leaves `max_context_chunks - len(...)`
+        == 0 whenever the named papers fill the budget on their own (four
+        golden-set questions do exactly that -- evals/retrieval/README.md), so
+        no library chunk ever lands while the SCOPE block still tells the model
+        "Excerpts from other papers are also provided". The returned flag
+        therefore reports what ACTUALLY happened: widened is True only when a
+        chunk from OUTSIDE the mention scope landed, or when the scope was
+        empty and the turn genuinely ran over the whole library.
+
+        Returns the final chunks, renumbered over their FINAL order (`n`
+        must follow what the model is actually shown -- two lists pinned +
+        filled both start their own `n` at 1, so skipping this step lets two
+        excerpts share a citation marker), and the widened flag as it was
+        ACTUALLY applied.
+        """
+        floor = settings.mention_per_paper_floor
+        budget = settings.max_context_chunks
+        scope_ids = [p.paper_id for p in scope]
+
+        async with SessionLocal() as db:
+            candidates = await self._retrieve_paper_chunks(
+                db,
+                scope,
+                embedding,
+                query_text,
+                pool_limit=budget,
+                guarantee_per_paper=floor,
+            )
+
+        if not (widened or not candidates):
+            # Narrow: floor first, then the rest of the budget by relevance,
+            # all inside the papers the user named.
+            return self._renumber_chunks(
+                apply_per_paper_floor(
+                    candidates,
+                    paper_of=lambda c: c.paper_id,
+                    scope=scope_ids,
+                    floor=floor,
+                    budget=budget,
+                )
+            ), False
+
+        # Widened: pin ONLY the floor, so the global fill has room to land.
+        # `min(...)` keeps the pin inside the budget when floor * papers would
+        # exceed it (reachable only with a small max_context_chunks).
+        pinned = apply_per_paper_floor(
+            candidates,
+            paper_of=lambda c: c.paper_id,
+            scope=scope_ids,
+            floor=floor,
+            budget=min(floor * len(scope), budget),
+        )
+        pinned_keys = {(c.paper_id, c.chunk_index) for c in pinned}
+        remaining = budget - len(pinned)
+        extra: list[ChunkContext] = []
+        if remaining > 0:
+            async with SessionLocal() as db:
+                # `+ len(pinned)`: the fill spans the whole library, so up to
+                # len(pinned) of its rows are the already-pinned chunks and get
+                # dropped below. Asking for that many extra rows is what stops
+                # the budget coming back short. Bounded by the same reasoning as
+                # the scoped pool above.
+                fill = await self._retrieve_paper_chunks(
+                    db,
+                    all_papers,
+                    embedding,
+                    query_text,
+                    pool_limit=budget + len(pinned),
+                )
+            extra = [c for c in fill if (c.paper_id, c.chunk_index) not in pinned_keys][:remaining]
+
+        named = set(scope_ids)
+        widened = not candidates or any(c.paper_id not in named for c in extra)
+        return self._renumber_chunks(pinned + extra), widened
+
     async def _retrieve_history(
         self,
         db: AsyncSession,
@@ -527,155 +646,21 @@ class ChatService:
         rows = result.fetchall()
         return [{"role": r.role, "content": r.content} for r in rows]
 
-    async def _shortlist_papers(
-        self,
-        db: AsyncSession,
-        paper_infos: list[PaperInfo],
-        query_embedding: list[float],
-        query_text: str,
-    ) -> tuple[list[PaperInfo], int]:
-        """Shortlist candidate papers for the targeter, from two arms.
-
-        DENSE arm: papers ranked by their nearest chunk, capped at
-        `targeter_dense_candidates`. LEXICAL arm: the same papers ranked by
-        ts_rank_cd over their TITLES, capped at `targeter_lexical_candidates`.
-        The lexical hits are UNIONED onto the dense list — appended, never
-        fused — so the arm can only add candidates. Also returns the project's
-        TOTAL chunk count across every paper, which is what decides whether
-        targeting is worth an LLM call at all.
-
-        The two arms see different things and that is the point. Nearest-chunk
-        distance ranks on body text; a question that identifies its paper by a
-        property of the TITLE ranks its target wherever the body happens to
-        fall — 28th of 100, measured live. See `targeter_dense_candidates` in
-        config.py for the full measurement and for why this is a union rather
-        than an RRF fusion.
-
-        No SQL LIMIT, on purpose. The GROUP BY already scans the project's
-        chunks either way, so a LIMIT would save only the transfer of a few
-        dozen rows while costing a second round trip to learn the total. The
-        total is what decides whether targeting is worth an LLM call at all.
-
-        MIN distance rather than a mean of the nearest few: measured across
-        seven questions with known target papers the two ranked about equally
-        well, and MIN is simpler. No similarity_threshold filter — the
-        threshold belongs at retrieval time, and applying it here could empty
-        the shortlist on a vaguely worded question.
-        """
-        if len(paper_infos) <= 1:
-            # A single-paper project has nothing to disambiguate: the
-            # candidate list would be that one paper regardless of what this
-            # query returns, so skip it and its SQL round trip entirely.
-            return [], 0
-        sql = text("""
-            WITH scope AS (
-                SELECT value AS paper_id
-                FROM jsonb_array_elements_text(CAST(:ids AS jsonb))
-            )
-            SELECT c.paper_id,
-                   MIN(c.embedding <=> CAST(:qvec AS vector)) AS best,
-                   COUNT(*) AS n_chunks
-            FROM paper_chunk_embeddings c
-            JOIN scope s ON s.paper_id = c.paper_id
-            WHERE c.model = :model
-            GROUP BY c.paper_id
-            ORDER BY best ASC
-        """)
-        result = await db.execute(
-            sql,
-            {
-                "qvec": _vec_str(query_embedding),
-                "ids": json.dumps([p.paper_id for p in paper_infos]),
-                "model": settings.embedding_model,
-            },
-        )
-        rows = result.fetchall()
-        by_id = {p.paper_id: p for p in paper_infos}
-        total_chunks = sum(r.n_chunks for r in rows)
-        candidates = [by_id[r.paper_id] for r in rows if r.paper_id in by_id][
-            : settings.targeter_dense_candidates
-        ]
-
-        chosen = {p.paper_id for p in candidates}
-        for paper_id in await self._lexical_title_matches(db, paper_infos, query_text):
-            if paper_id not in chosen and paper_id in by_id:
-                candidates.append(by_id[paper_id])
-                chosen.add(paper_id)
-        return candidates, total_chunks
-
-    async def _lexical_title_matches(
-        self,
-        db: AsyncSession,
-        paper_infos: list[PaperInfo],
-        query_text: str,
-    ) -> list[str]:
-        """Paper ids whose TITLE matches the question lexically, best first.
-
-        OR-of-lexemes, deliberately, where the rest of this codebase uses
-        `websearch_to_tsquery`: that ANDs every term, so a question of a dozen
-        words matches no title at all — measured at 22 of 30 golden-set
-        questions matching nothing even against full chunk text, and a title
-        is a handful of words. The OR is what makes a partial title match
-        rank; `ts_rank_cd` is what keeps the noise below the real hit.
-
-        Titles are read from `papers`, not from `paper_infos`, so a title
-        corrected in the Papers tab takes effect on the next question with no
-        re-index — unlike the chunk embeddings, which are frozen at ingest.
-
-        Fail-open: the arm returns nothing on any error. It exists to ADD
-        candidates the dense arm missed; a broken lexical query must degrade
-        to the dense-only shortlist, not fail the turn.
-        """
-        if not query_text.strip():
-            return []
-        # A query of pure stopwords produces an empty tsvector, string_agg
-        # then returns NULL, and `@@ NULL` is NULL — no rows, no error.
-        sql = text("""
-            WITH scope AS (
-                SELECT value AS paper_id
-                FROM jsonb_array_elements_text(CAST(:ids AS jsonb))
-            ),
-            q AS (
-                SELECT (
-                    SELECT string_agg(lexeme, ' | ')
-                    FROM unnest(to_tsvector('english', :question))
-                )::tsquery AS tq
-            )
-            SELECT p.id AS paper_id
-            FROM papers p
-            JOIN scope s ON s.paper_id = p.id
-            CROSS JOIN q
-            WHERE to_tsvector('english', p.title) @@ q.tq
-            ORDER BY ts_rank_cd(to_tsvector('english', p.title), q.tq) DESC, p.id ASC
-            LIMIT :limit
-        """)
-        try:
-            result = await db.execute(
-                sql,
-                {
-                    "ids": json.dumps([p.paper_id for p in paper_infos]),
-                    "question": query_text,
-                    "limit": settings.targeter_lexical_candidates,
-                },
-            )
-            return [r.paper_id for r in result.fetchall()]
-        except Exception as exc:
-            log.warning("lexical_title_arm_failed_open", error=str(exc)[:200])
-            return []
-
     async def _retrieve_paper_chunks(
         self,
         db: AsyncSession,
         paper_infos: list[PaperInfo],
         query_embedding: list[float],
         query_text: str,
+        pool_limit: int | None = None,
+        guarantee_per_paper: int = 0,
     ) -> list[ChunkContext]:
         """Retrieve the nearest chunks from `paper_infos`, ranked by distance.
 
         `paper_infos` is the retrieval SCOPE the caller decided on -- the
-        whole project's papers by default, or the single paper the targeter
-        picked. This method has no opinion on which; it just ranks whatever
-        scope it is given.
+        whole project's papers by default, or the paper(s) the user explicitly
+        @-mentioned. This method has no opinion on which; it just ranks
+        whatever scope it is given.
 
         ONE query, and no per-paper ceiling. Cosine similarity spreads the
         result across papers by itself when scope is the whole library:
@@ -695,7 +680,7 @@ class ChatService:
 
         SINGLE-PAPER SCOPE IS DIFFERENT, and it is detected here rather than
         passed in: one paper in `paper_infos` means the user already named the
-        paper (the targeter picked it, or the project holds only that one), so
+        paper (an explicit @ mention, or the project holds only that one), so
         an absolute cosine cutoff tuned for beating OTHER papers is the wrong
         instrument. Two changes apply, and only together:
           - the SQL cutoff becomes `intra_paper_ceiling` (looser, a noise
@@ -733,32 +718,75 @@ class ChatService:
         A stopword-only question degrades for free: websearch_to_tsquery
         returns an empty query, `@@` matches nothing, the sparse arm is empty,
         and RRF collapses to the dense ordering.
+
+        `pool_limit` bounds the RANKED candidate list and defaults to
+        `settings.max_context_chunks`, i.e. every existing caller is unchanged
+        byte for byte.
+
+        `guarantee_per_paper` adds a REPRESENTATION guarantee on top of that
+        ranked list: every paper in `paper_infos` contributes its own nearest
+        `guarantee_per_paper` chunks as candidates whatever their global rank.
+        It exists because a global ranking is free to be owned end to end by
+        one paper -- measured at fused ranks 72 and 91 for a second mentioned
+        paper well inside the distance gate (see `_retrieve_mentioned_chunks`)
+        -- and `apply_per_paper_floor` cannot pin a row this method never
+        returned.
+
+        Three properties of the guarantee, all load-bearing:
+
+        - IT IS PRESENCE, NOT PROMOTION. The guaranteed rows are appended
+          AFTER the ranked list, in per-paper rank order, so the floor can pin
+          them while the relevance fill still reaches every genuinely
+          better-ranked chunk first. Injecting them INTO the ranking would
+          need a rank they have not earned: under hybrid the ranking is a
+          fused RRF score, and a synthetic rank there would either outrank
+          real candidates or be arbitrary. Leaving them out of `fuse_rrf`
+          entirely is the only honest option -- a paper's own top chunk by
+          distance says nothing about how it compares to another paper's
+          chunks after fusion.
+        - IT DOES NOT TOUCH THE GATE. The guarantee query carries the same
+          `threshold` as the ranked query, so it can rescue a paper losing to
+          rank domination and never one losing to the distance cutoff. Zero of
+          30 golden-set answer papers sit in the contested [0.75, 0.85) band,
+          so the gate is measured as not being the problem.
+        - IT IS INERT FOR A SINGLE-PAPER SCOPE, and must be: with one paper
+          in scope nothing can starve it, its own top chunks already ARE the
+          top of the ranking, and the single-paper cut
+          (`intra_paper_rank_window` / `intra_paper_delta`) is a deliberate
+          policy the guarantee has no business overriding.
+
+        This method never returns more than `pool_limit + guarantee_per_paper
+        * len(paper_infos)` rows, so a caller that passes neither still cannot
+        exceed the context budget.
         """
         if not paper_infos:
             return []
+        pool = pool_limit if pool_limit is not None else settings.max_context_chunks
         # See the docstring: scope size, not a flag, decides the policy.
         single_paper = len(paper_infos) == 1
         threshold = settings.intra_paper_ceiling if single_paper else settings.similarity_threshold
+        guarantee = 0 if single_paper else max(0, guarantee_per_paper)
         qvec = _vec_str(query_embedding)
         paper_title_map = {p.paper_id: p.title for p in paper_infos}
         ids = json.dumps([p.paper_id for p in paper_infos])
 
         if not settings.hybrid_retrieval:
-            rows = await self._dense_only_rows(db, ids, qvec, threshold)
+            rows = await self._dense_only_rows(db, ids, qvec, threshold, pool)
             # Re-applied in Python on purpose. LIMIT bounds what crosses the wire;
             # this bounds what reaches the model. The budget is the single
             # invariant that keeps chat working at any library size, so it must
             # not depend on a SQL clause surviving a future edit to the query.
-            rows = rows[: settings.max_context_chunks]
+            rows = rows[:pool]
             if single_paper:
                 rows = rows[
                     : keep_within_paper(
                         [row.distance for row in rows], delta=settings.intra_paper_delta
                     )
                 ]
+            rows = await self._with_guaranteed_rows(db, rows, ids, qvec, threshold, guarantee)
             return self._to_chunk_contexts(rows, paper_title_map)
 
-        rows = await self._hybrid_rows(db, ids, qvec, query_text, threshold)
+        rows = await self._hybrid_rows(db, ids, qvec, query_text, threshold, pool)
         by_id = {row.id: row for row in rows}
         dense_ranked = [
             row.id
@@ -778,14 +806,118 @@ class ChatService:
         # Budget FIRST, cut second -- same ordering the dense path documents
         # above. LIMIT bounds what crosses the wire; this bounds what reaches
         # the model, and the cut may only shrink what the budget bounded.
-        fused = fused[: settings.max_context_chunks]
+        fused = fused[:pool]
         if single_paper:
             fused = fused[
                 : keep_within_rank_window(
                     [score for _, score in fused], window=settings.intra_paper_rank_window
                 )
             ]
-        return self._to_chunk_contexts([by_id[key] for key, _ in fused], paper_title_map)
+        ranked = [by_id[key] for key, _ in fused]
+        ranked = await self._with_guaranteed_rows(db, ranked, ids, qvec, threshold, guarantee)
+        return self._to_chunk_contexts(ranked, paper_title_map)
+
+    async def _with_guaranteed_rows(
+        self, db: AsyncSession, ranked: list, ids: str, qvec: str, threshold: float, guarantee: int
+    ) -> list:
+        """`ranked` plus each scoped paper's own nearest `guarantee` chunks.
+
+        A no-op at `guarantee <= 0`, which is every non-mention turn: the
+        global path issues exactly the query it always did and this method
+        returns its argument unchanged.
+
+        The extras go at the TAIL, ordered by their own per-paper rank so a
+        truncation further down starves no paper before any other -- the same
+        round-robin fairness `apply_per_paper_floor` applies to the pins, for
+        the same reason. Tail position is what keeps the guarantee honest:
+        being a candidate is not being a good candidate.
+
+        The per-paper cap is re-applied here even though the SQL already
+        enforces it, for the reason the budget is re-applied in Python above:
+        the bound on how much context a mention turn can pull must not depend
+        on a SQL clause surviving a future edit.
+        """
+        if guarantee <= 0:
+            return ranked
+        rows = await self._guaranteed_rows(db, ids, qvec, threshold, guarantee)
+        seen = {row.id for row in ranked}
+        taken: dict[str, int] = {}
+        extras = []
+        for row in rows:
+            if row.id in seen or taken.get(row.paper_id, 0) >= guarantee:
+                continue
+            taken[row.paper_id] = taken.get(row.paper_id, 0) + 1
+            extras.append(row)
+        return list(ranked) + extras
+
+    async def _guaranteed_rows(
+        self, db: AsyncSession, ids: str, qvec: str, threshold: float, guarantee: int
+    ):
+        """Each scoped paper's own nearest `guarantee` chunks, whatever their
+        global rank.
+
+        `PARTITION BY c.paper_id` is the whole point: the window restarts per
+        paper, so the result is bounded at `guarantee * len(scope)` rows and is
+        completely independent of how much of the global ranking any one paper
+        owns. That independence is the guarantee -- a bigger global pool only
+        ever buys a bounded amount of rank domination, and rank domination has
+        no bound.
+
+        A SEPARATE query from the ranked one, deliberately. Folding the window
+        function into `_dense_only_rows` / `_hybrid_rows` would make every
+        un-mentioned turn -- the default, and the overwhelming majority -- pay
+        to rank-number a whole 4,500-chunk library per partition for a
+        guarantee it never asked for, and would put the two shapes one edit
+        away from diverging. This runs only when a caller names papers (<= 10
+        of them, `ChatRequest.mentioned_paper_ids`), returns <= 50 rows, and
+        hits the same index over the same scope as the ranked query. One extra
+        round trip on a mention turn is not measurable next to the LLM call it
+        feeds.
+
+        `< :threshold` is the SAME cutoff the ranked query used. The guarantee
+        rescues a paper from losing the RANKING, never from failing the gate.
+        """
+        sql = text("""
+            WITH scope AS (
+                SELECT value AS paper_id
+                FROM jsonb_array_elements_text(CAST(:ids AS jsonb))
+            ),
+            ranked AS (
+                SELECT c.id, c.paper_id, c.chunk_index, c.text,
+                       (c.embedding <=> CAST(:qvec AS vector)) AS distance,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY c.paper_id
+                           ORDER BY c.embedding <=> CAST(:qvec AS vector), c.id
+                       ) AS p_rank
+                FROM paper_chunk_embeddings c
+                JOIN scope s ON s.paper_id = c.paper_id
+                WHERE c.model = :model
+                  AND (c.embedding <=> CAST(:qvec AS vector)) < :threshold
+            )
+            SELECT id, paper_id, chunk_index, text, distance, p_rank
+            FROM ranked
+            WHERE p_rank <= :guarantee
+            ORDER BY p_rank ASC, distance ASC
+        """)
+        result = await db.execute(
+            sql,
+            {
+                "qvec": qvec,
+                "ids": ids,
+                "model": settings.embedding_model,
+                "threshold": threshold,
+                "guarantee": guarantee,
+            },
+        )
+        return result.fetchall()
+
+    def _renumber_chunks(self, chunks: list[ChunkContext]) -> list[ChunkContext]:
+        """Re-number after the floor and the fill have reordered the list.
+
+        `n` is the marker the model cites, so it must follow the order the
+        model is shown — same invariant `_to_chunk_contexts` documents.
+        """
+        return [chunk.model_copy(update={"n": i}) for i, chunk in enumerate(chunks, start=1)]
 
     def _to_chunk_contexts(self, rows, paper_title_map: dict[str, str]) -> list[ChunkContext]:
         """Number citations contiguously over the FINAL order.
@@ -804,7 +936,9 @@ class ChatService:
             for i, row in enumerate(rows, 1)
         ]
 
-    async def _dense_only_rows(self, db: AsyncSession, ids: str, qvec: str, threshold: float):
+    async def _dense_only_rows(
+        self, db: AsyncSession, ids: str, qvec: str, threshold: float, pool: int
+    ):
         # `paper_chunk_embeddings` is global, so this query MUST be scoped to
         # the project. The ids ride in as one jsonb param rather than an IN
         # list: 100 papers would otherwise need 100 bind params, and asyncpg
@@ -830,13 +964,13 @@ class ChatService:
                 "ids": ids,
                 "model": settings.embedding_model,
                 "threshold": threshold,
-                "max_chunks": settings.max_context_chunks,
+                "max_chunks": pool,
             },
         )
         return result.fetchall()
 
     async def _hybrid_rows(
-        self, db: AsyncSession, ids: str, qvec: str, qtext: str, threshold: float
+        self, db: AsyncSession, ids: str, qvec: str, qtext: str, threshold: float, pool: int
     ):
         """Both arms in ONE round trip, each carrying its own rank.
 
@@ -850,6 +984,17 @@ class ChatService:
         Ranking stops at the ranks. Fusion, the budget and the cut are Python,
         so `evals/retrieval/run_eval.py --hybrid` can import and measure the
         exact policy that ships.
+
+        `pool` is the caller's candidate bound, and only the DENSE arm's LIMIT
+        rises to meet it: that arm is a candidate pool (already gated by an
+        absolute distance cutoff), so capping it below what the caller asked
+        for would silently shrink the pool mid-query. The sparse LIMIT stays
+        exactly `hybrid_sparse_pool` because it is not a candidate bound at
+        all -- it IS the sparse arm's entire admission rule, since ts_rank_cd
+        has no cross-query-comparable magnitude to threshold on, so raising it
+        would change which lexical chunks are admitted. At the shipped
+        constants (dense 200 against a <= 110 pool) the `max()` returns 200
+        unchanged and nothing about the tuned fusion moves.
         """
         sql = text("""
             WITH scope AS (
@@ -903,7 +1048,7 @@ class ChatService:
                 "ids": ids,
                 "model": settings.embedding_model,
                 "threshold": threshold,
-                "dense_pool": settings.hybrid_dense_pool,
+                "dense_pool": max(settings.hybrid_dense_pool, pool),
                 "sparse_pool": settings.hybrid_sparse_pool,
             },
         )

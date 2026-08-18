@@ -255,3 +255,56 @@ def test_system_prompt_never_names_the_papers_block_to_the_user():
     PAPERS is an internal prompt structure and must never reach the user."""
     assert "internal structure" in SYSTEM.lower()
     assert "never name it in a reply" in SYSTEM.lower()
+
+
+def test_the_scope_block_names_every_mentioned_paper():
+    from app.agents.chat_agent import build_scope_block
+
+    block = build_scope_block(["Paper A", "Paper B"], widened=False)
+
+    assert "Paper A" in block and "Paper B" in block
+    # Without this the model reports the LIBRARY does not cover something that
+    # was merely out of scope — its existing "the assigned papers do not appear
+    # to cover this" rule cannot tell a narrow evidence set from a thin one.
+    assert "not available" in block
+
+
+def test_a_widened_scope_says_so():
+    from app.agents.chat_agent import build_scope_block
+
+    block = build_scope_block(["Paper A"], widened=True)
+
+    assert "Paper A" in block
+    assert "other papers" in block
+    assert "not available" not in block
+
+
+def test_no_mentions_produces_no_scope_block():
+    from app.agents.chat_agent import build_scope_block
+
+    assert build_scope_block([], widened=False) == ""
+
+
+def test_a_mentioned_paper_with_no_excerpts_is_marked_in_the_scope_block():
+    """A named paper can return ZERO chunks — its best chunk sits outside the
+    distance gate, or it was never ingested. The model is still told the user
+    named it, so without a marker it cannot tell "this paper says nothing about
+    X" from "I was given nothing from this paper", and it will invent the
+    former. Naming the gap is what lets it say so."""
+    from app.agents.chat_agent import build_scope_block
+
+    block = build_scope_block(["Paper A", "Paper B"], widened=False, empty_titles=["Paper B"])
+
+    assert "- Paper A" in block
+    assert "- Paper B — no excerpts retrieved" in block
+    assert "no excerpts were retrieved" in block
+
+
+def test_scope_block_without_empty_papers_is_unchanged():
+    """The common case must not grow a word: every mentioned paper contributed."""
+    from app.agents.chat_agent import build_scope_block
+
+    assert build_scope_block(["Paper A"], widened=False) == build_scope_block(
+        ["Paper A"], widened=False, empty_titles=[]
+    )
+    assert "no excerpts" not in build_scope_block(["Paper A"], widened=False)

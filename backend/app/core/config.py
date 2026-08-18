@@ -68,8 +68,9 @@ class Settings(BaseSettings):
 
     # --- single-paper scope -------------------------------------------------
     # Both numbers below apply ONLY when retrieval is scoped to one paper
-    # (the targeter named it, or the project holds a single paper). They are
-    # MODEL-SPECIFIC in exactly the way similarity_threshold above is:
+    # (the user @-mentioned exactly one paper, or the project holds a single
+    # paper). They are MODEL-SPECIFIC in exactly the way similarity_threshold
+    # above is:
     # measured on text-embedding-3-small against the 100-paper dev corpus on
     # 2026-08-12, and invalid for any other embedding model.
     #
@@ -77,8 +78,9 @@ class Settings(BaseSettings):
     #
     # The CEILING is the noise floor. It replaces similarity_threshold as the
     # SQL cutoff in single-paper scope. Measured on the three off_topic golden
-    # cases, scoped to the paper holding the globally nearest chunk (the
-    # targeter-misfire simulation): 0.85 admits 0, 1 and 1 chunks; 0.90 admits
+    # cases, scoped to the paper holding the globally nearest chunk
+    # (simulating a single-paper mention on an off-topic question): 0.85
+    # admits 0, 1 and 1 chunks; 0.90 admits
     # 1, 2 and 9. A relative rule cannot do this job — an off-topic question's
     # distances are compressed (best 0.7518-0.8581), so the delta alone (0.25,
     # the then-current value; it is 0.20 below now) keeps 24/24, 44/44 and
@@ -193,37 +195,6 @@ class Settings(BaseSettings):
     # evals/retrieval/README.md before changing it.
     intra_paper_rank_window: int = 30
 
-    # Papers offered to the PaperTargeterAgent, from two arms unioned.
-    #
-    # Sized by measurement, not by prompt budget. The DENSE arm ranks papers
-    # by their nearest chunk, which ranks on BODY TEXT: a question that names
-    # its paper by a property of the TITLE ("the paper that compares
-    # evolutionary algorithms against reinforcement learning") ranked its
-    # target 28th of 100 on the live corpus, outside any sane dense cap, while
-    # dozens of deep-RL UAV papers whose bodies match the content words sat
-    # above it. The targeter then cannot do anything but name a wrong paper,
-    # and retrieval is scoped to it — live failure, conversation 867dd8c5.
-    #
-    # The LEXICAL arm ranks the same papers by ts_rank_cd over their TITLES,
-    # which is the signal the dense arm structurally cannot see. Measured on
-    # the 30-positive golden set plus 8 title-referential questions:
-    #
-    #   config           golden recall  title-ref recall  WRONG scoping
-    #   dense 10 only        28/30            7/8          12/30 + 1/8
-    #   dense 10 + lex 10    29/30            8/8          10/30 + 0/8
-    #   all 100 titles       30/30            8/8          10/30 + 0/8
-    #
-    # UNION, never RRF fusion: fusing the two arms 50/50 DROPPED golden recall
-    # 28 → 24, because a lexical rank exists for papers the dense arm was
-    # right to bury. A union can only add candidates.
-    #
-    # Offering all 100 titles buys one extra golden case over the union for
-    # ~2,900 extra input tokens per targeted turn, and is O(N) in library
-    # size — at 1,000 papers it is ~23k tokens, past Groq's 12k
-    # single-request ceiling. The union is O(1).
-    targeter_dense_candidates: int = 10
-    targeter_lexical_candidates: int = 10
-
     # Hard ceiling on chunks sent to the chat model in one turn.
     #
     # The retrieval budget must be a function of the CONTEXT WINDOW, never of
@@ -243,6 +214,20 @@ class Settings(BaseSettings):
     # question. Hybrid lexical + dense ranking is the actual fix — do not read
     # this number as having solved anything.
     max_context_chunks: int = 60
+
+    # Chunks each MENTIONED paper is guaranteed before the rest of the budget
+    # fills by distance.
+    #
+    # This exists because the USER named the papers. Plain global top-k inside
+    # a scope is the right policy when an algorithm chose that scope — cosine
+    # similarity spreads a global query across papers by itself. It is the
+    # wrong policy for an explicit instruction: "compare @A and @B" can
+    # legitimately rank 60 chunks of A above the first chunk of B, and
+    # answering with nothing from B reads as ignoring what the user asked for.
+    #
+    # Small on purpose. The floor is a REPRESENTATION guarantee, not an
+    # allocation: relevance still decides everything above it.
+    mention_per_paper_floor: int = 5
 
     # Output budget for one chat answer. PROVIDER-SPECIFIC, like the
     # similarity threshold above — re-measure when LLM_MODEL changes.
@@ -271,13 +256,20 @@ class Settings(BaseSettings):
     # on a model that does not think.
     query_reformulator_max_tokens: int = 3000
 
-    # Output budget for one paper-targeting call. PROVIDER-SPECIFIC for the
-    # same reason as the two budgets above: the output is a single paper id,
-    # so a small budget would do on gpt-4.1-mini — but a reasoning model
-    # spends ~1,900 tokens thinking before emitting a character and would
-    # truncate the call outright. max_tokens is a cap, not a charge, so a
+    # Output budget for one scope-widening decision. PROVIDER-SPECIFIC for the
+    # same reason as chat_answer_max_tokens and query_reformulator_max_tokens
+    # above: the answer is a single boolean JSON field, so the budget is not
+    # about answer length — it is headroom for reasoning models that bill
+    # invisible thinking tokens against this same budget. Measured on
+    # gemini-3.6-flash: ~1,900 tokens went to thinking before a single answer
+    # token (see chat_answer_max_tokens). At the old budget of 200, a reasoning
+    # model would truncate outright (finish_reason=length), parse_structured
+    # would raise, the agent would fail-open to widen=False forever, and the
+    # feature would be silently disabled with no error anywhere. 3000 is the
+    # same as query_reformulator because the answer size is similarly trivial
+    # on non-reasoning models. max_tokens is a cap, not a charge, so a
     # generous default costs nothing on a model that does not think.
-    paper_targeter_max_tokens: int = 3000
+    scope_widener_max_tokens: int = 3000
 
     # Abuse limits (decision D3): anonymous per-IP quotas + a global daily
     # cap; the owner API key (X-API-Key header) bypasses both. The cap is

@@ -73,21 +73,22 @@ One divergence remains:
 
 The global report above measures the path production takes when retrieval is
 scoped to the whole project. Since 2026-08-10 there is a second production
-path: when a paper targeter has scoped retrieval to ONE paper,
-`chat_service._retrieve_paper_chunks` swaps in a looser SQL ceiling
+path: when a turn is scoped to ONE paper — a single `@` mention, or a
+project holding only one paper — `chat_service._retrieve_paper_chunks`
+swaps in a looser SQL ceiling
 (`settings.intra_paper_ceiling`) plus a relative delta cut
 (`settings.intra_paper_delta`, via `keep_within_paper`) instead of the global
 `similarity_threshold`. `--targeted` is what measures *that* path — the
 global report cannot see it at all, because a global top-k across 100 papers
 never lets one paper's low-ranked-but-correct chunk through.
 
-**What it simulates.** Each case is scoped to a single paper, the same way
-the targeter would:
+**What it simulates.** Each case is scoped to a single paper, the way a
+single `@` mention would be:
 - `content` / `metadata` / `figure` cases scope to the paper the case names
-  (`_scope_to_paper`) — the targeter picked correctly.
+  (`_scope_to_paper`) — the mention names the right paper.
 - `off_topic` cases scope to whichever paper holds the globally nearest
-  chunk (`_scope_to_nearest_paper`) — this simulates the targeter
-  *mis-firing* on a question the library cannot answer, which is exactly the
+  chunk (`_scope_to_nearest_paper`) — this simulates a user @-mentioning a
+  paper that turns out irrelevant to their question, which is exactly the
   scenario `intra_paper_ceiling` exists to contain. There is no "correct"
   paper to scope an off_topic case to, so the worst case (nearest wrong
   paper) is what's measured.
@@ -139,22 +140,21 @@ The report's columns:
   chunk is defined for a negative).
 - **kept** — how many chunks survive `_production_cut`. For off_topic rows
   this is the ceiling measurement, not a rank: it is what
-  `intra_paper_ceiling` lets through when the targeter picks the wrong paper.
+  `intra_paper_ceiling` lets through when a mentioned paper turns out to be
+  the wrong one.
 - **survived** — whether the satisfying chunk is still present after the
   cut. `-` for off_topic, same reason as `intra_rank`.
 
 **`kept = 0` on an off_topic row does not mean production returns nothing.**
-It means the single-paper cut emptied the mis-targeted paper's scope — but
-`chat_service.py`'s `respond()` re-queries the untargeted (whole-project)
-scope whenever the targeted retrieval comes back empty
-(`scope is not paper_infos and not paper_chunks`, right after
-`_retrieve_paper_chunks` in `respond()`), so production still answers, from
-global chunks, instead of returning nothing. This matters for the "Open
-finding" below: raising `intra_paper_ceiling`'s scrutiny would push more
-mis-targeted off_topic questions toward `kept = 0`, i.e. toward *this*
-fallback rather than toward an empty, ungrounded answer — the two are not
-the same failure mode, and a tighter ceiling trades one for the other rather
-than eliminating a risk outright.
+It means the single-paper cut emptied the mentioned paper's scope — but
+`chat_service._retrieve_mentioned_chunks` treats an empty result as forcing
+`widened = True` and re-queries the whole project, so production still
+answers, from global chunks, instead of returning nothing. This matters for
+the "Open finding" below: raising `intra_paper_ceiling`'s scrutiny would push
+more off-topic mentions toward `kept = 0`, i.e. toward *this* widen fallback
+rather than toward an empty, ungrounded answer — the two are not the same
+failure mode, and a tighter ceiling trades one for the other rather than
+eliminating a risk outright.
 
 `survival@cut` at the bottom is `survived == yes` count over scored
 (non-off_topic) cases — the single number to watch when re-tuning
@@ -525,64 +525,424 @@ measured N times. The weights must sum to exactly 1.0 or `Settings` refuses
 to start. One run is ~one embedding call per case plus one per targeted
 positive (~72 calls on this set), so a full grid is not free.
 
-## Scoping harness (`shortlist_eval.py`)
+## Multi-mention mode
 
-`run_eval.py` measures whether the answering CHUNK reached the budget. It
-cannot see the failure one layer above: retrieval scoped to the wrong PAPER
-returns plenty of chunks, all from that paper, and every chunk-level metric
-looks healthy while the answer is grounded in the wrong work.
+    docker compose exec -T backend python -m evals.retrieval.mention_eval \
+      --project-id <uuid> [--per-case] [--json /tmp/mention.json]
 
-    docker compose exec -T backend python -m evals.retrieval.shortlist_eval --project-id <uuid>
-    docker compose exec -T backend python -m evals.retrieval.shortlist_eval --project-id <uuid> --no-llm
+A SEPARATE module (`mention_eval.py`, with its pure helpers in
+`mention_metrics.py`), because every code path in `run_eval.py` assumes a
+scope of one paper. This one builds a TWO-mention scope for every golden-set
+case and runs production's mention path end to end: it imports
+`apply_per_paper_floor` from `app.services.mention_ranker`, `keep_within_paper`
+/ `keep_within_rank_window` from the rankers, and mirrors
+`chat_service._hybrid_rows` / `_dense_only_rows` exactly — same `<=>`
+operator, same `WHERE c.model = :model` filter, same jsonb scope CTE, same
+`max(hybrid_dense_pool, pool)` dense LIMIT against a fixed
+`hybrid_sparse_pool`, same `pool = max_context_chunks + floor * len(scope)`,
+same Python-side budget. It reads only; it never writes.
 
-It imports production's own `ChatService._shortlist_papers`, so it cannot
-measure a shortlist policy production does not run. `--no-llm` reports
-candidate recall only and makes no targeter calls.
+**The question it exists for.** `chat_service._retrieve_paper_chunks` picks
+its SQL cutoff from the SIZE of the scope: `single_paper = len(paper_infos)
+== 1` gets the loose `intra_paper_ceiling` (0.85), two or more mentions fall
+back to the global `similarity_threshold` (0.75) applied to each paper
+individually. A paper whose nearest chunk sits at 0.78 therefore contributes
+everything when named alone and nothing when named beside a second paper, and
+`apply_per_paper_floor` cannot repair it — the floor reorders candidates, it
+cannot resurrect rows SQL never returned.
 
-Two case sets, and the split is the point:
+**The arms.**
 
-- **golden** — `golden_set.json` positives, content-worded. Most name no paper
-  at all, so the correct targeter outcome for them is `empty` (unscoped), not
-  `correct`.
-- **scope** — `scope_set.json`, title-referential ("the paper that compares
-  evolutionary algorithms against reinforcement learning"). These identify one
-  paper, by a property of its TITLE.
+| arm | gate | shape |
+|---|---|---|
+| `status-quo` | flat `similarity_threshold` (0.75) | what ships: one query over the merged scope, then the floor |
+| `policy-A` | flat `intra_paper_ceiling` (0.85) | identical to the status quo except the cutoff |
+| `policy-B` | per-paper | each mentioned paper queried ALONE (so it gets production's single-paper treatment: the 0.85 SQL ceiling and its own dense/sparse pools), ADMITTED only if its own nearest chunk clears 0.75, cut by production's own single-paper cut, then merged and floored |
+| `policy-B*` | per-paper | policy B with the admission gate at 0.85 instead — separates "which gate admits the PAPER" from "which gate retains its CHUNKS", and costs no extra query |
 
-Read `WRONG` as the harm metric: a paper missing from the candidate list only
-hurts if the targeter then names a paper that does not hold the answer.
-Abstaining is safe.
+**Policy B is SIMULATED in the harness.** It never shipped, so its admission
+decision (`mention_metrics.admitted_papers`) and its merge
+(`mention_metrics.merge_round_robin`) have no production function to import.
+Everything else policy B uses is production's. The merge interleaves the
+per-paper rankings by position rather than sorting the union by distance,
+because under hybrid retrieval each paper's list is a fused RRF rank computed
+against that paper's own pools and those ranks are not comparable across
+papers; sparse-only admissions have no distance at all. Read every policy-B
+number as "the design, as this harness reconstructs it", not as a measurement
+of shipped code.
 
-### Measured — 2026-08-18
+**Pair construction is deterministic — no RNG that varies between runs.** For
+each of the golden set's 30 positives the first mention is the paper the case
+names, and the second is either:
 
-Live 100-paper project, before and after the lexical title arm was unioned
-into the shortlist:
+- `nearest` — the OTHER paper whose own nearest chunk is closest to the
+  question. The hard, realistic "compare these two" case: the second paper is
+  the one the question already drags in.
+- `seeded` — a paper drawn from the project with `random.Random(case.id)`
+  over a SORTED id list. The contrast case: a second mention the question has
+  no reason to touch. Same paper on every re-run.
 
-    config                     golden recall   scope recall   golden WRONG   scope WRONG
-    dense 10 (before)              28/30           7/8          12/30           1/8
-    dense 10 + lexical 10          29/30           8/8          10-11/30         0/8
-    all 100 titles offered         30/30           8/8          10/30            0/8
+`off_topic` negatives have no answering paper, so their first mention is the
+paper holding the globally nearest chunk (matching `run_eval`'s
+`_scope_to_nearest_paper`) and their second is the next nearest — a user
+mentioning two papers on a question the library cannot answer.
 
-The live failure (conversation `867dd8c5`, `scope_set.json` case
-`live-867dd8c5`): the target paper ranked **28th of 100** by nearest-chunk
-distance, outside the dense cap, so the targeter named a wrong paper and
-retrieval was scoped to it. Under the lexical arm the same paper is offered
-and picked correctly.
+**The metrics.** `repr` is the fraction of MENTIONED papers contributing at
+least one chunk, denominated in paper-slots rather than cases (with two
+mentions, "one of the two vanished" is the failure, and a per-case boolean
+hides which shape it had); `both` is the per-case version. `ans-zero` is the
+fraction of cases where the paper that HOLDS the answer contributed nothing —
+the harmful shape. `survival` uses the golden set's own predicate
+(`golden_set.chunk_satisfies`, via `metrics.first_satisfying_rank`) against
+the FINAL budget. `other share` is the mean fraction of the delivered budget
+taken by the non-answering mentioned paper. The `gate band` table at the
+bottom counts mentioned papers whose own nearest chunk lands in
+`[similarity_threshold, intra_paper_ceiling)` — the only papers the status quo
+and policy A can possibly treat differently, so it bounds the whole question.
 
-Two findings worth keeping:
+### The REAL comparison arm (`comparison_set.json`)
 
-- **RRF fusion of the two arms is wrong here; union is right.** Fusing 50/50
-  dropped golden candidate recall 28/30 → 24/30 — a lexical rank exists for
-  papers the dense arm was right to bury. A union can only add.
-- **Offering all 100 titles buys one golden case over the union** for ~2,900
-  extra input tokens per targeted turn, and is O(N) in library size (~23k
-  tokens at 1,000 papers). Not shipped.
+The two pairings above are SYNTHETIC: the golden set's questions each ask
+about one paper, and the second mention is bolted on. That left the regime
+that actually motivates `@A ... @B` unmeasured — the 2026-08-18 block below
+records it as its own biggest gap. `comparison_set.json` closes it. It holds
+real "how do @A and @B differ" questions, authored from the corpus, whose
+answer is genuinely SPLIT across two papers.
 
-`golden WRONG` at 10-11/30 is a STANDING DEFECT, not a consequence of this
-change: the targeter names a paper on content questions that identify none,
-where the safe answer is `empty`. Expanding the candidate list barely moves it
-(12 → 10-11, with abstentions rising 8 → 10-12). It needs its own fix; the
-existing `chat_service` fallback cannot catch it, since that re-queries
-unscoped only when the scoped retrieval returns ZERO chunks.
+    docker compose exec -T backend python -m evals.retrieval.mention_eval \
+      --project-id <uuid> --per-case            # comparisons run by default
+    ... --comparison-set <path>                 # a different case file
+    ... --skip-comparisons                      # synthetic pairings only
+
+**It is a NEW file, not an addition to `golden_set.json`.** Every number in
+this README's "Measured" blocks is denominated in that set's 30 positives and
+12 negatives; adding cases to it would silently invalidate all of them. The
+synthetic pairings are kept for the same reason — they are what the
+2026-08-18 numbers were taken with.
+
+**The schema** (loader: `comparison_set.py`, `load_comparison_set`). Each
+case carries `id`, `question`, and then TWO of everything:
+`paper_a_title_contains` / `expect_a_substrings` and
+`paper_b_title_contains` / `expect_b_substrings`. Ground truth is per SIDE
+because the question's answer is per side: "did paper A's half reach the
+model" and "did paper B's" are different questions, and a comparison where
+only one half arrived is exactly the failure this arm exists to catch.
+`ComparisonCase.side("a")` projects one half into a `golden_set.Case`, so
+`chunk_satisfies` / `first_satisfying_rank` score it unchanged — the matching
+predicate is shared, never reimplemented. The loader rejects a case whose two
+needles nest (`"Partial Replanning"` vs `"Partial Replanning for …"` name one
+paper), and the harness additionally rejects at run time a case whose two
+needles resolve to the same paper *in this corpus*, or whose named paper holds
+no chunk containing its substrings — those reach `ERRORS`, never a score.
+
+**Authoring rules.** Substrings are copied literally out of
+`paper_chunk_embeddings.text` and every one must be verified against the
+corpus before the case ships (`chunk_satisfies` needs ALL of a side's
+substrings in ONE chunk, so multi-substring sides must be checked for
+co-occurrence, not just presence). Prefer pairs that genuinely DISAGREE — a
+question where retrieving only one paper produces a confidently wrong answer
+is the one worth measuring. A shared title keyword is not evidence that two
+papers discuss the same thing; read the chunks. Fewer real cases beat more
+invented ones: a case whose "answer" is not in the paper poisons every future
+measurement.
+
+**The metrics** (its own table, because the synthetic arms' `ans-zero` /
+`other share` have no meaning here — both papers are answering papers).
+`repr` is unchanged. `both` is the fraction of questions where BOTH halves of
+the answer reached the budget — the headline. `side surv` is the same thing
+denominated in sides (2 per case), so one lost half reads as one lost side
+rather than one lost case. `shut out` is the fraction of cases where a paper
+the USER named contributed zero chunks — a distinct failure from the answer
+being missed, because the user typed both mentions. `min share` is the share
+of the delivered budget held by the LESS represented named paper: 0.0 means
+one was shut out, 0.5 means an even split. Unlike `other share`, a small value
+here is a defect, not a cost. The `gate band` table gains a
+`comparison paper (real)` row: each named paper's own nearest chunk measured
+against the BLENDED question that names both — the datum the synthetic arms
+structurally cannot produce.
+
+### Measured — 2026-08-18 (multi-mention gate)
+
+- corpus: **4527 chunks / 100 papers** (project `fa2ab869…52922`) — the same
+  project the 2026-08-12 and 2026-08-15 blocks used
+- model: `text-embedding-3-small`; `hybrid_retrieval=True`
+- constants: `similarity_threshold 0.75`, `intra_paper_ceiling 0.85`,
+  `intra_paper_rank_window 30`, `mention_per_paper_floor 5`,
+  `max_context_chunks 60`
+- golden set: unchanged — **30 positives**, **12 negatives**, no `ERRORS` block
+- 60 two-mention scopes per arm for positives (30 per pairing), 24 for negatives
+
+**Positives, second mention = nearest OTHER paper (n=30):**
+
+| arm | repr | both | ans-zero | survival | mean kept | other share |
+|---|---|---|---|---|---|---|
+| status-quo | 1.00 | 1.00 | 0.00 | 1.00 | 57.6 | 0.42 |
+| policy-A | 1.00 | 1.00 | 0.00 | 1.00 | 58.9 | 0.42 |
+| policy-B | 1.00 | 1.00 | 0.00 | 1.00 | 57.1 | 0.51 |
+| policy-B* | 1.00 | 1.00 | 0.00 | 1.00 | 57.1 | 0.51 |
+
+**Positives, second mention = seeded random paper (n=30):**
+
+| arm | repr | both | ans-zero | survival | mean kept | other share |
+|---|---|---|---|---|---|---|
+| status-quo | 0.93 | 0.87 | 0.00 | 1.00 | 57.5 | 0.27 |
+| policy-A | 0.95 | 0.90 | 0.00 | 1.00 | 59.7 | 0.28 |
+| policy-B | 0.97 | 0.93 | 0.00 | 1.00 | 54.8 | 0.47 |
+| policy-B* | 1.00 | 1.00 | 0.00 | 1.00 | 56.3 | 0.49 |
+
+**`off_topic` negatives, scoped to two papers (n=12; containment, lower is
+better):**
+
+| arm | mean kept | worst kept | papers repr |
+|---|---|---|---|
+| status-quo | 33.0 | 60 | 0.75 |
+| policy-A | **44.6** | 60 | 0.92 |
+| policy-B | 43.2 | 60 | 0.75 |
+| policy-B* | 43.6 | 60 | 0.92 |
+
+**Gate band `[0.75, 0.85)` — where the status quo and policy A can differ at
+all:**
+
+| role | n | in band | worst nearest-chunk |
+|---|---|---|---|
+| answer paper | 30 | **0** | **0.6163** |
+| second mention (nearest) | 30 | 0 | 0.5476 |
+| second mention (seeded) | 30 | 2 | 0.7632 |
+| off_topic anchor + second | 36 | 6 | 0.9467 |
+
+#### What the numbers say
+
+**1. The harm the policy change was proposed to fix does not occur on this
+corpus.** `ans-zero` is 0.00 and `survival` is 1.00 in all four arms and both
+pairings. The answering paper's own nearest chunk never exceeds **0.6163**,
+i.e. it clears the strict 0.75 gate with 0.134 of headroom on the worst of 30
+questions, and NO answering paper lands in the contested band. The paper that
+holds the answer is never the one shut out.
+
+**2. Policy A never displaced an answering chunk either.** No arm produced a
+survival regression against the status quo (`survival_regressions` printed
+nothing at any point). The finding that would have killed policy A outright
+did not appear.
+
+**3. The dominant cause of a mentioned paper getting nothing is the CANDIDATE
+POOL, not the gate.** Four paper-slots came back empty under the status quo,
+all in the seeded pairing, all second mentions. Their causes, from
+`--json` plus a direct probe of the fused candidate list:
+
+| case | second paper's nearest chunk | first fused rank of that paper | SQ | A | B | B* | cause |
+|---|---|---|---|---|---|---|---|
+| `hybrid-split-federated` | 0.6925 | 72 at BOTH gates | ✗ | ✗ | ✓ | ✓ | pool |
+| `nemo-mobility` | 0.6837 | 91 at both gates | ✗ | ✗ | ✓ | ✓ | pool |
+| `iot-lowpower-protocols` | 0.7557 | absent at 0.75, 89 at 0.85 | ✗ | ✗ | ✗ | ✓ | gate AND pool |
+| `drl-subagent-decomposition` | 0.7632 | absent at 0.75, 57 at 0.85 | ✗ | ✓ | ✗ | ✓ | gate |
+
+The pool is `max_context_chunks + floor * len(scope)` = **70** here. Two of
+the four papers sit comfortably INSIDE the 0.75 gate (0.6925, 0.6837) and
+still contribute nothing, because the other mentioned paper owns the first 72
+and 91 fused ranks respectively. `apply_per_paper_floor` can only pin what
+reached it. **The pool's `floor * len(scope)` headroom (10 rows) makes the
+floor real only when the second paper's best chunk sits within that many ranks
+of the budget edge; when it does not, the representation guarantee silently
+does not hold.** That is a property of shipped code, measured here for the
+first time, and no gate change addresses it — policy A fixes exactly ONE of
+the four, and `iot-lowpower-protocols` shows a paper that policy A admits into
+the SQL result and that still contributes nothing.
+
+**4. What policy A actually buys is off-topic noise.** It moves representation
+0.93 → 0.95 on the contrast pairing (one paper-slot in sixty) and changes
+nothing at all on the realistic pairing. On the negatives it raises mean kept
+from 33.0 to **44.6** chunks (≈ +5.1k tokens per turn at ~439 tokens/chunk)
+and pulls the second mentioned paper into the context on 0.92 of slots instead
+of 0.75. Six of the 36 off_topic-scoped papers sit in the band, against zero
+answering papers — **the contested band on this corpus is populated almost
+entirely by papers that do not answer the question.** That is the same open
+finding the 2026-08-12 block records against `intra_paper_ceiling` itself
+(near-domain negatives sit at 0.547–0.652, well inside 0.85), reaching the
+multi-mention path.
+
+**5. Policy B trades the answering paper's depth for representation.** B and
+B* apply production's single-paper cut per paper, so the answering paper is
+capped at `intra_paper_rank_window` = 30 chunks; `other share` therefore rises
+0.27 → 0.47/0.49 on the seeded pairing, i.e. roughly half the budget goes to a
+paper the question is not about. Survival is unaffected (the worst answering
+chunk sits at intra-rank 18 — the 2026-08-12 measurement), so this is a cost
+paid in context, not in answers. B* is the only arm that reaches repr 1.00,
+and it does so by fixing the pool problem (a per-paper query gives each paper
+its own pool), not by moving a threshold.
+
+#### Recommendation (not applied — the constants are the owner's call)
+
+**Keep the status quo.** Nothing here justifies policy A: it fixes one
+paper-slot in sixty on a synthetic contrast pairing, changes nothing on the
+realistic one, and costs +11.6 chunks of off-topic context per mis-mentioned
+turn. The 0.85 ceiling was measured for single-paper scope (2026-08-12) and
+this measurement gives no reason to extend it — the band it opens holds six
+non-answering papers and zero answering ones on this corpus.
+
+Policy B is not justified EITHER, on these numbers: it fixes two paper-slots
+the status quo loses and loses two the status quo also loses, while handing
+half the budget to the non-answering paper. Its useful half is the per-paper
+QUERY (each paper gets its own candidate pool), not the per-paper admission
+GATE — B* isolates that, but B* is policy A's gate plus policy B's shape and
+inherits A's off-topic cost.
+
+**The finding worth acting on is not a threshold at all**: the floor's
+representation guarantee is defeated by pool exhaustion in 3 of 60 paper-slots
+here, at a gate that admits the paper. If representation is worth defending,
+the lever is the candidate pool (or a per-paper query), and it should be
+measured on its own — this run does not sweep it.
+
+#### What this measurement does NOT cover
+
+- **No genuine two-paper QUESTION exists in the golden set.** Every positive
+  is a question about ONE paper; the second mention is synthetic. A real
+  "compare @A and @B" turn embeds a blended query, under which BOTH papers'
+  nearest-chunk distances could sit higher than anything measured here — which
+  is exactly the regime where the 0.75/0.85 band would start to matter. This
+  is the single biggest gap, and closing it means adding comparison questions
+  to the golden set, not re-running this.
+- **Two mentions only.** The API caps `mentioned_paper_ids` at 10. A 5-paper
+  scope divides the same 60-chunk budget five ways and has a pool of
+  `60 + 5*5 = 85`; nothing here says how representation behaves there.
+- **One corpus, one model.** 100 papers on a single topic (UAV/RL),
+  `text-embedding-3-small`. Every distance in this block is model-specific in
+  exactly the way `similarity_threshold` and `intra_paper_ceiling` are.
+- **Query reformulation is still not simulated** (see "What it measures vs.
+  what production does"). Multi-turn mention scoping is untouched.
+- **The widen path is not measured.** Every arm runs
+  `_retrieve_mentioned_chunks`'s NARROW branch (`widened=False`). The empty-
+  scope fallback that forces `widened=True` was never triggered: no arm
+  returned zero chunks for any case.
+- **Nothing here measures answer QUALITY.** `survival` says the answering
+  chunk reached the budget; it says nothing about whether the model used it,
+  nor whether the extra off-topic chunks policy A admits degrade the answer.
+- **`policy-B` is a reconstruction.** Its admission rule and merge are harness
+  code; a shipped policy B could differ in both.
+
+#### How to re-run
+
+    docker compose exec -T backend python -m evals.retrieval.mention_eval \
+      --project-id <uuid> --per-case --json /tmp/mention.json
+
+Every gate is read from `settings` at call time, so the arms follow an env
+override the same way production does — e.g.
+`-e SIMILARITY_THRESHOLD=0.80` moves the status-quo arm AND the band table's
+lower bound together. Check the printed `gates:` header changes across points,
+or every row is one configuration measured N times. One run costs one
+embedding call per case (~42) and ~14 queries per case.
+
+### Measured — 2026-08-18b (REAL two-paper comparisons)
+
+Same corpus, model, gates and arms as the 2026-08-18 block above; the
+synthetic pairings re-ran identically, so these rows are directly comparable
+to that block's. New input: **10 real comparison questions**
+(`comparison_set.json`), each naming two papers that genuinely differ on the
+thing asked, with per-paper ground truth for each half. Zero `ERRORS` — every
+case's two papers resolved uniquely and every substring was found in a chunk
+of the paper it was attributed to.
+
+| arm | repr | both | side surv | shut out | mean kept | min share |
+|---|---|---|---|---|---|---|
+| status-quo (0.75 flat) | 1.00 | **1.00** | 1.00 | 0.00 | 55.6 | 0.39 |
+| policy-A (0.85 flat) | 1.00 | **1.00** | 1.00 | 0.00 | 56.4 | 0.39 |
+| policy-B (per-paper, admit 0.75) | 1.00 | **1.00** | 1.00 | 0.00 | 55.8 | 0.47 |
+| policy-B\* (per-paper, admit 0.85) | 1.00 | **1.00** | 1.00 | 0.00 | 55.8 | 0.47 |
+
+Gate band, the row the synthetic arms could not produce:
+
+| role | n | in band | worst nearest-chunk |
+|---|---|---|---|
+| answer paper (single-paper question) | 30 | 0 | 0.6163 |
+| **comparison paper (real, blended query)** | **20** | **0** | **0.4364** |
+
+**1. The hypothesis behind the gap was wrong, in the safe direction.** The
+2026-08-18 block reasoned that a real comparison question "embeds a blended
+query under which BOTH papers' nearest-chunk distances could sit higher than
+anything measured here — exactly the regime where the 0.75/0.85 band would
+start to matter." The opposite happens. Across 20 named-paper slots the worst
+nearest chunk is **0.4364**, against 0.6163 for the single-paper questions:
+naming both papers in one question pulls BOTH of them *closer*, because the
+question text carries vocabulary from each. Zero comparison papers land in the
+band, so the gate choice is even more academic on real comparisons than on the
+synthetic pairs. This does not generalize beyond a single-topic corpus — every
+pair here shares a research area, which is why a blended query still lands
+near both — but the specific worry that motivated the gap is not what happens.
+
+**2. No named paper was ever shut out, and no half of an answer was ever
+lost.** `shut out` 0.00 and `both` 1.00 in all four arms. The failure this arm
+was built to detect — the user names two papers, one of them contributes
+nothing, and the model answers half the question with total confidence — did
+not occur once on this corpus.
+
+**3. Real comparisons split the budget far more evenly than synthetic pairs,
+without any policy change.** `min share` 0.39 under the status quo means the
+less-represented named paper still holds ~22 of 60 chunks; the synthetic
+`seeded` pairing's non-answering paper held 0.27 of the budget and the
+`nearest` pairing's 0.42. The floor is not what produces this — the raw
+ranking does, because both papers are genuinely relevant to the query. Policy
+B's per-paper query raises it to 0.47 (near-even) at no measured benefit,
+since both halves already survive everywhere.
+
+**4. The deepest surviving half sat at rank 35 of 60** (`coverage-area-
+decomposition`, side A), with `drl-map-input-representation` next at 28. Two
+cases therefore have less than half the budget in reserve; a smaller
+`max_context_chunks` would start losing halves of comparisons well before it
+started losing single-paper answers (worst intra-rank there is 18, per
+2026-08-12). That is the margin worth watching, not the gate.
+
+**What this arm still does not cover.** Ten questions on one 100-paper,
+single-topic corpus with one embedding model. Every pair shares a research
+area — cross-domain comparisons ("compare @a UAV paper and @a compiler
+paper") are not represented and are exactly where a blended query could
+plausibly land far from both. Answer QUALITY is not measured: `both` says both
+halves reached the model, not that the model used them or attributed them
+correctly. Only two mentions, as with the synthetic arms. And the floor policy
+itself is still not isolated — the arm measures the whole path, so it cannot
+say which chunks the floor pinned versus which the ranking would have
+delivered anyway.
+
+## Scoping is no longer measured here
+
+This section used to document `shortlist_eval.py`: a harness that measured
+whether an LLM (`PaperTargeterAgent`) picked the right paper to scope
+retrieval to, from a two-arm (dense + lexical-title) candidate shortlist.
+That whole layer — the shortlist, the titles-only targeter call, and its
+eval harness and fixture — was deleted on 2026-08-18. Retrieval scope is now
+set only by explicit `@` mentions the user picks, plus a binary widen/don't
+-widen decision (`ScopeWidenerAgent`) — see `respond()` in
+`app/services/chat_service.py` and `app/agents/scope_widener.py`. There is no
+longer an inference step to score.
+
+**The numbers that killed the targeter (measured 2026-08-18, 30-question
+golden set):**
+
+| approach | correct | wrong paper (holds no answer) | abstained |
+|---|---|---|---|
+| `PaperTargeterAgent` | 9/30 | **11/30** | 10/30 |
+| nearest dense chunk, rank 1, unconditionally | 22/30 | 8/30 | 0/30 |
+
+The targeter saw titles only — a title is a lossy index of contents — and on
+more than a third of content questions it confidently scoped retrieval to a
+paper that did not hold the answer, which is worse than not scoping at all:
+an empty target falls through to unscoped global retrieval, but a *wrong*
+target actively excludes the paper that does hold the answer. Simply always
+taking the nearest chunk's paper was a better blind guess (22/30) and was
+still wrong on 8/30 — good enough to show a title- or embedding-based guess
+has a real ceiling, not good enough to ship. Both blind signals were dropped
+rather than arbitrated between; see CLAUDE.md and
+`docs/superpowers/specs/2026-08-18-paper-mentions-design.md` for the full
+argument.
+
+`run_eval.py` below still measures whether the answering chunk reaches the
+context budget once a scope is chosen (global, or SINGLE-paper via
+`--targeted` — see "Targeted mode" below; `_scope_to_paper` and
+`_scope_to_nearest_paper` only ever scope to one paper). Multi-mention scope,
+including the `apply_per_paper_floor` round-robin policy, is measured by a
+SEPARATE module in this package — `mention_eval.py`, added 2026-08-18; see
+"Multi-mention mode" below. `run_eval.py` itself still does not import
+`mention_ranker` and is not the place to add it: its every code path assumes a
+scope of one paper. There is no longer a paper-scoping layer above either of
+them to measure separately.
 
 ## Adding a case
 
@@ -597,6 +957,12 @@ regenerated on every re-index, so id-based truth would rot immediately.
 `kind` is `content`, `metadata`, `figure`, or `off_topic`. A case passes when a
 retrieved chunk is from the expected paper **and** contains **every** listed
 substring.
+
+**Do not add two-paper comparison questions here.** They go in
+`comparison_set.json`, which has its own loader, its own schema (two title
+needles, two substring lists) and its own arm — see "The REAL comparison arm"
+above. Editing `golden_set.json` changes the denominator of every "Measured"
+block in this file.
 
 **Verify your substring exists in the target paper before adding it** — not
 just anywhere in the corpus. A count across the whole corpus can be nonzero

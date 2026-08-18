@@ -4,9 +4,11 @@ import { useCallback, useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { MessageSquarePlus, Plus, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { MentionTextarea } from "@/components/mention-textarea";
 import { createConversation, deleteConversation, listConversations } from "@/lib/chat";
-import { getProject } from "@/lib/projects";
-import type { ChatConversation, Role } from "@/lib/types";
+import type { Mention } from "@/lib/mentions";
+import { getProject, listPapers } from "@/lib/projects";
+import type { ChatConversation, Paper, Role } from "@/lib/types";
 
 // Matches the backend: delete_conversation requires require_member(..., "editor").
 const CAN_DELETE: Role[] = ["owner", "editor"];
@@ -27,6 +29,8 @@ export default function ChatPage() {
   const [deleting, setDeleting] = useState<string | null>(null);
   const [showForm, setShowForm] = useState(false);
   const [content, setContent] = useState("");
+  const [mentions, setMentions] = useState<Mention[]>([]);
+  const [papers, setPapers] = useState<Paper[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
 
@@ -46,6 +50,10 @@ export default function ChatPage() {
   useEffect(() => {
     load();
   }, [load]);
+
+  useEffect(() => {
+    listPapers(projectId).then(setPapers).catch(() => {});
+  }, [projectId]);
 
   // Deletes immediately, no confirmation — deliberate for now, matching the
   // papers list. Unlike a paper, a deleted conversation cannot be restored from
@@ -69,8 +77,10 @@ export default function ChatPage() {
     setSubmitError(null);
     try {
       const conv = await createConversation(projectId, q);
+      const ids = mentions.map((mention) => mention.paperId);
+      const m = ids.length ? `&m=${ids.map(encodeURIComponent).join(",")}` : "";
       setSubmitting(false);
-      router.push(`/research/${projectId}/chat/${conv.id}?q=${encodeURIComponent(q)}`);
+      router.push(`/research/${projectId}/chat/${conv.id}?q=${encodeURIComponent(q)}${m}`);
     } catch {
       setSubmitError("Failed to start chat. Please try again.");
       setSubmitting(false);
@@ -105,19 +115,14 @@ export default function ChatPage() {
 
       {showForm && (
         <div className="mb-4 rounded-xl border border-border bg-card p-4">
-          <textarea
-            autoFocus
-            rows={3}
+          <MentionTextarea
             value={content}
-            onChange={(e) => setContent(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault();
-                handleStart();
-              }
-            }}
-            placeholder="Ask a question about the assigned papers…"
-            className="w-full resize-none bg-transparent text-sm outline-none placeholder:text-muted-foreground"
+            onChange={setContent}
+            mentions={mentions}
+            onMentionsChange={setMentions}
+            papers={papers}
+            disabled={submitting}
+            onSubmit={handleStart}
           />
           {submitError && (
             <p className="mt-1 text-xs text-destructive">{submitError}</p>
@@ -127,7 +132,11 @@ export default function ChatPage() {
               <MessageSquarePlus className="mr-1.5 size-3.5" />
               {submitting ? "Starting…" : "Start Chat"}
             </Button>
-            <Button size="sm" variant="ghost" onClick={() => { setShowForm(false); setContent(""); setSubmitError(null); }}>
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => { setShowForm(false); setContent(""); setMentions([]); setSubmitError(null); }}
+            >
               Cancel
             </Button>
           </div>
