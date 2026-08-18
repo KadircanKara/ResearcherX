@@ -209,9 +209,18 @@ _SCOPED_HYBRID_SQL = text("""
 class Arm:
     """One configuration under measurement.
 
-    `mode` is "flat" (production's shape: one SQL cutoff over the merged
-    scope) or "per_paper" (policy B: one query per mentioned paper, admitted
-    on its own best chunk). `admission` is meaningful only for "per_paper".
+    `mode` is "production" (calls the shipped mention path directly),
+    "flat" (one SQL cutoff over the merged scope) or "per_paper" (policy B:
+    one query per mentioned paper, admitted on its own best chunk).
+    `admission` is meaningful only for "per_paper".
+
+    ONLY the "production" arm is authoritative for what ships. The other arms
+    MIRROR the SQL rather than importing it, which is what let the per-paper
+    guarantee's absence hide: on 2026-08-18 the shipped path grew a second
+    guarantee query and every mirrored arm silently went on measuring the
+    older shape. Mirrors are kept because policies A and B do not exist in
+    production and cannot be imported — but a mirror is a hypothesis, and the
+    production arm is the control that catches it drifting.
     """
 
     name: str
@@ -225,7 +234,9 @@ def _arms() -> list[Arm]:
     (`SIMILARITY_THRESHOLD=...`) reaches the arms the same way it reaches
     production."""
     return [
-        Arm("status-quo", "flat", settings.similarity_threshold, None),
+        # First, and the only arm that imports the shipped path end to end.
+        Arm("production", "production", settings.similarity_threshold, None),
+        Arm("mirror-0.75", "flat", settings.similarity_threshold, None),
         Arm("policy-A", "flat", settings.intra_paper_ceiling, None),
         Arm("policy-B", "per_paper", settings.intra_paper_ceiling, settings.similarity_threshold),
         Arm(
@@ -360,6 +371,8 @@ async def _run_arm(
     qvec: str,
     qtext: str,
     scope_ids: list[str],
+    embedding: list[float] | None = None,
+    titles: dict[str, str] | None = None,
 ) -> list[Scored]:
     """The final chunk list one arm delivers to the model for one case.
 
@@ -373,6 +386,35 @@ async def _run_arm(
     """
     floor = settings.mention_per_paper_floor
     budget = settings.max_context_chunks
+
+    if arm.mode == "production":
+        # No mirror at all: this is the code the product runs, including the
+        # per-paper guarantee query and the floor. Everything else in this
+        # module is a hypothesis measured beside it.
+        from app.services.chat_service import ChatService, PaperInfo
+
+        scope = [PaperInfo(paper_id=pid, title=(titles or {}).get(pid, "")) for pid in scope_ids]
+        chunks, _widened = await ChatService()._retrieve_mentioned_chunks(
+            scope,
+            scope,
+            embedding or [],
+            qtext,
+            False,
+        )
+        return [
+            Scored(
+                paper_id=c.paper_id,
+                paper_title=c.title,
+                chunk_text=c.text,
+                # The shipped path returns what the MODEL sees, which carries
+                # no distance -- a fused or guaranteed row has none to report.
+                distance=None,
+                chunk_id=f"{c.paper_id}:{c.chunk_index}",
+                d_rank=None,
+                s_rank=None,
+            )
+            for c in chunks
+        ]
 
     if arm.mode == "flat":
         candidates = await _fetch_scope(
@@ -842,9 +884,16 @@ async def main() -> None:  # noqa: PLR0912 — a report script, not a library AP
                             "best": best_by_id.get(paper_id),
                         }
                     )
+                titles_by_id = {p.paper_id: p.title for p in papers}
                 for arm in arms:
                     kept = await _run_arm(
-                        db, arm, qvec=qvec, qtext=case.question, scope_ids=scope_ids
+                        db,
+                        arm,
+                        qvec=qvec,
+                        qtext=case.question,
+                        scope_ids=scope_ids,
+                        embedding=embedding,
+                        titles=titles_by_id,
                     )
                     outcomes.append(_outcome(case, arm, pairing, scope_ids, answer_paper_id, kept))
 
@@ -872,9 +921,16 @@ async def main() -> None:  # noqa: PLR0912 — a report script, not a library AP
                         "best": best_by_id.get(side_paper[side]),
                     }
                 )
+            titles_by_id = {p.paper_id: p.title for p in papers}
             for arm in arms:
                 kept = await _run_arm(
-                    db, arm, qvec=qvec, qtext=comparison.question, scope_ids=scope_ids
+                    db,
+                    arm,
+                    qvec=qvec,
+                    qtext=comparison.question,
+                    scope_ids=scope_ids,
+                    embedding=embedding,
+                    titles=titles_by_id,
                 )
                 comparison_outcomes.append(
                     _comparison_outcome(comparison, arm, side_paper, scope_ids, kept)
