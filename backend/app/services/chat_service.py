@@ -14,8 +14,8 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.chat_agent import ChatAgent, ChatAgentInput, ChunkContext, PaperMetaContext
-from app.agents.paper_targeter import PaperTargeterAgent, TargeterInput
 from app.agents.query_reformulator import QueryReformulatorAgent, ReformulatorInput
+from app.agents.scope_widener import ScopeWidenerAgent, WidenerInput
 from app.core.config import settings
 from app.core.logging import log
 from app.db.models import Paper
@@ -28,6 +28,7 @@ from app.services.conversation_service import ConversationService
 from app.services.embedding_service import EmbeddingService
 from app.services.hybrid_ranker import fuse_rrf, keep_within_rank_window
 from app.services.intra_paper_ranker import keep_within_paper
+from app.services.mention_ranker import apply_per_paper_floor
 
 _HISTORY_TOP_K = 5
 
@@ -221,7 +222,7 @@ class ChatService:
     def __init__(self) -> None:
         self._embedding_svc = EmbeddingService()
         self._reformulator = QueryReformulatorAgent()
-        self._targeter = PaperTargeterAgent()
+        self._widener = ScopeWidenerAgent()
         self._chat_agent = ChatAgent()
         self._conv_svc = ConversationService()
 
@@ -289,44 +290,19 @@ class ChatService:
             # This project's paper ids + titles: scopes the global top-k chunk
             # query below to this project and labels citations by title.
             paper_infos = [PaperInfo(paper_id=p.id, title=p.title) for p in paper_rows]
-            # Defaults to the whole project; narrowed below only when
-            # targeting picks one paper. Initialised here, unconditionally,
-            # so it is always defined at the 'retrieving' event below even
-            # when embedding failed or the project has no papers.
+
+            mentioned = list(mentioned_paper_ids or [])
             scope = paper_infos
+            widened = False
+            mentioned_infos = []
 
             if query_embedding is not None:
-                # Retrieve relevant history
                 async with SessionLocal() as db:
                     history_hits = await self._retrieve_history(
                         db, conversation_id, query_embedding
                     )
 
                 if paper_infos:
-                    # Reformulate only when there IS a conversation to resolve
-                    # against. A first turn is already standalone, so the call
-                    # would buy nothing and is skipped.
-                    #
-                    # Gate on prior_messages ALONE -- never on history_hits or
-                    # on reformulation_context below. conversation_service's
-                    # save_message() fires asyncio.create_task(_embed_message
-                    # (...)) for the user's own message before respond() runs,
-                    # so by the time _retrieve_history executes above, that
-                    # row is frequently already embedded and sitting in
-                    # conversation_message_embeddings. It then self-matches
-                    # its own query embedding at distance ~= 0 (comfortably
-                    # under similarity_threshold) and comes back as a
-                    # "history hit" -- even on a genuine first turn. Gating on
-                    # `prior_messages + history_hits` therefore raced that
-                    # background embedding task: whether the reformulator ran
-                    # on a first turn depended on embedding latency, not on
-                    # whether a prior turn actually existed. prior_messages is
-                    # immune to that race (it's read from conv.messages,
-                    # loaded before this turn's message was embedded), and
-                    # hits can only ever come from THIS conversation, so an
-                    # empty prior_messages means any hit IS the current
-                    # message. Do not "simplify" this back to
-                    # `if reformulation_context:`.
                     reformulation_context = prior_messages + history_hits
                     retrieval_query = user_content
                     if prior_messages:
@@ -345,77 +321,54 @@ class ChatService:
                         else query_embedding
                     )
 
-                    async with SessionLocal() as db:
-                        candidates, total_chunks = await self._shortlist_papers(
-                            db, paper_infos, retrieval_embedding, retrieval_query
-                        )
+                    by_id = {p.paper_id: p for p in paper_infos}
+                    mentioned_infos = [by_id[pid] for pid in mentioned if pid in by_id]
 
-                    # Scope retrieval to one paper when the question might be
-                    # about one paper. Skipped for single-paper projects: the
-                    # scope would be that one paper whether the targeter names
-                    # it or answers None, so targeting there is a guaranteed
-                    # no-op that still costs a full extra LLM call every turn
-                    # -- and "upload one PDF and ask about it" is the common
-                    # case. Also skipped when the whole library already fits
-                    # the context budget; that second skip is a COST decision,
-                    # not a correctness one -- with similarity_threshold in
-                    # play, scoping to one paper can still change which chunks
-                    # come back even under budget (a threshold-passing chunk
-                    # from another paper is not available once scoped). Small
-                    # projects deliberately keep that original misattribution
-                    # risk in exchange for skipping this LLM call.
-                    if (
-                        len(paper_infos) > 1
-                        and total_chunks > settings.max_context_chunks
-                        and candidates
-                    ):
-                        target_id = await self._targeter.run(
-                            TargeterInput(
-                                query=retrieval_query,
-                                candidates=[
-                                    {"paper_id": c.paper_id, "title": c.title} for c in candidates
-                                ],
-                                prior_messages=reformulation_context,
+                    if mentioned_infos:
+                        # The widener may only ADD the library. It has no vote
+                        # on whether the named papers are retrieved.
+                        widened = await self._widener.run(
+                            WidenerInput(
+                                query=user_content,
+                                mentioned_titles=[p.title for p in mentioned_infos],
                             )
                         )
-                        if target_id is not None:
-                            scope = [c for c in candidates if c.paper_id == target_id]
-                            log.info(
-                                "paper_targeted",
-                                conversation_id=conversation_id,
-                                paper_id=target_id,
-                                candidates=len(candidates),
+                        scope = mentioned_infos
+                        async with SessionLocal() as db:
+                            paper_chunks = await self._retrieve_paper_chunks(
+                                db, mentioned_infos, retrieval_embedding, retrieval_query
                             )
-
-                    async with SessionLocal() as db:
-                        paper_chunks = await self._retrieve_paper_chunks(
-                            db, scope, retrieval_embedding, retrieval_query
+                        paper_chunks = apply_per_paper_floor(
+                            paper_chunks,
+                            paper_of=lambda c: c.paper_id,
+                            scope=[p.paper_id for p in mentioned_infos],
+                            floor=settings.mention_per_paper_floor,
+                            budget=settings.max_context_chunks,
                         )
-
-                    if scope is not paper_infos and not paper_chunks:
-                        # A targeted paper can still retrieve nothing, and
-                        # chat_agent then answers ungrounded -- a worse
-                        # failure than the misattribution this feature fixes.
-                        # Re-querying the untargeted scope keeps the answer
-                        # grounded, same as if targeting had never fired.
-                        #
-                        # Under dense-only retrieval (hybrid_retrieval=False)
-                        # this fires exactly when every chunk of the targeted
-                        # paper sits at or beyond intra_paper_ceiling (the
-                        # single-paper SQL cutoff -- see
-                        # _retrieve_paper_chunks). Under hybrid retrieval the
-                        # sparse arm has NO distance gate, so a paper whose
-                        # every chunk sits beyond the ceiling can still be
-                        # admitted via a lexical match -- a sparse-only
-                        # admission is treated as grounded here, same as any
-                        # other chunk. This branch therefore fires strictly
-                        # LESS often than it did before hybrid retrieval
-                        # shipped, not under the same condition.
+                        if widened or not paper_chunks:
+                            # Not widening on an empty scope would answer from
+                            # nothing: a paper can be mentioned before its
+                            # ingest finished. Answering wider than asked beats
+                            # answering ungrounded.
+                            widened = True
+                            async with SessionLocal() as db:
+                                fill = await self._retrieve_paper_chunks(
+                                    db, paper_infos, retrieval_embedding, retrieval_query
+                                )
+                            pinned_keys = {(c.paper_id, c.chunk_index) for c in paper_chunks}
+                            budget = settings.max_context_chunks - len(paper_chunks)
+                            extra = [
+                                c for c in fill if (c.paper_id, c.chunk_index) not in pinned_keys
+                            ][:budget]
+                            paper_chunks = self._renumber_chunks(paper_chunks + extra)
+                            scope = paper_infos
+                        else:
+                            paper_chunks = self._renumber_chunks(paper_chunks)
+                    else:
                         async with SessionLocal() as db:
                             paper_chunks = await self._retrieve_paper_chunks(
                                 db, paper_infos, retrieval_embedding, retrieval_query
                             )
-                        scope = paper_infos
 
             yield {
                 "event": "retrieving",
@@ -423,6 +376,11 @@ class ChatService:
                     {
                         "paper_count": len(scope),
                         "history_hits": len(history_hits),
+                        "scoped": bool(mentioned),
+                        # How many papers the USER named — not len(scope),
+                        # which becomes the whole project once widening fires.
+                        "scoped_count": len(mentioned_infos) if mentioned else 0,
+                        "widened": widened,
                     }
                 ),
             }
@@ -434,6 +392,11 @@ class ChatService:
                 prior_messages=all_prior,
                 paper_chunks=paper_chunks,
                 papers=paper_metas,
+                # The papers the USER named, always — never `scope`, which is
+                # the whole project once widening fires. A SCOPE block listing
+                # 100 titles would say nothing and cost ~2k tokens.
+                scope_titles=[p.title for p in mentioned_infos],
+                scope_widened=widened,
             )
 
             # Stream response
@@ -531,142 +494,6 @@ class ChatService:
         )
         rows = result.fetchall()
         return [{"role": r.role, "content": r.content} for r in rows]
-
-    async def _shortlist_papers(
-        self,
-        db: AsyncSession,
-        paper_infos: list[PaperInfo],
-        query_embedding: list[float],
-        query_text: str,
-    ) -> tuple[list[PaperInfo], int]:
-        """Shortlist candidate papers for the targeter, from two arms.
-
-        DENSE arm: papers ranked by their nearest chunk, capped at
-        `targeter_dense_candidates`. LEXICAL arm: the same papers ranked by
-        ts_rank_cd over their TITLES, capped at `targeter_lexical_candidates`.
-        The lexical hits are UNIONED onto the dense list — appended, never
-        fused — so the arm can only add candidates. Also returns the project's
-        TOTAL chunk count across every paper, which is what decides whether
-        targeting is worth an LLM call at all.
-
-        The two arms see different things and that is the point. Nearest-chunk
-        distance ranks on body text; a question that identifies its paper by a
-        property of the TITLE ranks its target wherever the body happens to
-        fall — 28th of 100, measured live. See `targeter_dense_candidates` in
-        config.py for the full measurement and for why this is a union rather
-        than an RRF fusion.
-
-        No SQL LIMIT, on purpose. The GROUP BY already scans the project's
-        chunks either way, so a LIMIT would save only the transfer of a few
-        dozen rows while costing a second round trip to learn the total. The
-        total is what decides whether targeting is worth an LLM call at all.
-
-        MIN distance rather than a mean of the nearest few: measured across
-        seven questions with known target papers the two ranked about equally
-        well, and MIN is simpler. No similarity_threshold filter — the
-        threshold belongs at retrieval time, and applying it here could empty
-        the shortlist on a vaguely worded question.
-        """
-        if len(paper_infos) <= 1:
-            # A single-paper project has nothing to disambiguate: the
-            # candidate list would be that one paper regardless of what this
-            # query returns, so skip it and its SQL round trip entirely.
-            return [], 0
-        sql = text("""
-            WITH scope AS (
-                SELECT value AS paper_id
-                FROM jsonb_array_elements_text(CAST(:ids AS jsonb))
-            )
-            SELECT c.paper_id,
-                   MIN(c.embedding <=> CAST(:qvec AS vector)) AS best,
-                   COUNT(*) AS n_chunks
-            FROM paper_chunk_embeddings c
-            JOIN scope s ON s.paper_id = c.paper_id
-            WHERE c.model = :model
-            GROUP BY c.paper_id
-            ORDER BY best ASC
-        """)
-        result = await db.execute(
-            sql,
-            {
-                "qvec": _vec_str(query_embedding),
-                "ids": json.dumps([p.paper_id for p in paper_infos]),
-                "model": settings.embedding_model,
-            },
-        )
-        rows = result.fetchall()
-        by_id = {p.paper_id: p for p in paper_infos}
-        total_chunks = sum(r.n_chunks for r in rows)
-        candidates = [by_id[r.paper_id] for r in rows if r.paper_id in by_id][
-            : settings.targeter_dense_candidates
-        ]
-
-        chosen = {p.paper_id for p in candidates}
-        for paper_id in await self._lexical_title_matches(db, paper_infos, query_text):
-            if paper_id not in chosen and paper_id in by_id:
-                candidates.append(by_id[paper_id])
-                chosen.add(paper_id)
-        return candidates, total_chunks
-
-    async def _lexical_title_matches(
-        self,
-        db: AsyncSession,
-        paper_infos: list[PaperInfo],
-        query_text: str,
-    ) -> list[str]:
-        """Paper ids whose TITLE matches the question lexically, best first.
-
-        OR-of-lexemes, deliberately, where the rest of this codebase uses
-        `websearch_to_tsquery`: that ANDs every term, so a question of a dozen
-        words matches no title at all — measured at 22 of 30 golden-set
-        questions matching nothing even against full chunk text, and a title
-        is a handful of words. The OR is what makes a partial title match
-        rank; `ts_rank_cd` is what keeps the noise below the real hit.
-
-        Titles are read from `papers`, not from `paper_infos`, so a title
-        corrected in the Papers tab takes effect on the next question with no
-        re-index — unlike the chunk embeddings, which are frozen at ingest.
-
-        Fail-open: the arm returns nothing on any error. It exists to ADD
-        candidates the dense arm missed; a broken lexical query must degrade
-        to the dense-only shortlist, not fail the turn.
-        """
-        if not query_text.strip():
-            return []
-        # A query of pure stopwords produces an empty tsvector, string_agg
-        # then returns NULL, and `@@ NULL` is NULL — no rows, no error.
-        sql = text("""
-            WITH scope AS (
-                SELECT value AS paper_id
-                FROM jsonb_array_elements_text(CAST(:ids AS jsonb))
-            ),
-            q AS (
-                SELECT (
-                    SELECT string_agg(lexeme, ' | ')
-                    FROM unnest(to_tsvector('english', :question))
-                )::tsquery AS tq
-            )
-            SELECT p.id AS paper_id
-            FROM papers p
-            JOIN scope s ON s.paper_id = p.id
-            CROSS JOIN q
-            WHERE to_tsvector('english', p.title) @@ q.tq
-            ORDER BY ts_rank_cd(to_tsvector('english', p.title), q.tq) DESC, p.id ASC
-            LIMIT :limit
-        """)
-        try:
-            result = await db.execute(
-                sql,
-                {
-                    "ids": json.dumps([p.paper_id for p in paper_infos]),
-                    "question": query_text,
-                    "limit": settings.targeter_lexical_candidates,
-                },
-            )
-            return [r.paper_id for r in result.fetchall()]
-        except Exception as exc:
-            log.warning("lexical_title_arm_failed_open", error=str(exc)[:200])
-            return []
 
     async def _retrieve_paper_chunks(
         self,
@@ -791,6 +618,14 @@ class ChatService:
                 )
             ]
         return self._to_chunk_contexts([by_id[key] for key, _ in fused], paper_title_map)
+
+    def _renumber_chunks(self, chunks: list[ChunkContext]) -> list[ChunkContext]:
+        """Re-number after the floor and the fill have reordered the list.
+
+        `n` is the marker the model cites, so it must follow the order the
+        model is shown — same invariant `_to_chunk_contexts` documents.
+        """
+        return [chunk.model_copy(update={"n": i}) for i, chunk in enumerate(chunks, start=1)]
 
     def _to_chunk_contexts(self, rows, paper_title_map: dict[str, str]) -> list[ChunkContext]:
         """Number citations contiguously over the FINAL order.

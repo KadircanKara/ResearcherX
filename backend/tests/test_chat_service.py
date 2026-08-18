@@ -626,460 +626,6 @@ async def test_retrieve_paper_chunks_numbers_citations_contiguously_after_cappin
     assert [c.n for c in chunks] == list(range(1, 41))
 
 
-def _mock_db_returning_shortlist(
-    rows: list[tuple[str, float, int]],
-    lexical: list[str] | None = None,
-) -> MagicMock:
-    """Fake AsyncSession answering both shortlist arms.
-
-    The dense arm gets (paper_id, best, n_chunks) rows; the lexical title arm
-    gets `lexical` paper ids, in the order given. Which query is which is
-    decided by looking for ts_rank_cd in the SQL — neither arm's ranking runs
-    here, so the tests prove what the service does with the rows rather than
-    what Postgres would have done for it.
-    """
-    dense_result = MagicMock()
-    dense_result.fetchall.return_value = [
-        MagicMock(paper_id=p, best=b, n_chunks=n) for p, b, n in rows
-    ]
-    lexical_result = MagicMock()
-    lexical_result.fetchall.return_value = [MagicMock(paper_id=p) for p in (lexical or [])]
-
-    async def execute(sql, params=None):
-        return lexical_result if "ts_rank_cd" in str(sql) else dense_result
-
-    mock_db = MagicMock()
-    mock_db.execute = AsyncMock(side_effect=execute)
-    return mock_db
-
-
-async def test_shortlist_papers_returns_nearest_first_capped_at_limit():
-    from app.services.chat_service import ChatService, PaperInfo
-
-    svc = ChatService()
-    mock_db = _mock_db_returning_shortlist([("p0", 0.30, 10), ("p1", 0.31, 20), ("p2", 0.32, 30)])
-    papers = [PaperInfo(paper_id=f"p{i}", title=f"Paper {i}") for i in range(3)]
-
-    with patch.object(settings, "targeter_dense_candidates", 2):
-        candidates, _ = await svc._shortlist_papers(mock_db, papers, [0.0] * 768, "a question")
-
-    assert [c.paper_id for c in candidates] == ["p0", "p1"]
-    assert [c.title for c in candidates] == ["Paper 0", "Paper 1"]
-
-
-async def test_shortlist_papers_counts_chunks_across_the_whole_project():
-    """The total must cover EVERY paper, not just the returned candidates.
-
-    It is what decides whether targeting is worth an LLM call at all: if the
-    whole library already fits the context budget, scoping cannot change what
-    is retrieved. Counting only the top few would under-report and skip
-    targeting on projects that need it.
-    """
-    from app.services.chat_service import ChatService, PaperInfo
-
-    svc = ChatService()
-    mock_db = _mock_db_returning_shortlist([("p0", 0.30, 10), ("p1", 0.31, 20), ("p2", 0.32, 30)])
-    papers = [PaperInfo(paper_id=f"p{i}", title=f"Paper {i}") for i in range(3)]
-
-    _, total = await svc._shortlist_papers(mock_db, papers, [0.0] * 768, "a question")
-
-    assert total == 60
-
-
-async def test_shortlist_papers_scopes_both_arms_to_this_projects_papers():
-    """Both arms are scoped to this project, and only the dense one is
-    embedding-model bound.
-
-    paper_chunk_embeddings is global; an unscoped ranking would rank another
-    project's papers as candidates for this project's question. The lexical
-    arm reads `papers`, which carries no embedding — a title index is not tied
-    to a vector space, so it takes the id scope but no model filter.
-    """
-    from app.services.chat_service import ChatService, PaperInfo
-
-    svc = ChatService()
-    mock_db = _mock_db_returning_shortlist([])
-    papers = [PaperInfo(paper_id=f"p{i}", title=f"Paper {i}") for i in range(3)]
-
-    with patch.object(settings, "embedding_model", "test-embed-model"):
-        await svc._shortlist_papers(mock_db, papers, [0.0] * 768, "a question")
-
-    assert mock_db.execute.await_count == 2
-    dense_sql, dense_params = mock_db.execute.await_args_list[0].args
-    lexical_sql, lexical_params = mock_db.execute.await_args_list[1].args
-    assert json.loads(dense_params["ids"]) == ["p0", "p1", "p2"]
-    assert dense_params["model"] == "test-embed-model"
-    assert json.loads(lexical_params["ids"]) == ["p0", "p1", "p2"]
-    assert lexical_params["question"] == "a question"
-    assert "model" not in lexical_params
-    assert "ts_rank_cd" in str(lexical_sql) and "ts_rank_cd" not in str(dense_sql)
-
-
-async def test_shortlist_papers_skips_rows_for_unknown_papers():
-    """A row whose paper_id is not in paper_infos cannot be labelled with a
-    title, so it must be dropped rather than surfaced with an empty one.
-
-    Two known papers, not one: a single-paper project now short-circuits
-    before this filtering logic even runs (see
-    test_shortlist_papers_returns_early_for_a_single_paper), so this needs
-    more than one paper to actually exercise it.
-    """
-    from app.services.chat_service import ChatService, PaperInfo
-
-    svc = ChatService()
-    mock_db = _mock_db_returning_shortlist([("ghost", 0.20, 5), ("p0", 0.30, 10)])
-    papers = [PaperInfo(paper_id="p0", title="Paper 0"), PaperInfo(paper_id="p1", title="Paper 1")]
-
-    candidates, total = await svc._shortlist_papers(mock_db, papers, [0.0] * 768, "a question")
-
-    assert [c.paper_id for c in candidates] == ["p0"]
-    assert total == 15
-
-
-async def test_respond_scopes_retrieval_to_the_targeted_paper(
-    db_session: AsyncSession, project: Project, conversation_with_message
-):
-    """The whole point: when one paper is identified, retrieval sees only it.
-
-    Attribution errors become structurally impossible rather than
-    discouraged — another paper's chunks are never fetched, so the model
-    cannot answer from them however similar they look.
-
-    The mocked retrieval returns a real chunk, not []: an empty result now
-    triggers the full-library fallback (see
-    test_respond_falls_back_to_full_library_when_scoped_retrieval_is_empty),
-    which would make `retrieve.await_args` below point at that second,
-    unscoped call instead of the scoped one this test exists to check.
-    """
-    from app.db.models import Paper
-    from app.services.chat_service import ChatService, PaperInfo
-
-    conv = conversation_with_message
-    for i in range(3):
-        db_session.add(Paper(project_id=project.id, title=f"Paper {i}", source="manual"))
-    await db_session.commit()
-
-    async def fake_stream(*args, **kwargs):
-        yield "answer"
-
-    svc = ChatService()
-    retrieve = AsyncMock(return_value=[MagicMock(n=1)])
-    candidates = [
-        PaperInfo(paper_id="pA", title="Paper A"),
-        PaperInfo(paper_id="pB", title="Paper B"),
-    ]
-
-    with (
-        patch.object(svc._embedding_svc, "embed", AsyncMock(return_value=[0.0] * 768)),
-        patch.object(svc, "_retrieve_history", AsyncMock(return_value=[])),
-        patch.object(svc, "_shortlist_papers", AsyncMock(return_value=(candidates, 500))),
-        patch.object(svc._targeter, "run", AsyncMock(return_value="pB")),
-        patch.object(svc, "_retrieve_paper_chunks", retrieve),
-        patch.object(svc._chat_agent, "stream", return_value=fake_stream()),
-        patch.object(svc._conv_svc, "save_message", AsyncMock()),
-    ):
-        async for _ in svc.respond(conv.id, "Test question"):
-            pass
-
-    scoped = retrieve.await_args.args[1]
-    assert [p.paper_id for p in scoped] == ["pB"]
-
-
-async def test_respond_retrieves_across_all_papers_when_no_target(
-    db_session: AsyncSession, project: Project, conversation_with_message
-):
-    """None is a normal answer. It must fall through to the unscoped global
-    top-k — the behaviour that existed before targeting."""
-    from app.db.models import Paper
-    from app.services.chat_service import ChatService, PaperInfo
-
-    conv = conversation_with_message
-    for i in range(3):
-        db_session.add(Paper(project_id=project.id, title=f"Paper {i}", source="manual"))
-    await db_session.commit()
-
-    async def fake_stream(*args, **kwargs):
-        yield "answer"
-
-    svc = ChatService()
-    retrieve = AsyncMock(return_value=[])
-    candidates = [PaperInfo(paper_id="pA", title="Paper A")]
-
-    with (
-        patch.object(svc._embedding_svc, "embed", AsyncMock(return_value=[0.0] * 768)),
-        patch.object(svc, "_retrieve_history", AsyncMock(return_value=[])),
-        patch.object(svc, "_shortlist_papers", AsyncMock(return_value=(candidates, 500))),
-        patch.object(svc._targeter, "run", AsyncMock(return_value=None)),
-        patch.object(svc, "_retrieve_paper_chunks", retrieve),
-        patch.object(svc._chat_agent, "stream", return_value=fake_stream()),
-        patch.object(svc._conv_svc, "save_message", AsyncMock()),
-    ):
-        async for _ in svc.respond(conv.id, "Test question"):
-            pass
-
-    scoped = retrieve.await_args.args[1]
-    assert len(scoped) == 3
-
-
-async def test_respond_skips_targeting_when_the_library_fits_the_budget(
-    db_session: AsyncSession, project: Project, conversation_with_message
-):
-    """If every chunk in the project already fits the context budget, scoping
-    cannot change what is retrieved, so the LLM call is pure cost. Asserting
-    ZERO calls is the point — this is what keeps small projects free."""
-    from app.db.models import Paper
-    from app.services.chat_service import ChatService, PaperInfo
-
-    conv = conversation_with_message
-    db_session.add(Paper(project_id=project.id, title="Paper A", source="manual"))
-    await db_session.commit()
-
-    async def fake_stream(*args, **kwargs):
-        yield "answer"
-
-    svc = ChatService()
-    target = AsyncMock(return_value="pA")
-    candidates = [PaperInfo(paper_id="pA", title="Paper A")]
-
-    with (
-        patch.object(settings, "max_context_chunks", 40),
-        patch.object(svc._embedding_svc, "embed", AsyncMock(return_value=[0.0] * 768)),
-        patch.object(svc, "_retrieve_history", AsyncMock(return_value=[])),
-        patch.object(svc, "_shortlist_papers", AsyncMock(return_value=(candidates, 12))),
-        patch.object(svc._targeter, "run", target),
-        patch.object(svc, "_retrieve_paper_chunks", AsyncMock(return_value=[])),
-        patch.object(svc._chat_agent, "stream", return_value=fake_stream()),
-        patch.object(svc._conv_svc, "save_message", AsyncMock()),
-    ):
-        async for _ in svc.respond(conv.id, "Test question"):
-            pass
-
-    target.assert_not_awaited()
-
-
-async def test_respond_sends_the_targeter_titles_only(
-    db_session: AsyncSession, project: Project, conversation_with_message
-):
-    """The service must not hand the targeter anything but ids and titles —
-    the O(1)-in-library-size property is a property of the CALLER too."""
-    from app.db.models import Paper
-    from app.services.chat_service import ChatService, PaperInfo
-
-    conv = conversation_with_message
-    for i in range(3):
-        db_session.add(Paper(project_id=project.id, title=f"Paper {i}", source="manual"))
-    await db_session.commit()
-
-    async def fake_stream(*args, **kwargs):
-        yield "answer"
-
-    svc = ChatService()
-    target = AsyncMock(return_value=None)
-    candidates = [PaperInfo(paper_id="pA", title="Paper A")]
-
-    with (
-        patch.object(svc._embedding_svc, "embed", AsyncMock(return_value=[0.0] * 768)),
-        patch.object(svc, "_retrieve_history", AsyncMock(return_value=[])),
-        patch.object(svc, "_shortlist_papers", AsyncMock(return_value=(candidates, 500))),
-        patch.object(svc._targeter, "run", target),
-        patch.object(svc, "_retrieve_paper_chunks", AsyncMock(return_value=[])),
-        patch.object(svc._chat_agent, "stream", return_value=fake_stream()),
-        patch.object(svc._conv_svc, "save_message", AsyncMock()),
-    ):
-        async for _ in svc.respond(conv.id, "Test question"):
-            pass
-
-    sent = target.await_args.args[0]
-    assert sent.candidates == [{"paper_id": "pA", "title": "Paper A"}]
-
-
-async def test_shortlist_papers_returns_early_for_a_single_paper():
-    """A single-paper project has nothing to disambiguate: the candidate
-    list would be that one paper regardless of what this query returns, so
-    it must skip the SQL round trip entirely rather than rank a list of
-    one."""
-    from app.services.chat_service import ChatService, PaperInfo
-
-    svc = ChatService()
-    mock_db = MagicMock()
-    mock_db.execute = AsyncMock()
-    papers = [PaperInfo(paper_id="p0", title="Paper 0")]
-
-    result = await svc._shortlist_papers(mock_db, papers, [0.0] * 768, "a question")
-
-    assert result == ([], 0)
-    mock_db.execute.assert_not_awaited()
-
-
-async def test_respond_skips_targeting_for_a_single_paper_project_even_over_budget(
-    db_session: AsyncSession, project: Project, conversation_with_message
-):
-    """A one-paper project has nothing to disambiguate: `scope` would be that
-    same paper whether the targeter names it or answers None, so targeting
-    there is a guaranteed no-op that still costs a full extra LLM call every
-    turn. Forcing total_chunks OVER budget isolates this from the separate
-    'library fits the budget' skip -- both must independently hold for
-    "upload one PDF and ask about it", the common case, to stay at one LLM
-    call per turn."""
-    from app.db.models import Paper
-    from app.services.chat_service import ChatService, PaperInfo
-
-    conv = conversation_with_message
-    db_session.add(Paper(project_id=project.id, title="Paper A", source="manual"))
-    await db_session.commit()
-
-    async def fake_stream(*args, **kwargs):
-        yield "answer"
-
-    svc = ChatService()
-    target = AsyncMock(return_value="pA")
-    candidates = [PaperInfo(paper_id="pA", title="Paper A")]
-
-    with (
-        patch.object(svc._embedding_svc, "embed", AsyncMock(return_value=[0.0] * 768)),
-        patch.object(svc, "_retrieve_history", AsyncMock(return_value=[])),
-        patch.object(svc, "_shortlist_papers", AsyncMock(return_value=(candidates, 500))),
-        patch.object(svc._targeter, "run", target),
-        patch.object(svc, "_retrieve_paper_chunks", AsyncMock(return_value=[])),
-        patch.object(svc._chat_agent, "stream", return_value=fake_stream()),
-        patch.object(svc._conv_svc, "save_message", AsyncMock()),
-    ):
-        async for _ in svc.respond(conv.id, "Test question"):
-            pass
-
-    target.assert_not_awaited()
-
-
-async def test_respond_falls_back_to_full_library_when_scoped_retrieval_is_empty(
-    db_session: AsyncSession, project: Project, conversation_with_message
-):
-    """Scoped retrieval can legitimately return zero chunks when every chunk
-    of the targeted paper sits at or beyond similarity_threshold. Falling
-    back to the full paper list keeps the answer grounded -- the alternative
-    is chat_agent silently answering from general knowledge, a worse failure
-    than the misattribution this branch fixes."""
-    from app.db.models import Paper
-    from app.services.chat_service import ChatService, PaperInfo
-
-    conv = conversation_with_message
-    for i in range(3):
-        db_session.add(Paper(project_id=project.id, title=f"Paper {i}", source="manual"))
-    await db_session.commit()
-
-    async def fake_stream(*args, **kwargs):
-        yield "answer"
-
-    svc = ChatService()
-    candidates = [
-        PaperInfo(paper_id="pA", title="Paper A"),
-        PaperInfo(paper_id="pB", title="Paper B"),
-    ]
-    retrieve = AsyncMock(return_value=[])
-
-    with (
-        patch.object(svc._embedding_svc, "embed", AsyncMock(return_value=[0.0] * 768)),
-        patch.object(svc, "_retrieve_history", AsyncMock(return_value=[])),
-        patch.object(svc, "_shortlist_papers", AsyncMock(return_value=(candidates, 500))),
-        patch.object(svc._targeter, "run", AsyncMock(return_value="pB")),
-        patch.object(svc, "_retrieve_paper_chunks", retrieve),
-        patch.object(svc._chat_agent, "stream", return_value=fake_stream()),
-        patch.object(svc._conv_svc, "save_message", AsyncMock()),
-    ):
-        events = []
-        async for event in svc.respond(conv.id, "Test question"):
-            events.append(event)
-
-    assert retrieve.await_count == 2
-    first_scope, second_scope = (c.args[1] for c in retrieve.await_args_list)
-    assert [p.paper_id for p in first_scope] == ["pB"]
-    assert len(second_scope) == 3  # falls back to the full project paper list
-
-    # The 'retrieving' event's paper_count must follow the fallback, not the
-    # abandoned scoped attempt (see test_respond_reports_the_scoped_paper_
-    # count_in_the_retrieving_event for the non-fallback case).
-    retrieving = next(e for e in events if e["event"] == "retrieving")
-    assert json.loads(retrieving["data"])["paper_count"] == 3
-
-
-async def test_respond_does_not_fall_back_when_scoped_retrieval_returns_chunks(
-    db_session: AsyncSession, project: Project, conversation_with_message
-):
-    """The fallback must fire ONLY on an empty result -- a real chunk from
-    the targeted paper is exactly the case scoping exists for, so a second
-    query here would silently reintroduce the cross-paper misattribution."""
-    from app.db.models import Paper
-    from app.services.chat_service import ChatService, PaperInfo
-
-    conv = conversation_with_message
-    for i in range(3):
-        db_session.add(Paper(project_id=project.id, title=f"Paper {i}", source="manual"))
-    await db_session.commit()
-
-    async def fake_stream(*args, **kwargs):
-        yield "answer"
-
-    svc = ChatService()
-    candidates = [
-        PaperInfo(paper_id="pA", title="Paper A"),
-        PaperInfo(paper_id="pB", title="Paper B"),
-    ]
-    retrieve = AsyncMock(return_value=[MagicMock(n=1)])
-
-    with (
-        patch.object(svc._embedding_svc, "embed", AsyncMock(return_value=[0.0] * 768)),
-        patch.object(svc, "_retrieve_history", AsyncMock(return_value=[])),
-        patch.object(svc, "_shortlist_papers", AsyncMock(return_value=(candidates, 500))),
-        patch.object(svc._targeter, "run", AsyncMock(return_value="pB")),
-        patch.object(svc, "_retrieve_paper_chunks", retrieve),
-        patch.object(svc._chat_agent, "stream", return_value=fake_stream()),
-        patch.object(svc._conv_svc, "save_message", AsyncMock()),
-    ):
-        async for _ in svc.respond(conv.id, "Test question"):
-            pass
-
-    assert retrieve.await_count == 1
-
-
-async def test_respond_reports_the_scoped_paper_count_in_the_retrieving_event(
-    db_session: AsyncSession, project: Project, conversation_with_message
-):
-    """The SSE 'retrieving' event must report how many papers retrieval
-    actually used, not the whole project -- otherwise the UI says "Retrieving
-    from 3 papers..." right after retrieval was scoped to 1."""
-    from app.db.models import Paper
-    from app.services.chat_service import ChatService, PaperInfo
-
-    conv = conversation_with_message
-    for i in range(3):
-        db_session.add(Paper(project_id=project.id, title=f"Paper {i}", source="manual"))
-    await db_session.commit()
-
-    async def fake_stream(*args, **kwargs):
-        yield "answer"
-
-    svc = ChatService()
-    candidates = [
-        PaperInfo(paper_id="pA", title="Paper A"),
-        PaperInfo(paper_id="pB", title="Paper B"),
-    ]
-
-    with (
-        patch.object(svc._embedding_svc, "embed", AsyncMock(return_value=[0.0] * 768)),
-        patch.object(svc, "_retrieve_history", AsyncMock(return_value=[])),
-        patch.object(svc, "_shortlist_papers", AsyncMock(return_value=(candidates, 500))),
-        patch.object(svc._targeter, "run", AsyncMock(return_value="pB")),
-        patch.object(svc, "_retrieve_paper_chunks", AsyncMock(return_value=[MagicMock(n=1)])),
-        patch.object(svc._chat_agent, "stream", return_value=fake_stream()),
-        patch.object(svc._conv_svc, "save_message", AsyncMock()),
-    ):
-        events = []
-        async for event in svc.respond(conv.id, "Test question"):
-            events.append(event)
-
-    retrieving = next(e for e in events if e["event"] == "retrieving")
-    assert json.loads(retrieving["data"])["paper_count"] == 1
-
-
 async def test_respond_persists_citations_renumbered_from_one(
     db_session: AsyncSession, project: Project, conversation_with_message
 ):
@@ -1112,7 +658,7 @@ async def test_respond_persists_citations_renumbered_from_one(
     with (
         patch.object(svc._embedding_svc, "embed", AsyncMock(return_value=[0.0] * 768)),
         patch.object(svc, "_retrieve_history", AsyncMock(return_value=[])),
-        patch.object(svc, "_shortlist_papers", AsyncMock(return_value=([], 0))),
+        patch.object(svc._widener, "run", AsyncMock(return_value=False)),
         patch.object(svc, "_retrieve_paper_chunks", AsyncMock(return_value=chunks)),
         patch.object(svc._chat_agent, "stream", return_value=fake_stream()),
         patch.object(svc._conv_svc, "save_message", save),
@@ -1157,7 +703,7 @@ async def test_respond_sends_paper_metadata_on_a_metadata_question(
     with (
         patch.object(svc._embedding_svc, "embed", AsyncMock(return_value=[0.0] * 768)),
         patch.object(svc, "_retrieve_history", AsyncMock(return_value=[])),
-        patch.object(svc, "_shortlist_papers", AsyncMock(return_value=([], 0))),
+        patch.object(svc._widener, "run", AsyncMock(return_value=False)),
         patch.object(svc, "_retrieve_paper_chunks", AsyncMock(return_value=[])),
         patch.object(svc._chat_agent, "stream", stream),
         patch.object(svc._conv_svc, "save_message", AsyncMock()),
@@ -1195,7 +741,7 @@ async def test_respond_sends_titles_only_on_a_content_question(
     with (
         patch.object(svc._embedding_svc, "embed", AsyncMock(return_value=[0.0] * 768)),
         patch.object(svc, "_retrieve_history", AsyncMock(return_value=[])),
-        patch.object(svc, "_shortlist_papers", AsyncMock(return_value=([], 0))),
+        patch.object(svc._widener, "run", AsyncMock(return_value=False)),
         patch.object(svc, "_retrieve_paper_chunks", AsyncMock(return_value=[])),
         patch.object(svc._chat_agent, "stream", stream),
         patch.object(svc._conv_svc, "save_message", AsyncMock()),
@@ -1356,7 +902,7 @@ async def test_a_misattributed_marker_is_stripped_before_the_citation_array_is_b
         patch.object(svc._embedding_svc, "embed", AsyncMock(return_value=[0.0] * 768)),
         patch.object(svc, "_retrieve_history", AsyncMock(return_value=[])),
         patch.object(svc._reformulator, "run", AsyncMock(return_value="Test question")),
-        patch.object(svc, "_shortlist_papers", AsyncMock(return_value=([], 0))),
+        patch.object(svc._widener, "run", AsyncMock(return_value=False)),
         patch.object(svc, "_retrieve_paper_chunks", AsyncMock(return_value=chunks)),
         patch.object(svc._chat_agent, "stream", return_value=fake_stream()),
         patch.object(svc._conv_svc, "save_message", save),
@@ -1371,155 +917,216 @@ async def test_a_misattributed_marker_is_stripped_before_the_citation_array_is_b
     assert citations[0]["paper_id"] == owner.id
 
 
-async def test_the_lexical_title_arm_adds_a_paper_the_dense_arm_buried():
-    """The failure this arm exists for, in miniature.
-
-    Nearest-chunk distance ranks on BODY text. A question that names its paper
-    by a property of the TITLE ranked its target 28th of 100 live (conversation
-    867dd8c5), outside any sane dense cap, so the targeter could only name a
-    wrong paper and retrieval was scoped to it. The lexical arm ranks the same
-    papers by their titles, which is the signal the dense arm cannot see.
-    """
-    from app.services.chat_service import ChatService, PaperInfo
-
-    svc = ChatService()
-    mock_db = _mock_db_returning_shortlist(
-        [("p0", 0.30, 10), ("p1", 0.31, 20), ("p2", 0.32, 30)],
-        lexical=["p9"],
-    )
-    papers = [PaperInfo(paper_id=f"p{i}", title=f"Paper {i}") for i in range(10)]
-
-    with patch.object(settings, "targeter_dense_candidates", 2):
-        candidates, _ = await svc._shortlist_papers(mock_db, papers, [0.0] * 768, "a question")
-
-    assert [c.paper_id for c in candidates] == ["p0", "p1", "p9"]
-    assert candidates[-1].title == "Paper 9"
-
-
-async def test_the_lexical_arm_is_unioned_after_the_dense_arm_never_fused():
-    """Union, not fusion, and dense order is preserved.
-
-    Fusing the two arms 50/50 by RRF was measured on the golden set and DROPPED
-    candidate recall 28/30 -> 24/30: a lexical rank exists for papers the dense
-    arm was right to bury, and fusion lets those displace real hits. A union
-    can only add.
-    """
-    from app.services.chat_service import ChatService, PaperInfo
-
-    svc = ChatService()
-    mock_db = _mock_db_returning_shortlist(
-        [("p0", 0.30, 10), ("p1", 0.31, 20)],
-        lexical=["p1", "p0"],  # both already dense hits, in the opposite order
-    )
-    papers = [PaperInfo(paper_id=f"p{i}", title=f"Paper {i}") for i in range(2)]
-
-    candidates, _ = await svc._shortlist_papers(mock_db, papers, [0.0] * 768, "a question")
-
-    assert [c.paper_id for c in candidates] == ["p0", "p1"]
-
-
-async def test_the_lexical_arm_skips_ids_that_are_not_in_this_projects_papers():
-    """Defence in depth: the arm's own SQL scopes by id, so a foreign id can
-    only arrive if that scope ever breaks — and it must not be labelled with a
-    title this project does not have."""
-    from app.services.chat_service import ChatService, PaperInfo
-
-    svc = ChatService()
-    mock_db = _mock_db_returning_shortlist([("p0", 0.30, 10)], lexical=["ghost"])
-    papers = [PaperInfo(paper_id="p0", title="Paper 0"), PaperInfo(paper_id="p1", title="Paper 1")]
-
-    candidates, _ = await svc._shortlist_papers(mock_db, papers, [0.0] * 768, "a question")
-
-    assert [c.paper_id for c in candidates] == ["p0"]
-
-
-async def test_the_lexical_arm_is_capped_by_settings():
-    from app.services.chat_service import ChatService, PaperInfo
-
-    svc = ChatService()
-    mock_db = _mock_db_returning_shortlist([("p0", 0.30, 10)], lexical=[])
-    papers = [PaperInfo(paper_id=f"p{i}", title=f"Paper {i}") for i in range(3)]
-
-    with patch.object(settings, "targeter_lexical_candidates", 4):
-        await svc._shortlist_papers(mock_db, papers, [0.0] * 768, "a question")
-
-    _, lexical_params = mock_db.execute.await_args_list[1].args
-    assert lexical_params["limit"] == 4
-
-
-async def test_a_broken_lexical_arm_degrades_to_the_dense_shortlist():
-    """Fail-open. The arm exists to ADD candidates; a failing query must leave
-    the dense shortlist standing, not fail the turn."""
-    from app.services.chat_service import ChatService, PaperInfo
-
-    svc = ChatService()
-    dense_result = MagicMock()
-    dense_result.fetchall.return_value = [MagicMock(paper_id="p0", best=0.3, n_chunks=10)]
-
-    async def execute(sql, params=None):
-        if "ts_rank_cd" in str(sql):
-            raise RuntimeError("text search configuration missing")
-        return dense_result
-
-    mock_db = MagicMock()
-    mock_db.execute = AsyncMock(side_effect=execute)
-    papers = [PaperInfo(paper_id="p0", title="Paper 0"), PaperInfo(paper_id="p1", title="Paper 1")]
-
-    candidates, total = await svc._shortlist_papers(mock_db, papers, [0.0] * 768, "a question")
-
-    assert [c.paper_id for c in candidates] == ["p0"]
-    assert total == 10
-
-
-async def test_an_empty_question_skips_the_lexical_query_entirely():
-    """No lexemes, no query. Reformulation can return an empty-ish string, and
-    a tsquery built from nothing matches nothing anyway."""
-    from app.services.chat_service import ChatService, PaperInfo
-
-    svc = ChatService()
-    mock_db = _mock_db_returning_shortlist([("p0", 0.30, 10)])
-    papers = [PaperInfo(paper_id="p0", title="Paper 0"), PaperInfo(paper_id="p1", title="Paper 1")]
-
-    candidates, _ = await svc._shortlist_papers(mock_db, papers, [0.0] * 768, "   ")
-
-    assert mock_db.execute.await_count == 1
-    assert [c.paper_id for c in candidates] == ["p0"]
-
-
-async def test_the_shortlist_is_built_from_the_reformulated_query_text(
+async def test_mentions_scope_retrieval_to_the_named_papers(
     db_session: AsyncSession, project: Project, conversation_with_message
 ):
-    """The lexical arm must see the same text the dense arm's embedding came
-    from. A pronoun-only follow-up ('and that one?') carries no title words at
-    all; the reformulated query is what does."""
+    from app.agents.chat_agent import ChunkContext
+    from app.db.models import Paper
+    from app.services.chat_service import ChatService
+
+    conv = conversation_with_message
+    papers = [Paper(project_id=project.id, title=f"Paper {i}", source="manual") for i in range(3)]
+    db_session.add_all(papers)
+    await db_session.commit()
+    for p in papers:
+        await db_session.refresh(p)
+
+    async def fake_stream(*args, **kwargs):
+        yield "answer"
+
+    svc = ChatService()
+    # A non-empty result, deliberately: an empty return here would also
+    # trigger the widen-on-empty-scope fallback (see
+    # test_mentions_with_no_chunks_at_all_fall_back_to_the_library), which
+    # re-queries the FULL library and becomes the mock's last recorded call —
+    # masking the very narrowing this test exists to check.
+    retrieve = AsyncMock(
+        return_value=[
+            ChunkContext(n=1, paper_id=papers[1].id, title=papers[1].title, chunk_index=0, text="t")
+        ]
+    )
+
+    with (
+        patch.object(svc._embedding_svc, "embed", AsyncMock(return_value=[0.0] * 768)),
+        patch.object(svc, "_retrieve_history", AsyncMock(return_value=[])),
+        patch.object(svc._widener, "run", AsyncMock(return_value=False)),
+        patch.object(svc, "_retrieve_paper_chunks", retrieve),
+        patch.object(svc._chat_agent, "stream", return_value=fake_stream()),
+        patch.object(svc._conv_svc, "save_message", AsyncMock()),
+    ):
+        async for _ in svc.respond(conv.id, "What does it say?", [papers[1].id]):
+            pass
+
+    scoped = retrieve.await_args.args[1]
+    assert [p.paper_id for p in scoped] == [papers[1].id]
+
+
+async def test_no_mentions_means_no_widener_call_and_global_scope(
+    db_session: AsyncSession, project: Project, conversation_with_message
+):
+    """Nothing infers scope any more. An un-mentioned turn makes no scoping
+    decision at all — and therefore cannot make a wrong one."""
     from app.db.models import Paper
     from app.services.chat_service import ChatService
 
     conv = conversation_with_message
     for i in range(3):
         db_session.add(Paper(project_id=project.id, title=f"Paper {i}", source="manual"))
-    # A prior turn, so reformulation runs at all: a first turn is already
-    # standalone and is skipped (see the reformulation-gating tests above).
-    db_session.add(ChatMessage(conversation_id=conv.id, role="assistant", content="Earlier answer"))
-    db_session.add(ChatMessage(conversation_id=conv.id, role="user", content="and that one?"))
     await db_session.commit()
 
     async def fake_stream(*args, **kwargs):
         yield "answer"
 
     svc = ChatService()
-    shortlist = AsyncMock(return_value=([], 0))
+    retrieve = AsyncMock(return_value=[])
+    widener = AsyncMock(return_value=False)
 
     with (
         patch.object(svc._embedding_svc, "embed", AsyncMock(return_value=[0.0] * 768)),
         patch.object(svc, "_retrieve_history", AsyncMock(return_value=[])),
-        patch.object(svc._reformulator, "run", AsyncMock(return_value="the evolutionary paper")),
-        patch.object(svc, "_shortlist_papers", shortlist),
-        patch.object(svc, "_retrieve_paper_chunks", AsyncMock(return_value=[])),
+        patch.object(svc._widener, "run", widener),
+        patch.object(svc, "_retrieve_paper_chunks", retrieve),
         patch.object(svc._chat_agent, "stream", return_value=fake_stream()),
         patch.object(svc._conv_svc, "save_message", AsyncMock()),
     ):
-        async for _ in svc.respond(conv.id, "and that one?"):
+        async for _ in svc.respond(conv.id, "What does it say?", []):
             pass
 
-    assert shortlist.await_args.args[3] == "the evolutionary paper"
+    widener.assert_not_awaited()
+    assert len(retrieve.await_args.args[1]) == 3
+
+
+async def test_widening_pins_the_mentioned_papers_and_fills_globally(
+    db_session: AsyncSession, project: Project, conversation_with_message
+):
+    """The widener adds the library; it never removes the named paper."""
+    from app.agents.chat_agent import ChunkContext
+    from app.db.models import Paper
+    from app.services.chat_service import ChatService
+
+    conv = conversation_with_message
+    papers = [Paper(project_id=project.id, title=f"Paper {i}", source="manual") for i in range(3)]
+    db_session.add_all(papers)
+    await db_session.commit()
+    for p in papers:
+        await db_session.refresh(p)
+    named, other = papers[1], papers[2]
+
+    async def fake_stream(*args, **kwargs):
+        yield "answer"
+
+    def chunk(n, paper):
+        return ChunkContext(n=n, paper_id=paper.id, title=paper.title, chunk_index=n, text=f"c{n}")
+
+    calls = []
+
+    async def fake_retrieve(db, scope, embedding, query_text):
+        calls.append([p.paper_id for p in scope])
+        if len(calls) == 1:
+            return [chunk(1, named)]
+        return [chunk(1, other)]
+
+    svc = ChatService()
+
+    with (
+        patch.object(svc._embedding_svc, "embed", AsyncMock(return_value=[0.0] * 768)),
+        patch.object(svc, "_retrieve_history", AsyncMock(return_value=[])),
+        patch.object(svc._widener, "run", AsyncMock(return_value=True)),
+        patch.object(svc, "_retrieve_paper_chunks", fake_retrieve),
+        patch.object(svc._chat_agent, "stream", return_value=fake_stream()),
+        patch.object(svc._conv_svc, "save_message", AsyncMock()),
+    ):
+        events = [ev async for ev in svc.respond(conv.id, "and others?", [named.id])]
+
+    assert calls[0] == [named.id]
+    assert len(calls[1]) == 3
+    retrieving = json.loads(next(e for e in events if e["event"] == "retrieving")["data"])
+    assert retrieving["scoped"] is True and retrieving["widened"] is True
+    # The count follows what the USER named, not the widened scope.
+    assert retrieving["scoped_count"] == 1
+
+
+async def test_mentions_with_no_chunks_at_all_fall_back_to_the_library(
+    db_session: AsyncSession, project: Project, conversation_with_message
+):
+    """A paper mentioned before ingest finished has no chunks. Answering from
+    an empty evidence set is worse than answering wider than asked."""
+    from app.db.models import Paper
+    from app.services.chat_service import ChatService
+
+    conv = conversation_with_message
+    papers = [Paper(project_id=project.id, title=f"Paper {i}", source="manual") for i in range(2)]
+    db_session.add_all(papers)
+    await db_session.commit()
+    for p in papers:
+        await db_session.refresh(p)
+
+    async def fake_stream(*args, **kwargs):
+        yield "answer"
+
+    scopes = []
+
+    async def fake_retrieve(db, scope, embedding, query_text):
+        scopes.append([p.paper_id for p in scope])
+        return []
+
+    svc = ChatService()
+
+    with (
+        patch.object(svc._embedding_svc, "embed", AsyncMock(return_value=[0.0] * 768)),
+        patch.object(svc, "_retrieve_history", AsyncMock(return_value=[])),
+        patch.object(svc._widener, "run", AsyncMock(return_value=False)),
+        patch.object(svc, "_retrieve_paper_chunks", fake_retrieve),
+        patch.object(svc._chat_agent, "stream", return_value=fake_stream()),
+        patch.object(svc._conv_svc, "save_message", AsyncMock()),
+    ):
+        events = [ev async for ev in svc.respond(conv.id, "q", [papers[0].id])]
+
+    assert scopes[0] == [papers[0].id]
+    assert len(scopes[1]) == 2
+    retrieving = json.loads(next(e for e in events if e["event"] == "retrieving")["data"])
+    assert retrieving["widened"] is True
+
+
+async def test_the_scope_titles_reach_the_chat_agent(
+    db_session: AsyncSession, project: Project, conversation_with_message
+):
+    from app.agents.chat_agent import ChunkContext
+    from app.db.models import Paper
+    from app.services.chat_service import ChatService
+
+    conv = conversation_with_message
+    paper = Paper(project_id=project.id, title="Named Paper", source="manual")
+    other = Paper(project_id=project.id, title="Other Paper", source="manual")
+    db_session.add_all([paper, other])
+    await db_session.commit()
+    await db_session.refresh(paper)
+
+    async def fake_stream(*args, **kwargs):
+        yield "answer"
+
+    stream = MagicMock(return_value=fake_stream())
+    svc = ChatService()
+
+    with (
+        patch.object(svc._embedding_svc, "embed", AsyncMock(return_value=[0.0] * 768)),
+        patch.object(svc, "_retrieve_history", AsyncMock(return_value=[])),
+        patch.object(svc._widener, "run", AsyncMock(return_value=False)),
+        patch.object(
+            svc,
+            "_retrieve_paper_chunks",
+            AsyncMock(
+                return_value=[
+                    ChunkContext(n=1, paper_id=paper.id, title=paper.title, chunk_index=0, text="t")
+                ]
+            ),
+        ),
+        patch.object(svc._chat_agent, "stream", stream),
+        patch.object(svc._conv_svc, "save_message", AsyncMock()),
+    ):
+        async for _ in svc.respond(conv.id, "q", [paper.id]):
+            pass
+
+    agent_input = stream.call_args.args[0]
+    assert agent_input.scope_titles == ["Named Paper"]
+    assert agent_input.scope_widened is False

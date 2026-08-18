@@ -193,37 +193,6 @@ class Settings(BaseSettings):
     # evals/retrieval/README.md before changing it.
     intra_paper_rank_window: int = 30
 
-    # Papers offered to the PaperTargeterAgent, from two arms unioned.
-    #
-    # Sized by measurement, not by prompt budget. The DENSE arm ranks papers
-    # by their nearest chunk, which ranks on BODY TEXT: a question that names
-    # its paper by a property of the TITLE ("the paper that compares
-    # evolutionary algorithms against reinforcement learning") ranked its
-    # target 28th of 100 on the live corpus, outside any sane dense cap, while
-    # dozens of deep-RL UAV papers whose bodies match the content words sat
-    # above it. The targeter then cannot do anything but name a wrong paper,
-    # and retrieval is scoped to it — live failure, conversation 867dd8c5.
-    #
-    # The LEXICAL arm ranks the same papers by ts_rank_cd over their TITLES,
-    # which is the signal the dense arm structurally cannot see. Measured on
-    # the 30-positive golden set plus 8 title-referential questions:
-    #
-    #   config           golden recall  title-ref recall  WRONG scoping
-    #   dense 10 only        28/30            7/8          12/30 + 1/8
-    #   dense 10 + lex 10    29/30            8/8          10/30 + 0/8
-    #   all 100 titles       30/30            8/8          10/30 + 0/8
-    #
-    # UNION, never RRF fusion: fusing the two arms 50/50 DROPPED golden recall
-    # 28 → 24, because a lexical rank exists for papers the dense arm was
-    # right to bury. A union can only add candidates.
-    #
-    # Offering all 100 titles buys one extra golden case over the union for
-    # ~2,900 extra input tokens per targeted turn, and is O(N) in library
-    # size — at 1,000 papers it is ~23k tokens, past Groq's 12k
-    # single-request ceiling. The union is O(1).
-    targeter_dense_candidates: int = 10
-    targeter_lexical_candidates: int = 10
-
     # Hard ceiling on chunks sent to the chat model in one turn.
     #
     # The retrieval budget must be a function of the CONTEXT WINDOW, never of
