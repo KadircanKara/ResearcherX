@@ -74,6 +74,29 @@ services:
     volumes:
       - ./backend:/app
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    networks:
+      - default
+      - latex
+
+  latex-compiler:
+    build:
+      context: ./latex-compiler
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 64
+    mem_limit: 2g
+    cpus: 2
+    # NO env_file and NO environment: this container must never hold
+    # DATABASE_URL, LLM_API_KEY or OWNER_API_KEY. That is the control that
+    # makes `\input{/app/.env}` -- which survives every engine flag -- return
+    # nothing worth having.
+    networks:
+      - latex
 
   frontend:
     build:
@@ -94,3 +117,8 @@ services:
 volumes:
   db_data:
   ollama_models:
+
+networks:
+  default:
+  latex:
+    internal: true    # no egress: a compile cannot phone home with what it read
