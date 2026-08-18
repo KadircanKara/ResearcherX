@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import type { ChatCitation, ChatEvent, ChatMessage } from "@/lib/types";
+import type { ChatCitation, ChatEvent, ChatMessage, Paper } from "@/lib/types";
 import { chatMessagesUrl, getConversation } from "@/lib/chat";
 import { getDevUserId } from "@/lib/api";
 import { CitationHoverCard, queryTermsFrom, resetChunkCache } from "@/components/citation-hover-card";
@@ -33,6 +33,44 @@ interface Props {
   pendingContent?: string;
   /** Paper ids the pending message was scoped to. */
   pendingMentions?: string[];
+  /** Full paper list, for resolving mention ids to titles at render time. */
+  papers: Paper[];
+}
+
+function MentionedContent({ content, mentions, papers }: {
+  content: string;
+  mentions: string[];
+  papers: Paper[];
+}) {
+  if (mentions.length === 0) return <>{content}</>;
+  // Titles are resolved from ids at RENDER time, so a paper renamed in the
+  // Papers tab relabels every past turn that named it — the same rule the
+  // citation chips follow.
+  const titles = mentions
+    .map((id) => papers.find((p) => p.id === id)?.title)
+    .filter((t): t is string => Boolean(t));
+  if (titles.length === 0) return <>{content}</>;
+  const parts = content.split(new RegExp(`(${titles.map(escapeRegExp).map((t) => `@${t}`).join("|")})`));
+  return (
+    <>
+      {parts.map((part, i) =>
+        part.startsWith("@") && titles.some((t) => part === `@${t}`) ? (
+          // Rendered only inside the user bubble (bg-primary text-primary-foreground):
+          // bg-primary/10 + text-primary from the brief is blue-on-blue there and
+          // renders invisible. primary-foreground/20 keeps contrast against bg-primary.
+          <span key={i} className="rounded bg-primary-foreground/20 px-1 font-semibold text-primary-foreground">
+            {part}
+          </span>
+        ) : (
+          <span key={i}>{part}</span>
+        )
+      )}
+    </>
+  );
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 export function ChatStream({
@@ -43,11 +81,18 @@ export function ChatStream({
   onError,
   pendingContent,
   pendingMentions,
+  papers,
 }: Props) {
   const [messages, setMessages] = useState<ChatMessage[]>(initialMessages);
   const [streamingText, setStreamingText] = useState("");
   const [status, setStatus] = useState<"idle" | "thinking" | "retrieving" | "streaming">("idle");
-  const [retrievingInfo, setRetrievingInfo] = useState<{ paper_count: number; history_hits: number } | null>(null);
+  const [retrievingInfo, setRetrievingInfo] = useState<{
+    paper_count: number;
+    history_hits: number;
+    scoped: boolean;
+    scoped_count: number;
+    widened: boolean;
+  } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
 
@@ -118,7 +163,13 @@ export function ChatStream({
               setStatus("thinking");
             } else if (ev.type === "retrieving") {
               setStatus("retrieving");
-              setRetrievingInfo({ paper_count: ev.paper_count, history_hits: ev.history_hits });
+              setRetrievingInfo({
+                paper_count: ev.paper_count,
+                history_hits: ev.history_hits,
+                scoped: ev.scoped,
+                scoped_count: ev.scoped_count,
+                widened: ev.widened,
+              });
             } else if (ev.type === "delta") {
               setStatus("streaming");
               setStreamingText((prev) => prev + ev.text);
@@ -221,7 +272,9 @@ export function ChatStream({
                 </ReactMarkdown>
               </div>
             ) : (
-              <p>{msg.content}</p>
+              <p>
+                <MentionedContent content={msg.content} mentions={msg.mentions} papers={papers} />
+              </p>
             )}
             {msg.role === "assistant" && msg.citations.length > 0 && (
               <div className="mt-2 flex flex-wrap gap-1">
@@ -271,6 +324,13 @@ export function ChatStream({
             {status === "retrieving" && (retrievingInfo
               ? `Retrieving from ${retrievingInfo.paper_count} paper${retrievingInfo.paper_count !== 1 ? "s" : ""}…`
               : "Retrieving…")}
+            {retrievingInfo?.scoped && (
+              <span className="ml-2 text-xs text-muted-foreground">
+                scoped to {retrievingInfo.scoped_count} paper
+                {retrievingInfo.scoped_count === 1 ? "" : "s"}
+                {retrievingInfo.widened ? " + library" : ""}
+              </span>
+            )}
           </div>
         </div>
       )}

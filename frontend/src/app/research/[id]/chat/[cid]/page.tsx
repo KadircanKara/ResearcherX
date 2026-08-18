@@ -25,7 +25,11 @@ export default function ConversationPage() {
   );
   const [mentions, setMentions] = useState<Mention[]>([]);
   const [papers, setPapers] = useState<Paper[]>([]);
-  const [pendingMentions, setPendingMentions] = useState<string[]>([]);
+  // ?m= carries the paper ids picked on the new-chat page, for the first
+  // message only — cleared once the pending message is confirmed.
+  const [pendingMentions, setPendingMentions] = useState<string[]>(
+    (searchParams.get("m") ?? "").split(",").filter(Boolean)
+  );
 
   useEffect(() => {
     getConversation(projectId, cid)
@@ -78,6 +82,7 @@ export default function ConversationPage() {
           initialMessages={detail.messages}
           pendingContent={pendingContent}
           pendingMentions={pendingMentions}
+          papers={papers}
           onDone={() => setPendingContent(undefined)}
         />
       </div>
