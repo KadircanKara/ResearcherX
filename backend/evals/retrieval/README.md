@@ -73,21 +73,22 @@ One divergence remains:
 
 The global report above measures the path production takes when retrieval is
 scoped to the whole project. Since 2026-08-10 there is a second production
-path: when a paper targeter has scoped retrieval to ONE paper,
-`chat_service._retrieve_paper_chunks` swaps in a looser SQL ceiling
+path: when a turn is scoped to ONE paper — a single `@` mention, or a
+project holding only one paper — `chat_service._retrieve_paper_chunks`
+swaps in a looser SQL ceiling
 (`settings.intra_paper_ceiling`) plus a relative delta cut
 (`settings.intra_paper_delta`, via `keep_within_paper`) instead of the global
 `similarity_threshold`. `--targeted` is what measures *that* path — the
 global report cannot see it at all, because a global top-k across 100 papers
 never lets one paper's low-ranked-but-correct chunk through.
 
-**What it simulates.** Each case is scoped to a single paper, the same way
-the targeter would:
+**What it simulates.** Each case is scoped to a single paper, the way a
+single `@` mention would be:
 - `content` / `metadata` / `figure` cases scope to the paper the case names
-  (`_scope_to_paper`) — the targeter picked correctly.
+  (`_scope_to_paper`) — the mention names the right paper.
 - `off_topic` cases scope to whichever paper holds the globally nearest
-  chunk (`_scope_to_nearest_paper`) — this simulates the targeter
-  *mis-firing* on a question the library cannot answer, which is exactly the
+  chunk (`_scope_to_nearest_paper`) — this simulates a user @-mentioning a
+  paper that turns out irrelevant to their question, which is exactly the
   scenario `intra_paper_ceiling` exists to contain. There is no "correct"
   paper to scope an off_topic case to, so the worst case (nearest wrong
   paper) is what's measured.
@@ -139,22 +140,21 @@ The report's columns:
   chunk is defined for a negative).
 - **kept** — how many chunks survive `_production_cut`. For off_topic rows
   this is the ceiling measurement, not a rank: it is what
-  `intra_paper_ceiling` lets through when the targeter picks the wrong paper.
+  `intra_paper_ceiling` lets through when a mentioned paper turns out to be
+  the wrong one.
 - **survived** — whether the satisfying chunk is still present after the
   cut. `-` for off_topic, same reason as `intra_rank`.
 
 **`kept = 0` on an off_topic row does not mean production returns nothing.**
-It means the single-paper cut emptied the mis-targeted paper's scope — but
-`chat_service.py`'s `respond()` re-queries the untargeted (whole-project)
-scope whenever the targeted retrieval comes back empty
-(`scope is not paper_infos and not paper_chunks`, right after
-`_retrieve_paper_chunks` in `respond()`), so production still answers, from
-global chunks, instead of returning nothing. This matters for the "Open
-finding" below: raising `intra_paper_ceiling`'s scrutiny would push more
-mis-targeted off_topic questions toward `kept = 0`, i.e. toward *this*
-fallback rather than toward an empty, ungrounded answer — the two are not
-the same failure mode, and a tighter ceiling trades one for the other rather
-than eliminating a risk outright.
+It means the single-paper cut emptied the mentioned paper's scope — but
+`chat_service._retrieve_mentioned_chunks` treats an empty result as forcing
+`widened = True` and re-queries the whole project, so production still
+answers, from global chunks, instead of returning nothing. This matters for
+the "Open finding" below: raising `intra_paper_ceiling`'s scrutiny would push
+more off-topic mentions toward `kept = 0`, i.e. toward *this* widen fallback
+rather than toward an empty, ungrounded answer — the two are not the same
+failure mode, and a tighter ceiling trades one for the other rather than
+eliminating a risk outright.
 
 `survival@cut` at the bottom is `survived == yes` count over scored
 (non-off_topic) cases — the single number to watch when re-tuning
@@ -525,16 +525,42 @@ measured N times. The weights must sum to exactly 1.0 or `Settings` refuses
 to start. One run is ~one embedding call per case plus one per targeted
 positive (~72 calls on this set), so a full grid is not free.
 
-## Scoping harness — removed
+## Scoping is no longer measured here
 
-The LLM-guessing paper-scoping layer this section used to document (the
-dense+lexical shortlist, the titles-only targeter call, and their eval
-harness and fixture) was deleted when explicit "@ paper mentions" shipped.
-Retrieval scope is now whatever the user names, plus a binary widen/don't
--widen decision — see `respond()` in `app/services/chat_service.py` and
-`app/agents/scope_widener.py`. `run_eval.py` below still measures whether the
-answering chunk reaches the context budget; there is no longer a
-paper-scoping layer above it to measure separately.
+This section used to document `shortlist_eval.py`: a harness that measured
+whether an LLM (`PaperTargeterAgent`) picked the right paper to scope
+retrieval to, from a two-arm (dense + lexical-title) candidate shortlist.
+That whole layer — the shortlist, the titles-only targeter call, and its
+eval harness and fixture — was deleted on 2026-08-18. Retrieval scope is now
+set only by explicit `@` mentions the user picks, plus a binary widen/don't
+-widen decision (`ScopeWidenerAgent`) — see `respond()` in
+`app/services/chat_service.py` and `app/agents/scope_widener.py`. There is no
+longer an inference step to score.
+
+**The numbers that killed the targeter (measured 2026-08-18, 30-question
+golden set):**
+
+| approach | correct | wrong paper (holds no answer) | abstained |
+|---|---|---|---|
+| `PaperTargeterAgent` | 9/30 | **11/30** | 10/30 |
+| nearest dense chunk, rank 1, unconditionally | 22/30 | 8/30 | 0/30 |
+
+The targeter saw titles only — a title is a lossy index of contents — and on
+more than a third of content questions it confidently scoped retrieval to a
+paper that did not hold the answer, which is worse than not scoping at all:
+an empty target falls through to unscoped global retrieval, but a *wrong*
+target actively excludes the paper that does hold the answer. Simply always
+taking the nearest chunk's paper was a better blind guess (22/30) and was
+still wrong on 8/30 — good enough to show a title- or embedding-based guess
+has a real ceiling, not good enough to ship. Both blind signals were dropped
+rather than arbitrated between; see CLAUDE.md and
+`docs/superpowers/specs/2026-08-18-paper-mentions-design.md` for the full
+argument.
+
+`run_eval.py` below still measures whether the answering chunk reaches the
+context budget once a scope is chosen (global, or single/multi-paper via
+`--targeted`); there is no longer a paper-scoping layer above it to measure
+separately.
 
 ## Adding a case
 

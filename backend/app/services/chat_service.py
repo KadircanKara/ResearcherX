@@ -125,13 +125,14 @@ def needs_paper_metadata(question: str, prior_messages: list[dict]) -> bool:
     others -- and "how" alone opens a large share of all questions). The
     list of collisions grows with every paper added, silently, with nothing
     to flag when a new author erodes the saving again. It also bought less
-    than it cost: the paper TARGETER, which decides retrieval scoping, only
-    ever receives paper TITLES, so the system already cannot resolve
-    "Kara's paper" to a paper at the retrieval layer -- naming the author in
-    the answer-time block never fixed that; it only let the model repeat a
-    name for chunks it had already been handed some other way. Do not
-    reintroduce corpus tokens to "fix" this gap without solving that
-    retrieval-layer problem first, or the same three collision classes
+    than it cost: retrieval scope is set only by the explicit "@" mentions
+    the user picks -- nothing resolves a natural-language reference like
+    "Kara's paper" to a paper id at the retrieval layer, so naming the
+    author in the answer-time block never fixed that; it only let the model
+    repeat a name for chunks it had already been handed some other way (an
+    explicit mention, or the whole library). Do not reintroduce corpus
+    tokens to "fix" this gap without solving that retrieval-layer problem
+    first, or the same three collision classes
     return.
 
     A pronoun-only follow-up such as "and that one?" carries no keyword or

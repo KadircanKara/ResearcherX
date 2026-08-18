@@ -68,8 +68,9 @@ class Settings(BaseSettings):
 
     # --- single-paper scope -------------------------------------------------
     # Both numbers below apply ONLY when retrieval is scoped to one paper
-    # (the targeter named it, or the project holds a single paper). They are
-    # MODEL-SPECIFIC in exactly the way similarity_threshold above is:
+    # (the user @-mentioned exactly one paper, or the project holds a single
+    # paper). They are MODEL-SPECIFIC in exactly the way similarity_threshold
+    # above is:
     # measured on text-embedding-3-small against the 100-paper dev corpus on
     # 2026-08-12, and invalid for any other embedding model.
     #
@@ -77,8 +78,9 @@ class Settings(BaseSettings):
     #
     # The CEILING is the noise floor. It replaces similarity_threshold as the
     # SQL cutoff in single-paper scope. Measured on the three off_topic golden
-    # cases, scoped to the paper holding the globally nearest chunk (the
-    # targeter-misfire simulation): 0.85 admits 0, 1 and 1 chunks; 0.90 admits
+    # cases, scoped to the paper holding the globally nearest chunk
+    # (simulating a single-paper mention on an off-topic question): 0.85
+    # admits 0, 1 and 1 chunks; 0.90 admits
     # 1, 2 and 9. A relative rule cannot do this job — an off-topic question's
     # distances are compressed (best 0.7518-0.8581), so the delta alone (0.25,
     # the then-current value; it is 0.20 below now) keeps 24/24, 44/44 and
@@ -264,9 +266,9 @@ class Settings(BaseSettings):
     # model would truncate outright (finish_reason=length), parse_structured
     # would raise, the agent would fail-open to widen=False forever, and the
     # feature would be silently disabled with no error anywhere. 3000 is the
-    # same as query_reformulator and paper_targeter because the answer size is
-    # similarly trivial on non-reasoning models. max_tokens is a cap, not a
-    # charge, so a generous default costs nothing on a model that does not think.
+    # same as query_reformulator because the answer size is similarly trivial
+    # on non-reasoning models. max_tokens is a cap, not a charge, so a
+    # generous default costs nothing on a model that does not think.
     scope_widener_max_tokens: int = 3000
 
     # Abuse limits (decision D3): anonymous per-IP quotas + a global daily
