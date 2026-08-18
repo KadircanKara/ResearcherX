@@ -50,7 +50,11 @@ function MentionedContent({ content, mentions, papers }: {
     .map((id) => papers.find((p) => p.id === id)?.title)
     .filter((t): t is string => Boolean(t));
   if (titles.length === 0) return <>{content}</>;
-  const parts = content.split(new RegExp(`(${titles.map(escapeRegExp).map((t) => `@${t}`).join("|")})`));
+  // Longest-first, same convention as reconcileMentions in lib/mentions.ts:
+  // otherwise a shorter co-mentioned title that prefixes a longer one (e.g.
+  // "RL" and "RL Survey") can steal the match and split the longer title in two.
+  const sortedTitles = [...titles].sort((a, b) => b.length - a.length);
+  const parts = content.split(new RegExp(`(${sortedTitles.map(escapeRegExp).map((t) => `@${t}`).join("|")})`));
   return (
     <>
       {parts.map((part, i) =>
@@ -119,6 +123,9 @@ export function ChatStream({
     let cancelled = false;
     setStreamingText("");
     setStatus("thinking");
+    // Stale scope from a PRIOR turn must not survive into this one — a badge
+    // claiming a scope the current turn doesn't have is worse than no badge.
+    setRetrievingInfo(null);
     setError(null);
 
     const controller = new AbortController();
@@ -324,7 +331,7 @@ export function ChatStream({
             {status === "retrieving" && (retrievingInfo
               ? `Retrieving from ${retrievingInfo.paper_count} paper${retrievingInfo.paper_count !== 1 ? "s" : ""}…`
               : "Retrieving…")}
-            {retrievingInfo?.scoped && (
+            {status === "retrieving" && retrievingInfo?.scoped && (
               <span className="ml-2 text-xs text-muted-foreground">
                 scoped to {retrievingInfo.scoped_count} paper
                 {retrievingInfo.scoped_count === 1 ? "" : "s"}
