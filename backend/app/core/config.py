@@ -279,11 +279,20 @@ class Settings(BaseSettings):
     # generous default costs nothing on a model that does not think.
     paper_targeter_max_tokens: int = 3000
 
-    # One boolean, nothing else. Sized like query_reformulator_max_tokens: the
-    # answer is a single JSON field, and the schema-in-prompt is what makes it
-    # parse. A reasoning model bills thinking against this budget invisibly
-    # (see chat_answer_max_tokens) — raise it there, not here, if one is used.
-    scope_widener_max_tokens: int = 200
+    # Output budget for one scope-widening decision. PROVIDER-SPECIFIC for the
+    # same reason as chat_answer_max_tokens and query_reformulator_max_tokens
+    # above: the answer is a single boolean JSON field, so the budget is not
+    # about answer length — it is headroom for reasoning models that bill
+    # invisible thinking tokens against this same budget. Measured on
+    # gemini-3.6-flash: ~1,900 tokens went to thinking before a single answer
+    # token (see chat_answer_max_tokens). At the old budget of 200, a reasoning
+    # model would truncate outright (finish_reason=length), parse_structured
+    # would raise, the agent would fail-open to widen=False forever, and the
+    # feature would be silently disabled with no error anywhere. 3000 is the
+    # same as query_reformulator and paper_targeter because the answer size is
+    # similarly trivial on non-reasoning models. max_tokens is a cap, not a
+    # charge, so a generous default costs nothing on a model that does not think.
+    scope_widener_max_tokens: int = 3000
 
     # Abuse limits (decision D3): anonymous per-IP quotas + a global daily
     # cap; the owner API key (X-API-Key header) bypasses both. The cap is
