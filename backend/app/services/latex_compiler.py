@@ -52,14 +52,22 @@ async def compile_source(source: str, engine: str) -> CompileResult:
     payload = await _post("/compile", {"source": source, "engine": engine})
     if payload is None:
         return CompileResult(ok=False, log=_UNAVAILABLE, pdf=None, synctex_gz=None)
-    pdf_b64 = payload.get("pdf_b64")
-    synctex_b64 = payload.get("synctex_b64")
-    return CompileResult(
-        ok=bool(payload.get("ok")),
-        log=payload.get("log") or "",
-        pdf=base64.b64decode(pdf_b64) if pdf_b64 else None,
-        synctex_gz=base64.b64decode(synctex_b64) if synctex_b64 else None,
-    )
+    try:
+        pdf_b64 = payload.get("pdf_b64")
+        synctex_b64 = payload.get("synctex_b64")
+        return CompileResult(
+            ok=bool(payload.get("ok")),
+            log=payload.get("log") or "",
+            pdf=base64.b64decode(pdf_b64) if pdf_b64 else None,
+            synctex_gz=base64.b64decode(synctex_b64) if synctex_b64 else None,
+        )
+    except Exception as exc:
+        # Shaping the RESPONSE can fail too, not just the network call: a
+        # truncated or malformed base64 body raises binascii.Error. Guarding
+        # only _post would leave the module's fail-open promise true of the
+        # request and false of the reply.
+        log.warning("latex_compiler_bad_payload", path="/compile", error=str(exc)[:200])
+        return CompileResult(ok=False, log=_UNAVAILABLE, pdf=None, synctex_gz=None)
 
 
 def _artifacts(source: str, pdf: bytes, synctex_gz: bytes) -> dict:
@@ -78,13 +86,21 @@ async def synctex_forward(
     )
     if not payload or not payload.get("found"):
         return None
-    return PdfPosition(
-        page=int(payload["page"]),
-        x=float(payload["x"]),
-        y=float(payload["y"]),
-        width=float(payload.get("width") or 0),
-        height=float(payload.get("height") or 0),
-    )
+    try:
+        return PdfPosition(
+            page=int(payload["page"]),
+            x=float(payload["x"]),
+            y=float(payload["y"]),
+            width=float(payload.get("width") or 0),
+            height=float(payload.get("height") or 0),
+        )
+    except Exception as exc:
+        # `found: true` is not a promise that the other keys are present. The
+        # client and the compile service are separately deployed images, so a
+        # version skew must degrade to "no navigation", never raise into a
+        # chat turn.
+        log.warning("latex_synctex_bad_payload", direction="forward", error=str(exc)[:200])
+        return None
 
 
 async def synctex_reverse(
@@ -102,4 +118,8 @@ async def synctex_reverse(
     )
     if not payload or not payload.get("found"):
         return None
-    return int(payload["line"])
+    try:
+        return int(payload["line"])
+    except Exception as exc:
+        log.warning("latex_synctex_bad_payload", direction="reverse", error=str(exc)[:200])
+        return None

@@ -81,7 +81,70 @@ async def test_a_compile_without_a_map_still_returns_the_pdf():
         result = await compile_source("\\documentclass{article}", "pdflatex")
 
     assert result.ok
+    # The POINT of this test: the PDF survives a missing map. Asserting only
+    # that synctex_gz is None would pass with pdf wrongly None too.
+    assert result.pdf == b"%PDF-1.5"
     assert result.synctex_gz is None
+
+
+async def test_malformed_base64_degrades_instead_of_raising():
+    """A truncated body is a failed compile, not a 500 out of a chat turn."""
+    payload = {
+        "ok": True,
+        "log": "",
+        "pdf_b64": "not-valid-base64!!",
+        "synctex_b64": None,
+    }
+    with patch("httpx.AsyncClient", return_value=_client_returning(payload)):
+        result = await compile_source("\\documentclass{article}", "pdflatex")
+
+    assert not result.ok
+    assert result.pdf is None
+
+
+async def test_a_non_2xx_response_degrades():
+    class _Failing(_Response):
+        def raise_for_status(self):
+            import httpx
+
+            raise httpx.HTTPStatusError("boom", request=None, response=None)
+
+    client = MagicMock()
+    client.post = AsyncMock(return_value=_Failing({}))
+    client.__aenter__.return_value = client
+    client.__aexit__.return_value = False
+
+    with patch("httpx.AsyncClient", return_value=client):
+        result = await compile_source("\\documentclass{article}", "pdflatex")
+
+    assert not result.ok
+    assert "boom" not in result.log
+
+
+async def test_a_malformed_json_body_degrades():
+    class _BadJson(_Response):
+        def json(self):
+            raise ValueError("not json")
+
+    client = MagicMock()
+    client.post = AsyncMock(return_value=_BadJson({}))
+    client.__aenter__.return_value = client
+    client.__aexit__.return_value = False
+
+    with patch("httpx.AsyncClient", return_value=client):
+        result = await compile_source("\\documentclass{article}", "pdflatex")
+
+    assert not result.ok
+    assert "not json" not in result.log
+
+
+async def test_found_true_without_the_other_keys_degrades_to_no_navigation():
+    """The client and the service are separately deployed images; a version
+    skew must cost navigation, never raise."""
+    with patch("httpx.AsyncClient", return_value=_client_returning({"found": True})):
+        assert await synctex_forward("src", b"pdf", b"gz", line=1) is None
+    with patch("httpx.AsyncClient", return_value=_client_returning({"found": True})):
+        assert await synctex_reverse("src", b"pdf", b"gz", page=1, x=0.0, y=0.0) is None
 
 
 async def test_an_unreachable_compiler_fails_open_to_a_generic_message():
