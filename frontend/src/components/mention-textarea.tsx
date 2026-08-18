@@ -14,6 +14,9 @@ interface Props {
   onSubmit: () => void;
 }
 
+const LISTBOX_ID = "mention-listbox";
+const optionId = (paperId: string) => `mention-option-${paperId}`;
+
 export function MentionTextarea({
   value,
   onChange,
@@ -40,9 +43,13 @@ export function MentionTextarea({
     setQuery(findMentionQuery(next, caret));
   }
 
-  function choose(paper: Paper) {
+  // Defensive: `active` resets to 0 in an effect keyed on the query, one
+  // render after `options` can shrink, so `options[active]` is transiently
+  // undefined in theory. Resolve first and bail rather than ever passing
+  // undefined into insertMention.
+  function choose(paper: Paper | undefined) {
     const el = ref.current;
-    if (!el || !query) return;
+    if (!el || !query || !paper) return;
     const { text, caret } = insertMention(value, query.start, el.selectionStart, paper.title);
     onChange(text);
     onMentionsChange(
@@ -55,10 +62,13 @@ export function MentionTextarea({
     });
   }
 
+  const activeOption = open ? options[active] : undefined;
+
   return (
     <div className="relative flex-1">
       {open && (
         <ul
+          id={LISTBOX_ID}
           role="listbox"
           aria-label="Papers"
           className="absolute bottom-full mb-1 max-h-60 w-full overflow-y-auto rounded-xl border border-border bg-popover p-1 shadow-lg"
@@ -66,6 +76,7 @@ export function MentionTextarea({
           {options.map((paper, i) => (
             <li key={paper.id}>
               <button
+                id={optionId(paper.id)}
                 type="button"
                 role="option"
                 aria-selected={i === active}
@@ -88,10 +99,18 @@ export function MentionTextarea({
         rows={2}
         value={value}
         disabled={disabled}
+        role="combobox"
+        aria-expanded={open}
+        aria-autocomplete="list"
+        aria-haspopup="listbox"
+        aria-controls={LISTBOX_ID}
+        aria-activedescendant={activeOption ? optionId(activeOption.id) : undefined}
         onChange={(e) => update(e.target.value, e.target.selectionStart)}
         onKeyDown={(e) => {
           if (open) {
-            // While the dropdown is open Enter selects and MUST NOT submit.
+            // While the dropdown is open Enter selects and MUST NOT submit —
+            // except Shift+Enter, which must still insert a newline like a
+            // plain textarea and leave the dropdown open.
             if (e.key === "ArrowDown") {
               e.preventDefault();
               setActive((i) => (i + 1) % options.length);
@@ -102,7 +121,7 @@ export function MentionTextarea({
               setActive((i) => (i - 1 + options.length) % options.length);
               return;
             }
-            if (e.key === "Enter" || e.key === "Tab") {
+            if ((e.key === "Enter" && !e.shiftKey) || e.key === "Tab") {
               e.preventDefault();
               choose(options[active]);
               return;
@@ -119,6 +138,7 @@ export function MentionTextarea({
           }
         }}
         onClick={(e) => setQuery(findMentionQuery(value, e.currentTarget.selectionStart))}
+        onBlur={() => setQuery(null)}
         placeholder="Ask a follow-up question…  Type @ to scope to a paper"
         className="w-full resize-none rounded-xl border border-border bg-background px-3 py-2 text-sm outline-none placeholder:text-muted-foreground disabled:opacity-50"
       />
