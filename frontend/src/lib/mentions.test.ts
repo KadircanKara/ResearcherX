@@ -52,6 +52,14 @@ describe("reconcileMentions", () => {
     expect(reconcileMentions("about @Cooperative Sea", [a])).toEqual([]);
   });
 
+  it("drops only the deleted mention when two unrelated ones are bound", () => {
+    expect(reconcileMentions("compare @Cooperative Search and @Federated Sky", [a, b])).toEqual([
+      a,
+      b,
+    ]);
+    expect(reconcileMentions("compare @Federated Sky with nothing", [a, b])).toEqual([b]);
+  });
+
   it("keeps two papers sharing a title only while both occurrences stand", () => {
     const dupA: Mention = { paperId: "p1", title: "Same Title" };
     const dupB: Mention = { paperId: "p2", title: "Same Title" };

@@ -9,6 +9,17 @@ export type Mention = { paperId: string; title: string };
 const MAX_QUERY = 80;
 
 /**
+ * How many papers one message may be scoped to.
+ *
+ * MUST match `ChatRequest.mentioned_paper_ids`'s `max_length` in
+ * `backend/app/schemas/chat.py`. The server is the real enforcement — this
+ * copy exists so an 11th pick is refused with a visible message instead of
+ * being accepted, sent, and rejected as a 422 after the composer has already
+ * been cleared.
+ */
+export const MAX_MENTIONS = 10;
+
+/**
  * The "@query" being typed at the caret, or null.
  *
  * "@" only triggers at the start of a word, so an email address never opens

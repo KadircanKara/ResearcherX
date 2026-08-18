@@ -81,6 +81,27 @@ function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+/**
+ * Why a send was refused, in the user's terms.
+ *
+ * The two rejections a mention can cause are indistinguishable from "Request
+ * failed.", and both are the user's to fix: a 400 means a mentioned paper is
+ * no longer in the project (deleted in another tab between the pick and the
+ * send), a 422 means the scope is larger than the server accepts. Everything
+ * else stays deliberately generic — this says what the USER did, never what
+ * the server did internally.
+ */
+export function sendFailureMessage(status: number, mentionCount: number): string {
+  if (mentionCount === 0) return "Request failed.";
+  if (status === 400) {
+    return "A mentioned paper is no longer in this project. Remove the mention and send again.";
+  }
+  if (status === 422) {
+    return `This message scopes to ${mentionCount} papers, which is more than allowed. Remove some mentions and send again.`;
+  }
+  return "Request failed.";
+}
+
 export function ChatStream({
   projectId,
   conversationId,
@@ -146,7 +167,7 @@ export function ChatStream({
       signal: controller.signal,
     }).then(async (res) => {
       if (!res.ok || !res.body) {
-        const msg = "Request failed.";
+        const msg = sendFailureMessage(res.status, pendingMentions?.length ?? 0);
         setError(msg);
         setStatus("idle");
         onError?.(msg);
@@ -337,9 +358,15 @@ export function ChatStream({
               : "Retrieving…")}
             {status === "retrieving" && retrievingInfo?.scoped && (
               <span className="ml-2 text-xs text-muted-foreground">
-                scoped to {retrievingInfo.scoped_count} paper
-                {retrievingInfo.scoped_count === 1 ? "" : "s"}
-                {retrievingInfo.widened ? " + library" : ""}
+                {retrievingInfo.scoped_count === 0
+                  ? // Papers were mentioned but none could be scoped to (all
+                    // deleted, or retrieval could not run). The backend reports
+                    // this widened; "scoped to 0 papers" would claim a scope
+                    // that was never applied.
+                    "mentions unavailable — searching the library"
+                  : `scoped to ${retrievingInfo.scoped_count} paper${
+                      retrievingInfo.scoped_count === 1 ? "" : "s"
+                    }${retrievingInfo.widened ? " + library" : ""}`}
               </span>
             )}
           </div>

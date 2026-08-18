@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { findMentionQuery, insertMention, matchPapers, reconcileMentions, type Mention } from "@/lib/mentions";
+import { findMentionQuery, insertMention, matchPapers, MAX_MENTIONS, reconcileMentions, type Mention } from "@/lib/mentions";
 import type { Paper } from "@/lib/types";
 
 interface Props {
@@ -29,6 +29,9 @@ export function MentionTextarea({
   const ref = useRef<HTMLTextAreaElement>(null);
   const [query, setQuery] = useState<{ query: string; start: number } | null>(null);
   const [active, setActive] = useState(0);
+  // Set when a pick is refused for hitting the cap. Cleared by the next edit,
+  // so it never outlives the state it describes.
+  const [capped, setCapped] = useState(false);
 
   const options = query ? matchPapers(papers, query.query) : [];
   const open = query !== null && options.length > 0;
@@ -37,6 +40,7 @@ export function MentionTextarea({
 
   function update(next: string, caret: number) {
     onChange(next);
+    setCapped(false);
     // Offsets are never stored — the mention list is re-derived from the text
     // on every change, so an edit anywhere cannot leave a stale id behind.
     onMentionsChange(reconcileMentions(next, mentions));
@@ -50,6 +54,14 @@ export function MentionTextarea({
   function choose(paper: Paper | undefined) {
     const el = ref.current;
     if (!el || !query || !paper) return;
+    // The server caps scope at MAX_MENTIONS and answers an 11th with a 422.
+    // Refusing here — visibly, never silently — is the only way the user
+    // finds out before their message is sent and their text is gone.
+    if (mentions.length >= MAX_MENTIONS) {
+      setCapped(true);
+      setQuery(null);
+      return;
+    }
     const { text, caret } = insertMention(value, query.start, el.selectionStart, paper.title);
     onChange(text);
     onMentionsChange(
@@ -142,6 +154,13 @@ export function MentionTextarea({
         placeholder="Ask a follow-up question…  Type @ to scope to a paper"
         className="w-full resize-none rounded-xl border border-border bg-background px-3 py-2 text-sm outline-none placeholder:text-muted-foreground disabled:opacity-50"
       />
+      {capped && (
+        // role="status" so the refusal is announced, not just drawn — a pick
+        // that does nothing with no feedback reads as a broken dropdown.
+        <p role="status" className="mt-1 text-xs text-destructive">
+          Up to {MAX_MENTIONS} papers per message. That paper was not added.
+        </p>
+      )}
     </div>
   );
 }

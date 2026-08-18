@@ -42,13 +42,29 @@ export default function ConversationPage() {
     listPapers(projectId).then(setPapers).catch(() => {});
   }, [projectId]);
 
+  // What the composer held when the last message was sent. The textarea is
+  // cleared optimistically, so without this a rejected send (an unknown paper
+  // id, a scope over the server's cap, a dropped connection) destroys what the
+  // user typed and tells them nothing.
+  const [lastSent, setLastSent] = useState<{ text: string; mentions: Mention[] } | null>(null);
+
   function handleSend() {
     const q = input.trim();
     if (!q || pendingContent) return;
+    setLastSent({ text: q, mentions });
     setInput("");
     setPendingMentions(mentions.map((m) => m.paperId));
     setMentions([]);
     setPendingContent(q);
+  }
+
+  function handleSendFailed() {
+    if (!lastSent) return;
+    // Only into an empty composer. The textarea is disabled while a turn is in
+    // flight so this is the normal case, but restoring over something the user
+    // did manage to type would be a second way to lose text.
+    setInput((current) => (current.trim() ? current : lastSent.text));
+    setMentions((current) => (current.length ? current : lastSent.mentions));
   }
 
   if (loading) {
@@ -84,6 +100,7 @@ export default function ConversationPage() {
           pendingMentions={pendingMentions}
           papers={papers}
           onDone={() => setPendingContent(undefined)}
+          onError={handleSendFailed}
         />
       </div>
 
