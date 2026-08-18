@@ -7,6 +7,19 @@ not installed and file-path invocation drops cwd from sys.path.
 
 One query per case pulls EVERY chunk with its cosine distance; all scoring
 happens in evals.retrieval.metrics, so the threshold sweep costs no extra queries.
+
+CRITICAL, --hybrid mode: `metrics.Scored.distance` is `float | None` because a
+sparse-only admission has no cosine distance. `_hybrid_chunks_for`'s raw
+output must NEVER reach a distance-sorting code path (`simulate_retrieval`'s
+default `presorted=False`, or any of best_satisfying_distance, noise_floor,
+sweep, separating_threshold/diagnose_separation) — those keep consuming the
+DENSE arm exclusively, via plain `_chunks_for`. The hybrid arm may only feed
+`recall_at_k` / `mean_reciprocal_rank` with `presorted=True` (structural, not
+documentation — see `simulate_retrieval`'s docstring: it skips the sort
+entirely rather than trusting a fabricated field), `rescued_count` /
+`rescue_eligible_count` (which read `d_rank`/`s_rank`, never `.distance`), and
+the targeted survival cut (`_hybrid_production_cut`, via
+`keep_within_rank_window`, which never touches `.distance` either).
 """
 
 from __future__ import annotations
@@ -21,6 +34,7 @@ from sqlalchemy import text
 from app.core.config import settings
 from app.db.session import SessionLocal
 from app.services.embedding_service import EmbeddingService
+from app.services.hybrid_ranker import fuse_rrf, keep_within_rank_window
 from app.services.intra_paper_ranker import keep_within_paper
 from evals.retrieval.golden_set import Case, load_golden_set
 from evals.retrieval.metrics import (
@@ -36,6 +50,8 @@ from evals.retrieval.metrics import (
     order_statistic_risk,
     recall_at_k,
     recommended_point,
+    rescue_eligible_count,
+    rescued_count,
     separating_threshold,
     simulate_retrieval,
     sweep,
@@ -84,6 +100,116 @@ _SQL = text("""
     WHERE c.model = :model
       AND p.project_id = :project_id
     ORDER BY distance ASC
+""")
+
+# Mirrors chat_service._hybrid_rows exactly (dense pool + sparse pool, fused
+# in Python via fuse_rrf), with `_SQL`'s project scoping (`p.project_id`)
+# substituted for production's per-request `scope` CTE of paper ids, plus
+# `c.id AS chunk_id` so the harness can tell rescued chunks apart from each
+# other and match rows back after fusion. Ranking stops at the ranks here too
+# -- fusion, the budget, and the single-paper cut all stay in Python and are
+# IMPORTED from app.services.hybrid_ranker, never reimplemented.
+_HYBRID_SQL = text("""
+    WITH scope AS (
+        SELECT id AS paper_id FROM papers WHERE project_id = :project_id
+    ),
+    q AS (
+        SELECT websearch_to_tsquery('english', :qtext) AS tsq
+    ),
+    dense AS (
+        SELECT c.id, c.paper_id, c.text,
+               (c.embedding <=> CAST(:qvec AS vector)) AS distance,
+               ROW_NUMBER() OVER (
+                   ORDER BY c.embedding <=> CAST(:qvec AS vector)
+               ) AS d_rank
+        FROM paper_chunk_embeddings c
+        JOIN scope s ON s.paper_id = c.paper_id
+        WHERE c.model = :model
+          AND (c.embedding <=> CAST(:qvec AS vector)) < :threshold
+        ORDER BY distance ASC
+        LIMIT :dense_pool
+    ),
+    sparse AS (
+        SELECT c.id, c.paper_id, c.text,
+               ROW_NUMBER() OVER (
+                   ORDER BY ts_rank_cd(c.tsv, q.tsq) DESC, c.id
+               ) AS s_rank
+        FROM paper_chunk_embeddings c
+        JOIN scope s ON s.paper_id = c.paper_id
+        CROSS JOIN q
+        WHERE c.model = :model
+          AND c.tsv @@ q.tsq
+        ORDER BY ts_rank_cd(c.tsv, q.tsq) DESC, c.id
+        LIMIT :sparse_pool
+    )
+    SELECT COALESCE(d.id, sp.id)             AS chunk_id,
+           COALESCE(d.paper_id, sp.paper_id) AS paper_id,
+           p.title                           AS paper_title,
+           COALESCE(d.text, sp.text)         AS chunk_text,
+           d.distance                        AS distance,
+           d.d_rank                          AS d_rank,
+           sp.s_rank                         AS s_rank
+    FROM dense d
+    FULL OUTER JOIN sparse sp ON sp.id = d.id
+    JOIN papers p ON p.id = COALESCE(d.paper_id, sp.paper_id)
+""")
+
+# Targeted mode's hybrid counterpart to `_HYBRID_SQL`: `scope` narrows to ONE
+# paper instead of the whole project. This is not an optimization -- it is
+# required for correctness. Production's `_retrieve_paper_chunks` issues the
+# hybrid query already scoped to `paper_infos`, so when scope is a single
+# paper (the targeter's case), THAT paper gets the entire `dense_pool`/
+# `sparse_pool` to itself and its d_rank/s_rank are computed against only its
+# own chunks. Filtering `_HYBRID_SQL`'s project-wide result down to one paper
+# post-hoc would instead have that paper compete with 99 others for the same
+# pools, which changes both which chunks are admitted and their fused rank --
+# not what production computes. `:threshold` is also bound differently by the
+# caller here: targeted mode always passes `intra_paper_ceiling`, matching
+# `chat_service._retrieve_paper_chunks`'s `single_paper` branch, never
+# `similarity_threshold` (see `_hybrid_chunks_for`'s `threshold` parameter).
+_HYBRID_SQL_PAPER = text("""
+    WITH scope AS (
+        SELECT id AS paper_id FROM papers WHERE id = :paper_id
+    ),
+    q AS (
+        SELECT websearch_to_tsquery('english', :qtext) AS tsq
+    ),
+    dense AS (
+        SELECT c.id, c.paper_id, c.text,
+               (c.embedding <=> CAST(:qvec AS vector)) AS distance,
+               ROW_NUMBER() OVER (
+                   ORDER BY c.embedding <=> CAST(:qvec AS vector)
+               ) AS d_rank
+        FROM paper_chunk_embeddings c
+        JOIN scope s ON s.paper_id = c.paper_id
+        WHERE c.model = :model
+          AND (c.embedding <=> CAST(:qvec AS vector)) < :threshold
+        ORDER BY distance ASC
+        LIMIT :dense_pool
+    ),
+    sparse AS (
+        SELECT c.id, c.paper_id, c.text,
+               ROW_NUMBER() OVER (
+                   ORDER BY ts_rank_cd(c.tsv, q.tsq) DESC, c.id
+               ) AS s_rank
+        FROM paper_chunk_embeddings c
+        JOIN scope s ON s.paper_id = c.paper_id
+        CROSS JOIN q
+        WHERE c.model = :model
+          AND c.tsv @@ q.tsq
+        ORDER BY ts_rank_cd(c.tsv, q.tsq) DESC, c.id
+        LIMIT :sparse_pool
+    )
+    SELECT COALESCE(d.id, sp.id)             AS chunk_id,
+           COALESCE(d.paper_id, sp.paper_id) AS paper_id,
+           p.title                           AS paper_title,
+           COALESCE(d.text, sp.text)         AS chunk_text,
+           d.distance                        AS distance,
+           d.d_rank                          AS d_rank,
+           sp.s_rank                         AS s_rank
+    FROM dense d
+    FULL OUTER JOIN sparse sp ON sp.id = d.id
+    JOIN papers p ON p.id = COALESCE(d.paper_id, sp.paper_id)
 """)
 
 
@@ -224,6 +350,87 @@ async def _chunks_for(db, svc: EmbeddingService, case: Case, project_id: str) ->
     ]
 
 
+async def _hybrid_chunks_for(
+    db,
+    svc: EmbeddingService,
+    case: Case,
+    project_id: str,
+    *,
+    threshold: float,
+    paper_id: str | None = None,
+) -> list[Scored]:
+    """The hybrid arm, in production's exact order.
+
+    fuse_rrf and keep_within_rank_window are IMPORTED from
+    app.services.hybrid_ranker rather than reproduced, for the same reason
+    keep_within_paper is: a re-implementation here would drift and the harness
+    would measure a policy that does not ship.
+
+    `threshold` and `paper_id` mirror the two things production's own
+    `single_paper` branch changes together (see
+    `chat_service._retrieve_paper_chunks`'s docstring): the GLOBAL scope
+    (`paper_id=None`) uses `similarity_threshold` and pools against the whole
+    project (`_HYBRID_SQL`); single-paper/targeted scope MUST pass
+    `threshold=settings.intra_paper_ceiling` and a `paper_id`, which switches
+    to `_HYBRID_SQL_PAPER` so the named paper gets the dense/sparse pools to
+    itself, exactly as production's own per-request scope does. Passing a
+    `paper_id` with `similarity_threshold` (or vice versa) reproduces neither
+    policy production runs.
+
+    The returned list is already in FUSED order and its `distance` may be
+    None (a sparse-only admission). It must never be handed to
+    `simulate_retrieval` with the default `presorted=False`, or to any other
+    distance-space function: re-sorting a fused list by distance would both
+    crash on the None entries and destroy the ranking under measurement. Feed
+    this only to recall_at_k / mean_reciprocal_rank with `presorted=True`,
+    rescued_count, and _hybrid_production_cut.
+    """
+    embedding = await svc.embed(case.question, task_type="RETRIEVAL_QUERY")
+    params = {
+        "qvec": _vec(embedding),
+        "qtext": case.question,
+        "model": settings.embedding_model,
+        "threshold": threshold,
+        "dense_pool": settings.hybrid_dense_pool,
+        "sparse_pool": settings.hybrid_sparse_pool,
+    }
+    if paper_id is not None:
+        sql = _HYBRID_SQL_PAPER
+        params["paper_id"] = paper_id
+    else:
+        sql = _HYBRID_SQL
+        params["project_id"] = project_id
+    rows = (await db.execute(sql, params)).fetchall()
+    by_id = {r.chunk_id: r for r in rows}
+    dense_ranked = [
+        r.chunk_id
+        for r in sorted((x for x in rows if x.d_rank is not None), key=lambda x: x.d_rank)
+    ]
+    sparse_ranked = [
+        r.chunk_id
+        for r in sorted((x for x in rows if x.s_rank is not None), key=lambda x: x.s_rank)
+    ]
+    fused = fuse_rrf(
+        dense_ranked,
+        sparse_ranked,
+        w_dense=settings.hybrid_dense_weight,
+        w_sparse=settings.hybrid_sparse_weight,
+        k=settings.hybrid_rrf_k,
+    )
+    return [
+        Scored(
+            paper_id=by_id[key].paper_id,
+            paper_title=by_id[key].paper_title,
+            chunk_text=by_id[key].chunk_text,
+            distance=None if by_id[key].distance is None else float(by_id[key].distance),
+            chunk_id=key,
+            d_rank=by_id[key].d_rank,
+            s_rank=by_id[key].s_rank,
+        )
+        for key, _ in fused
+    ]
+
+
 def _scope_to_paper(chunks: list[Scored], title_contains: str) -> list[Scored]:
     """The chunks of the paper a case names, nearest first — what production
     queries once the targeter has picked that paper."""
@@ -260,6 +467,20 @@ def _production_cut(
     ranked = sorted((c for c in chunks if c.distance < ceiling), key=lambda c: c.distance)
     ranked = ranked[:budget]
     return ranked[: keep_within_paper([c.distance for c in ranked], delta=delta)]
+
+
+def _hybrid_production_cut(chunks: list[Scored], *, window: int, budget: int) -> list[Scored]:
+    """Production's hybrid single-paper cut, in production's exact order:
+    budget first, then the rank window -- the cut may only shrink what the
+    budget already bounded.
+
+    `keep_within_rank_window` is IMPORTED from production, same guarantee as
+    `_production_cut`'s use of `keep_within_paper`. `chunks` is already in
+    fused order (from `_hybrid_chunks_for`) and must NOT be re-sorted by
+    distance -- some entries have none.
+    """
+    bounded = chunks[:budget]
+    return bounded[: keep_within_rank_window([0.0] * len(bounded), window=window)]
 
 
 def _targeted_case_status(case: Case, chunks: list[Scored]) -> str | None:
@@ -328,6 +549,56 @@ def _targeted_row(case: Case, chunks: list[Scored]) -> dict:
         "kept": len(kept),
         "survived": survived,
     }
+
+
+def _hybrid_targeted_row(case: Case, hybrid_chunks: list[Scored]) -> dict:
+    """The hybrid counterpart of `_targeted_row`, for non-negative cases only
+    -- callers only build these for cases that already passed
+    `_targeted_case_status` against the dense scope, same routing the dense
+    targeted rows rely on.
+
+    `hybrid_chunks` must already come from `_hybrid_chunks_for` called WITH a
+    `paper_id` (single-paper scope, `intra_paper_ceiling`) -- not the
+    project-wide fetch filtered post-hoc. Production issues the query already
+    scoped to one paper, which is what gives that paper the whole
+    dense/sparse pool to itself; filtering a project-wide result down to one
+    paper afterwards would measure a scope production never assembles (both
+    membership and fused rank would differ -- see `_HYBRID_SQL_PAPER`'s
+    comment). No further filtering happens here: the SQL scope already
+    guarantees every row belongs to the one named paper.
+    """
+    kept = _hybrid_production_cut(
+        hybrid_chunks, window=settings.intra_paper_rank_window, budget=settings.max_context_chunks
+    )
+    rank = first_satisfying_rank(case, hybrid_chunks)
+    survived = first_satisfying_rank(case, kept) is not None
+    return {
+        "id": case.id,
+        "kind": case.kind,
+        "paper_chunks": len(hybrid_chunks),
+        "intra_rank": rank,
+        "kept": len(kept),
+        "survived": survived,
+    }
+
+
+def _report_hybrid_targeted(rows: list[dict]) -> None:
+    """Print the hybrid single-paper survival report, alongside
+    `_report_targeted`'s dense one. `rows` come from `_hybrid_targeted_row`
+    above and cover non-negative cases only (see that function's docstring)."""
+    if not rows:
+        print("\nhybrid targeted mode: skipped — no non-negative cases scoped to one paper")
+        return
+    print(
+        f"\nhybrid targeted mode (rank_window={settings.intra_paper_rank_window} "
+        f"budget={settings.max_context_chunks})"
+    )
+    survival = sum(1 for r in rows if r["survived"]) / len(rows)
+    mean_kept = sum(r["kept"] for r in rows) / len(rows)
+    print(
+        f"survival@cut: {survival:.2f} ({sum(1 for r in rows if r['survived'])}/{len(rows)})"
+        f"    mean kept chunks: {mean_kept:.1f}"
+    )
 
 
 def _report_targeted(rows: list[dict]) -> None:
@@ -400,6 +671,14 @@ async def main() -> None:  # noqa: PLR0912, PLR0915 — a report script, not a l
             "whether the answering chunk survives production's single-paper cut"
         ),
     )
+    parser.add_argument(
+        "--hybrid",
+        action="store_true",
+        help=(
+            "also run the hybrid (dense + sparse RRF) arm and report it beside "
+            "the dense-only baseline, plus the `rescued` count"
+        ),
+    )
     args = parser.parse_args()
 
     cases = load_golden_set(args.set)
@@ -411,6 +690,15 @@ async def main() -> None:  # noqa: PLR0912, PLR0915 — a report script, not a l
     errors: list[str] = []
     per_case: list[dict] = []
     targeted_rows: list[dict] = []
+    # Hybrid arm. Only populated when --hybrid is set, and only for
+    # non-negative cases that passed the same golden-set status check the
+    # dense positives list uses — a golden-set defect must not double-count
+    # against the hybrid numbers either. `hybrid_positives` holds RAW fused
+    # chunks (some distance=None): feed it to recall_at_k/mean_reciprocal_rank
+    # with presorted=True, or to rescued_count -- never to a distance-sorting
+    # function (see the module CRITICAL docstring above).
+    hybrid_positives: list[tuple[Case, list[Scored]]] = []
+    hybrid_targeted_rows: list[dict] = []
 
     async with SessionLocal() as db:
         counts = {r.model: r.n for r in (await db.execute(_MODEL_COUNTS_SQL)).fetchall()}
@@ -442,6 +730,28 @@ async def main() -> None:  # noqa: PLR0912, PLR0915 — a report script, not a l
                     errors.append(f"{case.id}: {targeted_status}")
                 else:
                     targeted_rows.append(_targeted_row(case, chunks))
+                    # Hybrid targeted mode needs its OWN query scoped to just
+                    # this one paper (Critical #2 from review): production
+                    # issues the hybrid query already scoped to `paper_infos`,
+                    # so the named paper gets the full dense/sparse pool to
+                    # itself, and single-paper scope always binds
+                    # `intra_paper_ceiling` (Critical #1), never
+                    # `similarity_threshold`. off_topic cases are excluded --
+                    # `_hybrid_targeted_row` is for non-negative cases only,
+                    # matching `_targeted_case_status`'s own is_negative
+                    # short-circuit above.
+                    if args.hybrid and not case.is_negative:
+                        scoped_dense = _scope_to_paper(chunks, case.paper_title_contains or "")
+                        paper_id = scoped_dense[0].paper_id
+                        hybrid_paper_chunks = await _hybrid_chunks_for(
+                            db,
+                            svc,
+                            case,
+                            args.project_id,
+                            threshold=settings.intra_paper_ceiling,
+                            paper_id=paper_id,
+                        )
+                        hybrid_targeted_rows.append(_hybrid_targeted_row(case, hybrid_paper_chunks))
             # else: status is not None, so this case's single ERRORS line is
             # appended below (positives branch) — it must not ALSO get a
             # targeted-mode error from _targeted_case_status, which checks a
@@ -461,6 +771,18 @@ async def main() -> None:  # noqa: PLR0912, PLR0915 — a report script, not a l
                 continue
 
             positives.append((case, chunks))
+
+            if args.hybrid:
+                # GLOBAL scope: similarity_threshold, whole project pool --
+                # the hybrid targeted (single-paper) fetch is a SEPARATE call
+                # made above, scoped by paper_id with intra_paper_ceiling
+                # (Criticals #1/#2 from review; see _hybrid_chunks_for's
+                # docstring).
+                hybrid_chunks = await _hybrid_chunks_for(
+                    db, svc, case, args.project_id, threshold=settings.similarity_threshold
+                )
+                hybrid_positives.append((case, hybrid_chunks))
+
             rank = first_satisfying_rank(case, simulate_retrieval(chunks, args.k))
             topk_distance = topk_satisfying_distance(case, chunks, args.k)
             per_case.append(
@@ -518,6 +840,62 @@ async def main() -> None:  # noqa: PLR0912, PLR0915 — a report script, not a l
     floor = noise_floor(negatives)
     print(f"noise floor (best off-topic distance): {floor if floor is None else round(floor, 4)}\n")
 
+    # --- hybrid arm: dense-only baseline vs dense+sparse RRF ----------------
+    # `hybrid_positives` carries the raw fused chunks (some `distance=None`).
+    # recall_at_k / mean_reciprocal_rank take `presorted=True` (structural,
+    # see metrics.simulate_retrieval's docstring) instead of a distance sort.
+    # rescued_count / rescue_eligible_count read d_rank/s_rank/distance-sorted
+    # DENSE positives respectively -- neither touches a hybrid `.distance`.
+    #
+    # `rescued`'s budget is `settings.max_context_chunks` (what actually
+    # reaches the model in production), NOT `args.k` -- they coincide at the
+    # default, but `--k 30` would otherwise silently redefine what "reaches
+    # the model" means for this one number while every other figure on this
+    # line still uses `args.k`.
+    if args.hybrid:
+        print()
+        if hybrid_positives:
+            h_recall = recall_at_k(hybrid_positives, args.k, presorted=True)
+            h_mrr = mean_reciprocal_rank(hybrid_positives, args.k, presorted=True)
+            rescue_budget = settings.max_context_chunks
+            h_rescued = rescued_count(hybrid_positives, rescue_budget)
+            h_eligible = rescue_eligible_count(positives, rescue_budget)
+            # rescued_count fires on whichever satisfying chunk is FIRST in
+            # fused order for a case; rescue_eligible_count asks whether ANY
+            # satisfying chunk is absent from the dense arm's own top-k. With
+            # substring ground truth a case can be dense-hit (so ineligible)
+            # yet still register a rescue via a DIFFERENT sparse-only
+            # satisfying chunk elsewhere in the fused order -- so rescued can
+            # in principle exceed eligible. It does not on the current
+            # corpus, but that is a corpus fact, not a guarantee the two
+            # predicates enforce, so surface it loudly rather than silently
+            # printing a >1.0 ratio or clamping it away.
+            if h_rescued > h_eligible:
+                print(
+                    f"  WARNING: rescued ({h_rescued}) > eligible ({h_eligible}) -- "
+                    "a case registered a rescue via a sparse-only chunk while also "
+                    "being a dense hit through a different chunk; see the comment "
+                    "above this check"
+                )
+            print(
+                f"hybrid arm (w_dense={settings.hybrid_dense_weight} "
+                f"w_sparse={settings.hybrid_sparse_weight} rrf_k={settings.hybrid_rrf_k} "
+                f"dense_pool={settings.hybrid_dense_pool} sparse_pool={settings.hybrid_sparse_pool}):"
+            )
+            print(
+                f"  dense-only   recall@{args.k}: {recall_at_k(positives, args.k):.2f}    "
+                f"MRR: {mean_reciprocal_rank(positives, args.k):.3f}"
+            )
+            print(f"  hybrid       recall@{args.k}: {h_recall:.2f}    MRR: {h_mrr:.3f}")
+            print(
+                f"  rescued@{rescue_budget}: {h_rescued}/{len(hybrid_positives)} of all positives"
+                f"    {h_rescued}/{h_eligible} of cases the dense arm actually missed "
+                "(eligible)"
+            )
+        else:
+            print("hybrid arm: skipped — no positive cases scored (see ERRORS above)")
+            print()
+
     # Column width derived from the actual ids so a long case id can never
     # collide with the next column (a fixed 28-char width collided in
     # review with a 29-char synthetic id).
@@ -534,6 +912,8 @@ async def main() -> None:  # noqa: PLR0912, PLR0915 — a report script, not a l
 
     if args.targeted:
         _report_targeted(targeted_rows)
+        if args.hybrid:
+            _report_hybrid_targeted(hybrid_targeted_rows)
 
     usable_negatives = any(negatives)
 
@@ -694,6 +1074,30 @@ async def main() -> None:  # noqa: PLR0912, PLR0915 — a report script, not a l
                 "k": args.k,
             }
         )
+        hybrid_payload = None
+        if args.hybrid:
+            hybrid_payload = {
+                "recall": None,
+                "mrr": None,
+                "rescued": None,
+                "rescued_denominator_all_positives": None,
+                "rescued_denominator_eligible": None,
+                "rescue_budget": settings.max_context_chunks,
+                "n_cases": len(hybrid_positives),
+                "targeted": hybrid_targeted_rows if args.targeted else None,
+            }
+            if hybrid_positives:
+                hybrid_payload["recall"] = recall_at_k(hybrid_positives, args.k, presorted=True)
+                hybrid_payload["mrr"] = mean_reciprocal_rank(
+                    hybrid_positives, args.k, presorted=True
+                )
+                rescue_budget = settings.max_context_chunks
+                hybrid_payload["rescued"] = rescued_count(hybrid_positives, rescue_budget)
+                hybrid_payload["rescued_denominator_all_positives"] = len(hybrid_positives)
+                hybrid_payload["rescued_denominator_eligible"] = rescue_eligible_count(
+                    positives, rescue_budget
+                )
+
         args.json.write_text(
             json.dumps(
                 {
@@ -713,6 +1117,7 @@ async def main() -> None:  # noqa: PLR0912, PLR0915 — a report script, not a l
                     },
                     "separation": separation,
                     "targeted": targeted_rows if args.targeted else None,
+                    "hybrid": hybrid_payload,
                 },
                 indent=2,
             )

@@ -15,6 +15,8 @@ from evals.retrieval.metrics import (
     order_statistic_risk,
     recall_at_k,
     recommended_point,
+    rescue_eligible_count,
+    rescued_count,
     separating_threshold,
     sweep,
     simulate_retrieval,
@@ -36,6 +38,20 @@ def _s(title: str, text: str, dist: float, paper_id: str | None = None) -> Score
     care about the distinction; pass it explicitly for a test that needs a
     paper_id different from its title (e.g. two papers sharing a title)."""
     return Scored(paper_id=paper_id or title, paper_title=title, chunk_text=text, distance=dist)
+
+
+def _case(answer_contains: str) -> Case:
+    """A Case whose paper is "A" and whose only requirement is that the
+    chunk text contain `answer_contains` -- the minimal Case the
+    rescued_count tests need, matching the paper_title="A" used in the
+    hybrid Scored fixtures below."""
+    return Case(
+        id="hybrid-case",
+        kind="content",
+        question="q",
+        paper_title_contains="A",
+        expect_substrings=(answer_contains,),
+    )
 
 
 def test_simulate_retrieval_takes_a_global_top_k_not_per_paper():
@@ -421,3 +437,167 @@ def test_order_statistic_risk_raises_without_at_least_one_case_each_side():
         order_statistic_risk(n_positives=0, n_negatives=3)
     with pytest.raises(ValueError):
         order_statistic_risk(n_positives=3, n_negatives=0)
+
+
+# --- rescued_count -----------------------------------------------------------
+
+
+def test_rescued_counts_only_sparse_only_admissions():
+    """`rescued` is the number that justifies hybrid retrieval at all: how
+    many positives have their answering chunk admitted ONLY by the sparse
+    arm. A chunk the dense arm also found is not a rescue -- hybrid merely
+    reordered it, which the recall figure already reflects."""
+    case = _case(answer_contains="reward table")
+    rescued = Scored(
+        paper_id="p1",
+        paper_title="A",
+        chunk_text="the reward table lists",
+        distance=None,
+        chunk_id="c1",
+        d_rank=None,
+        s_rank=1,
+    )
+    assert rescued_count([(case, [rescued])], k=60) == 1
+
+
+def test_a_chunk_found_by_both_arms_is_not_a_rescue():
+    case = _case(answer_contains="reward table")
+    both = Scored(
+        paper_id="p1",
+        paper_title="A",
+        chunk_text="the reward table lists",
+        distance=0.4,
+        chunk_id="c1",
+        d_rank=3,
+        s_rank=1,
+    )
+    assert rescued_count([(case, [both])], k=60) == 0
+
+
+def test_a_rescue_outside_the_budget_does_not_count():
+    """A chunk the sparse arm admitted but that fusion ranked past k never
+    reaches the model, so it rescued nothing."""
+    case = _case(answer_contains="reward table")
+    filler = [
+        Scored(
+            paper_id="p1",
+            paper_title="A",
+            chunk_text=f"filler {i}",
+            distance=0.1,
+            chunk_id=f"f{i}",
+            d_rank=i + 1,
+            s_rank=None,
+        )
+        for i in range(3)
+    ]
+    rescued = Scored(
+        paper_id="p1",
+        paper_title="A",
+        chunk_text="the reward table lists",
+        distance=None,
+        chunk_id="c1",
+        d_rank=None,
+        s_rank=1,
+    )
+    assert rescued_count([(case, filler + [rescued])], k=3) == 0
+
+
+# --- simulate_retrieval / recall_at_k / mean_reciprocal_rank (presorted) -----
+
+
+def test_simulate_retrieval_presorted_takes_prefix_without_sorting():
+    """presorted=True is the hybrid path's structural guarantee: input is
+    already in FUSED rank order (and may contain distance=None, e.g. a
+    sparse-only admission), so this must NOT sort -- sorting would both
+    crash on the None and destroy the fused order. Deliberately listed with
+    the nearest DISTANCE last, so a naive implementation that still sorts
+    would return the wrong prefix (and would crash outright on the None)."""
+    chunks = [
+        Scored(
+            paper_id="p", paper_title="A", chunk_text="first", distance=None, d_rank=None, s_rank=1
+        ),
+        Scored(
+            paper_id="p", paper_title="A", chunk_text="second", distance=0.9, d_rank=5, s_rank=None
+        ),
+        Scored(
+            paper_id="p", paper_title="A", chunk_text="third", distance=0.1, d_rank=1, s_rank=None
+        ),
+    ]
+    got = simulate_retrieval(chunks, k=2, presorted=True)
+    assert [c.chunk_text for c in got] == ["first", "second"]
+
+
+def test_simulate_retrieval_presorted_default_is_false():
+    """The dense path's existing behavior (sort by distance) must survive
+    unchanged when `presorted` isn't passed."""
+    chunks = [_s("Beta", "b1", 0.30), _s("Alpha", "a1", 0.10)]
+    assert [c.chunk_text for c in simulate_retrieval(chunks, k=2)] == ["a1", "b1"]
+
+
+def test_recall_at_k_presorted_preserves_fused_order_including_none_distance():
+    """The hybrid arm's whole point: some chunks have distance=None, and
+    recall_at_k(..., presorted=True) must neither crash on them nor re-sort
+    them out of fused order."""
+    case = _case(answer_contains="reward table")
+    chunks = [
+        Scored(
+            paper_id="p", paper_title="A", chunk_text="filler", distance=None, d_rank=None, s_rank=1
+        ),
+        Scored(
+            paper_id="p",
+            paper_title="A",
+            chunk_text="the reward table lists",
+            distance=None,
+            d_rank=None,
+            s_rank=2,
+        ),
+    ]
+    assert recall_at_k([(case, chunks)], k=1, presorted=True) == 0.0
+    assert recall_at_k([(case, chunks)], k=2, presorted=True) == 1.0
+
+
+def test_mean_reciprocal_rank_presorted_preserves_fused_order():
+    case = _case(answer_contains="reward table")
+    chunks = [
+        Scored(
+            paper_id="p", paper_title="A", chunk_text="filler", distance=None, d_rank=None, s_rank=1
+        ),
+        Scored(
+            paper_id="p",
+            paper_title="A",
+            chunk_text="the reward table lists",
+            distance=None,
+            d_rank=None,
+            s_rank=2,
+        ),
+    ]
+    assert mean_reciprocal_rank([(case, chunks)], k=5, presorted=True) == 0.5
+
+
+# --- rescue_eligible_count ----------------------------------------------------
+
+
+def test_rescue_eligible_count_counts_cases_the_dense_arm_misses():
+    """Eligibility is defined against the DENSE arm's own admitted set within
+    k -- the denominator rescued_count needs, per the same rule recall_at_k
+    already uses for the dense arm."""
+    case = _case(answer_contains="reward table")
+    dense_miss = (case, [_s("A", "irrelevant filler", 0.10)])
+    assert rescue_eligible_count([dense_miss], k=5) == 1
+
+
+def test_rescue_eligible_count_excludes_cases_the_dense_arm_already_finds():
+    """A case dense already hits is not eligible for a rescue -- it isn't
+    missing anything for the sparse arm to supply."""
+    case = _case(answer_contains="reward table")
+    dense_hit = (case, [_s("A", "the reward table lists", 0.10)])
+    assert rescue_eligible_count([dense_hit], k=5) == 0
+
+
+def test_rescue_eligible_count_respects_k():
+    """A satisfying chunk that exists in the corpus but falls outside the
+    dense arm's own top-k is still a miss -- and so still eligible."""
+    case = _case(answer_contains="reward table")
+    chunks = [_s("A", "irrelevant", 0.10), _s("A", "the reward table lists", 0.20)]
+    assert rescue_eligible_count([(case, chunks)], k=1) == 1
+    assert rescue_eligible_count([(case, chunks)], k=2) == 0

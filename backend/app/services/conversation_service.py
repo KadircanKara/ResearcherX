@@ -5,6 +5,7 @@ block the SSE stream. Background tasks create their own DB sessions.
 """
 
 import asyncio
+from collections.abc import Mapping
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,7 +15,7 @@ from sqlalchemy import text
 
 from app.core.config import settings
 from app.core.logging import log
-from app.db.models import ChatConversation, ChatMessage, _now
+from app.db.models import ChatConversation, ChatMessage, Paper, _now
 from app.db.session import SessionLocal
 from app.services.embedding_service import EmbeddingService
 
@@ -46,6 +47,32 @@ async def _embed_message(message_id: str, content: str, svc: EmbeddingService) -
             await db.commit()
     except Exception as exc:
         log.warning("message_embedding_failed", message_id=message_id, error=str(exc)[:200])
+
+
+def retitle_citations(citations: list[dict], titles: Mapping[str, str]) -> list[dict]:
+    """Re-label persisted citations with each paper's CURRENT title.
+
+    A citation is written as a snapshot — n, paper_id, title, chunk_index,
+    snippet — because the chip has to render without a join, and because
+    chunk_index and snippet must stay pinned to the text the model was
+    actually shown. The TITLE is the one field that is not evidence: it is a
+    label for a paper that still exists, and renaming that paper in the Papers
+    tab has to change every chip and hover card that points at it. Rewriting
+    the stored rows on rename would leave every conversation one failed
+    backfill away from lying again, so resolution happens on the read path
+    instead, where it is self-healing by construction.
+
+    A paper_id with no current title (the paper was deleted) keeps its stored
+    title: a chip labelled with the name the answer was written against beats
+    a chip labelled with nothing.
+
+    Returns new dicts. The ORM instances are left untouched — a mutated JSON
+    column would be a write on a GET.
+    """
+    return [
+        {**c, "title": titles.get(c.get("paper_id"), c.get("title"))} if isinstance(c, dict) else c
+        for c in citations
+    ]
 
 
 class ConversationService:
@@ -83,6 +110,13 @@ class ConversationService:
             .options(selectinload(ChatConversation.messages))
         )
         return result.scalar_one_or_none()
+
+    async def current_paper_titles(self, db: AsyncSession, project_id: str) -> dict[str, str]:
+        """paper_id -> title for this project, as the papers table has it NOW."""
+        result = await db.execute(
+            select(Paper.id, Paper.title).where(Paper.project_id == project_id)
+        )
+        return {paper_id: title for paper_id, title in result.all()}
 
     async def save_message(
         self,

@@ -20,18 +20,16 @@ from app.core.config import settings
 from app.core.logging import log
 from app.db.models import Paper
 from app.db.session import SessionLocal
+from app.services.citation_attribution import (
+    split_prose_segments,
+    strip_misattributed_citations,
+)
 from app.services.conversation_service import ConversationService
 from app.services.embedding_service import EmbeddingService
+from app.services.hybrid_ranker import fuse_rrf, keep_within_rank_window
 from app.services.intra_paper_ranker import keep_within_paper
 
 _HISTORY_TOP_K = 5
-
-# Papers offered to the targeter. Sized by measurement, not by prompt budget:
-# on the question this feature exists to fix, the correct paper ranked 6th by
-# nearest-chunk distance. Questions whose target ranks below this generally
-# name no paper at all (measured at 17th and 51st), where the honest answer is
-# "none" anyway.
-_TARGETER_CANDIDATES = 10
 
 _CITATION_RE = re.compile(r"\[(\d+)\]")
 
@@ -156,37 +154,6 @@ def needs_paper_metadata(question: str, prior_messages: list[dict]) -> bool:
     return False
 
 
-# A fence opens with ``` or ~~~ — both are valid markdown fences, and remark
-# (the frontend's markdown renderer) treats either as <pre><code>. The
-# backreference (\1) means a fence can only be closed by the SAME delimiter
-# it opened with — a ``` fence is never closed by ~~~ or vice versa. A fence
-# with no matching closing delimiter runs to the end of the text rather than
-# falling through to be reinterpreted as (part of) an inline span. Fences are
-# located in a pass of their own, before inline spans are considered at all,
-# so a stray or unpaired backtick elsewhere in the answer can never pair
-# across a fence delimiter. See renumber_citations' docstring for why a
-# single combined pattern got this wrong.
-_FENCE_RE = re.compile(r"(```|~~~).*?(?:\1|\Z)", re.DOTALL)
-
-# Inline spans are matched only within the prose _FENCE_RE leaves behind, so
-# a backtick bordering a fence can no longer be mistaken for the other half
-# of an inline span.
-_INLINE_CODE_RE = re.compile(r"`[^`\n]*`")
-
-# Known gap, left deliberately: a four-space indented run is markdown code
-# too (remark renders it as <pre><code>, same as a fence), but this guard
-# does not detect it. Whether an indented run is code or list-item
-# continuation content depends on the enclosing list's nesting column, which
-# needs list-context state this function does not track — and this chat's
-# system prompt asks for "-" bullets and fenced code, not indented blocks, so
-# nested-bullet content is the routine case and a genuine indented code block
-# is not. Treating indentation as code by itself would risk the opposite,
-# worse failure: a nested bullet's citation silently skipped from the numbered
-# sequence ([1], [3], no [2]) rather than merely mis-renumbered. See
-# test_an_indented_code_block_is_a_documented_gap_not_detected_as_code for the
-# accepted current behaviour.
-
-
 def renumber_citations(text: str, max_n: int) -> tuple[str, dict[int, int]]:
     """Renumber an answer's citation markers to 1..N by first appearance.
 
@@ -202,57 +169,19 @@ def renumber_citations(text: str, max_n: int) -> tuple[str, dict[int, int]]:
     pre-existing bug where an out-of-range `arr[99]` became
     `arr[source unavailable]` inside a fenced block.
 
-    Fences and inline spans are found in two separate passes rather than one
-    combined pattern. A single alternation tried left to right lets an
-    unterminated fence fall through to the inline alternative — consuming two
-    of its three backticks as an empty span — and lets a stray backtick
-    earlier in the answer pair with a fence's own opening backtick; both leak
-    a fenced marker out into renumbering. Locating fences first, over the
-    whole text, with "no closing ``` " meaning "runs to end of text" rather
-    than "not a fence", removes both failure modes: fence boundaries never
-    depend on where a stray backtick happens to sit, and an answer truncated
-    mid-snippet — an observed occurrence, not a hypothetical: a chat reply
-    hit `finish_reason=length` mid-sentence on 2026-08-10 — still treats
-    everything after the opening fence as code.
-
-    Markdown has more than one code form, and this guard has to agree with
-    whichever ones the client also treats as code — a form the backend
-    renumbers inside but the frontend renders as <pre><code> corrupts
-    exactly the bytes the two sides agree are code. `_FENCE_RE` accordingly
-    accepts ~~~ fences as well as ``` ones. Four-space indented blocks are
-    the one markdown code form this guard still does not detect — see the
-    comment above `_FENCE_RE` for why that gap is deliberate, not an
-    oversight.
+    What counts as code — ``` and ~~~ fences, unterminated fences, inline
+    spans, and the deliberate four-space-indented gap — is decided by
+    `citation_attribution.segment_offsets`, which owns that guard for every
+    pass that rewrites markers. Its docstring records why fences and inline
+    spans are located in two passes rather than one alternation.
 
     Returns the rewritten text and the old→new map, ordered by new number.
     """
-    # Stage 1: split the whole text on fenced blocks. An unterminated fence
-    # consumes to the end of the text instead of un-matching.
-    segments: list[tuple[str, bool]] = []  # (text, is_code)
-    cursor = 0
-    for match in _FENCE_RE.finditer(text):
-        if match.start() > cursor:
-            segments.append((text[cursor : match.start()], False))
-        segments.append((match.group(0), True))
-        cursor = match.end()
-    segments.append((text[cursor:], False))
-
-    # Stage 2: within what Stage 1 left as prose, split on inline spans. Code
-    # segments pass through untouched — a fence is never re-examined here, so
-    # a backtick bordering one cannot pair across the boundary.
-    with_inline: list[tuple[str, bool]] = []
-    for body, is_code in segments:
-        if is_code:
-            with_inline.append((body, True))
-            continue
-        inner_cursor = 0
-        for match in _INLINE_CODE_RE.finditer(body):
-            if match.start() > inner_cursor:
-                with_inline.append((body[inner_cursor : match.start()], False))
-            with_inline.append((match.group(0), True))
-            inner_cursor = match.end()
-        with_inline.append((body[inner_cursor:], False))
-    segments = with_inline
+    # The code guard is shared with strip_misattributed_citations, never
+    # duplicated: it is subtle enough that two copies will diverge, and a
+    # divergence corrupts exactly the bytes the backend and frontend must
+    # agree are code.
+    segments = split_prose_segments(text)
 
     # First pass: assign numbers in order of appearance across prose only, so
     # a marker buried in a code block cannot claim a number.
@@ -413,7 +342,7 @@ class ChatService:
 
                     async with SessionLocal() as db:
                         candidates, total_chunks = await self._shortlist_papers(
-                            db, paper_infos, retrieval_embedding, _TARGETER_CANDIDATES
+                            db, paper_infos, retrieval_embedding, retrieval_query
                         )
 
                     # Scope retrieval to one paper when the question might be
@@ -455,20 +384,31 @@ class ChatService:
 
                     async with SessionLocal() as db:
                         paper_chunks = await self._retrieve_paper_chunks(
-                            db, scope, retrieval_embedding
+                            db, scope, retrieval_embedding, retrieval_query
                         )
 
                     if scope is not paper_infos and not paper_chunks:
-                        # A targeted paper whose every chunk sits at or beyond
-                        # intra_paper_ceiling (the single-paper SQL cutoff --
-                        # see _retrieve_paper_chunks) retrieves nothing, and
+                        # A targeted paper can still retrieve nothing, and
                         # chat_agent then answers ungrounded -- a worse
                         # failure than the misattribution this feature fixes.
                         # Re-querying the untargeted scope keeps the answer
                         # grounded, same as if targeting had never fired.
+                        #
+                        # Under dense-only retrieval (hybrid_retrieval=False)
+                        # this fires exactly when every chunk of the targeted
+                        # paper sits at or beyond intra_paper_ceiling (the
+                        # single-paper SQL cutoff -- see
+                        # _retrieve_paper_chunks). Under hybrid retrieval the
+                        # sparse arm has NO distance gate, so a paper whose
+                        # every chunk sits beyond the ceiling can still be
+                        # admitted via a lexical match -- a sparse-only
+                        # admission is treated as grounded here, same as any
+                        # other chunk. This branch therefore fires strictly
+                        # LESS often than it did before hybrid retrieval
+                        # shipped, not under the same condition.
                         async with SessionLocal() as db:
                             paper_chunks = await self._retrieve_paper_chunks(
-                                db, paper_infos, retrieval_embedding
+                                db, paper_infos, retrieval_embedding, retrieval_query
                             )
                         scope = paper_infos
 
@@ -504,7 +444,25 @@ class ChatService:
             # sees. This also replaces out-of-range markers, so it subsumes
             # the validation pass that used to live here.
             max_n = len(paper_chunks)
-            clean_response, renumbered = renumber_citations(response_text, max_n)
+
+            # Strip BEFORE renumbering — the order is load-bearing.
+            # renumber_citations assigns 1..N by first appearance and the chip
+            # list is built from `renumbered`, so a marker stripped afterwards
+            # would leave a chip pointing at a claim that no longer cites it,
+            # and would consume a number in the visible sequence.
+            attributed_response, misattributed = strip_misattributed_citations(
+                response_text,
+                chunk_papers={c.n: c.paper_id for c in paper_chunks},
+                paper_titles={p.paper_id: p.title for p in paper_infos},
+            )
+            if misattributed:
+                log.info(
+                    "citation_misattributed",
+                    conversation_id=conversation_id,
+                    stripped=len(misattributed),
+                )
+
+            clean_response, renumbered = renumber_citations(attributed_response, max_n)
 
             # Ordered by the NEW number so the chip row reads 1, 2, 3 left to
             # right. `renumbered` maps catalog position → new number, which is
@@ -574,12 +532,24 @@ class ChatService:
         db: AsyncSession,
         paper_infos: list[PaperInfo],
         query_embedding: list[float],
-        limit: int,
+        query_text: str,
     ) -> tuple[list[PaperInfo], int]:
-        """Rank this project's papers by their nearest chunk.
+        """Shortlist candidate papers for the targeter, from two arms.
 
-        Returns at most `limit` papers, nearest first, plus the project's
-        TOTAL chunk count across every paper — two answers from one query.
+        DENSE arm: papers ranked by their nearest chunk, capped at
+        `targeter_dense_candidates`. LEXICAL arm: the same papers ranked by
+        ts_rank_cd over their TITLES, capped at `targeter_lexical_candidates`.
+        The lexical hits are UNIONED onto the dense list — appended, never
+        fused — so the arm can only add candidates. Also returns the project's
+        TOTAL chunk count across every paper, which is what decides whether
+        targeting is worth an LLM call at all.
+
+        The two arms see different things and that is the point. Nearest-chunk
+        distance ranks on body text; a question that identifies its paper by a
+        property of the TITLE ranks its target wherever the body happens to
+        fall — 28th of 100, measured live. See `targeter_dense_candidates` in
+        config.py for the full measurement and for why this is a union rather
+        than an RRF fusion.
 
         No SQL LIMIT, on purpose. The GROUP BY already scans the project's
         chunks either way, so a LIMIT would save only the transfer of a few
@@ -622,14 +592,83 @@ class ChatService:
         rows = result.fetchall()
         by_id = {p.paper_id: p for p in paper_infos}
         total_chunks = sum(r.n_chunks for r in rows)
-        candidates = [by_id[r.paper_id] for r in rows if r.paper_id in by_id][:limit]
+        candidates = [by_id[r.paper_id] for r in rows if r.paper_id in by_id][
+            : settings.targeter_dense_candidates
+        ]
+
+        chosen = {p.paper_id for p in candidates}
+        for paper_id in await self._lexical_title_matches(db, paper_infos, query_text):
+            if paper_id not in chosen and paper_id in by_id:
+                candidates.append(by_id[paper_id])
+                chosen.add(paper_id)
         return candidates, total_chunks
+
+    async def _lexical_title_matches(
+        self,
+        db: AsyncSession,
+        paper_infos: list[PaperInfo],
+        query_text: str,
+    ) -> list[str]:
+        """Paper ids whose TITLE matches the question lexically, best first.
+
+        OR-of-lexemes, deliberately, where the rest of this codebase uses
+        `websearch_to_tsquery`: that ANDs every term, so a question of a dozen
+        words matches no title at all — measured at 22 of 30 golden-set
+        questions matching nothing even against full chunk text, and a title
+        is a handful of words. The OR is what makes a partial title match
+        rank; `ts_rank_cd` is what keeps the noise below the real hit.
+
+        Titles are read from `papers`, not from `paper_infos`, so a title
+        corrected in the Papers tab takes effect on the next question with no
+        re-index — unlike the chunk embeddings, which are frozen at ingest.
+
+        Fail-open: the arm returns nothing on any error. It exists to ADD
+        candidates the dense arm missed; a broken lexical query must degrade
+        to the dense-only shortlist, not fail the turn.
+        """
+        if not query_text.strip():
+            return []
+        # A query of pure stopwords produces an empty tsvector, string_agg
+        # then returns NULL, and `@@ NULL` is NULL — no rows, no error.
+        sql = text("""
+            WITH scope AS (
+                SELECT value AS paper_id
+                FROM jsonb_array_elements_text(CAST(:ids AS jsonb))
+            ),
+            q AS (
+                SELECT (
+                    SELECT string_agg(lexeme, ' | ')
+                    FROM unnest(to_tsvector('english', :question))
+                )::tsquery AS tq
+            )
+            SELECT p.id AS paper_id
+            FROM papers p
+            JOIN scope s ON s.paper_id = p.id
+            CROSS JOIN q
+            WHERE to_tsvector('english', p.title) @@ q.tq
+            ORDER BY ts_rank_cd(to_tsvector('english', p.title), q.tq) DESC, p.id ASC
+            LIMIT :limit
+        """)
+        try:
+            result = await db.execute(
+                sql,
+                {
+                    "ids": json.dumps([p.paper_id for p in paper_infos]),
+                    "question": query_text,
+                    "limit": settings.targeter_lexical_candidates,
+                },
+            )
+            return [r.paper_id for r in result.fetchall()]
+        except Exception as exc:
+            log.warning("lexical_title_arm_failed_open", error=str(exc)[:200])
+            return []
 
     async def _retrieve_paper_chunks(
         self,
         db: AsyncSession,
         paper_infos: list[PaperInfo],
         query_embedding: list[float],
+        query_text: str,
     ) -> list[ChunkContext]:
         """Retrieve the nearest chunks from `paper_infos`, ranked by distance.
 
@@ -676,6 +715,24 @@ class ChatService:
         0.25, the then-current value -- kept 24/24, 44/44 and 64/64 chunks of
         the nearest paper (see the CEILING measurement on intra_paper_ceiling
         in app/core/config.py).
+
+        HYBRID (settings.hybrid_retrieval, default on): the query grows a
+        second, LEXICAL arm and the two are fused by weighted RRF. Admission
+        is DISJUNCTIVE -- a chunk qualifies by passing the dense distance gate
+        OR by landing in the sparse arm's top-N -- because the failure this
+        fixes is a chunk the dense gate rejects. Gating on dense distance
+        before fusing would make the sparse arm decorative.
+
+        The cut changes with it. `intra_paper_delta` is a distance-space rule
+        (`best + delta`) and has no meaning against a fused rank, so under
+        hybrid the single-paper cut is `intra_paper_rank_window`. The delta
+        survives for `hybrid_retrieval=False`, which reproduces the
+        pre-2026-08-15 path exactly and is both the eval harness's control arm
+        and production's kill switch.
+
+        A stopword-only question degrades for free: websearch_to_tsquery
+        returns an empty query, `@@` matches nothing, the sparse arm is empty,
+        and RRF collapses to the dense ordering.
         """
         if not paper_infos:
             return []
@@ -684,6 +741,70 @@ class ChatService:
         threshold = settings.intra_paper_ceiling if single_paper else settings.similarity_threshold
         qvec = _vec_str(query_embedding)
         paper_title_map = {p.paper_id: p.title for p in paper_infos}
+        ids = json.dumps([p.paper_id for p in paper_infos])
+
+        if not settings.hybrid_retrieval:
+            rows = await self._dense_only_rows(db, ids, qvec, threshold)
+            # Re-applied in Python on purpose. LIMIT bounds what crosses the wire;
+            # this bounds what reaches the model. The budget is the single
+            # invariant that keeps chat working at any library size, so it must
+            # not depend on a SQL clause surviving a future edit to the query.
+            rows = rows[: settings.max_context_chunks]
+            if single_paper:
+                rows = rows[
+                    : keep_within_paper(
+                        [row.distance for row in rows], delta=settings.intra_paper_delta
+                    )
+                ]
+            return self._to_chunk_contexts(rows, paper_title_map)
+
+        rows = await self._hybrid_rows(db, ids, qvec, query_text, threshold)
+        by_id = {row.id: row for row in rows}
+        dense_ranked = [
+            row.id
+            for row in sorted((r for r in rows if r.d_rank is not None), key=lambda r: r.d_rank)
+        ]
+        sparse_ranked = [
+            row.id
+            for row in sorted((r for r in rows if r.s_rank is not None), key=lambda r: r.s_rank)
+        ]
+        fused = fuse_rrf(
+            dense_ranked,
+            sparse_ranked,
+            w_dense=settings.hybrid_dense_weight,
+            w_sparse=settings.hybrid_sparse_weight,
+            k=settings.hybrid_rrf_k,
+        )
+        # Budget FIRST, cut second -- same ordering the dense path documents
+        # above. LIMIT bounds what crosses the wire; this bounds what reaches
+        # the model, and the cut may only shrink what the budget bounded.
+        fused = fused[: settings.max_context_chunks]
+        if single_paper:
+            fused = fused[
+                : keep_within_rank_window(
+                    [score for _, score in fused], window=settings.intra_paper_rank_window
+                )
+            ]
+        return self._to_chunk_contexts([by_id[key] for key, _ in fused], paper_title_map)
+
+    def _to_chunk_contexts(self, rows, paper_title_map: dict[str, str]) -> list[ChunkContext]:
+        """Number citations contiguously over the FINAL order.
+
+        `n` is the marker the model cites, so it must follow the order the
+        model sees -- after fusion and after every cut, never the row order.
+        """
+        return [
+            ChunkContext(
+                n=i,
+                paper_id=row.paper_id,
+                title=paper_title_map.get(row.paper_id, ""),
+                chunk_index=row.chunk_index,
+                text=row.text,
+            )
+            for i, row in enumerate(rows, 1)
+        ]
+
+    async def _dense_only_rows(self, db: AsyncSession, ids: str, qvec: str, threshold: float):
         # `paper_chunk_embeddings` is global, so this query MUST be scoped to
         # the project. The ids ride in as one jsonb param rather than an IN
         # list: 100 papers would otherwise need 100 bind params, and asyncpg
@@ -693,7 +814,7 @@ class ChatService:
                 SELECT value AS paper_id
                 FROM jsonb_array_elements_text(CAST(:ids AS jsonb))
             )
-            SELECT c.paper_id, c.chunk_index, c.text,
+            SELECT c.id, c.paper_id, c.chunk_index, c.text,
                    (c.embedding <=> CAST(:qvec AS vector)) AS distance
             FROM paper_chunk_embeddings c
             JOIN scope s ON s.paper_id = c.paper_id
@@ -706,33 +827,84 @@ class ChatService:
             sql,
             {
                 "qvec": qvec,
-                "ids": json.dumps([p.paper_id for p in paper_infos]),
+                "ids": ids,
                 "model": settings.embedding_model,
                 "threshold": threshold,
                 "max_chunks": settings.max_context_chunks,
             },
         )
-        # Re-applied in Python on purpose. LIMIT bounds what crosses the wire;
-        # this bounds what reaches the model. The budget is the single
-        # invariant that keeps chat working at any library size, so it must
-        # not depend on a SQL clause surviving a future edit to the query.
-        rows = result.fetchall()[: settings.max_context_chunks]
-        # Applied AFTER the budget slice, never before: the budget is the one
-        # invariant that keeps chat working at any library size, and the cut
-        # may only shrink what it already bounded.
-        if single_paper:
-            rows = rows[
-                : keep_within_paper(
-                    [row.distance for row in rows], delta=settings.intra_paper_delta
-                )
-            ]
-        return [
-            ChunkContext(
-                n=i,
-                paper_id=row.paper_id,
-                title=paper_title_map.get(row.paper_id, ""),
-                chunk_index=row.chunk_index,
-                text=row.text,
+        return result.fetchall()
+
+    async def _hybrid_rows(
+        self, db: AsyncSession, ids: str, qvec: str, qtext: str, threshold: float
+    ):
+        """Both arms in ONE round trip, each carrying its own rank.
+
+        The dense arm keeps the absolute distance gate exactly as tuned. The
+        sparse arm's admission is its top-N (`hybrid_sparse_pool`), because
+        `ts_rank_cd` has no cross-query-comparable magnitude to threshold on.
+        The FULL OUTER JOIN is what makes admission disjunctive: a chunk in
+        either arm reaches Python, with a NULL rank for the arm that missed
+        it.
+
+        Ranking stops at the ranks. Fusion, the budget and the cut are Python,
+        so `evals/retrieval/run_eval.py --hybrid` can import and measure the
+        exact policy that ships.
+        """
+        sql = text("""
+            WITH scope AS (
+                SELECT value AS paper_id
+                FROM jsonb_array_elements_text(CAST(:ids AS jsonb))
+            ),
+            q AS (
+                SELECT websearch_to_tsquery('english', :qtext) AS tsq
+            ),
+            dense AS (
+                SELECT c.id, c.paper_id, c.chunk_index, c.text,
+                       (c.embedding <=> CAST(:qvec AS vector)) AS distance,
+                       ROW_NUMBER() OVER (
+                           ORDER BY c.embedding <=> CAST(:qvec AS vector)
+                       ) AS d_rank
+                FROM paper_chunk_embeddings c
+                JOIN scope s ON s.paper_id = c.paper_id
+                WHERE c.model = :model
+                  AND (c.embedding <=> CAST(:qvec AS vector)) < :threshold
+                ORDER BY distance ASC
+                LIMIT :dense_pool
+            ),
+            sparse AS (
+                SELECT c.id, c.paper_id, c.chunk_index, c.text,
+                       ROW_NUMBER() OVER (
+                           ORDER BY ts_rank_cd(c.tsv, q.tsq) DESC, c.id
+                       ) AS s_rank
+                FROM paper_chunk_embeddings c
+                JOIN scope s ON s.paper_id = c.paper_id
+                CROSS JOIN q
+                WHERE c.model = :model
+                  AND c.tsv @@ q.tsq
+                ORDER BY ts_rank_cd(c.tsv, q.tsq) DESC, c.id
+                LIMIT :sparse_pool
             )
-            for i, row in enumerate(rows, 1)
-        ]
+            SELECT COALESCE(d.id, sp.id)                   AS id,
+                   COALESCE(d.paper_id, sp.paper_id)       AS paper_id,
+                   COALESCE(d.chunk_index, sp.chunk_index) AS chunk_index,
+                   COALESCE(d.text, sp.text)               AS text,
+                   d.distance                              AS distance,
+                   d.d_rank                                AS d_rank,
+                   sp.s_rank                                AS s_rank
+            FROM dense d
+            FULL OUTER JOIN sparse sp ON sp.id = d.id
+        """)
+        result = await db.execute(
+            sql,
+            {
+                "qvec": qvec,
+                "qtext": qtext,
+                "ids": ids,
+                "model": settings.embedding_model,
+                "threshold": threshold,
+                "dense_pool": settings.hybrid_dense_pool,
+                "sparse_pool": settings.hybrid_sparse_pool,
+            },
+        )
+        return result.fetchall()

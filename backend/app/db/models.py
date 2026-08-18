@@ -229,6 +229,12 @@ class PaperChunkEmbedding(Base):
     # pgvector index — a failure with no error and no way to detect it after.
     model: Mapped[str] = mapped_column(String(64), default="", server_default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    # NOT DECLARED HERE, on purpose: `tsv`, a generated tsvector column with a
+    # GIN index, added by migration a7b8c9d0e1f2 for hybrid retrieval's sparse
+    # arm. SQLite `create_all` in tests cannot take a tsvector, and nothing
+    # reads it through the ORM -- retrieval uses raw text() SQL. The guard that
+    # stops autogenerate proposing to drop it lives in app/db/autogenerate.py
+    # (`include_object`), pinned by tests/test_autogenerate_exclusions.py.
 
     paper: Mapped[Paper] = relationship(back_populates="chunks")
 

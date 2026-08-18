@@ -132,7 +132,7 @@ async def test_retrieve_paper_chunks_uses_settings_similarity_threshold():
     papers = [PaperInfo(paper_id="p1", title="Test Paper"), PaperInfo(paper_id="p2", title="B")]
 
     with patch.object(settings, "similarity_threshold", 0.42):
-        await svc._retrieve_paper_chunks(mock_db, papers, [0.0] * 768)
+        await svc._retrieve_paper_chunks(mock_db, papers, [0.0] * 768, "q")
 
     _, params = mock_db.execute.call_args.args
     assert params["threshold"] == 0.42
@@ -141,8 +141,12 @@ async def test_retrieve_paper_chunks_uses_settings_similarity_threshold():
 def _mock_db_returning(n_rows: int) -> MagicMock:
     """Fake AsyncSession returning `n_rows` chunk rows, nearest first.
 
-    Deliberately ignores any LIMIT in the SQL — that is the point: it proves
+    Deliberately ignores any LIMIT in the SQL -- that is the point: it proves
     the service bounds its own output rather than trusting the database to.
+
+    `d_rank`/`s_rank` are what the hybrid query's two arms emit. Here every
+    row is dense-ranked and none is sparse-ranked, so fusion reproduces the
+    distance order and these tests keep measuring what they measured before.
     """
     rows = [
         MagicMock(
@@ -151,6 +155,8 @@ def _mock_db_returning(n_rows: int) -> MagicMock:
             chunk_index=i,
             text=f"chunk {i}",
             distance=0.1 + i * 0.0001,
+            d_rank=i + 1,
+            s_rank=None,
         )
         for i in range(n_rows)
     ]
@@ -174,7 +180,7 @@ async def test_retrieve_paper_chunks_issues_one_query_for_the_whole_library():
     mock_db = _mock_db_returning(0)
     papers = [PaperInfo(paper_id=f"p{i}", title=f"Paper {i}") for i in range(100)]
 
-    await svc._retrieve_paper_chunks(mock_db, papers, [0.0] * 768)
+    await svc._retrieve_paper_chunks(mock_db, papers, [0.0] * 768, "q")
 
     assert mock_db.execute.await_count == 1
 
@@ -192,7 +198,7 @@ async def test_retrieve_paper_chunks_caps_total_at_settings_max_context_chunks()
     papers = [PaperInfo(paper_id=f"p{i}", title=f"Paper {i}") for i in range(100)]
 
     with patch.object(settings, "max_context_chunks", 40):
-        chunks = await svc._retrieve_paper_chunks(mock_db, papers, [0.0] * 768)
+        chunks = await svc._retrieve_paper_chunks(mock_db, papers, [0.0] * 768, "q")
 
     assert len(chunks) == 40
 
@@ -211,10 +217,283 @@ async def test_retrieve_paper_chunks_scopes_to_this_projects_papers():
     mock_db = _mock_db_returning(0)
     papers = [PaperInfo(paper_id=f"p{i}", title=f"Paper {i}") for i in range(3)]
 
-    await svc._retrieve_paper_chunks(mock_db, papers, [0.0] * 768)
+    await svc._retrieve_paper_chunks(mock_db, papers, [0.0] * 768, "q")
 
     _, params = mock_db.execute.call_args.args
     assert json.loads(params["ids"]) == ["p0", "p1", "p2"]
+
+
+def _hybrid_db(rows: list[dict]) -> MagicMock:
+    """Fake AsyncSession returning explicitly-ranked hybrid rows."""
+    mock_result = MagicMock()
+    mock_result.fetchall.return_value = [MagicMock(**row) for row in rows]
+    mock_db = MagicMock()
+    mock_db.execute = AsyncMock(return_value=mock_result)
+    return mock_db
+
+
+async def test_hybrid_query_binds_the_question_text_for_the_sparse_arm():
+    """The sparse arm needs the words, not the vector. Passing only the
+    embedding is what made this retrieval dense-only in the first place."""
+    from app.services.chat_service import ChatService, PaperInfo
+
+    svc = ChatService()
+    mock_db = _mock_db_returning(0)
+    papers = [PaperInfo(paper_id="p1", title="A"), PaperInfo(paper_id="p2", title="B")]
+
+    await svc._retrieve_paper_chunks(mock_db, papers, [0.0] * 768, "what reward function")
+
+    _, params = mock_db.execute.call_args.args
+    assert params["qtext"] == "what reward function"
+
+
+async def test_hybrid_binds_both_pool_sizes():
+    from app.services.chat_service import ChatService, PaperInfo
+
+    svc = ChatService()
+    mock_db = _mock_db_returning(0)
+    papers = [PaperInfo(paper_id="p1", title="A"), PaperInfo(paper_id="p2", title="B")]
+
+    with (
+        patch.object(settings, "hybrid_dense_pool", 111),
+        patch.object(settings, "hybrid_sparse_pool", 22),
+    ):
+        await svc._retrieve_paper_chunks(mock_db, papers, [0.0] * 768, "q")
+
+    _, params = mock_db.execute.call_args.args
+    assert params["dense_pool"] == 111
+    assert params["sparse_pool"] == 22
+
+
+async def test_a_sparse_only_chunk_can_outrank_a_dense_chunk():
+    """The wiring, not the arithmetic -- `fuse_rrf` itself is unit-tested in
+    test_hybrid_ranker.py. Production only ever hands the fusion CONTIGUOUS
+    per-arm ranks: the SQL's ROW_NUMBER() OVER (...) emits 1..N with no gaps,
+    and the FULL OUTER JOIN carries every row of both arms back. This fixture
+    mirrors that shape -- 100 contiguous dense rows (ranks 1..100) plus one
+    sparse-only row (absent from the dense arm entirely, the distance gate
+    rejected it) at sparse rank 1.
+
+    At the default 70/30 weights and k=30 (the shipped default, not the
+    textbook k=60), RRF(w=0.3, rank=1) = 0.3/31 ~= 0.00968 exceeds
+    RRF(w=0.7, rank=d) once d > 42.33, so the sparse-only chunk outranks
+    dense ranks 43-100.
+
+    Asserted by POSITION, not membership: this test uses multi-paper scope
+    (two papers) with `max_context_chunks` patched to 200, so with 101 rows
+    total every row is returned regardless of fusion order and a bare
+    membership check (`"lexical" in [...]`) would be a tautology that cannot
+    fail for the reason the test name claims. Asserting that "lexical" sits
+    ahead of the dense rank-100 row is what actually exercises fusion order.
+    """
+    from app.services.chat_service import ChatService, PaperInfo
+
+    svc = ChatService()
+    dense_rows = [
+        {
+            "id": f"d{i}",
+            "paper_id": "p1",
+            "chunk_index": i,
+            "text": f"dense {i}",
+            "distance": 0.1 + i * 0.001,
+            "d_rank": i,
+            "s_rank": None,
+        }
+        for i in range(1, 101)
+    ]
+    sparse_row = {
+        "id": "sparse-only",
+        "paper_id": "p1",
+        "chunk_index": 999,
+        "text": "lexical",
+        "distance": None,
+        "d_rank": None,
+        "s_rank": 1,
+    }
+    mock_db = _hybrid_db([*dense_rows, sparse_row])
+    papers = [PaperInfo(paper_id="p1", title="A"), PaperInfo(paper_id="p2", title="B")]
+
+    with patch.object(settings, "max_context_chunks", 200):
+        chunks = await svc._retrieve_paper_chunks(mock_db, papers, [0.0] * 768, "reward table")
+
+    texts = [c.text for c in chunks]
+    assert texts.index("lexical") < texts.index("dense 100")
+
+
+async def test_a_both_arms_chunk_outranks_a_dense_only_top_hit():
+    """The join's central property: one row can carry BOTH ranks, and both
+    RRF terms are summed. At the shipped k=30 (not the textbook k=60): 'c1'
+    is dense rank 3 AND sparse rank 1 (score = 0.7/33 + 0.3/31 ~= 0.02121 +
+    0.00968 = 0.03089); 'c2' is the dense arm's OWN rank-1 hit and
+    sparse-absent (score = 0.7/31 ~= 0.02258). c1's combined score beats
+    c2's dense-only score even though c2 outranks c1 in the dense arm alone
+    -- proving both terms are actually summed, not just the higher one
+    kept."""
+    from app.services.chat_service import ChatService, PaperInfo
+
+    svc = ChatService()
+    mock_db = _hybrid_db(
+        [
+            {
+                "id": "c1",
+                "paper_id": "p1",
+                "chunk_index": 0,
+                "text": "both arms",
+                "distance": 0.42,
+                "d_rank": 3,
+                "s_rank": 1,
+            },
+            {
+                "id": "c2",
+                "paper_id": "p1",
+                "chunk_index": 1,
+                "text": "dense only",
+                "distance": 0.30,
+                "d_rank": 1,
+                "s_rank": None,
+            },
+        ]
+    )
+    papers = [PaperInfo(paper_id="p1", title="A"), PaperInfo(paper_id="p2", title="B")]
+
+    chunks = await svc._retrieve_paper_chunks(mock_db, papers, [0.0] * 768, "q")
+
+    assert [c.text for c in chunks] == ["both arms", "dense only"]
+
+
+async def test_citations_are_numbered_contiguously_after_fusion():
+    """`n` is the citation marker the model cites. Fusion reorders rows, so
+    the numbering has to follow the fused order, not the row order. Pinned
+    to (n, text) pairs -- a bare `[c.n for c in chunks] == [1, 2]` is just
+    `enumerate(rows, 1)` and would pass under any fusion order, including
+    none (see test_single_paper_scope_applies_the_delta_cut for the same
+    failure mode)."""
+    from app.services.chat_service import ChatService, PaperInfo
+
+    svc = ChatService()
+    mock_db = _hybrid_db(
+        [
+            {
+                "id": "c1",
+                "paper_id": "p1",
+                "chunk_index": 0,
+                "text": "dense",
+                "distance": 0.4,
+                "d_rank": 1,
+                "s_rank": None,
+            },
+            {
+                "id": "c2",
+                "paper_id": "p1",
+                "chunk_index": 1,
+                "text": "lexical",
+                "distance": None,
+                "d_rank": None,
+                "s_rank": 1,
+            },
+        ]
+    )
+    papers = [PaperInfo(paper_id="p1", title="A"), PaperInfo(paper_id="p2", title="B")]
+
+    chunks = await svc._retrieve_paper_chunks(mock_db, papers, [0.0] * 768, "q")
+
+    # Both at position 1 in their own arm: dense's 0.7 weight beats sparse's
+    # 0.3 weight at the same rank, so "dense" (c1) fuses ahead of "lexical"
+    # (c2). This pins WHICH row got WHICH number, not just the count.
+    assert [(c.n, c.text) for c in chunks] == [(1, "dense"), (2, "lexical")]
+
+
+async def test_single_paper_scope_applies_the_rank_window():
+    from app.services.chat_service import ChatService, PaperInfo
+
+    svc = ChatService()
+    mock_db = _mock_db_returning(50)
+    papers = [PaperInfo(paper_id="p1", title="Only Paper")]
+
+    with patch.object(settings, "intra_paper_rank_window", 7):
+        chunks = await svc._retrieve_paper_chunks(mock_db, papers, [0.0] * 768, "q")
+
+    assert len(chunks) == 7
+
+
+async def test_multi_paper_scope_does_not_apply_the_rank_window():
+    """The window is single-paper precision, not a global budget. Applying it
+    to library-wide scope would cut the budget for every question."""
+    from app.services.chat_service import ChatService, PaperInfo
+
+    svc = ChatService()
+    mock_db = _mock_db_returning(50)
+    papers = [PaperInfo(paper_id=f"p{i}", title=f"P{i}") for i in range(5)]
+
+    with (
+        patch.object(settings, "intra_paper_rank_window", 7),
+        patch.object(settings, "max_context_chunks", 40),
+    ):
+        chunks = await svc._retrieve_paper_chunks(mock_db, papers, [0.0] * 768, "q")
+
+    assert len(chunks) == 40
+
+
+async def test_the_budget_is_applied_before_the_rank_window():
+    """NOT a proof of ordering. Both cuts are prefix slices, and prefix
+    slicing is commutative -- `seq[:a][:b] == seq[:b][:a]` whenever both
+    bounds are within range, which they are here. Swapping the two lines in
+    `_retrieve_paper_chunks` would leave this test green. It exists only to
+    pin the budget's own value (10, not 999) under a scope that also has a
+    rank window in play; the ordering itself is structural (see the
+    docstring and the comment above the budget slice in
+    `_retrieve_paper_chunks`) and is not, and cannot be, verified by any
+    test built from two prefix slices."""
+    from app.services.chat_service import ChatService, PaperInfo
+
+    svc = ChatService()
+    mock_db = _mock_db_returning(500)
+    papers = [PaperInfo(paper_id="p1", title="Only Paper")]
+
+    with (
+        patch.object(settings, "max_context_chunks", 10),
+        patch.object(settings, "intra_paper_rank_window", 999),
+    ):
+        chunks = await svc._retrieve_paper_chunks(mock_db, papers, [0.0] * 768, "q")
+
+    assert len(chunks) == 10
+
+
+async def test_hybrid_disabled_falls_back_to_the_dense_only_query():
+    """The kill switch. With hybrid off the query must not mention tsv at
+    all -- a deployment that has not run the migration still has to work."""
+    from app.services.chat_service import ChatService, PaperInfo
+
+    svc = ChatService()
+    mock_db = _mock_db_returning(0)
+    papers = [PaperInfo(paper_id="p1", title="A"), PaperInfo(paper_id="p2", title="B")]
+
+    with patch.object(settings, "hybrid_retrieval", False):
+        await svc._retrieve_paper_chunks(mock_db, papers, [0.0] * 768, "q")
+
+    sql, params = mock_db.execute.call_args.args
+    assert "tsv" not in str(sql)
+    assert "qtext" not in params
+
+
+async def test_hybrid_disabled_still_applies_the_distance_delta_cut():
+    """intra_paper_delta is not dead code: it governs the cut whenever the
+    kill switch is on."""
+    from app.services.chat_service import ChatService, PaperInfo
+
+    svc = ChatService()
+    mock_db = _mock_db_returning(50)
+    papers = [PaperInfo(paper_id="p1", title="Only Paper")]
+
+    with (
+        patch.object(settings, "hybrid_retrieval", False),
+        patch.object(settings, "intra_paper_delta", 0.0),
+    ):
+        chunks = await svc._retrieve_paper_chunks(mock_db, papers, [0.0] * 768, "q")
+
+    # _mock_db_returning spaces distances 0.0001 apart, so delta 0.0 keeps
+    # only the nearest chunk.
+    assert len(chunks) == 1
 
 
 async def test_respond_skips_reformulation_on_a_first_turn(
@@ -342,23 +621,35 @@ async def test_retrieve_paper_chunks_numbers_citations_contiguously_after_cappin
     papers = [PaperInfo(paper_id=f"p{i}", title=f"Paper {i}") for i in range(100)]
 
     with patch.object(settings, "max_context_chunks", 40):
-        chunks = await svc._retrieve_paper_chunks(mock_db, papers, [0.0] * 768)
+        chunks = await svc._retrieve_paper_chunks(mock_db, papers, [0.0] * 768, "q")
 
     assert [c.n for c in chunks] == list(range(1, 41))
 
 
-def _mock_db_returning_shortlist(rows: list[tuple[str, float, int]]) -> MagicMock:
-    """Fake AsyncSession returning (paper_id, best, n_chunks) rows.
+def _mock_db_returning_shortlist(
+    rows: list[tuple[str, float, int]],
+    lexical: list[str] | None = None,
+) -> MagicMock:
+    """Fake AsyncSession answering both shortlist arms.
 
-    Deliberately returns them in the order given, ignoring any ORDER BY, so
-    the tests prove what the service does with the rows rather than what
-    Postgres would have done for it.
+    The dense arm gets (paper_id, best, n_chunks) rows; the lexical title arm
+    gets `lexical` paper ids, in the order given. Which query is which is
+    decided by looking for ts_rank_cd in the SQL — neither arm's ranking runs
+    here, so the tests prove what the service does with the rows rather than
+    what Postgres would have done for it.
     """
-    mock_rows = [MagicMock(paper_id=p, best=b, n_chunks=n) for p, b, n in rows]
-    mock_result = MagicMock()
-    mock_result.fetchall.return_value = mock_rows
+    dense_result = MagicMock()
+    dense_result.fetchall.return_value = [
+        MagicMock(paper_id=p, best=b, n_chunks=n) for p, b, n in rows
+    ]
+    lexical_result = MagicMock()
+    lexical_result.fetchall.return_value = [MagicMock(paper_id=p) for p in (lexical or [])]
+
+    async def execute(sql, params=None):
+        return lexical_result if "ts_rank_cd" in str(sql) else dense_result
+
     mock_db = MagicMock()
-    mock_db.execute = AsyncMock(return_value=mock_result)
+    mock_db.execute = AsyncMock(side_effect=execute)
     return mock_db
 
 
@@ -369,7 +660,8 @@ async def test_shortlist_papers_returns_nearest_first_capped_at_limit():
     mock_db = _mock_db_returning_shortlist([("p0", 0.30, 10), ("p1", 0.31, 20), ("p2", 0.32, 30)])
     papers = [PaperInfo(paper_id=f"p{i}", title=f"Paper {i}") for i in range(3)]
 
-    candidates, _ = await svc._shortlist_papers(mock_db, papers, [0.0] * 768, 2)
+    with patch.object(settings, "targeter_dense_candidates", 2):
+        candidates, _ = await svc._shortlist_papers(mock_db, papers, [0.0] * 768, "a question")
 
     assert [c.paper_id for c in candidates] == ["p0", "p1"]
     assert [c.title for c in candidates] == ["Paper 0", "Paper 1"]
@@ -389,16 +681,19 @@ async def test_shortlist_papers_counts_chunks_across_the_whole_project():
     mock_db = _mock_db_returning_shortlist([("p0", 0.30, 10), ("p1", 0.31, 20), ("p2", 0.32, 30)])
     papers = [PaperInfo(paper_id=f"p{i}", title=f"Paper {i}") for i in range(3)]
 
-    _, total = await svc._shortlist_papers(mock_db, papers, [0.0] * 768, 2)
+    _, total = await svc._shortlist_papers(mock_db, papers, [0.0] * 768, "a question")
 
     assert total == 60
 
 
-async def test_shortlist_papers_issues_one_scoped_query():
-    """One query, scoped to this project's papers and this embedding model.
+async def test_shortlist_papers_scopes_both_arms_to_this_projects_papers():
+    """Both arms are scoped to this project, and only the dense one is
+    embedding-model bound.
 
     paper_chunk_embeddings is global; an unscoped ranking would rank another
-    project's papers as candidates for this project's question.
+    project's papers as candidates for this project's question. The lexical
+    arm reads `papers`, which carries no embedding — a title index is not tied
+    to a vector space, so it takes the id scope but no model filter.
     """
     from app.services.chat_service import ChatService, PaperInfo
 
@@ -407,12 +702,17 @@ async def test_shortlist_papers_issues_one_scoped_query():
     papers = [PaperInfo(paper_id=f"p{i}", title=f"Paper {i}") for i in range(3)]
 
     with patch.object(settings, "embedding_model", "test-embed-model"):
-        await svc._shortlist_papers(mock_db, papers, [0.0] * 768, 10)
+        await svc._shortlist_papers(mock_db, papers, [0.0] * 768, "a question")
 
-    assert mock_db.execute.await_count == 1
-    _, params = mock_db.execute.call_args.args
-    assert json.loads(params["ids"]) == ["p0", "p1", "p2"]
-    assert params["model"] == "test-embed-model"
+    assert mock_db.execute.await_count == 2
+    dense_sql, dense_params = mock_db.execute.await_args_list[0].args
+    lexical_sql, lexical_params = mock_db.execute.await_args_list[1].args
+    assert json.loads(dense_params["ids"]) == ["p0", "p1", "p2"]
+    assert dense_params["model"] == "test-embed-model"
+    assert json.loads(lexical_params["ids"]) == ["p0", "p1", "p2"]
+    assert lexical_params["question"] == "a question"
+    assert "model" not in lexical_params
+    assert "ts_rank_cd" in str(lexical_sql) and "ts_rank_cd" not in str(dense_sql)
 
 
 async def test_shortlist_papers_skips_rows_for_unknown_papers():
@@ -430,7 +730,7 @@ async def test_shortlist_papers_skips_rows_for_unknown_papers():
     mock_db = _mock_db_returning_shortlist([("ghost", 0.20, 5), ("p0", 0.30, 10)])
     papers = [PaperInfo(paper_id="p0", title="Paper 0"), PaperInfo(paper_id="p1", title="Paper 1")]
 
-    candidates, total = await svc._shortlist_papers(mock_db, papers, [0.0] * 768, 10)
+    candidates, total = await svc._shortlist_papers(mock_db, papers, [0.0] * 768, "a question")
 
     assert [c.paper_id for c in candidates] == ["p0"]
     assert total == 15
@@ -605,7 +905,7 @@ async def test_shortlist_papers_returns_early_for_a_single_paper():
     mock_db.execute = AsyncMock()
     papers = [PaperInfo(paper_id="p0", title="Paper 0")]
 
-    result = await svc._shortlist_papers(mock_db, papers, [0.0] * 768, 10)
+    result = await svc._shortlist_papers(mock_db, papers, [0.0] * 768, "a question")
 
     assert result == ([], 0)
     mock_db.execute.assert_not_awaited()
@@ -926,7 +1226,7 @@ async def test_single_paper_scope_binds_the_intra_paper_ceiling():
         patch.object(settings, "intra_paper_ceiling", 0.85),
         patch.object(settings, "similarity_threshold", 0.75),
     ):
-        await svc._retrieve_paper_chunks(mock_db, [paper], [0.0] * 768)
+        await svc._retrieve_paper_chunks(mock_db, [paper], [0.0] * 768, "q")
 
     _, params = mock_db.execute.call_args.args
     assert params["threshold"] == 0.85
@@ -948,8 +1248,11 @@ async def test_single_paper_scope_applies_the_delta_cut():
     mock_db.execute = AsyncMock(return_value=mock_result)
     paper = PaperInfo(paper_id="p1", title="Only Paper")
 
-    with patch.object(settings, "intra_paper_delta", 0.25):
-        chunks = await svc._retrieve_paper_chunks(mock_db, [paper], [0.0] * 768)
+    with (
+        patch.object(settings, "hybrid_retrieval", False),
+        patch.object(settings, "intra_paper_delta", 0.25),
+    ):
+        chunks = await svc._retrieve_paper_chunks(mock_db, [paper], [0.0] * 768, "q")
 
     # best 0.50 + 0.25 = 0.75 -> the 0.80 row is cut, the 0.74 row survives
     assert len(chunks) == 3
@@ -978,8 +1281,11 @@ async def test_multi_paper_scope_applies_no_delta_cut():
     mock_db.execute = AsyncMock(return_value=mock_result)
     papers = [PaperInfo(paper_id=f"p{i}", title=f"P{i}") for i in range(3)]
 
-    with patch.object(settings, "intra_paper_delta", 0.25):
-        chunks = await svc._retrieve_paper_chunks(mock_db, papers, [0.0] * 768)
+    with (
+        patch.object(settings, "hybrid_retrieval", False),
+        patch.object(settings, "intra_paper_delta", 0.25),
+    ):
+        chunks = await svc._retrieve_paper_chunks(mock_db, papers, [0.0] * 768, "q")
 
     assert len(chunks) == 3
 
@@ -998,6 +1304,222 @@ async def test_single_paper_scope_with_empty_sql_result_returns_empty():
     mock_db = _mock_db_returning_no_rows()
     paper = PaperInfo(paper_id="p1", title="Only Paper")
 
-    chunks = await svc._retrieve_paper_chunks(mock_db, [paper], [0.0] * 768)
+    chunks = await svc._retrieve_paper_chunks(mock_db, [paper], [0.0] * 768, "q")
 
     assert chunks == []
+
+
+async def test_a_misattributed_marker_is_stripped_before_the_citation_array_is_built(
+    db_session: AsyncSession, project: Project, conversation_with_message
+):
+    """The strip-then-renumber ordering, asserted end to end.
+
+    The evidence is one paper's chunk; the answer enumerates two papers and
+    hangs that marker off both. The chip list is built from the renumbering
+    map, so a marker stripped AFTER renumbering would leave a chip pointing at
+    a claim that no longer cites it, and would consume a number in the visible
+    sequence. Here the second item loses its marker and the persisted array
+    carries exactly one entry, numbered [1].
+    """
+    from app.agents.chat_agent import ChunkContext
+    from app.db.models import Paper
+    from app.services.chat_service import ChatService
+
+    conv = conversation_with_message
+    owner = Paper(
+        project_id=project.id,
+        title="Cooperative Multi-Target Search with UAV Swarms",
+        source="manual",
+    )
+    other = Paper(
+        project_id=project.id,
+        title="Deep Reinforcement Learning for Trajectory Path Planning",
+        source="manual",
+    )
+    db_session.add_all([owner, other])
+    await db_session.commit()
+    await db_session.refresh(owner)
+
+    answer = (
+        "1. Cooperative Multi-Target Search with UAV Swarms: the reward is shaped [1].\n"
+        "2. Deep Reinforcement Learning for Trajectory Path Planning: penalties too [1].\n"
+    )
+
+    async def fake_stream(*args, **kwargs):
+        yield answer
+
+    svc = ChatService()
+    save = AsyncMock()
+    chunks = [ChunkContext(n=1, paper_id=owner.id, title=owner.title, chunk_index=0, text="reward")]
+
+    with (
+        patch.object(svc._embedding_svc, "embed", AsyncMock(return_value=[0.0] * 768)),
+        patch.object(svc, "_retrieve_history", AsyncMock(return_value=[])),
+        patch.object(svc._reformulator, "run", AsyncMock(return_value="Test question")),
+        patch.object(svc, "_shortlist_papers", AsyncMock(return_value=([], 0))),
+        patch.object(svc, "_retrieve_paper_chunks", AsyncMock(return_value=chunks)),
+        patch.object(svc._chat_agent, "stream", return_value=fake_stream()),
+        patch.object(svc._conv_svc, "save_message", save),
+    ):
+        async for _ in svc.respond(conv.id, "Test question"):
+            pass
+
+    persisted_text, citations = save.await_args.args[3], save.await_args.args[4]
+    assert persisted_text.splitlines()[0].endswith("the reward is shaped [1].")
+    assert persisted_text.splitlines()[1].endswith("penalties too.")
+    assert [c["n"] for c in citations] == [1]
+    assert citations[0]["paper_id"] == owner.id
+
+
+async def test_the_lexical_title_arm_adds_a_paper_the_dense_arm_buried():
+    """The failure this arm exists for, in miniature.
+
+    Nearest-chunk distance ranks on BODY text. A question that names its paper
+    by a property of the TITLE ranked its target 28th of 100 live (conversation
+    867dd8c5), outside any sane dense cap, so the targeter could only name a
+    wrong paper and retrieval was scoped to it. The lexical arm ranks the same
+    papers by their titles, which is the signal the dense arm cannot see.
+    """
+    from app.services.chat_service import ChatService, PaperInfo
+
+    svc = ChatService()
+    mock_db = _mock_db_returning_shortlist(
+        [("p0", 0.30, 10), ("p1", 0.31, 20), ("p2", 0.32, 30)],
+        lexical=["p9"],
+    )
+    papers = [PaperInfo(paper_id=f"p{i}", title=f"Paper {i}") for i in range(10)]
+
+    with patch.object(settings, "targeter_dense_candidates", 2):
+        candidates, _ = await svc._shortlist_papers(mock_db, papers, [0.0] * 768, "a question")
+
+    assert [c.paper_id for c in candidates] == ["p0", "p1", "p9"]
+    assert candidates[-1].title == "Paper 9"
+
+
+async def test_the_lexical_arm_is_unioned_after_the_dense_arm_never_fused():
+    """Union, not fusion, and dense order is preserved.
+
+    Fusing the two arms 50/50 by RRF was measured on the golden set and DROPPED
+    candidate recall 28/30 -> 24/30: a lexical rank exists for papers the dense
+    arm was right to bury, and fusion lets those displace real hits. A union
+    can only add.
+    """
+    from app.services.chat_service import ChatService, PaperInfo
+
+    svc = ChatService()
+    mock_db = _mock_db_returning_shortlist(
+        [("p0", 0.30, 10), ("p1", 0.31, 20)],
+        lexical=["p1", "p0"],  # both already dense hits, in the opposite order
+    )
+    papers = [PaperInfo(paper_id=f"p{i}", title=f"Paper {i}") for i in range(2)]
+
+    candidates, _ = await svc._shortlist_papers(mock_db, papers, [0.0] * 768, "a question")
+
+    assert [c.paper_id for c in candidates] == ["p0", "p1"]
+
+
+async def test_the_lexical_arm_skips_ids_that_are_not_in_this_projects_papers():
+    """Defence in depth: the arm's own SQL scopes by id, so a foreign id can
+    only arrive if that scope ever breaks — and it must not be labelled with a
+    title this project does not have."""
+    from app.services.chat_service import ChatService, PaperInfo
+
+    svc = ChatService()
+    mock_db = _mock_db_returning_shortlist([("p0", 0.30, 10)], lexical=["ghost"])
+    papers = [PaperInfo(paper_id="p0", title="Paper 0"), PaperInfo(paper_id="p1", title="Paper 1")]
+
+    candidates, _ = await svc._shortlist_papers(mock_db, papers, [0.0] * 768, "a question")
+
+    assert [c.paper_id for c in candidates] == ["p0"]
+
+
+async def test_the_lexical_arm_is_capped_by_settings():
+    from app.services.chat_service import ChatService, PaperInfo
+
+    svc = ChatService()
+    mock_db = _mock_db_returning_shortlist([("p0", 0.30, 10)], lexical=[])
+    papers = [PaperInfo(paper_id=f"p{i}", title=f"Paper {i}") for i in range(3)]
+
+    with patch.object(settings, "targeter_lexical_candidates", 4):
+        await svc._shortlist_papers(mock_db, papers, [0.0] * 768, "a question")
+
+    _, lexical_params = mock_db.execute.await_args_list[1].args
+    assert lexical_params["limit"] == 4
+
+
+async def test_a_broken_lexical_arm_degrades_to_the_dense_shortlist():
+    """Fail-open. The arm exists to ADD candidates; a failing query must leave
+    the dense shortlist standing, not fail the turn."""
+    from app.services.chat_service import ChatService, PaperInfo
+
+    svc = ChatService()
+    dense_result = MagicMock()
+    dense_result.fetchall.return_value = [MagicMock(paper_id="p0", best=0.3, n_chunks=10)]
+
+    async def execute(sql, params=None):
+        if "ts_rank_cd" in str(sql):
+            raise RuntimeError("text search configuration missing")
+        return dense_result
+
+    mock_db = MagicMock()
+    mock_db.execute = AsyncMock(side_effect=execute)
+    papers = [PaperInfo(paper_id="p0", title="Paper 0"), PaperInfo(paper_id="p1", title="Paper 1")]
+
+    candidates, total = await svc._shortlist_papers(mock_db, papers, [0.0] * 768, "a question")
+
+    assert [c.paper_id for c in candidates] == ["p0"]
+    assert total == 10
+
+
+async def test_an_empty_question_skips_the_lexical_query_entirely():
+    """No lexemes, no query. Reformulation can return an empty-ish string, and
+    a tsquery built from nothing matches nothing anyway."""
+    from app.services.chat_service import ChatService, PaperInfo
+
+    svc = ChatService()
+    mock_db = _mock_db_returning_shortlist([("p0", 0.30, 10)])
+    papers = [PaperInfo(paper_id="p0", title="Paper 0"), PaperInfo(paper_id="p1", title="Paper 1")]
+
+    candidates, _ = await svc._shortlist_papers(mock_db, papers, [0.0] * 768, "   ")
+
+    assert mock_db.execute.await_count == 1
+    assert [c.paper_id for c in candidates] == ["p0"]
+
+
+async def test_the_shortlist_is_built_from_the_reformulated_query_text(
+    db_session: AsyncSession, project: Project, conversation_with_message
+):
+    """The lexical arm must see the same text the dense arm's embedding came
+    from. A pronoun-only follow-up ('and that one?') carries no title words at
+    all; the reformulated query is what does."""
+    from app.db.models import Paper
+    from app.services.chat_service import ChatService
+
+    conv = conversation_with_message
+    for i in range(3):
+        db_session.add(Paper(project_id=project.id, title=f"Paper {i}", source="manual"))
+    # A prior turn, so reformulation runs at all: a first turn is already
+    # standalone and is skipped (see the reformulation-gating tests above).
+    db_session.add(ChatMessage(conversation_id=conv.id, role="assistant", content="Earlier answer"))
+    db_session.add(ChatMessage(conversation_id=conv.id, role="user", content="and that one?"))
+    await db_session.commit()
+
+    async def fake_stream(*args, **kwargs):
+        yield "answer"
+
+    svc = ChatService()
+    shortlist = AsyncMock(return_value=([], 0))
+
+    with (
+        patch.object(svc._embedding_svc, "embed", AsyncMock(return_value=[0.0] * 768)),
+        patch.object(svc, "_retrieve_history", AsyncMock(return_value=[])),
+        patch.object(svc._reformulator, "run", AsyncMock(return_value="the evolutionary paper")),
+        patch.object(svc, "_shortlist_papers", shortlist),
+        patch.object(svc, "_retrieve_paper_chunks", AsyncMock(return_value=[])),
+        patch.object(svc._chat_agent, "stream", return_value=fake_stream()),
+        patch.object(svc._conv_svc, "save_message", AsyncMock()),
+    ):
+        async for _ in svc.respond(conv.id, "and that one?"):
+            pass
+
+    assert shortlist.await_args.args[3] == "the evolutionary paper"
