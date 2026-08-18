@@ -6,8 +6,11 @@ import { useParams, useSearchParams } from "next/navigation";
 import { ArrowLeft, Send } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ChatStream } from "@/components/chat-stream";
+import { MentionTextarea } from "@/components/mention-textarea";
 import { getConversation } from "@/lib/chat";
-import type { ChatConversationDetail } from "@/lib/types";
+import type { Mention } from "@/lib/mentions";
+import { listPapers } from "@/lib/projects";
+import type { ChatConversationDetail, Paper } from "@/lib/types";
 
 export default function ConversationPage() {
   const { id: projectId, cid } = useParams<{ id: string; cid: string }>();
@@ -20,6 +23,9 @@ export default function ConversationPage() {
   const [pendingContent, setPendingContent] = useState<string | undefined>(
     searchParams.get("q") ?? undefined
   );
+  const [mentions, setMentions] = useState<Mention[]>([]);
+  const [papers, setPapers] = useState<Paper[]>([]);
+  const [pendingMentions, setPendingMentions] = useState<string[]>([]);
 
   useEffect(() => {
     getConversation(projectId, cid)
@@ -28,10 +34,16 @@ export default function ConversationPage() {
       .finally(() => setLoading(false));
   }, [projectId, cid]);
 
+  useEffect(() => {
+    listPapers(projectId).then(setPapers).catch(() => {});
+  }, [projectId]);
+
   function handleSend() {
     const q = input.trim();
     if (!q || pendingContent) return;
     setInput("");
+    setPendingMentions(mentions.map((m) => m.paperId));
+    setMentions([]);
     setPendingContent(q);
   }
 
@@ -65,25 +77,21 @@ export default function ConversationPage() {
           conversationId={cid}
           initialMessages={detail.messages}
           pendingContent={pendingContent}
+          pendingMentions={pendingMentions}
           onDone={() => setPendingContent(undefined)}
         />
       </div>
 
       {/* Input bar */}
       <div className="mt-4 flex gap-2 border-t border-border pt-4">
-        <textarea
-          rows={2}
+        <MentionTextarea
           value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey) {
-              e.preventDefault();
-              handleSend();
-            }
-          }}
-          placeholder="Ask a follow-up question…"
+          onChange={setInput}
+          mentions={mentions}
+          onMentionsChange={setMentions}
+          papers={papers}
           disabled={!!pendingContent}
-          className="flex-1 resize-none rounded-xl border border-border bg-background px-3 py-2 text-sm outline-none placeholder:text-muted-foreground disabled:opacity-50"
+          onSubmit={handleSend}
         />
         <Button
           size="sm"

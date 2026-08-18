@@ -31,6 +31,8 @@ interface Props {
   onError?: (message: string) => void;
   /** Content of the message that was just submitted (optimistic display). */
   pendingContent?: string;
+  /** Paper ids the pending message was scoped to. */
+  pendingMentions?: string[];
 }
 
 export function ChatStream({
@@ -40,6 +42,7 @@ export function ChatStream({
   onDone,
   onError,
   pendingContent,
+  pendingMentions,
 }: Props) {
   const [messages, setMessages] = useState<ChatMessage[]>(initialMessages);
   const [streamingText, setStreamingText] = useState("");
@@ -83,7 +86,7 @@ export function ChatStream({
         "Content-Type": "application/json",
         ...(uid ? { "X-Dev-User-Id": uid } : {}),
       },
-      body: JSON.stringify({ content: pendingContent }),
+      body: JSON.stringify({ content: pendingContent, mentioned_paper_ids: pendingMentions ?? [] }),
       signal: controller.signal,
     }).then(async (res) => {
       if (!res.ok || !res.body) {
@@ -149,7 +152,7 @@ export function ChatStream({
     });
 
     return () => { cancelled = true; controller.abort(); };
-  }, [pendingContent, projectId, conversationId]);
+  }, [pendingContent, pendingMentions, projectId, conversationId]);
 
   // The user message this answer replied to, for term highlighting. Resolving
   // conversation state is this component's job, not the card's.
