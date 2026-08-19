@@ -24,6 +24,7 @@ from app.schemas.latex import (
     SynctexReverseIn,
     SynctexReverseOut,
 )
+from app.services import latex_files_service as files
 from app.services import project_service
 from app.services.latex_cache import CachedBuild, cache, source_hash
 from app.services.latex_compiler import compile_source, synctex_forward, synctex_reverse
@@ -47,6 +48,29 @@ async def _get_document_or_404(
     return document
 
 
+async def _as_out(db: AsyncSession, document: LatexDocument) -> LatexDocumentOut:
+    """Assemble the response, resolving the `source` shim from the tree.
+
+    `source` is not a column any more. Reading the main file here keeps the
+    single-file editor working unchanged while the tree lands; plan 4 deletes
+    the field and this helper with it. A document whose main file is missing
+    reports an empty source rather than failing -- the editor shows an empty
+    buffer, which is recoverable, where a 500 is not.
+    """
+    row = await files.read_file(db, document.id, document.main_path)
+    return LatexDocumentOut(
+        id=document.id,
+        project_id=document.project_id,
+        name=document.name,
+        source=(row.content or "") if row is not None and not row.is_binary else "",
+        main_path=document.main_path,
+        revision=document.revision,
+        engine=document.engine,
+        created_at=document.created_at,
+        updated_at=document.updated_at,
+    )
+
+
 @router.get("/projects/{project_id}/latex", response_model=list[LatexDocumentOut])
 async def list_documents(
     project_id: str,
@@ -65,7 +89,10 @@ async def list_documents(
         .scalars()
         .all()
     )
-    return [LatexDocumentOut.model_validate(row) for row in rows]
+    out = []
+    for row in rows:
+        out.append(await _as_out(db, row))
+    return out
 
 
 @router.post("/projects/{project_id}/latex", response_model=LatexDocumentOut, status_code=201)
@@ -86,7 +113,13 @@ async def create_document(
     db.add(document)
     await db.commit()
     await db.refresh(document)
-    return LatexDocumentOut.model_validate(document)
+    # The `source` field is a shim: turn it into the real file the compiler
+    # will read, so create and compile cannot disagree about what the
+    # document contains.
+    await files.write_text(db, document.id, document.main_path, payload.source)
+    await db.commit()
+    await db.refresh(document)
+    return await _as_out(db, document)
 
 
 @router.get("/projects/{project_id}/latex/{document_id}", response_model=LatexDocumentOut)
@@ -97,7 +130,7 @@ async def get_document(
     db: AsyncSession = Depends(get_session),
 ) -> LatexDocumentOut:
     await project_service.require_member(db, project_id, user.id, "viewer")
-    return LatexDocumentOut.model_validate(await _get_document_or_404(db, project_id, document_id))
+    return await _as_out(db, await _get_document_or_404(db, project_id, document_id))
 
 
 @router.patch("/projects/{project_id}/latex/{document_id}", response_model=LatexDocumentOut)
@@ -112,13 +145,24 @@ async def update_document(
     document = await _get_document_or_404(db, project_id, document_id)
     if payload.name is not None:
         document.name = payload.name
+    # Order matters: main_path is applied BEFORE source, so a single PATCH
+    # carrying both writes the NEW main file rather than the old one.
+    if payload.main_path is not None:
+        target = await files.read_file(db, document.id, payload.main_path)
+        if target is None or target.is_binary:
+            raise HTTPException(
+                status_code=422, detail=f"{payload.main_path} is not a text file in this document"
+            )
+        if not payload.main_path.endswith(".tex"):
+            raise HTTPException(status_code=422, detail="The main file must be a .tex file")
+        document.main_path = payload.main_path
     if payload.source is not None:
-        document.source = payload.source
+        await files.write_text(db, document.id, document.main_path, payload.source)
     if payload.engine is not None:
         document.engine = payload.engine
     await db.commit()
     await db.refresh(document)
-    return LatexDocumentOut.model_validate(document)
+    return await _as_out(db, document)
 
 
 @router.delete("/projects/{project_id}/latex/{document_id}", status_code=204)
@@ -153,7 +197,10 @@ async def compile_document(
     # for slow LLM calls. Extract BEFORE the commit: touching an ORM attribute
     # afterwards would trigger a refresh and check a connection straight back
     # out.
-    doc_id, source, engine = document.id, document.source, document.engine
+    doc_id, engine, main_path = document.id, document.engine, document.main_path
+    revision = document.revision
+    row = await files.read_file(db, doc_id, main_path)
+    source = (row.content or "") if row is not None and not row.is_binary else ""
     await db.commit()
 
     key = source_hash(source, engine)
@@ -173,7 +220,7 @@ async def compile_document(
         # `_total_bytes`), and `move_to_end` is the LRU promotion a hit
         # should get anyway.
         cache.put(key, cached, document_id=doc_id)
-        return CompileOut(ok=True, log=cached.log, pdf_hash=key)
+        return CompileOut(ok=True, log=cached.log, pdf_hash=key, revision=revision)
 
     result = await compile_source(source, engine)
     if not result.ok or result.pdf is None:
@@ -186,7 +233,7 @@ async def compile_document(
         CachedBuild(source=source, pdf=result.pdf, synctex_gz=result.synctex_gz, log=result.log),
         document_id=doc_id,
     )
-    return CompileOut(ok=True, log=result.log, pdf_hash=key)
+    return CompileOut(ok=True, log=result.log, pdf_hash=key, revision=revision)
 
 
 @router.get("/projects/{project_id}/latex/{document_id}/pdf")

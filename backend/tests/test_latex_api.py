@@ -49,16 +49,16 @@ async def test_create_and_list_documents(client: AsyncClient, you: User, project
     assert [d["name"] for d in listed.json()] == ["main.tex"]
 
 
-async def test_patch_saves_the_source(
-    client: AsyncClient, you: User, project: Project, db_session: AsyncSession
-):
-    doc = LatexDocument(project_id=project.id, name="main.tex", source="old")
-    db_session.add(doc)
-    await db_session.commit()
-    await db_session.refresh(doc)
+async def test_patch_saves_the_source(client: AsyncClient, you: User, project: Project):
+    created = await client.post(
+        f"/v1/projects/{project.id}/latex",
+        json={"name": "main.tex", "source": "old"},
+        headers={"X-Dev-User-Id": you.id},
+    )
+    doc_id = created.json()["id"]
 
     resp = await client.patch(
-        f"/v1/projects/{project.id}/latex/{doc.id}",
+        f"/v1/projects/{project.id}/latex/{doc_id}",
         json={"source": "new"},
         headers={"X-Dev-User-Id": you.id},
     )
@@ -123,12 +123,14 @@ async def test_delete_removes_the_document(
 
 
 async def test_compile_stores_the_pdf_and_returns_its_hash(
-    client: AsyncClient, you: User, project: Project, db_session: AsyncSession
+    client: AsyncClient, you: User, project: Project
 ):
-    doc = LatexDocument(project_id=project.id, name="main.tex", source="\\documentclass{article}")
-    db_session.add(doc)
-    await db_session.commit()
-    await db_session.refresh(doc)
+    created = await client.post(
+        f"/v1/projects/{project.id}/latex",
+        json={"name": "main.tex", "source": "\\documentclass{article}"},
+        headers={"X-Dev-User-Id": you.id},
+    )
+    doc_id = created.json()["id"]
 
     result = CompileResult(ok=True, log="", pdf=b"%PDF-good", synctex_gz=b"gz")
     with (
@@ -136,17 +138,17 @@ async def test_compile_stores_the_pdf_and_returns_its_hash(
         patch("app.api.v1.latex.cache", LatexCache(max_entries=4, max_bytes=10_000)) as cache,
     ):
         resp = await client.post(
-            f"/v1/projects/{project.id}/latex/{doc.id}/compile",
+            f"/v1/projects/{project.id}/latex/{doc_id}/compile",
             headers={"X-Dev-User-Id": you.id},
         )
         body = resp.json()
         pdf = await client.get(
-            f"/v1/projects/{project.id}/latex/{doc.id}/pdf?hash={body['pdf_hash']}",
+            f"/v1/projects/{project.id}/latex/{doc_id}/pdf?hash={body['pdf_hash']}",
             headers={"X-Dev-User-Id": you.id},
         )
 
     assert body["ok"] is True
-    assert body["pdf_hash"] == source_hash(doc.source, doc.engine)
+    assert body["pdf_hash"] == source_hash(created.json()["source"], created.json()["engine"])
     assert pdf.content == b"%PDF-good"
     assert cache.get(body["pdf_hash"]) is not None
 
@@ -319,16 +321,18 @@ async def test_a_cache_hit_lets_a_second_identical_document_sync(
 
 
 async def test_a_cache_hit_after_an_edit_and_undo_syncs_the_reverted_build_not_the_edit(
-    client: AsyncClient, you: User, project: Project, db_session: AsyncSession
+    client: AsyncClient, you: User, project: Project
 ):
     """Edit S1 -> S2 -> undo back to S1. The third compile is a cache hit
     for S1's key, but before the fix `_latest` still pointed at S2 (the
     last `put`) -- so a sync query answered from the WRONG build. That is
     a confidently wrong line, worse than admitting staleness."""
-    doc = LatexDocument(project_id=project.id, name="main.tex", source="S1")
-    db_session.add(doc)
-    await db_session.commit()
-    await db_session.refresh(doc)
+    created = await client.post(
+        f"/v1/projects/{project.id}/latex",
+        json={"name": "main.tex", "source": "S1"},
+        headers={"X-Dev-User-Id": you.id},
+    )
+    doc_id = created.json()["id"]
 
     s1 = CompileResult(ok=True, log="", pdf=b"%PDF-S1", synctex_gz=b"gz-s1")
     s2 = CompileResult(ok=True, log="", pdf=b"%PDF-S2", synctex_gz=b"gz-s2")
@@ -337,23 +341,23 @@ async def test_a_cache_hit_after_an_edit_and_undo_syncs_the_reverted_build_not_t
     with patch("app.api.v1.latex.cache", LatexCache(max_entries=4, max_bytes=10_000)):
         with patch("app.api.v1.latex.compile_source", AsyncMock(return_value=s1)):
             compiled_s1 = await client.post(
-                f"/v1/projects/{project.id}/latex/{doc.id}/compile",
+                f"/v1/projects/{project.id}/latex/{doc_id}/compile",
                 headers={"X-Dev-User-Id": you.id},
             )
 
         await client.patch(
-            f"/v1/projects/{project.id}/latex/{doc.id}",
+            f"/v1/projects/{project.id}/latex/{doc_id}",
             json={"source": "S2"},
             headers={"X-Dev-User-Id": you.id},
         )
         with patch("app.api.v1.latex.compile_source", AsyncMock(return_value=s2)):
             await client.post(
-                f"/v1/projects/{project.id}/latex/{doc.id}/compile",
+                f"/v1/projects/{project.id}/latex/{doc_id}/compile",
                 headers={"X-Dev-User-Id": you.id},
             )
 
         await client.patch(
-            f"/v1/projects/{project.id}/latex/{doc.id}",
+            f"/v1/projects/{project.id}/latex/{doc_id}",
             json={"source": "S1"},
             headers={"X-Dev-User-Id": you.id},
         )
@@ -362,11 +366,11 @@ async def test_a_cache_hit_after_an_edit_and_undo_syncs_the_reverted_build_not_t
             patch("app.api.v1.latex.synctex_forward", AsyncMock(return_value=position)) as forward,
         ):
             compiled_undo = await client.post(
-                f"/v1/projects/{project.id}/latex/{doc.id}/compile",
+                f"/v1/projects/{project.id}/latex/{doc_id}/compile",
                 headers={"X-Dev-User-Id": you.id},
             )
             await client.post(
-                f"/v1/projects/{project.id}/latex/{doc.id}/synctex/forward",
+                f"/v1/projects/{project.id}/latex/{doc_id}/synctex/forward",
                 json={"line": 1},
                 headers={"X-Dev-User-Id": you.id},
             )
@@ -418,3 +422,161 @@ async def test_an_oversized_source_is_also_rejected_on_update(
 
     assert resp.status_code == 422
     assert any(err["type"] == "string_too_long" for err in resp.json()["detail"])
+
+
+async def test_creating_a_document_puts_its_source_in_the_tree_as_main_tex(
+    client: AsyncClient, you: User, project: Project
+):
+    """The `source` field is a compatibility shim over the tree. Creating with
+    it must produce a real file, or the editor and the compiler disagree."""
+    created = await client.post(
+        f"/v1/projects/{project.id}/latex",
+        json={"name": "paper", "source": "\\documentclass{article}"},
+        headers={"X-Dev-User-Id": you.id},
+    )
+    doc_id = created.json()["id"]
+    assert created.json()["main_path"] == "main.tex"
+
+    tree = await client.get(
+        f"/v1/projects/{project.id}/latex/{doc_id}/files",
+        headers={"X-Dev-User-Id": you.id},
+    )
+    assert [f["path"] for f in tree.json()["files"]] == ["main.tex"]
+
+
+async def test_reading_a_document_returns_the_main_file_as_source(
+    client: AsyncClient, you: User, project: Project
+):
+    created = await client.post(
+        f"/v1/projects/{project.id}/latex",
+        json={"name": "paper", "source": "BODY"},
+        headers={"X-Dev-User-Id": you.id},
+    )
+    doc_id = created.json()["id"]
+
+    got = await client.get(
+        f"/v1/projects/{project.id}/latex/{doc_id}", headers={"X-Dev-User-Id": you.id}
+    )
+    assert got.json()["source"] == "BODY"
+
+
+async def test_patching_source_writes_the_main_file_and_bumps_the_revision(
+    client: AsyncClient, you: User, project: Project
+):
+    created = await client.post(
+        f"/v1/projects/{project.id}/latex",
+        json={"name": "paper", "source": "old"},
+        headers={"X-Dev-User-Id": you.id},
+    )
+    doc_id = created.json()["id"]
+    before = created.json()["revision"]
+
+    patched = await client.patch(
+        f"/v1/projects/{project.id}/latex/{doc_id}",
+        json={"source": "new"},
+        headers={"X-Dev-User-Id": you.id},
+    )
+    assert patched.json()["source"] == "new"
+    assert patched.json()["revision"] > before
+
+    file_read = await client.get(
+        f"/v1/projects/{project.id}/latex/{doc_id}/file",
+        params={"path": "main.tex"},
+        headers={"X-Dev-User-Id": you.id},
+    )
+    assert file_read.json()["content"] == "new"
+
+
+async def test_main_path_can_be_repointed_at_another_tex_file(
+    client: AsyncClient, you: User, project: Project
+):
+    created = await client.post(
+        f"/v1/projects/{project.id}/latex",
+        json={"name": "paper", "source": "a"},
+        headers={"X-Dev-User-Id": you.id},
+    )
+    doc_id = created.json()["id"]
+    await client.put(
+        f"/v1/projects/{project.id}/latex/{doc_id}/file",
+        params={"path": "other.tex"},
+        json={"content": "b"},
+        headers={"X-Dev-User-Id": you.id},
+    )
+
+    resp = await client.patch(
+        f"/v1/projects/{project.id}/latex/{doc_id}",
+        json={"main_path": "other.tex"},
+        headers={"X-Dev-User-Id": you.id},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["main_path"] == "other.tex"
+    assert resp.json()["source"] == "b"
+
+
+async def test_main_path_pointing_at_a_missing_file_is_refused(
+    client: AsyncClient, you: User, project: Project
+):
+    created = await client.post(
+        f"/v1/projects/{project.id}/latex",
+        json={"name": "paper", "source": "a"},
+        headers={"X-Dev-User-Id": you.id},
+    )
+    doc_id = created.json()["id"]
+
+    resp = await client.patch(
+        f"/v1/projects/{project.id}/latex/{doc_id}",
+        json={"main_path": "ghost.tex"},
+        headers={"X-Dev-User-Id": you.id},
+    )
+    assert resp.status_code == 422
+
+
+async def test_main_path_pointing_at_a_non_tex_file_is_refused(
+    client: AsyncClient, you: User, project: Project
+):
+    created = await client.post(
+        f"/v1/projects/{project.id}/latex",
+        json={"name": "paper", "source": "a"},
+        headers={"X-Dev-User-Id": you.id},
+    )
+    doc_id = created.json()["id"]
+    await client.put(
+        f"/v1/projects/{project.id}/latex/{doc_id}/file",
+        params={"path": "refs.bib"},
+        json={"content": "@book{}"},
+        headers={"X-Dev-User-Id": you.id},
+    )
+
+    resp = await client.patch(
+        f"/v1/projects/{project.id}/latex/{doc_id}",
+        json={"main_path": "refs.bib"},
+        headers={"X-Dev-User-Id": you.id},
+    )
+    assert resp.status_code == 422
+
+
+async def test_compile_sends_the_main_file_content_not_the_dropped_column(
+    client: AsyncClient, you: User, project: Project
+):
+    """Plan 3 replaces this with a tar of the whole tree. Until then compile
+    must read the SAME bytes the editor shows, or a fixed bug reappears as a
+    stale compile."""
+    created = await client.post(
+        f"/v1/projects/{project.id}/latex",
+        json={"name": "paper", "source": "FROM-TREE"},
+        headers={"X-Dev-User-Id": you.id},
+    )
+    doc_id = created.json()["id"]
+
+    with patch(
+        "app.api.v1.latex.compile_source",
+        new=AsyncMock(return_value=CompileResult(ok=True, log="", pdf=b"%PDF", synctex_gz=None)),
+    ) as mock:
+        resp = await client.post(
+            f"/v1/projects/{project.id}/latex/{doc_id}/compile",
+            headers={"X-Dev-User-Id": you.id},
+        )
+
+    assert resp.status_code == 200
+    assert mock.await_args.args[0] == "FROM-TREE"
+    assert resp.json()["revision"] == created.json()["revision"]

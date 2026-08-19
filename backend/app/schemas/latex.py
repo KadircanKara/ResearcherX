@@ -29,6 +29,7 @@ class LatexDocumentCreate(BaseModel):
 class LatexDocumentUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=200)
     source: str | None = Field(default=None, max_length=_MAX_SOURCE_LENGTH)
+    main_path: str | None = Field(default=None, min_length=1, max_length=400)
     engine: Engine | None = None
 
 
@@ -36,11 +37,18 @@ class LatexDocumentOut(BaseModel):
     id: str
     project_id: str
     name: str
+    # COMPATIBILITY SHIM. There is no `source` column any more -- this is the
+    # content of the file named by `main_path`, resolved on read. It exists so
+    # the single-file editor keeps working while the tree lands, and it is
+    # removed in plan 4 once the frontend reads the tree directly.
     source: str
+    main_path: str
+    revision: int
     engine: str
     created_at: datetime
     updated_at: datetime
-    model_config = {"from_attributes": True}
+    # NOT from_attributes: `source` is assembled by the route, not read off
+    # the ORM instance.
 
 
 class CompileOut(BaseModel):
@@ -50,6 +58,10 @@ class CompileOut(BaseModel):
     # failed compile leaves the previous hash -- and therefore the last good
     # PDF -- untouched on screen.
     pdf_hash: str | None = None
+    # The document revision this build was made from. The client compares it
+    # against the document's current revision to know the PDF is stale --
+    # numbers it was handed, never a hash it recomputed.
+    revision: int | None = None
 
 
 class SynctexForwardIn(BaseModel):
