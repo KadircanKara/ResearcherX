@@ -27,8 +27,8 @@ async def import_archive(
     """Create the document and write every entry. Caller commits.
 
     `main_path` overrides detection -- that is how the client answers an
-    AmbiguousMain 422. It must name an entry in THIS archive; the caller
-    checks that before calling.
+    AmbiguousMain 422. It must name an entry in THIS archive and pass the
+    caller's own `.tex`/text guard; the caller checks both before calling.
     """
     chosen = main_path or detect_main([(e.path, e.data) for e in entries])
     main = next(e for e in entries if e.path == chosen)
@@ -44,9 +44,11 @@ async def import_archive(
     db.add(document)
     await db.flush()  # populate id WITHOUT committing
 
-    for entry in entries:
-        if entry.is_binary:
-            await files.write_binary(db, document.id, entry.path, entry.data)
-        else:
-            await files.write_text(db, document.id, entry.path, entry.data.decode("utf-8"))
-    return document, len(entries)
+    # `bulk_create` rather than a per-entry write_text/write_binary loop: the
+    # tree is guaranteed empty (this document was just created), so the
+    # per-write collision scan and quota SUM those functions perform are
+    # vacuous here and cost O(n^2) database round trips on a large import.
+    count = await files.bulk_create(
+        db, document.id, [(e.path, e.data, e.is_binary) for e in entries]
+    )
+    return document, count

@@ -226,6 +226,50 @@ async def write_binary(db: AsyncSession, document_id: str, path: str, data: byte
     return existing
 
 
+async def bulk_create(
+    db: AsyncSession, document_id: str, entries: Sequence[tuple[str, bytes, bool]]
+) -> int:
+    """Insert every file of a FRESHLY CREATED document in one pass.
+
+    Valid only for a document whose tree is empty: there is nothing to
+    collide with and nothing to add to, so the per-write collision scan and
+    per-write quota SUM that `write_text` performs are both vacuous here.
+    Bumps `revision` ONCE -- an import is one change, not one per file.
+
+    Do NOT use this to add files to an existing document; it does not check
+    for collisions against rows already present.
+
+    Still enforces the total-bytes and per-count caps in Python over
+    `entries` -- defence in depth, not reliance on the archive reader having
+    already done it.
+    """
+    total = 0
+    count = 0
+    for path, data, _is_binary in entries:
+        total += len(data)
+        count += 1
+        if total > settings.latex_project_max_bytes:
+            raise QuotaExceeded(total, settings.latex_project_max_bytes)
+        if count > settings.latex_max_files:
+            raise TooManyFiles(count, settings.latex_max_files)
+
+    for path, data, is_binary in entries:
+        normalized = normalize_path(path)
+        db.add(
+            LatexFile(
+                document_id=document_id,
+                path=normalized,
+                is_binary=is_binary,
+                content=None if is_binary else data.decode("utf-8"),
+                blob=data if is_binary else None,
+                size_bytes=len(data),
+            )
+        )
+    await db.flush()
+    await _bump_revision(db, document_id)
+    return count
+
+
 async def delete_file(db: AsyncSession, document_id: str, path: str) -> bool:
     """True if a file was removed. A miss is NOT an error -- the caller turns
     it into a 404 with the context it has."""

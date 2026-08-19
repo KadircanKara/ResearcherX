@@ -128,6 +128,28 @@ async def test_an_explicit_main_path_not_in_the_archive_is_a_422(
     assert resp.status_code == 422
 
 
+async def test_an_explicit_main_path_pointing_at_a_binary_is_a_422(
+    client: AsyncClient, you: User, project: Project
+):
+    resp = await client.post(
+        f"/v1/projects/{project.id}/latex/import?main_path=f.png",
+        content=_zip({"main.tex": DOC, "f.png": b"\x89PNG\x00"}),
+        headers=_h(you),
+    )
+    assert resp.status_code == 422
+
+
+async def test_an_explicit_main_path_pointing_at_a_non_tex_file_is_a_422(
+    client: AsyncClient, you: User, project: Project
+):
+    resp = await client.post(
+        f"/v1/projects/{project.id}/latex/import?main_path=notes.txt",
+        content=_zip({"main.tex": DOC, "notes.txt": b"hello"}),
+        headers=_h(you),
+    )
+    assert resp.status_code == 422
+
+
 async def test_an_archive_with_no_main_file_is_a_422_and_creates_nothing(
     client: AsyncClient, you: User, project: Project, db_session: AsyncSession
 ):
@@ -179,10 +201,19 @@ async def test_an_upload_body_over_the_cap_is_a_413_before_it_is_all_buffered(
     from app.core.config import settings
 
     monkeypatch.setattr(settings, "latex_project_max_bytes", 64)
+    pulled = 0
+
+    async def body():
+        nonlocal pulled
+        for _ in range(64):
+            pulled += 1
+            yield b"x" * 32
+
     resp = await client.post(
-        f"/v1/projects/{project.id}/latex/import", content=b"x" * 4096, headers=_h(you)
+        f"/v1/projects/{project.id}/latex/import", content=body(), headers=_h(you)
     )
     assert resp.status_code == 413
+    assert pulled < 64  # the server stopped consuming before the end
 
 
 async def test_a_chunked_upload_with_no_content_length_is_still_capped(
@@ -191,15 +222,19 @@ async def test_a_chunked_upload_with_no_content_length_is_still_capped(
     from app.core.config import settings
 
     monkeypatch.setattr(settings, "latex_project_max_bytes", 64)
+    pulled = 0
 
     async def body():
+        nonlocal pulled
         for _ in range(16):
+            pulled += 1
             yield b"x" * 32
 
     resp = await client.post(
         f"/v1/projects/{project.id}/latex/import", content=body(), headers=_h(you)
     )
     assert resp.status_code == 413
+    assert pulled < 16  # the server stopped consuming before the end
 
 
 async def test_a_viewer_cannot_import(
@@ -244,3 +279,15 @@ async def test_import_never_overwrites_an_existing_document(
         )
     rows = (await db_session.execute(select(LatexDocument))).scalars().all()
     assert len(rows) == 2
+
+
+async def test_an_over_long_name_is_a_422(
+    client: AsyncClient, you: User, project: Project, db_session: AsyncSession
+):
+    resp = await client.post(
+        f"/v1/projects/{project.id}/latex/import?name={'x' * 201}",
+        content=_zip({"main.tex": DOC}),
+        headers=_h(you),
+    )
+    assert resp.status_code == 422
+    assert (await db_session.execute(select(LatexDocument))).scalars().all() == []

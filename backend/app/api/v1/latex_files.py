@@ -12,7 +12,7 @@ message is specific rather than sanitized.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -84,7 +84,7 @@ def _translate(exc: Exception) -> HTTPException:
 async def import_archive_route(
     project_id: str,
     request: Request,
-    name: str = "Imported project",
+    name: str = Query("Imported project", min_length=1, max_length=200),
     main_path: str | None = None,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_session),
@@ -115,8 +115,15 @@ async def import_archive_route(
     except (EncryptedArchive, InvalidArchive) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    if main_path is not None and not any(e.path == main_path for e in entries):
-        raise HTTPException(status_code=422, detail=f"{main_path} is not in the archive")
+    if main_path is not None:
+        chosen = next((e for e in entries if e.path == main_path), None)
+        if chosen is None:
+            raise HTTPException(status_code=422, detail=f"{main_path} is not in the archive")
+        if chosen.is_binary or not chosen.path.endswith(".tex"):
+            raise HTTPException(
+                status_code=422,
+                detail=f"{main_path} is not a .tex source file in the archive",
+            )
 
     try:
         document, count = await latex_import_service.import_archive(
