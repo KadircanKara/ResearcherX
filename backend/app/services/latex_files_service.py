@@ -17,6 +17,7 @@ from collections.abc import Sequence
 
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import defer
 
 from app.core.config import settings
 from app.db.models import LatexDocument, LatexFile
@@ -55,13 +56,21 @@ class FileNotFound(Exception):
 
 
 async def list_files(db: AsyncSession, document_id: str) -> list[LatexFile]:
-    """Every file in the tree, sorted by path.
+    """Every file in the tree, sorted by path. Content columns deferred.
 
     Sorted in SQL rather than in the caller: the sidebar renders in this
     order, and two callers sorting differently is two different trees.
+
+    `content`/`blob` are deferred -- a caller that needs a file's bytes must
+    go through `read_file`, which loads a single row. Without this, listing
+    a 2000-file / 25MB tree ships and ORM-hydrates every blob just to render
+    a sidebar.
     """
     rows = await db.execute(
-        select(LatexFile).where(LatexFile.document_id == document_id).order_by(LatexFile.path)
+        select(LatexFile)
+        .where(LatexFile.document_id == document_id)
+        .order_by(LatexFile.path)
+        .options(defer(LatexFile.content), defer(LatexFile.blob))
     )
     return list(rows.scalars().all())
 
@@ -106,22 +115,42 @@ async def _guard_write(
     db: AsyncSession, document_id: str, path: str, size: int
 ) -> LatexFile | None:
     """Shared precondition check for both write paths. Returns the row being
-    overwritten, or None for a create."""
+    overwritten, or None for a create.
+
+    Locks the document row first (`FOR UPDATE` on Postgres; SQLAlchemy's
+    sqlite dialect compiles `with_for_update()` away entirely -- verified,
+    not assumed -- so this is a no-op there rather than an error). Without
+    it, two overlapping writes can each read the tree under the cap, both
+    project themselves as within it, and both commit, taking the document
+    over 25MB with neither write individually at fault.
+    """
     if size > settings.latex_file_max_bytes:
         raise QuotaExceeded(size, settings.latex_file_max_bytes)
+
+    await db.execute(
+        select(LatexDocument.id).where(LatexDocument.id == document_id).with_for_update()
+    )
 
     existing = await read_file(db, document_id, path)
 
     if existing is None:
         # Case-fold collision is checked only on CREATE: overwriting the
         # file at its own exact path is not a collision with itself.
+        # Column-only query: `list_files` selects (and, pre-deferral, used
+        # to ship) whole rows including blobs -- answering "does this path
+        # collide" and "how many files" from that materialised every file's
+        # content/blob on every single write.
         key = collision_key(path)
-        for row in await list_files(db, document_id):
-            if collision_key(row.path) == key:
-                raise PathCollision(path, row.path)
-        count = len(await list_files(db, document_id))
-        if count >= settings.latex_max_files:
-            raise TooManyFiles(count + 1, settings.latex_max_files)
+        taken = (
+            (await db.execute(select(LatexFile.path).where(LatexFile.document_id == document_id)))
+            .scalars()
+            .all()
+        )
+        for other in taken:
+            if collision_key(other) == key:
+                raise PathCollision(path, other)
+        if len(taken) >= settings.latex_max_files:
+            raise TooManyFiles(len(taken) + 1, settings.latex_max_files)
 
     projected = await used_bytes(db, document_id, excluding_path=path) + size
     if projected > settings.latex_project_max_bytes:
@@ -134,13 +163,28 @@ async def write_text(db: AsyncSession, document_id: str, path: str, content: str
     size = len(content.encode("utf-8"))
     existing = await _guard_write(db, document_id, path, size)
 
+    # Built complete on construction, not assigned field-by-field after
+    # `db.add` -- a row with is_binary's column default (False) and both
+    # content and blob still None satisfies neither arm of the DB's
+    # content-xor-blob CHECK. That half-built state used to survive only
+    # because nothing queried the session between `add` and these
+    # assignments to trigger autoflush; `_guard_write`'s own lock/collision
+    # queries now sit in exactly that window.
     if existing is None:
-        existing = LatexFile(document_id=document_id, path=path)
+        existing = LatexFile(
+            document_id=document_id,
+            path=path,
+            is_binary=False,
+            content=content,
+            blob=None,
+            size_bytes=size,
+        )
         db.add(existing)
-    existing.is_binary = False
-    existing.content = content
-    existing.blob = None
-    existing.size_bytes = size
+    else:
+        existing.is_binary = False
+        existing.content = content
+        existing.blob = None
+        existing.size_bytes = size
     await db.flush()
     await _bump_revision(db, document_id)
     return existing
@@ -151,12 +195,20 @@ async def write_binary(db: AsyncSession, document_id: str, path: str, data: byte
     existing = await _guard_write(db, document_id, path, len(data))
 
     if existing is None:
-        existing = LatexFile(document_id=document_id, path=path)
+        existing = LatexFile(
+            document_id=document_id,
+            path=path,
+            is_binary=True,
+            content=None,
+            blob=data,
+            size_bytes=len(data),
+        )
         db.add(existing)
-    existing.is_binary = True
-    existing.content = None
-    existing.blob = data
-    existing.size_bytes = len(data)
+    else:
+        existing.is_binary = True
+        existing.content = None
+        existing.blob = data
+        existing.size_bytes = len(data)
     await db.flush()
     await _bump_revision(db, document_id)
     return existing
@@ -182,9 +234,14 @@ async def rename_file(db: AsyncSession, document_id: str, src: str, dst: str) ->
         raise FileNotFound(src)
     if src != dst:
         key = collision_key(dst)
-        for other in await list_files(db, document_id):
-            if other.path != src and collision_key(other.path) == key:
-                raise PathCollision(dst, other.path)
+        taken = (
+            (await db.execute(select(LatexFile.path).where(LatexFile.document_id == document_id)))
+            .scalars()
+            .all()
+        )
+        for other in taken:
+            if other != src and collision_key(other) == key:
+                raise PathCollision(dst, other)
     row.path = dst
     await db.flush()
     await _bump_revision(db, document_id)

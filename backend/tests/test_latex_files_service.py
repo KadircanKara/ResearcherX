@@ -116,6 +116,34 @@ async def test_a_bad_path_is_rejected_before_anything_is_written(
     assert (await db_session.execute(select(LatexFile))).scalars().all() == []
 
 
+async def test_overwriting_a_text_file_with_binary_clears_the_text_column(
+    db_session: AsyncSession, document: LatexDocument
+):
+    await svc.write_text(db_session, document.id, "f.dat", "text")
+    await db_session.commit()
+    row = await svc.write_binary(db_session, document.id, "f.dat", b"\x00\x01")
+    await db_session.commit()
+
+    assert row.is_binary is True
+    assert row.content is None
+    assert row.blob == b"\x00\x01"
+    assert row.size_bytes == 2
+
+
+async def test_overwriting_a_binary_file_with_text_clears_the_blob_column(
+    db_session: AsyncSession, document: LatexDocument
+):
+    await svc.write_binary(db_session, document.id, "f.dat", b"\x00\x01")
+    await db_session.commit()
+    row = await svc.write_text(db_session, document.id, "f.dat", "café")
+    await db_session.commit()
+
+    assert row.is_binary is False
+    assert row.blob is None
+    assert row.content == "café"
+    assert row.size_bytes == 5
+
+
 async def test_a_file_over_the_per_file_cap_is_refused(
     db_session: AsyncSession, document: LatexDocument, monkeypatch
 ):
