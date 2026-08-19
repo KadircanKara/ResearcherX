@@ -22,6 +22,13 @@ from app.core.logging import log
 # runs a single worker -- the same invariant the event bus, the rate limiter
 # and latex_cache already depend on. See `latex_max_concurrent_compiles` in
 # config.py for the pids_limit math behind the number.
+#
+# An asyncio.Semaphore binds itself to the event loop that first CONTENDS it,
+# so a module-level one is only safe because the app has exactly one loop.
+# Under pytest, where every test gets a fresh loop, contending this object from
+# a second loop raises "RuntimeError: bound to a different event loop" -- which
+# is why the concurrency tests patch in a freshly constructed semaphore rather
+# than reusing this one. That patching is load-bearing, not incidental style.
 _compile_semaphore = asyncio.Semaphore(settings.latex_max_concurrent_compiles)
 
 

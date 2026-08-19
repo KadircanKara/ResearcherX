@@ -265,6 +265,16 @@ class Handler(BaseHTTPRequestHandler):
 
     server_version = "latex-compiler"
 
+    # BaseHTTPRequestHandler sets no socket timeout, so a client that claims a
+    # large Content-Length and then stalls pins its worker thread for as long
+    # as it likes. With ThreadingHTTPServer that is a thread leak: enough
+    # stalled connections and no member can compile at all. The timeout is per
+    # socket operation, not per request, so it never interrupts a compile --
+    # nothing reads or writes this socket during the 30s COMPILE_TIMEOUT -- and
+    # a client that keeps making progress is never cut off. On expiry the
+    # handler closes the connection and the thread is returned.
+    timeout = 30
+
     def _send(self, code: int, payload: dict) -> None:
         body = json.dumps(payload).encode()
         self.send_response(code)
