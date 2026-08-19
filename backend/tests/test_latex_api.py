@@ -148,7 +148,7 @@ async def test_compile_stores_the_pdf_and_returns_its_hash(
         )
 
     assert body["ok"] is True
-    assert body["pdf_hash"] == source_hash(created.json()["source"], created.json()["engine"])
+    assert body["pdf_hash"] == source_hash("\\documentclass{article}", "pdflatex")
     assert pdf.content == b"%PDF-good"
     assert cache.get(body["pdf_hash"]) is not None
 
@@ -580,3 +580,129 @@ async def test_compile_sends_the_main_file_content_not_the_dropped_column(
     assert resp.status_code == 200
     assert mock.await_args.args[0] == "FROM-TREE"
     assert resp.json()["revision"] == created.json()["revision"]
+
+
+async def test_a_patch_with_a_traversal_main_path_is_a_422(
+    client: AsyncClient, you: User, project: Project
+):
+    """`main_path` reaches `normalize_path` through `files.read_file`, which
+    raises `InvalidPath` for a traversal attempt. Nothing caught that before
+    this fix, so FastAPI turned a plain user error into a 500."""
+    created = await client.post(
+        f"/v1/projects/{project.id}/latex",
+        json={"name": "paper", "source": "a"},
+        headers={"X-Dev-User-Id": you.id},
+    )
+    doc_id = created.json()["id"]
+
+    resp = await client.patch(
+        f"/v1/projects/{project.id}/latex/{doc_id}",
+        json={"main_path": "../etc/passwd.tex"},
+        headers={"X-Dev-User-Id": you.id},
+    )
+    assert resp.status_code == 422
+
+
+async def test_repointing_main_path_by_a_denormalized_path_stores_the_normalized_form(
+    client: AsyncClient, you: User, project: Project
+):
+    """`document.main_path` must be stored NORMALIZED, or it silently stops
+    matching the row's actual `path` -- which defeats the delete route's
+    "is this the main file" guard (compared against `document.main_path`
+    expecting it already canonical)."""
+    created = await client.post(
+        f"/v1/projects/{project.id}/latex",
+        json={"name": "paper", "source": "a"},
+        headers={"X-Dev-User-Id": you.id},
+    )
+    doc_id = created.json()["id"]
+    await client.put(
+        f"/v1/projects/{project.id}/latex/{doc_id}/file",
+        params={"path": "other.tex"},
+        json={"content": "b"},
+        headers={"X-Dev-User-Id": you.id},
+    )
+
+    resp = await client.patch(
+        f"/v1/projects/{project.id}/latex/{doc_id}",
+        json={"main_path": "./other.tex"},
+        headers={"X-Dev-User-Id": you.id},
+    )
+    assert resp.status_code == 200
+
+    got = await client.get(
+        f"/v1/projects/{project.id}/latex/{doc_id}", headers={"X-Dev-User-Id": you.id}
+    )
+    assert got.json()["main_path"] == "other.tex"
+
+    guarded = await client.delete(
+        f"/v1/projects/{project.id}/latex/{doc_id}/file",
+        params={"path": "other.tex"},
+        headers={"X-Dev-User-Id": you.id},
+    )
+    assert guarded.status_code == 409
+
+
+async def test_a_patch_carrying_both_main_path_and_source_writes_the_new_main_file(
+    client: AsyncClient, you: User, project: Project
+):
+    """Order matters: `main_path` is applied BEFORE `source`. Reversed, the
+    content silently lands in the OLD main file with no error -- this test
+    is what fails if that order regresses."""
+    created = await client.post(
+        f"/v1/projects/{project.id}/latex",
+        json={"name": "paper", "source": "ORIGINAL"},
+        headers={"X-Dev-User-Id": you.id},
+    )
+    doc_id = created.json()["id"]
+    await client.put(
+        f"/v1/projects/{project.id}/latex/{doc_id}/file",
+        params={"path": "other.tex"},
+        json={"content": "stub"},
+        headers={"X-Dev-User-Id": you.id},
+    )
+
+    resp = await client.patch(
+        f"/v1/projects/{project.id}/latex/{doc_id}",
+        json={"main_path": "other.tex", "source": "Z"},
+        headers={"X-Dev-User-Id": you.id},
+    )
+    assert resp.status_code == 200
+
+    other = await client.get(
+        f"/v1/projects/{project.id}/latex/{doc_id}/file",
+        params={"path": "other.tex"},
+        headers={"X-Dev-User-Id": you.id},
+    )
+    assert other.json()["content"] == "Z"
+
+    main = await client.get(
+        f"/v1/projects/{project.id}/latex/{doc_id}/file",
+        params={"path": "main.tex"},
+        headers={"X-Dev-User-Id": you.id},
+    )
+    assert main.json()["content"] == "ORIGINAL"
+
+
+async def test_creating_a_document_that_would_exceed_the_project_quota_is_a_413_and_creates_nothing(
+    client: AsyncClient, you: User, project: Project, monkeypatch
+):
+    """`files.write_text` can raise `QuotaExceeded` on create -- the tree
+    write happens after the document row exists. Before this fix that
+    surfaced as an unhandled 500, and worse, left an orphan document with
+    an empty tree because the row was already committed. Now the row and
+    the tree write share one transaction, so a quota failure leaves nothing
+    behind."""
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "latex_project_max_bytes", 4)
+
+    resp = await client.post(
+        f"/v1/projects/{project.id}/latex",
+        json={"name": "paper", "source": "way too big for the cap"},
+        headers={"X-Dev-User-Id": you.id},
+    )
+    assert resp.status_code == 413
+
+    listed = await client.get(f"/v1/projects/{project.id}/latex", headers={"X-Dev-User-Id": you.id})
+    assert listed.json() == []

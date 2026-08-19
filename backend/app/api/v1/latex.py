@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.v1.latex_files import _translate
 from app.core.identity import get_current_user
 from app.db.models import LatexDocument, User
 from app.db.session import get_session
@@ -28,6 +29,7 @@ from app.services import latex_files_service as files
 from app.services import project_service
 from app.services.latex_cache import CachedBuild, cache, source_hash
 from app.services.latex_compiler import compile_source, synctex_forward, synctex_reverse
+from app.services.latex_paths import InvalidPath, normalize_path
 
 router = APIRouter(tags=["latex"])
 
@@ -111,12 +113,20 @@ async def create_document(
         created_by=user.id,
     )
     db.add(document)
-    await db.commit()
-    await db.refresh(document)
+    # Flushed, not committed: `document.id` (a Python-side default) must be
+    # assigned before `write_text` can target it, but the row and the tree
+    # write land in the SAME transaction. Committing between them -- the
+    # earlier version of this route did -- leaves an orphan document with an
+    # empty tree if the write fails its quota/collision checks.
+    await db.flush()
     # The `source` field is a shim: turn it into the real file the compiler
     # will read, so create and compile cannot disagree about what the
     # document contains.
-    await files.write_text(db, document.id, document.main_path, payload.source)
+    try:
+        await files.write_text(db, document.id, document.main_path, payload.source)
+    except Exception as exc:
+        await db.rollback()
+        raise _translate(exc) from exc
     await db.commit()
     await db.refresh(document)
     return await _as_out(db, document)
@@ -148,16 +158,31 @@ async def update_document(
     # Order matters: main_path is applied BEFORE source, so a single PATCH
     # carrying both writes the NEW main file rather than the old one.
     if payload.main_path is not None:
-        target = await files.read_file(db, document.id, payload.main_path)
+        # Normalized ONCE, then that one value is what gets looked up AND
+        # stored. `read_file` normalizes only for its own lookup; storing
+        # the raw string here would leave `document.main_path` spelled
+        # differently from the row's actual `path`, defeating the delete
+        # route's "is this the main file" guard and the rename route's
+        # "does the main file need to follow" guard -- both compare against
+        # `document.main_path` expecting it to already be canonical.
+        try:
+            normalized_main = normalize_path(payload.main_path)
+        except InvalidPath as exc:
+            raise _translate(exc) from exc
+        target = await files.read_file(db, document.id, normalized_main)
         if target is None or target.is_binary:
             raise HTTPException(
-                status_code=422, detail=f"{payload.main_path} is not a text file in this document"
+                status_code=422, detail=f"{normalized_main} is not a text file in this document"
             )
-        if not payload.main_path.endswith(".tex"):
+        if not normalized_main.endswith(".tex"):
             raise HTTPException(status_code=422, detail="The main file must be a .tex file")
-        document.main_path = payload.main_path
+        document.main_path = normalized_main
     if payload.source is not None:
-        await files.write_text(db, document.id, document.main_path, payload.source)
+        try:
+            await files.write_text(db, document.id, document.main_path, payload.source)
+        except Exception as exc:
+            await db.rollback()
+            raise _translate(exc) from exc
     if payload.engine is not None:
         document.engine = payload.engine
     await db.commit()
