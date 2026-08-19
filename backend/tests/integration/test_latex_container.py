@@ -6,11 +6,24 @@ service up and a real TeX Live. Run it explicitly:
     docker compose exec -T backend python -m pytest tests/integration -m container -v
 """
 
+import base64
+import io
+import tarfile
+
+import httpx
 import pytest
 
+from app.core.config import settings
 from app.services.latex_compiler import compile_source, synctex_forward, synctex_reverse
 
 pytestmark = pytest.mark.container
+
+# No COMPILER_URL constant exists in this file (the other tests reach the
+# service through compile_source/synctex_forward/synctex_reverse, not raw
+# HTTP) -- the tar tests below post directly, so they need the container's
+# address themselves. settings.latex_compiler_url is the same value those
+# helpers use.
+COMPILER_URL = settings.latex_compiler_url
 
 _PAPER = r"""
 \documentclass[conference]{IEEEtran}
@@ -170,3 +183,154 @@ async def test_a_broken_environ_read_would_be_caught_not_pass_tautologically():
     # by accident.
     assert not result.ok
     assert b"TEXMFHOME" not in (result.pdf or b"")
+
+
+def _tar(entries: dict[str, bytes]) -> bytes:
+    """Build an uncompressed tar in memory. `entries` maps arcname -> bytes."""
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as tf:
+        for name, data in entries.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            info.mode = 0o644
+            tf.addfile(info, io.BytesIO(data))
+    return buf.getvalue()
+
+
+ROOT_DOC = b"""\\documentclass{article}
+\\begin{document}
+\\section{Root}
+Alpha.
+\\input{chapters/intro}
+\\end{document}
+"""
+CHAPTER = b"\\section{Intro}\nBeta lives in a chapter.\n"
+
+
+@pytest.mark.container
+def test_a_multi_file_tree_compiles_with_its_input_resolved():
+    body = _tar({"main.tex": ROOT_DOC, "chapters/intro.tex": CHAPTER})
+    resp = httpx.post(
+        f"{COMPILER_URL}/compile",
+        content=body,
+        headers={
+            "Content-Type": "application/x-tar",
+            "X-Engine": "pdflatex",
+            "X-Main-Path": "main.tex",
+        },
+        timeout=120,
+    )
+    payload = resp.json()
+    assert payload["ok"] is True, payload["log"]
+    assert base64.b64decode(payload["pdf_b64"]).startswith(b"%PDF-")
+    assert payload["synctex_b64"]
+    assert payload["root"]
+
+
+@pytest.mark.container
+def test_a_main_file_in_a_subdirectory_compiles_and_its_artifacts_are_found():
+    """latexmk -cd chdirs into the main file's directory and writes the PDF
+    BESIDE it, not at the tree root. Measured; see the plan's table."""
+    body = _tar({"src/paper.tex": ROOT_DOC, "src/chapters/intro.tex": CHAPTER})
+    resp = httpx.post(
+        f"{COMPILER_URL}/compile",
+        content=body,
+        headers={
+            "Content-Type": "application/x-tar",
+            "X-Engine": "pdflatex",
+            "X-Main-Path": "src/paper.tex",
+        },
+        timeout=120,
+    )
+    payload = resp.json()
+    assert payload["ok"] is True, payload["log"]
+    assert base64.b64decode(payload["pdf_b64"]).startswith(b"%PDF-")
+
+
+@pytest.mark.container
+def test_a_missing_input_is_reported_as_a_tex_error_not_a_crash():
+    body = _tar({"main.tex": ROOT_DOC})  # chapters/intro.tex deliberately absent
+    resp = httpx.post(
+        f"{COMPILER_URL}/compile",
+        content=body,
+        headers={
+            "Content-Type": "application/x-tar",
+            "X-Engine": "pdflatex",
+            "X-Main-Path": "main.tex",
+        },
+        timeout=120,
+    )
+    payload = resp.json()
+    assert payload["ok"] is False
+    assert "intro" in payload["log"]
+
+
+@pytest.mark.container
+def test_a_tar_entry_escaping_the_tree_is_refused():
+    """filter='data' is the second, independent traversal guard -- the first
+    is latex_archive's validation, in a different process."""
+    body = _tar({"main.tex": ROOT_DOC, "../escape.tex": b"x"})
+    resp = httpx.post(
+        f"{COMPILER_URL}/compile",
+        content=body,
+        headers={
+            "Content-Type": "application/x-tar",
+            "X-Engine": "pdflatex",
+            "X-Main-Path": "main.tex",
+        },
+        timeout=120,
+    )
+    assert resp.status_code in (200, 400)
+    if resp.status_code == 200:
+        assert resp.json()["ok"] is False
+
+
+@pytest.mark.container
+def test_an_absolute_tar_entry_is_refused():
+    body = _tar({"main.tex": ROOT_DOC, "/etc/passwd": b"x"})
+    resp = httpx.post(
+        f"{COMPILER_URL}/compile",
+        content=body,
+        headers={
+            "Content-Type": "application/x-tar",
+            "X-Engine": "pdflatex",
+            "X-Main-Path": "main.tex",
+        },
+        timeout=120,
+    )
+    assert resp.status_code in (200, 400)
+    if resp.status_code == 200:
+        assert resp.json()["ok"] is False
+
+
+@pytest.mark.container
+def test_a_main_path_outside_the_tar_is_refused():
+    body = _tar({"main.tex": ROOT_DOC})
+    resp = httpx.post(
+        f"{COMPILER_URL}/compile",
+        content=body,
+        headers={
+            "Content-Type": "application/x-tar",
+            "X-Engine": "pdflatex",
+            "X-Main-Path": "../../etc/passwd",
+        },
+        timeout=120,
+    )
+    assert resp.status_code in (200, 400)
+    if resp.status_code == 200:
+        assert resp.json()["ok"] is False
+
+
+@pytest.mark.container
+def test_the_json_compile_form_still_works():
+    """Task 4 removes it; until then the backend still speaks JSON and every
+    commit must leave the app working."""
+    resp = httpx.post(
+        f"{COMPILER_URL}/compile",
+        json={
+            "source": "\\documentclass{article}\\begin{document}x\\end{document}",
+            "engine": "pdflatex",
+        },
+        timeout=120,
+    )
+    assert resp.json()["ok"] is True

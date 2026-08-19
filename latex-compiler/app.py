@@ -29,6 +29,7 @@ import json
 import os
 import signal
 import subprocess
+import tarfile
 import tempfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -48,6 +49,10 @@ SYNCTEX_TIMEOUT = 10
 # room for its base64 body (~13.3MB) plus the synctex map and source text
 # alongside it.
 MAX_CONTENT_LENGTH = 16 * 1024 * 1024
+
+# A tar of a 25MB tree plus headers. The JSON limit above still governs
+# /synctex, which carries base64 and is bounded by the PDF, not the tree.
+MAX_TAR_LENGTH = 32 * 1024 * 1024
 
 # latexmk engine flag per document engine. latexmk rather than a bare engine
 # call because a paper has citations and cross-references: without its rerun
@@ -159,6 +164,135 @@ def compile_tex(body: dict) -> dict:
             "synctex_b64": (
                 base64.b64encode(synctex.read_bytes()).decode() if synctex.exists() else None
             ),
+        }
+
+
+class _Bounded:
+    """Reads at most `limit` bytes from `stream`. tarfile in stream mode will
+    happily read as much as it is given; the socket does not end where the
+    request does."""
+
+    def __init__(self, stream, limit: int) -> None:
+        self._stream = stream
+        self._left = limit
+
+    def read(self, size: int = -1) -> bytes:
+        if self._left <= 0:
+            return b""
+        want = self._left if size is None or size < 0 else min(size, self._left)
+        chunk = self._stream.read(want)
+        self._left -= len(chunk)
+        return chunk
+
+
+def _extract_tree(stream, length: int, directory: Path) -> None:
+    """Extract the posted tar into `directory`.
+
+    `filter="data"` is CPython's own guard against absolute paths, `..`
+    escapes, symlinks and hardlinks pointing outside, and device nodes. It is
+    the SECOND independent traversal guard -- `latex_archive` already
+    validated every path in the backend process -- and it is deliberately not
+    hand-rolled here, in the one container where being wrong about it is
+    worst.
+
+    Streamed with mode "r|" so the archive is never materialised: a 32MB tar
+    read into memory before extraction would double the tmpfs cost of every
+    compile, and /tmp is RAM charged against this container's mem_limit.
+    """
+    with tarfile.open(fileobj=_Bounded(stream, length), mode="r|") as tf:
+        tf.extractall(directory, filter="data")
+
+
+def compile_tree(stream, length: int, engine: str, main_path: str) -> dict:
+    """Compile a whole tree. `main_path` is tree-relative.
+
+    latexmk runs with `-cd`, which chdirs into the main file's directory --
+    WITHOUT it, a `\\input{chapters/intro}` in `src/paper.tex` resolves
+    against the tree root and fails (`rc=12`, measured). The artifacts then
+    land BESIDE the main file, not at the root, which is why the PDF is read
+    from `main.parent`.
+    """
+    flag = _ENGINE_FLAG.get(engine, "-pdf")
+    with tempfile.TemporaryDirectory(prefix="rx-latex-") as tmp:
+        directory = Path(tmp)
+        try:
+            _extract_tree(stream, length, directory)
+        except Exception:
+            return {
+                "ok": False,
+                "log": "The uploaded project could not be unpacked.",
+                "pdf_b64": None,
+                "synctex_b64": None,
+                "root": None,
+            }
+
+        main = (directory / main_path).resolve()
+        # Belt and braces with filter="data": the main path is a separate
+        # input from the tar's member names and gets its own containment
+        # check. `resolve()` collapses any `..` before the comparison.
+        if not str(main).startswith(str(directory.resolve()) + os.sep) or not main.is_file():
+            return {
+                "ok": False,
+                "log": "The document's main file is not in the project.",
+                "pdf_b64": None,
+                "synctex_b64": None,
+                "root": None,
+            }
+
+        proc = subprocess.Popen(
+            [
+                "latexmk",
+                flag,
+                "-cd",
+                "-synctex=1",
+                "-interaction=nonstopmode",
+                "-no-shell-escape",
+                "-halt-on-error",
+                str(main),
+            ],
+            cwd=directory,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
+        try:
+            stdout, stderr = proc.communicate(timeout=COMPILE_TIMEOUT)
+            log_text = stdout + stderr
+        except subprocess.TimeoutExpired:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            proc.communicate()
+            return {
+                "ok": False,
+                "log": f"Compilation exceeded {COMPILE_TIMEOUT}s and was stopped.",
+                "pdf_b64": None,
+                "synctex_b64": None,
+                "root": None,
+            }
+
+        stem = main.stem
+        log_file = main.parent / f"{stem}.log"
+        if log_file.exists():
+            log_text = log_file.read_text(encoding="utf-8", errors="replace")
+
+        pdf = main.parent / f"{stem}.pdf"
+        synctex = main.parent / f"{stem}.synctex.gz"
+        if not pdf.exists():
+            return {
+                "ok": False,
+                "log": _first_error(log_text),
+                "pdf_b64": None,
+                "synctex_b64": None,
+                "root": None,
+            }
+        return {
+            "ok": True,
+            "log": _first_error(log_text) if proc.returncode else "",
+            "pdf_b64": base64.b64encode(pdf.read_bytes()).decode(),
+            "synctex_b64": (
+                base64.b64encode(synctex.read_bytes()).decode() if synctex.exists() else None
+            ),
+            "root": str(directory),
         }
 
 
@@ -320,7 +454,14 @@ class Handler(BaseHTTPRequestHandler):
         if length < 0:
             self._send(400, {"error": "invalid content-length"})
             return
-        if length > MAX_CONTENT_LENGTH:
+        # A tar body gets its own, larger cap (MAX_TAR_LENGTH, 32MB) --
+        # the generic MAX_CONTENT_LENGTH (16MB) below still governs JSON
+        # /compile and /synctex bodies. The content-type check has to run
+        # BEFORE the size check that applies it, or a 20MB tar would be
+        # rejected against the 16MB JSON cap before ever being recognised
+        # as a tar.
+        is_tar = self.path == "/compile" and self.headers.get("Content-Type") == "application/x-tar"
+        if length > (MAX_TAR_LENGTH if is_tar else MAX_CONTENT_LENGTH):
             # Drain the body before answering. By the time we know it is too
             # large, the client has typically already written most or all of
             # it into the socket. Responding and closing without reading
@@ -336,6 +477,11 @@ class Handler(BaseHTTPRequestHandler):
             # Content-Length cannot force a single huge allocation.
             self._drain(length)
             self._send(413, {"error": "request too large"})
+            return
+        if is_tar:
+            engine = self.headers.get("X-Engine", "pdflatex")
+            main_path = self.headers.get("X-Main-Path", "")
+            self._send(200, compile_tree(self.rfile, length, engine, main_path))
             return
         try:
             body = json.loads(self.rfile.read(length) or b"{}")
