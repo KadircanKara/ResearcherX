@@ -2,6 +2,10 @@
 
 import { useEffect, useRef, useState } from "react";
 import { canvasToTex, type TexPoint } from "@/lib/latex-sync";
+// Type-only: erased at build time, so this does not touch the module-scope
+// import restriction below (pdf.js itself is still loaded only inside the
+// effect).
+import type { RenderTask } from "pdfjs-dist";
 
 export interface PdfHighlight {
   page: number;
@@ -40,6 +44,15 @@ export function PdfViewer({
   // Bumped on every render pass so a slower earlier PDF cannot paint over a
   // faster later one -- the same out-of-order guard papers/page.tsx uses.
   const renderSeq = useRef(0);
+  // In-flight RenderTask per page. pdf.js tracks "this canvas is mid-render"
+  // in its own internal WeakSet, keyed by canvas element -- since canvasRefs
+  // reuses one <canvas> per page number across passes, a task from a
+  // superseded pass that is never explicitly cancelled leaves that entry set
+  // forever, and the next pass's render() on the same canvas throws "Cannot
+  // use the same canvas during multiple render() operations." `cancelled`/
+  // `renderSeq` stop this component from *acting* on a stale pass, but only
+  // task.cancel() tells pdf.js the canvas is free again.
+  const renderTasks = useRef<Map<number, RenderTask>>(new Map());
 
   useEffect(() => {
     if (!bytes) {
@@ -48,6 +61,14 @@ export function PdfViewer({
     }
     const seq = ++renderSeq.current;
     let cancelled = false;
+    // Captured once: renderTasks.current is a stable Map for the component's
+    // whole lifetime (only ever mutated via set/delete/clear, never
+    // reassigned), so this and `renderTasks.current` are always the same
+    // object -- but referencing the ref itself from the cleanup below trips
+    // react-hooks/exhaustive-deps ("might have changed by the time cleanup
+    // runs"), which is written for refs that get reattached to a new DOM
+    // node, not a container that outlives the whole component.
+    const tasks = renderTasks.current;
 
     (async () => {
       try {
@@ -56,6 +77,13 @@ export function PdfViewer({
         // server to produce the initial HTML.
         const pdfjs = await import("pdfjs-dist");
         pdfjs.GlobalWorkerOptions.workerSrc = "/pdf.worker.min.mjs";
+
+        // Belt-and-suspenders alongside the cleanup below: cancel() releases
+        // pdf.js's internal canvas-in-use marker SYNCHRONOUSLY, so doing this
+        // before this pass's own render() calls run guarantees no canvas this
+        // pass is about to draw into is still marked busy by a leftover task.
+        for (const task of tasks.values()) task.cancel();
+        tasks.clear();
 
         // pdf.js DETACHES the buffer it is given. Handing it `bytes` directly
         // would leave the caller holding a zero-length array, so every render
@@ -90,17 +118,44 @@ export function PdfViewer({
           canvas.style.width = `${viewport.width}px`;
           canvas.style.height = `${viewport.height}px`;
           ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-          await page.render({ canvasContext: ctx, viewport }).promise;
+
+          const task = page.render({ canvasContext: ctx, viewport });
+          tasks.set(n, task);
+          try {
+            await task.promise;
+          } finally {
+            // Runs whether the render finished or was cancelled -- either
+            // way this task is no longer in flight and must not be
+            // cancel()'d again later (cancel() on an already-settled task is
+            // harmless, but a stale Map entry would misreport this page as
+            // still busy to the next pass's leftover-task sweep above).
+            tasks.delete(n);
+          }
         }
         if (!cancelled && seq === renderSeq.current) setError(null);
       } catch (err) {
         if (cancelled || seq !== renderSeq.current) return;
+        // Cancelling a RenderTask makes it REJECT its promise with a
+        // RenderingCancelledException (verified against the installed
+        // pdfjs-dist source) -- that is the expected, intentional result of
+        // the cancel() calls above (a newer pass superseding this one, or
+        // this effect tearing down), not a real failure. Routing it into
+        // setError would blank the preview on every ordinary rapid zoom --
+        // the exact bug this file exists to fix, just by a different path --
+        // so it is deliberately swallowed here instead.
+        if (err instanceof Error && err.name === "RenderingCancelledException") return;
         setError(err instanceof Error ? err.message : String(err));
       }
     })();
 
     return () => {
       cancelled = true;
+      // Release every canvas this pass still has marked busy -- on unmount
+      // there is no next pass to do it via the sweep above, and on a
+      // dependency change React runs this cleanup before the next pass's
+      // effect body, so its own sweep finds nothing left to do.
+      for (const task of tasks.values()) task.cancel();
+      tasks.clear();
     };
   }, [bytes, scale]);
 
