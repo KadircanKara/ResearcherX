@@ -12,6 +12,9 @@ message is specific rather than sanitized.
 
 from __future__ import annotations
 
+import io
+import zipfile
+
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -156,6 +159,44 @@ async def import_archive_route(
         engine=document.engine,
         revision=document.revision,
         file_count=count,
+    )
+
+
+@router.get(f"{_BASE}/export")
+async def export_archive_route(
+    project_id: str,
+    document_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
+) -> Response:
+    """The document's tree as a .zip.
+
+    Read with `viewer` rights: exporting reveals nothing a viewer cannot
+    already read a file at a time.
+
+    ZIP_DEFLATED rather than stored: a LaTeX project is mostly text, and the
+    response is built in memory bounded by the same 25MB the tree is.
+    """
+    await project_service.require_member(db, project_id, user.id, "viewer")
+    document = await _document_or_404(db, project_id, document_id)
+
+    rows = await files.list_files(db, document_id)
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as archive:
+        for row in rows:
+            # list_files DEFERS content/blob -- touching them on these rows
+            # raises MissingGreenlet. Re-read each file by path.
+            full = await files.read_file(db, document_id, row.path)
+            if full is None:
+                continue
+            archive.writestr(full.path, full.blob if full.is_binary else (full.content or ""))
+    await db.commit()
+
+    filename = f"{document.name or 'project'}.zip".replace('"', "")
+    return Response(
+        content=buf.getvalue(),
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 

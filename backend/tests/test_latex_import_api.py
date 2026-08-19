@@ -291,3 +291,65 @@ async def test_an_over_long_name_is_a_422(
     )
     assert resp.status_code == 422
     assert (await db_session.execute(select(LatexDocument))).scalars().all() == []
+
+
+async def test_exporting_returns_every_file_in_the_tree(
+    client: AsyncClient, you: User, project: Project
+):
+    blob = _zip({"main.tex": DOC, "chapters/intro.tex": b"\\section{I}", "f.png": b"\x89PNG\x00"})
+    created = await client.post(
+        f"/v1/projects/{project.id}/latex/import", content=blob, headers=_h(you)
+    )
+    doc_id = created.json()["id"]
+
+    resp = await client.get(
+        f"/v1/projects/{project.id}/latex/{doc_id}/export",
+        headers={"X-Dev-User-Id": you.id},
+    )
+    assert resp.status_code == 200
+    assert resp.headers["content-type"] == "application/zip"
+
+    with zipfile.ZipFile(io.BytesIO(resp.content)) as z:
+        assert sorted(z.namelist()) == ["chapters/intro.tex", "f.png", "main.tex"]
+        assert z.read("main.tex") == DOC
+        assert z.read("f.png") == b"\x89PNG\x00"
+
+
+async def test_an_exported_archive_reimports_to_an_identical_tree(
+    client: AsyncClient, you: User, project: Project
+):
+    """The round trip is the point: a project you can upload but never get
+    back out is a roach motel."""
+    original = _zip({"main.tex": DOC, "chapters/intro.tex": b"\\section{I}"})
+    first = await client.post(
+        f"/v1/projects/{project.id}/latex/import", content=original, headers=_h(you)
+    )
+    exported = await client.get(
+        f"/v1/projects/{project.id}/latex/{first.json()['id']}/export",
+        headers={"X-Dev-User-Id": you.id},
+    )
+    second = await client.post(
+        f"/v1/projects/{project.id}/latex/import", content=exported.content, headers=_h(you)
+    )
+    assert second.status_code == 201
+    assert second.json()["main_path"] == first.json()["main_path"]
+    assert second.json()["file_count"] == first.json()["file_count"]
+
+
+async def test_a_non_member_gets_404_on_export(
+    client: AsyncClient, db_session: AsyncSession, project: Project, you: User
+):
+    created = await client.post(
+        f"/v1/projects/{project.id}/latex/import",
+        content=_zip({"main.tex": DOC}),
+        headers=_h(you),
+    )
+    stranger = (
+        await db_session.execute(select(User).where(User.email == "marco@lab.io"))
+    ).scalar_one()
+
+    resp = await client.get(
+        f"/v1/projects/{project.id}/latex/{created.json()['id']}/export",
+        headers={"X-Dev-User-Id": stranger.id},
+    )
+    assert resp.status_code == 404
