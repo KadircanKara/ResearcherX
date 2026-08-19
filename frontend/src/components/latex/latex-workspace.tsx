@@ -79,6 +79,28 @@ export function LatexWorkspace({ projectId, role }: LatexWorkspaceProps) {
   // the only reader.
   const pending = useRef<PendingSave | null>(null);
 
+  // Mirrors `selectedId`, updated right here in the render body (not from an
+  // effect, which would land one render late) so it is always exactly as
+  // fresh as `selectedId` itself. `compile`'s completion guard needs to ask
+  // "is the user still on this document?" -- that IS `selectedId`, updated
+  // SYNCHRONOUSLY the instant the user picks something else. It is a
+  // different question from `bufferDocId`'s "does the loaded buffer belong
+  // to this document?", which only moves once that document's own
+  // `getDocument` resolves -- ASYNCHRONOUSLY, and on a delay that has
+  // nothing to do with whether the user is still looking at it. Selecting a
+  // document and hitting Compile before its own load finishes -- unlikely,
+  // since a container compile should comfortably outlast a metadata GET,
+  // but neither the button nor Cmd/Ctrl+S is gated on the load completing --
+  // would otherwise compare the compile's own result against a
+  // `bufferDocId` that has not caught up yet, silently discarding a result
+  // that belongs to exactly the document on screen. Do not "simplify" this
+  // back to `bufferDocId` for consistency with `flush`: `flush` is correct
+  // to use `bufferDocId`, because for a save "which document does this text
+  // belong to" genuinely IS the buffer question. The two guards ask
+  // different questions on purpose.
+  const selectedIdRef = useRef(selectedId);
+  selectedIdRef.current = selectedId;
+
   // Declared HERE, above every callback, and not lower down beside the JSX.
   // Task 6's sync callbacks list `stale` in their dependency ARRAY, which is
   // evaluated the moment useCallback runs -- a `const` declared further down
@@ -209,21 +231,19 @@ export function LatexWorkspace({ projectId, role }: LatexWorkspaceProps) {
 
   const compile = useCallback(async () => {
     if (!canEdit || !selectedId || compiling) return;
-    // Captured now, before any await, and compared against `bufferDocId`
-    // (the LIVE "what document is actually loaded" ref) on every path below
-    // that writes pdfBytes/compiled/log -- comparing against `selectedId`
-    // instead would be comparing this closure's own value against itself,
-    // always equal, never catching a switch. Without this, a slow compile of
-    // A completing after the user has switched to B unconditionally
-    // overwrites B's screen with A's PDF or log: the same failure family
-    // autosave was hardened against twice, and `bufferDocId` is the existing
-    // guard for it, just never extended to compile. `isStale` does NOT catch
-    // this -- two untouched documents both created from STARTER have
-    // identical source and engine, so A's PDF rendered under B reports
-    // itself as perfectly up to date, with no signal anything is wrong. An
-    // id comparison (not a sequence counter) is deliberate: switching away
-    // from A and back to A before this resolves must still apply the
-    // result, and A's id is the same both times.
+    // Captured now, before any await, and compared against `selectedIdRef`
+    // -- NOT `bufferDocId` -- on every path below that writes
+    // pdfBytes/compiled/log. See `selectedIdRef`'s own comment for why the
+    // two guards in this file deliberately use different refs. Without this
+    // guard at all, a slow compile of A completing after the user has
+    // switched to B unconditionally overwrites B's screen with A's PDF or
+    // log: the same failure family autosave was hardened against twice.
+    // `isStale` does NOT catch this -- two untouched documents both created
+    // from STARTER have identical source and engine, so A's PDF rendered
+    // under B reports itself as perfectly up to date, with no signal
+    // anything is wrong. An id comparison (not a sequence counter) is
+    // deliberate: switching away from A and back to A before this resolves
+    // must still apply the result, and A's id is the same both times.
     const docId = selectedId;
     setCompiling(true);
     try {
@@ -235,7 +255,7 @@ export function LatexWorkspace({ projectId, role }: LatexWorkspaceProps) {
       await flush();
 
       const result = await compileDocument(projectId, docId);
-      if (bufferDocId.current !== docId) return; // user moved on; discard
+      if (selectedIdRef.current !== docId) return; // user moved on; discard
 
       if (!result.ok || !result.pdf_hash) {
         // The last good PDF stays on screen on purpose: a broken edit should
@@ -245,13 +265,13 @@ export function LatexWorkspace({ projectId, role }: LatexWorkspaceProps) {
         return;
       }
       const bytes = await fetchPdfBytes(projectId, docId, result.pdf_hash);
-      if (bufferDocId.current !== docId) return; // user moved on; discard
+      if (selectedIdRef.current !== docId) return; // user moved on; discard
 
       setPdfBytes(bytes);
       setCompiled({ source, engine, hash: result.pdf_hash });
       setLog(null);
     } catch {
-      if (bufferDocId.current === docId) {
+      if (selectedIdRef.current === docId) {
         setLog("The LaTeX compiler is unavailable. Please try again.");
       }
     } finally {
