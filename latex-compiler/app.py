@@ -39,33 +39,6 @@ from pathlib import Path, PurePosixPath
 COMPILE_TIMEOUT = 30
 SYNCTEX_TIMEOUT = 10
 
-# Drain at most this much of an over-declared body. Draining exists only so
-# that closing with unread bytes does not send an RST that swallows the
-# response the client is waiting for; it is a courtesy, not an obligation.
-# Bounding it by BYTES rather than by a socket deadline keeps it stateless --
-# an earlier version of this file set `connection.settimeout()` for the
-# drain and never restored it, which silently truncated every response sent
-# on that same socket afterwards: measured live with a 5.6MB PDF and a slow
-# reader, the tar path delivered only 556,905 of 5,619,935 declared bytes
-# (a BrokenPipeError, client address included, dumped to the container log)
-# while an identical JSON-path control delivered the full 5,619,913 bytes,
-# because only the tar path had ever touched the socket's timeout. A byte
-# bound cannot leak into `_send`'s own write the way a socket-wide deadline
-# did.
-#
-# This bound does NOT close the "trickle" hole: a client sending one byte
-# every few seconds during the drain still pins this thread for as long as
-# `Handler.timeout` (30s) allows before a read finally fails, same as it
-# would on the main body read -- `_drain`'s loop has no deadline of its own,
-# only the per-`read()` socket timeout that governs the whole connection.
-# Closing that requires an overall per-request deadline, a different
-# mechanism than this byte bound; `pids_limit: 64` is what currently bounds
-# how many such threads can pile up. This constant only shrinks how many
-# bytes a hostile client can make the server WANT to read after the real
-# archive ends -- it does not bound how long any one of those reads can
-# take.
-MAX_DRAIN_BYTES = 1024 * 1024
-
 # LaTeX source is text; a request claiming more than this is a mistake or an
 # attempt to make us buffer a huge body before compilation even starts.
 #
@@ -80,6 +53,38 @@ MAX_CONTENT_LENGTH = 16 * 1024 * 1024
 # A tar of a 25MB tree plus headers. The JSON limit above still governs
 # /synctex, which carries base64 and is bounded by the PDF, not the tree.
 MAX_TAR_LENGTH = 32 * 1024 * 1024
+
+# Drain at most this much of an over-declared/over-long body. The bound
+# exists to cap WORK, not to distinguish good clients from bad ones -- a
+# byte bound cannot tell the two things it's balancing apart:
+#
+# - Bytes the client has ALREADY WRITTEN into the socket (real trailing
+#   data under an honest Content-Length, or the tail of a lying one).
+#   Draining these is fast and is the entire point: leaving them unread is
+#   what makes the OS answer a close with an RST instead of a clean FIN,
+#   which swallows the response the client is waiting for.
+# - Bytes the client will NEVER send (a Content-Length that over-declares
+#   and then goes silent). Waiting for these is the stall the guarded
+#   try/except below exists to survive without losing the response.
+#
+# A smaller bound (1MB, this file's first attempt) narrowed the FIRST
+# failure mode instead of eliminating it: a valid tar plus 5MB of REAL,
+# already-sent trailing bytes under an HONEST Content-Length reproduced the
+# exact RST-swallows-the-response bug at that larger size (3/3 runs,
+# ConnectionResetError/BrokenPipeError, no response delivered) -- the same
+# defect rounds 2 through 4 kept finding, just past whatever bound was
+# tried. Raising the bound to MAX_TAR_LENGTH costs nothing new because both
+# failure modes are already bounded independently of this constant: no
+# legitimate OR hostile request can ever contain more real trailing bytes
+# than MAX_TAR_LENGTH (anything larger was already refused with a 413
+# before either drain call runs), so a bound at the wire cap drains
+# everything a request can actually carry and the RST class disappears
+# entirely within it. A client that stops sending is bounded by
+# `Handler.timeout` and the surrounding guard, not by this number -- that
+# path was already "bounded, not prompt" before this change and stays that
+# way; verified live, a 30MB over-declaration with the socket held open
+# blocks roughly 30s and then still delivers a correct `200 ok:true`.
+MAX_DRAIN_BYTES = MAX_TAR_LENGTH
 
 # latexmk engine flag per document engine. latexmk rather than a bare engine
 # call because a paper has citations and cross-references: without its rerun

@@ -637,9 +637,18 @@ def test_trailing_bytes_under_an_honest_content_length_still_get_a_response():
     unread in the kernel receive buffer when the server responds and
     closes -- round 2 measured this exact shape produces a TCP RST that
     swallows the response entirely (BrokenPipeError, no response
-    delivered) when nothing drains them first."""
+    delivered) when nothing drains them first.
+
+    10MB here, not 2MB: round 5 found that MAX_DRAIN_BYTES=1MB (round 4's
+    value) only narrowed this bug instead of eliminating it -- 5MB of real
+    trailing bytes reproduced the RST at that size, and this test's own
+    2MB was close enough to the old bound to flake (3 passes / 2 failures
+    in 5 runs against that value). MAX_DRAIN_BYTES is now MAX_TAR_LENGTH
+    (32MB, see its comment in app.py), so 10MB is comfortably inside the
+    bound with no ambiguity -- this is a determinism fix for the test, not
+    a claim that a specific byte count is special."""
     body = _tar({"main.tex": SELF_CONTAINED})
-    trailing = b"\x00" * (2 * 1024 * 1024)  # real bytes, actually sent
+    trailing = b"\x00" * (10 * 1024 * 1024)  # real bytes, actually sent
     full_body = body + trailing
     parsed = urlparse(COMPILER_URL)
     host, port = parsed.hostname, parsed.port or 80
