@@ -40,7 +40,14 @@ SYNCTEX_TIMEOUT = 10
 
 # LaTeX source is text; a request claiming more than this is a mistake or an
 # attempt to make us buffer a huge body before compilation even starts.
-MAX_CONTENT_LENGTH = 5 * 1024 * 1024
+#
+# /synctex carries the PDF (and the SyncTeX map) base64-encoded, which
+# inflates the wire size 4/3 over the raw bytes. 5MB used to cap SyncTeX
+# navigation for any PDF over ~3.7MB -- measured live: a 3.5MB PDF (4.67MB
+# body) worked, a 4MB PDF (5.33MB body) was rejected. 16MB gives a ~10MB PDF
+# room for its base64 body (~13.3MB) plus the synctex map and source text
+# alongside it.
+MAX_CONTENT_LENGTH = 16 * 1024 * 1024
 
 # latexmk engine flag per document engine. latexmk rather than a bare engine
 # call because a paper has citations and cross-references: without its rerun
@@ -266,6 +273,18 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _drain(self, length: int) -> None:
+        """Read and discard up to `length` bytes of the request body without
+        ever materialising it all at once. See the 413 branch in do_POST for
+        why this has to happen before that response is sent."""
+        remaining = length
+        chunk_size = 64 * 1024
+        while remaining > 0:
+            chunk = self.rfile.read(min(chunk_size, remaining))
+            if not chunk:
+                break
+            remaining -= len(chunk)
+
     def do_GET(self) -> None:
         if self.path == "/health":
             self._send(200, {"ok": True})
@@ -292,6 +311,20 @@ class Handler(BaseHTTPRequestHandler):
             self._send(400, {"error": "invalid content-length"})
             return
         if length > MAX_CONTENT_LENGTH:
+            # Drain the body before answering. By the time we know it is too
+            # large, the client has typically already written most or all of
+            # it into the socket. Responding and closing without reading
+            # those bytes leaves them unread in the kernel's receive buffer,
+            # and the OS answers a close-with-unread-data by sending a TCP
+            # RST instead of a clean FIN. That RST can land mid-write or
+            # mid-read on the client, so instead of a readable 413 it sees a
+            # bare connection error -- reproduced live as
+            # `httpx.ReadError('')`, logged as `latex_compiler_unavailable
+            # error=` with an empty error string: an undelivered 413 is
+            # indistinguishable from the service being down. Read in bounded
+            # chunks rather than one `rfile.read(length)` call so a hostile
+            # Content-Length cannot force a single huge allocation.
+            self._drain(length)
             self._send(413, {"error": "request too large"})
             return
         try:
