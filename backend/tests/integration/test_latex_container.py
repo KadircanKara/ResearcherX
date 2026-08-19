@@ -206,6 +206,12 @@ Alpha.
 """
 CHAPTER = b"\\section{Intro}\nBeta lives in a chapter.\n"
 
+SELF_CONTAINED = b"""\\documentclass{article}
+\\begin{document}
+Alpha.
+\\end{document}
+"""
+
 
 @pytest.mark.container
 def test_a_multi_file_tree_compiles_with_its_input_resolved():
@@ -267,9 +273,12 @@ def test_a_missing_input_is_reported_as_a_tex_error_not_a_crash():
 
 @pytest.mark.container
 def test_a_tar_entry_escaping_the_tree_is_refused():
-    """filter='data' is the second, independent traversal guard -- the first
-    is latex_archive's validation, in a different process."""
-    body = _tar({"main.tex": ROOT_DOC, "../escape.tex": b"x"})
+    """`_strict_filter` is our own refusal, layered on top of `data_filter`
+    (the second, independent traversal guard) -- the first guard is
+    latex_archive's validation, in a different process. SELF_CONTAINED (not
+    ROOT_DOC) so a compile that succeeded would prove the entry was
+    harmless, not merely that some unrelated missing \\input failed it."""
+    body = _tar({"main.tex": SELF_CONTAINED, "../escape.tex": b"x"})
     resp = httpx.post(
         f"{COMPILER_URL}/compile",
         content=body,
@@ -282,12 +291,18 @@ def test_a_tar_entry_escaping_the_tree_is_refused():
     )
     assert resp.status_code in (200, 400)
     if resp.status_code == 200:
-        assert resp.json()["ok"] is False
+        payload = resp.json()
+        assert payload["ok"] is False
+        assert "unpacked" in payload["log"]
 
 
 @pytest.mark.container
 def test_an_absolute_tar_entry_is_refused():
-    body = _tar({"main.tex": ROOT_DOC, "/etc/passwd": b"x"})
+    """`data_filter` alone would silently strip the leading slash and
+    contain `/etc/passwd` at `<dest>/etc/passwd` -- accepted, not refused.
+    SELF_CONTAINED so a compile that succeeded would prove that harmless
+    containment, not merely that some unrelated missing \\input failed it."""
+    body = _tar({"main.tex": SELF_CONTAINED, "/etc/passwd": b"x"})
     resp = httpx.post(
         f"{COMPILER_URL}/compile",
         content=body,
@@ -300,7 +315,29 @@ def test_an_absolute_tar_entry_is_refused():
     )
     assert resp.status_code in (200, 400)
     if resp.status_code == 200:
-        assert resp.json()["ok"] is False
+        payload = resp.json()
+        assert payload["ok"] is False
+        assert "unpacked" in payload["log"]
+
+
+@pytest.mark.container
+def test_a_self_contained_document_with_no_hostile_entries_compiles():
+    """Positive control for the two refusal tests above: without it, a
+    blanket regression that fails every unpack (not just hostile ones) would
+    pass this trio just as easily as the real guard does."""
+    body = _tar({"main.tex": SELF_CONTAINED})
+    resp = httpx.post(
+        f"{COMPILER_URL}/compile",
+        content=body,
+        headers={
+            "Content-Type": "application/x-tar",
+            "X-Engine": "pdflatex",
+            "X-Main-Path": "main.tex",
+        },
+        timeout=120,
+    )
+    payload = resp.json()
+    assert payload["ok"] is True, payload["log"]
 
 
 @pytest.mark.container

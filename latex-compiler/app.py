@@ -32,7 +32,7 @@ import subprocess
 import tarfile
 import tempfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 # Wall-clock ceiling for one compile. A runaway document is the common case
 # (a recursive macro), not the rare one.
@@ -185,22 +185,41 @@ class _Bounded:
         return chunk
 
 
+def _strict_filter(member: tarfile.TarInfo, path: str) -> tarfile.TarInfo:
+    """Refuse what `data_filter` would merely contain.
+
+    CPython's `data_filter` strips a leading slash and rewrites `/etc/passwd`
+    to `<dest>/etc/passwd` -- contained, but accepted. Nothing this service is
+    sent should ever hold an absolute or parent-relative name: `latex_archive`
+    rejects both in the backend process before a tar is ever built. Refusing
+    here keeps the two guards saying the same thing, so a tar that violates
+    the first is not quietly normalised by the second.
+    """
+    name = member.name
+    if name.startswith("/") or name.startswith("\\"):
+        raise ValueError(f"absolute path in archive: {name}")
+    if ".." in PurePosixPath(name).parts:
+        raise ValueError(f"parent-directory segment in archive: {name}")
+    return tarfile.data_filter(member, path)
+
+
 def _extract_tree(stream, length: int, directory: Path) -> None:
     """Extract the posted tar into `directory`.
 
-    `filter="data"` is CPython's own guard against absolute paths, `..`
-    escapes, symlinks and hardlinks pointing outside, and device nodes. It is
-    the SECOND independent traversal guard -- `latex_archive` already
-    validated every path in the backend process -- and it is deliberately not
-    hand-rolled here, in the one container where being wrong about it is
-    worst.
+    `_strict_filter` runs our own absolute/`..` refusal first, then delegates
+    to `filter="data"` -- CPython's own guard against symlinks and hardlinks
+    pointing outside, and device nodes. `data_filter` alone is the SECOND
+    independent traversal guard -- `latex_archive` already validated every
+    path in the backend process -- and it is deliberately not hand-rolled
+    here, in the one container where being wrong about it is worst; the
+    strict layer on top only tightens what it accepts, never replaces it.
 
     Streamed with mode "r|" so the archive is never materialised: a 32MB tar
     read into memory before extraction would double the tmpfs cost of every
     compile, and /tmp is RAM charged against this container's mem_limit.
     """
     with tarfile.open(fileobj=_Bounded(stream, length), mode="r|") as tf:
-        tf.extractall(directory, filter="data")
+        tf.extractall(directory, filter=_strict_filter)
 
 
 def compile_tree(stream, length: int, engine: str, main_path: str) -> dict:
