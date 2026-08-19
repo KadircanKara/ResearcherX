@@ -273,3 +273,109 @@ async def test_reverse_sync_maps_a_point_to_a_line(
         )
 
     assert resp.json() == {"found": True, "line": 161}
+
+
+async def test_a_cache_hit_lets_a_second_identical_document_sync(
+    client: AsyncClient, you: User, project: Project, db_session: AsyncSession
+):
+    """Two documents created from the same template compile to the same
+    cache key. `_latest` is written only by `LatexCache.put`, and the
+    cache-hit branch used to return before ever calling it -- so the second
+    document's build was never recorded and its SyncTeX queries answered
+    `found: False` forever, even though a correct PDF was on screen."""
+    doc1 = LatexDocument(project_id=project.id, name="a.tex", source="\\documentclass{article}")
+    doc2 = LatexDocument(project_id=project.id, name="b.tex", source="\\documentclass{article}")
+    db_session.add_all([doc1, doc2])
+    await db_session.commit()
+    await db_session.refresh(doc1)
+    await db_session.refresh(doc2)
+
+    result = CompileResult(ok=True, log="", pdf=b"%PDF-good", synctex_gz=b"gz")
+    position = PdfPosition(page=1, x=1.0, y=2.0, width=3.0, height=4.0)
+    with (
+        patch("app.api.v1.latex.compile_source", AsyncMock(return_value=result)),
+        patch("app.api.v1.latex.cache", LatexCache(max_entries=4, max_bytes=10_000)),
+        patch("app.api.v1.latex.synctex_forward", AsyncMock(return_value=position)),
+    ):
+        first = await client.post(
+            f"/v1/projects/{project.id}/latex/{doc1.id}/compile",
+            headers={"X-Dev-User-Id": you.id},
+        )
+        second = await client.post(
+            f"/v1/projects/{project.id}/latex/{doc2.id}/compile",
+            headers={"X-Dev-User-Id": you.id},
+        )
+        # Identical source and engine hash the same -- doc2's compile is a
+        # cache HIT, not a second miss.
+        assert second.json()["pdf_hash"] == first.json()["pdf_hash"]
+
+        sync_doc2 = await client.post(
+            f"/v1/projects/{project.id}/latex/{doc2.id}/synctex/forward",
+            json={"line": 1},
+            headers={"X-Dev-User-Id": you.id},
+        )
+
+    assert sync_doc2.json()["found"] is True
+
+
+async def test_a_cache_hit_after_an_edit_and_undo_syncs_the_reverted_build_not_the_edit(
+    client: AsyncClient, you: User, project: Project, db_session: AsyncSession
+):
+    """Edit S1 -> S2 -> undo back to S1. The third compile is a cache hit
+    for S1's key, but before the fix `_latest` still pointed at S2 (the
+    last `put`) -- so a sync query answered from the WRONG build. That is
+    a confidently wrong line, worse than admitting staleness."""
+    doc = LatexDocument(project_id=project.id, name="main.tex", source="S1")
+    db_session.add(doc)
+    await db_session.commit()
+    await db_session.refresh(doc)
+
+    s1 = CompileResult(ok=True, log="", pdf=b"%PDF-S1", synctex_gz=b"gz-s1")
+    s2 = CompileResult(ok=True, log="", pdf=b"%PDF-S2", synctex_gz=b"gz-s2")
+    position = PdfPosition(page=1, x=0.0, y=0.0, width=0.0, height=0.0)
+
+    with patch("app.api.v1.latex.cache", LatexCache(max_entries=4, max_bytes=10_000)):
+        with patch("app.api.v1.latex.compile_source", AsyncMock(return_value=s1)):
+            compiled_s1 = await client.post(
+                f"/v1/projects/{project.id}/latex/{doc.id}/compile",
+                headers={"X-Dev-User-Id": you.id},
+            )
+
+        await client.patch(
+            f"/v1/projects/{project.id}/latex/{doc.id}",
+            json={"source": "S2"},
+            headers={"X-Dev-User-Id": you.id},
+        )
+        with patch("app.api.v1.latex.compile_source", AsyncMock(return_value=s2)):
+            await client.post(
+                f"/v1/projects/{project.id}/latex/{doc.id}/compile",
+                headers={"X-Dev-User-Id": you.id},
+            )
+
+        await client.patch(
+            f"/v1/projects/{project.id}/latex/{doc.id}",
+            json={"source": "S1"},
+            headers={"X-Dev-User-Id": you.id},
+        )
+        with (
+            patch("app.api.v1.latex.compile_source", AsyncMock(return_value=s1)),
+            patch("app.api.v1.latex.synctex_forward", AsyncMock(return_value=position)) as forward,
+        ):
+            compiled_undo = await client.post(
+                f"/v1/projects/{project.id}/latex/{doc.id}/compile",
+                headers={"X-Dev-User-Id": you.id},
+            )
+            await client.post(
+                f"/v1/projects/{project.id}/latex/{doc.id}/synctex/forward",
+                json={"line": 1},
+                headers={"X-Dev-User-Id": you.id},
+            )
+
+    # The undo recompile is a cache hit against S1's own earlier build.
+    assert compiled_undo.json()["pdf_hash"] == compiled_s1.json()["pdf_hash"]
+    # The sync call must be handed S1's PDF/SyncTeX bytes, not S2's -- this
+    # is the "confidently wrong" failure mode, not merely "not found".
+    forward.assert_called_once()
+    called_source, called_pdf, called_synctex, called_line = forward.call_args.args
+    assert called_pdf == b"%PDF-S1"
+    assert called_synctex == b"gz-s1"

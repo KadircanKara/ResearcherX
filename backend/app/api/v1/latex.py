@@ -160,7 +160,19 @@ async def compile_document(
     cached = cache.get(key)
     if cached is not None:
         # Identical source and engine cannot produce a different PDF, so a
-        # repeat compile is a lookup rather than another 30s of CPU.
+        # repeat compile is a lookup rather than another 30s of CPU. Still
+        # record THIS document's latest key: `_latest` is written only by
+        # `put`, and SyncTeX answers from `cache.latest_for(doc_id)`, not
+        # from this response. Without this, a cache hit never updates
+        # `_latest` -- a second document sharing this key gets no entry at
+        # all (sync answers `found: False` forever), and a hit that follows
+        # an intervening edit leaves `_latest` pointing at that edit's build
+        # (sync answers confidently from the WRONG source). Re-`put`-ting
+        # the build we just got back is safe and cheap: same key, so
+        # `_entries` is a same-key re-assignment (no double count in
+        # `_total_bytes`), and `move_to_end` is the LRU promotion a hit
+        # should get anyway.
+        cache.put(key, cached, document_id=doc_id)
         return CompileOut(ok=True, log=cached.log, pdf_hash=key)
 
     result = await compile_source(source, engine)
