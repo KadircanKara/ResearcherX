@@ -52,6 +52,19 @@ async def test_a_real_template_compiles_and_round_trips_a_line():
     assert abs(back - line) <= 3
 
 
+async def test_the_same_template_also_compiles_under_xelatex():
+    """Regression guard, not a bug hunt -- this currently passes. The
+    integration suite was pdflatex-only, and the defect Task 7 caught
+    (pdflatex could not build an IEEEtran conference paper) was precisely
+    engine-specific breakage that nobody tested for the other engine this
+    service offers."""
+    result = await compile_source(_PAPER, "xelatex")
+
+    assert result.ok, result.log
+    assert result.pdf and result.pdf.startswith(b"%PDF")
+    assert result.synctex_gz
+
+
 async def test_a_broken_document_fails_with_a_log_and_no_pdf():
     result = await compile_source(
         r"\documentclass{article}\begin{document}\bogus\end{document}", "pdflatex"
