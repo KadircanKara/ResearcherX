@@ -142,6 +142,20 @@ export function LatexWorkspace({ projectId, role }: LatexWorkspaceProps) {
   const scheduleSave = useCallback(
     (next: string) => {
       if (!canEdit || !bufferDocId.current) return;
+      // Loading a document redispatches its text into CodeMirror, which
+      // reports it as an ordinary change and calls back in here -- that
+      // redispatch is a normal consequence of setSource, not an edge case,
+      // and it happens on every load, not just a slow one. If a DIFFERENT
+      // document's edit is still sitting in `pending` at that moment,
+      // overwriting it here would drop it exactly the way a bare
+      // clearTimeout used to, so any call that targets a document other
+      // than the one already pending must flush that entry first -- the
+      // same "switch flushes, never just clears" rule the effect cleanup
+      // already follows, applied to the one path that reaches
+      // scheduleSave directly instead of going through it.
+      if (pending.current && pending.current.docId !== bufferDocId.current) {
+        flush();
+      }
       pending.current = { docId: bufferDocId.current, text: next };
       if (saveTimer.current) clearTimeout(saveTimer.current);
       saveTimer.current = setTimeout(flush, AUTOSAVE_MS);
