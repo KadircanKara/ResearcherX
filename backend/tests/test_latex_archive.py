@@ -3,6 +3,7 @@ hostile. One test per control in the spec's threat table, each building its
 own crafted archive so the malicious shape is visible in the test."""
 
 import io
+import struct
 import zipfile
 
 import pytest
@@ -68,6 +69,48 @@ def test_a_backslash_entry_rejects_the_whole_archive():
         read_archive(blob)
 
 
+def test_a_relative_traversal_entry_rejects_the_archive_even_when_a_sibling_would_mask_it():
+    """A prior bug computed the shared-wrapper-directory strip on raw,
+    unvalidated names: `{"../a.tex", "../b.tex"}` both shared the `../`
+    "prefix" and were silently stripped down to `a.tex`/`b.tex` instead of
+    being rejected. Validation must run before stripping is even considered."""
+    blob = _zip({"../a.tex": b"x", "../b.tex": b"y"})
+    with pytest.raises(InvalidArchive):
+        read_archive(blob)
+
+
+def test_an_absolute_entry_rejects_the_archive_even_when_a_sibling_would_mask_it():
+    blob = _zip({"/etc/passwd": b"x", "/etc/shadow": b"y"})
+    with pytest.raises(InvalidArchive):
+        read_archive(blob)
+
+
+def test_a_drive_letter_entry_rejects_the_archive_even_when_a_sibling_would_mask_it():
+    blob = _zip({"C:/a.tex": b"x", "C:/b.tex": b"y"})
+    with pytest.raises(InvalidArchive):
+        read_archive(blob)
+
+
+def test_git_metadata_sharing_a_prefix_is_filtered_not_treated_as_a_shared_wrapper():
+    blob = _zip({".git/config": b"x", ".git/HEAD": b"y"})
+    with pytest.raises(InvalidArchive):
+        read_archive(blob)
+
+
+def test_a_macosx_sibling_does_not_prevent_a_real_wrapper_from_being_stripped():
+    """macOS Archive Utility emits a `__MACOSX/` sibling on essentially every
+    zip a Mac user produces. The junk member must be filtered out BEFORE the
+    shared-prefix decision, or it silently defeats stripping for everyone."""
+    blob = _zip(
+        {
+            "proj/main.tex": b"x",
+            "proj/a.tex": b"y",
+            "__MACOSX/._proj": b"junk",
+        }
+    )
+    assert sorted(e.path for e in read_archive(blob)) == ["a.tex", "main.tex"]
+
+
 def test_a_symlink_entry_rejects_the_whole_archive():
     """A symlink's CONTENT is its target path; storing it would let the
     compiler follow it out of the tree."""
@@ -76,6 +119,21 @@ def test_a_symlink_entry_rejects_the_whole_archive():
         z.writestr("main.tex", b"x")
         info = zipfile.ZipInfo("link.tex")
         info.create_system = 3  # Unix
+        info.external_attr = 0o120777 << 16  # S_IFLNK
+        z.writestr(info, b"/app/.env")
+    with pytest.raises(InvalidArchive):
+        read_archive(buf.getvalue())
+
+
+def test_a_symlink_claiming_to_be_windows_created_is_still_rejected():
+    """`create_system` is a byte the uploader fully controls. The symlink
+    check must not be gated on it -- an attacker can simply claim a creator
+    system with no mode bits to read and sail through."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("main.tex", b"x")
+        info = zipfile.ZipInfo("link.tex")
+        info.create_system = 0  # claims MS-DOS/Windows, not Unix
         info.external_attr = 0o120777 << 16  # S_IFLNK
         z.writestr(info, b"/app/.env")
     with pytest.raises(InvalidArchive):
@@ -104,21 +162,15 @@ def test_an_archive_expanding_past_the_project_cap_is_refused(monkeypatch):
         read_archive(blob)
 
 
-def test_the_parser_never_consults_the_declared_file_size():
-    """`ZipInfo.file_size` is attacker-controlled metadata: a header claiming
-    1KB can front gigabytes. The guard has to count bytes it actually
-    decompressed.
-
-    Forging a header inside a still-readable archive means hand-patching
-    central-directory bytes, which would test zipfile more than it tests us.
-    Pinning the invariant at the source level is the honest alternative: this
-    fails the moment someone adds a `file_size` shortcut, which is exactly the
-    regression that would silently reopen the bomb hole."""
-    import inspect
-
-    from app.services import latex_archive
-
-    assert "file_size" not in inspect.getsource(latex_archive)
+def test_a_highly_compressible_bomb_is_refused_while_decompressing(monkeypatch):
+    """A zip bomb: a small stored archive that expands to far more than the
+    project cap. The guard has to count bytes as they come out of the
+    decompressor, not trust anything read from a header."""
+    monkeypatch.setattr(settings, "latex_project_max_bytes", 1024)
+    blob = _zip({"bomb.tex": b"\x00" * 4_000_000})
+    assert len(blob) < 100_000  # the archive is small; the expansion is not
+    with pytest.raises(ArchiveTooLarge):
+        read_archive(blob)
 
 
 def test_a_single_file_over_the_per_file_cap_is_refused(monkeypatch):
@@ -146,12 +198,48 @@ def test_a_corrupt_archive_is_reported_as_unreadable():
         read_archive(b"this is not a zip file at all")
 
 
+def test_a_corrupted_compressed_payload_is_reported_as_invalid_not_a_500():
+    """zipfile/zlib validate and decompress lazily inside open()/read(), well
+    outside the up-front `ZipFile(...)` parse. A payload with intact headers
+    but scrambled deflate bytes must still come back as InvalidArchive."""
+    blob = bytearray(_zip({"main.tex": b"hello world " * 50}))
+    idx = blob.find(b"PK\x03\x04")
+    _sig, _ver, _flag, _method, _mtime, _mdate, _crc, csize, _usize, nlen, elen = struct.unpack(
+        "<4sHHHHHIIIHH", bytes(blob[idx : idx + 30])
+    )
+    data_start = idx + 30 + nlen + elen
+    flip_at = data_start + csize // 2
+    blob[flip_at] ^= 0xFF
+    with pytest.raises(InvalidArchive):
+        read_archive(bytes(blob))
+
+
+def test_an_entry_using_an_unsupported_compression_method_is_reported_as_invalid_not_a_500():
+    """Method 99 is WinZip's marker for AES-encrypted data; `zipfile` raises
+    `NotImplementedError` for any method it doesn't implement. Must not
+    escape as a 500."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_STORED) as z:
+        z.writestr("main.tex", b"hello")
+    blob = bytearray(buf.getvalue())
+    idx_local = blob.find(b"PK\x03\x04")
+    struct.pack_into("<H", blob, idx_local + 8, 99)
+    idx_central = blob.find(b"PK\x01\x02")
+    struct.pack_into("<H", blob, idx_central + 10, 99)
+    with pytest.raises(InvalidArchive):
+        read_archive(bytes(blob))
+
+
 def test_directory_entries_are_skipped_not_stored():
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as z:
         z.writestr("chapters/", b"")
         z.writestr("chapters/intro.tex", b"x")
-    assert [e.path for e in read_archive(buf.getvalue())] == ["chapters/intro.tex"]
+        z.writestr("main.tex", b"y")
+    assert sorted(e.path for e in read_archive(buf.getvalue())) == [
+        "chapters/intro.tex",
+        "main.tex",
+    ]
 
 
 def test_mac_and_vcs_junk_is_skipped_silently():
