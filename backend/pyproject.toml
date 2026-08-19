@@ -39,3 +39,7 @@ target-version = "py312"
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+  "container: needs the latex-compiler service running (skipped by default in make test)",
+]
+addopts = "-m 'not container'"
