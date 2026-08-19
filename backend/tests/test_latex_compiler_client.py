@@ -251,9 +251,7 @@ async def test_synctex_calls_are_not_gated_by_the_compile_semaphore():
     ):
         holder = asyncio.create_task(hold_compile_semaphore())
         await asyncio.sleep(0)  # let it acquire the semaphore's only slot first
-        position = await asyncio.wait_for(
-            synctex_forward("src", b"pdf", b"gz", line=1), timeout=1
-        )
+        position = await asyncio.wait_for(synctex_forward("src", b"pdf", b"gz", line=1), timeout=1)
         holder.cancel()
         try:
             await holder
