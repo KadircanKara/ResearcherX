@@ -486,10 +486,18 @@ def test_an_over_declared_content_length_still_gets_a_response_when_the_client_s
     drain unguarded, the server's read for the (never-coming) declared
     remainder blocks until the connection's own socket timeout, then raises,
     and that exception used to propagate out of do_POST entirely -- no
-    response, an empty connection. The fix wraps the drain in try/except AND
-    gives it its own short socket timeout (DRAIN_TIMEOUT, far below the
-    connection's 30s) so a lying Content-Length costs the client a couple of
-    seconds, not silence."""
+    response, an empty connection. The fix wraps the drain in try/except and
+    bounds it by MAX_DRAIN_BYTES (not by its own socket deadline -- an
+    earlier version set connection.settimeout() here and never restored it,
+    which silently truncated the RESPONSE itself for a slow reader on any
+    request, tar or not; see MAX_DRAIN_BYTES's comment in app.py). Without a
+    drain-specific timeout, a client that over-declares by this little
+    (4096 bytes) can still make the drain's read wait up to the connection's
+    own socket timeout before giving up -- so this asserts the response
+    ARRIVES and is correct, not that it arrives quickly. Measured live: this
+    takes roughly 30s (the connection's own socket timeout), which is exactly
+    the tradeoff Finding 1 of round 4 chose: bounded-but-occasionally-slow
+    over a socket deadline that leaked into unrelated code."""
     body = _tar({"main.tex": SELF_CONTAINED})
     parsed = urlparse(COMPILER_URL)
     host, port = parsed.hostname, parsed.port or 80
@@ -519,9 +527,10 @@ def test_an_over_declared_content_length_still_gets_a_response_when_the_client_s
     assert b" 200 " in header.split(b"\r\n", 1)[0], header
     payload = json.loads(raw_body)
     assert payload["ok"] is True, payload.get("log")
-    # Well under the connection's 30s socket timeout -- proves the drain
-    # used its own short deadline rather than the handler's full one.
-    assert elapsed < 10, f"took {elapsed:.1f}s -- drain is not using a short timeout"
+    # Bounded, not instant: the connection's own 30s socket timeout is what
+    # eventually gives up on the never-coming bytes. Comfortably under 35s
+    # (the client's own recv timeout above) proves it's bounded at all.
+    assert elapsed < 35, f"took {elapsed:.1f}s -- drain never gave up"
 
 
 @pytest.mark.container
@@ -588,3 +597,70 @@ def test_a_tar_over_the_member_cap_is_refused_before_extraction_finishes():
     payload = resp.json()
     assert payload["ok"] is False
     assert "unpacked" in payload["log"]
+
+
+@pytest.mark.container
+def test_a_tar_with_4000_members_still_compiles():
+    """Positive control pinning the OTHER side of the member-cap boundary:
+    the previous test (4001 pad members, i.e. 4002 total with main.tex)
+    only pins "a cap somewhere at or below 4002." Exactly 4000 members
+    (main.tex + 3999 pad files) must still succeed, so the boundary is
+    pinned on both sides."""
+    entries = {"main.tex": SELF_CONTAINED}
+    for i in range(3999):
+        entries[f"pad/{i}.txt"] = b"x"
+    assert len(entries) == 4000
+    body = _tar(entries)
+    resp = httpx.post(
+        f"{COMPILER_URL}/compile",
+        content=body,
+        headers={
+            "Content-Type": "application/x-tar",
+            "X-Engine": "pdflatex",
+            "X-Main-Path": "main.tex",
+        },
+        timeout=120,
+    )
+    payload = resp.json()
+    assert payload["ok"] is True, payload["log"]
+
+
+@pytest.mark.container
+def test_trailing_bytes_under_an_honest_content_length_still_get_a_response():
+    """Pins the drain's actual purpose (not the guard around it, which
+    test_an_over_declared_content_length_... already covers): a valid tar
+    followed by a substantial run of REAL trailing bytes, all of it
+    genuinely sent by the client under a Content-Length that matches
+    exactly what's sent (an honest header, unlike the lying-header tests
+    above). `compile_tree` stops reading at the tar's own end-of-archive
+    marker, so those trailing bytes are real, already-sent data sitting
+    unread in the kernel receive buffer when the server responds and
+    closes -- round 2 measured this exact shape produces a TCP RST that
+    swallows the response entirely (BrokenPipeError, no response
+    delivered) when nothing drains them first."""
+    body = _tar({"main.tex": SELF_CONTAINED})
+    trailing = b"\x00" * (2 * 1024 * 1024)  # real bytes, actually sent
+    full_body = body + trailing
+    parsed = urlparse(COMPILER_URL)
+    host, port = parsed.hostname, parsed.port or 80
+    request = (
+        f"POST /compile HTTP/1.1\r\nHost: {host}\r\n"
+        f"Content-Type: application/x-tar\r\nX-Engine: pdflatex\r\nX-Main-Path: main.tex\r\n"
+        f"Content-Length: {len(full_body)}\r\nConnection: close\r\n\r\n"
+    ).encode("latin-1")
+    with socket.create_connection((host, port), timeout=60) as sock:
+        sock.sendall(request + full_body)
+        sock.settimeout(50)
+        chunks = []
+        while True:
+            chunk = sock.recv(65536)
+            if not chunk:
+                break
+            chunks.append(chunk)
+    response = b"".join(chunks)
+    assert response, "connection produced no HTTP response (RST swallowed it)"
+    header, _, raw_body = response.partition(b"\r\n\r\n")
+    assert header.startswith(b"HTTP/1."), header
+    assert b" 200 " in header.split(b"\r\n", 1)[0], header
+    payload = json.loads(raw_body)
+    assert payload["ok"] is True, payload.get("log")

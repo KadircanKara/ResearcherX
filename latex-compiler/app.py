@@ -39,18 +39,32 @@ from pathlib import Path, PurePosixPath
 COMPILE_TIMEOUT = 30
 SYNCTEX_TIMEOUT = 10
 
-# The socket-level ceiling for the courtesy drain after a tar compile (see
-# the `finally`-turned-guarded drain in do_POST). Deliberately much shorter
-# than `Handler.timeout` (30s): bytes the client already sent are on a
-# same-host Docker bridge and arrive within milliseconds, so a short wait
-# is plenty for the legitimate case (real trailing padding under a CORRECT
-# Content-Length). Bytes an over-declared Content-Length promised but never
-# sent are never coming regardless of how long this waits -- reproduced
-# live, a client that lies about Content-Length and then goes silent (no
-# more data, no close) makes an unbounded-timeout drain sit for the FULL
-# 30s despite the response already being computed. 2s bounds that stall to
-# something a caller notices as "slightly slow," not "did this die."
-DRAIN_TIMEOUT = 2
+# Drain at most this much of an over-declared body. Draining exists only so
+# that closing with unread bytes does not send an RST that swallows the
+# response the client is waiting for; it is a courtesy, not an obligation.
+# Bounding it by BYTES rather than by a socket deadline keeps it stateless --
+# an earlier version of this file set `connection.settimeout()` for the
+# drain and never restored it, which silently truncated every response sent
+# on that same socket afterwards: measured live with a 5.6MB PDF and a slow
+# reader, the tar path delivered only 556,905 of 5,619,935 declared bytes
+# (a BrokenPipeError, client address included, dumped to the container log)
+# while an identical JSON-path control delivered the full 5,619,913 bytes,
+# because only the tar path had ever touched the socket's timeout. A byte
+# bound cannot leak into `_send`'s own write the way a socket-wide deadline
+# did.
+#
+# This bound does NOT close the "trickle" hole: a client sending one byte
+# every few seconds during the drain still pins this thread for as long as
+# `Handler.timeout` (30s) allows before a read finally fails, same as it
+# would on the main body read -- `_drain`'s loop has no deadline of its own,
+# only the per-`read()` socket timeout that governs the whole connection.
+# Closing that requires an overall per-request deadline, a different
+# mechanism than this byte bound; `pids_limit: 64` is what currently bounds
+# how many such threads can pile up. This constant only shrinks how many
+# bytes a hostile client can make the server WANT to read after the real
+# archive ends -- it does not bound how long any one of those reads can
+# take.
+MAX_DRAIN_BYTES = 1024 * 1024
 
 # LaTeX source is text; a request claiming more than this is a mistake or an
 # attempt to make us buffer a huge body before compilation even starts.
@@ -515,7 +529,14 @@ class Handler(BaseHTTPRequestHandler):
     def _drain(self, length: int) -> None:
         """Read and discard up to `length` bytes of the request body without
         ever materialising it all at once. See the 413 branch in do_POST for
-        why this has to happen before that response is sent."""
+        why this has to happen before that response is sent. Callers are
+        responsible for bounding `length` by MAX_DRAIN_BYTES themselves --
+        the two call sites bound different things (a hostile DECLARED
+        length vs. a tar's genuinely unread remainder), so the bound is kept
+        explicit at each call site rather than hidden as a default here.
+        Neither call site guards this with try/except internally either --
+        that is each caller's job too, since draining is a courtesy that
+        must never cost an already-decided response (see both call sites)."""
         remaining = length
         chunk_size = 64 * 1024
         while remaining > 0:
@@ -569,8 +590,20 @@ class Handler(BaseHTTPRequestHandler):
             # error=` with an empty error string: an undelivered 413 is
             # indistinguishable from the service being down. Read in bounded
             # chunks rather than one `rfile.read(length)` call so a hostile
-            # Content-Length cannot force a single huge allocation.
-            self._drain(length)
+            # Content-Length cannot force a single huge allocation. Bounded
+            # by MAX_DRAIN_BYTES (not the full declared `length`, which can
+            # be enormous for exactly the hostile client this branch exists
+            # for) and guarded: this predates the tar transport, and it had
+            # the same unguarded-drain defect Finding 1 found and fixed
+            # below -- reproduced live, a request declaring Content-Length
+            # 34MB with zero body bytes ever sent made this hang for the
+            # full 30s and then drop the connection with no 413 delivered
+            # at all. Draining here is the same courtesy as the tar path's:
+            # never worth losing the response that is already decided.
+            try:
+                self._drain(min(length, MAX_DRAIN_BYTES))
+            except Exception:
+                pass
             self._send(413, {"error": "request too large"})
             return
         if is_tar:
@@ -605,25 +638,22 @@ class Handler(BaseHTTPRequestHandler):
             # BrokenPipeError on the client with no response delivered.
             #
             # But draining is a COURTESY, never a reason to lose an already-
-            # computed response: a client that over-declares Content-Length
-            # and then stops sending (an honest but generous header, not
-            # malice -- our own backend client does not do this, but nothing
-            # requires a caller not to) makes this read hang until
-            # `Handler.timeout` (30s) and then raise `OSError: cannot read
-            # from timed out object` -- reproduced live. Unguarded, that
-            # exception used to propagate out of do_POST exactly like
-            # Finding 1's NUL-path bug: no response written, and a
-            # traceback (with the client's address) dumped to container
-            # logs by socketserver's default handler, around
-            # log_message's override. Guarding it here keeps the courtesy
-            # from ever costing the client its answer.
+            # computed response, so this is both guarded AND bounded by
+            # MAX_DRAIN_BYTES rather than by a socket deadline -- an earlier
+            # version of this fix called `self.connection.settimeout(...)`
+            # before draining and never restored it, which is a stateful
+            # mistake on a shared socket: that same deadline then silently
+            # governed `_send`'s write of the response a few lines below,
+            # truncating every multi-MB PDF sent to a client that could not
+            # read faster than the timeout allowed -- measured live, a
+            # 5.6MB PDF to a slow reader delivered only 556,905 of 5,619,935
+            # bytes over the tar path while an identical JSON-path control
+            # (which never touches the socket timeout) delivered all of it.
+            # A byte bound cannot leak into unrelated code the way a
+            # deadline on the connection itself can. See MAX_DRAIN_BYTES's
+            # own comment for what this bound does and does not close.
             try:
-                # Shorten the socket timeout for JUST this best-effort read
-                # -- see DRAIN_TIMEOUT's comment for why 2s, not 30s. HTTP/1.0
-                # + Connection: close means this socket is never reused for
-                # another request, so there is nothing to restore afterwards.
-                self.connection.settimeout(DRAIN_TIMEOUT)
-                self._drain(bounded.remaining)
+                self._drain(min(bounded.remaining, MAX_DRAIN_BYTES))
             except Exception:
                 pass
             if result is None:
