@@ -35,18 +35,42 @@ USER 1000:1000
 # as "the compiler is broken" to the user. /home/texlive is mode 700 and on
 # the read-only layer, so HOME moves too.
 #
-# This service does NOT offer lualatex (see the comment above _ENGINE_FLAG
-# in app.py): widening this block to the whole TEXMF family was tried
-# specifically to fix it and did not -- luaotfload still refuses to run for
-# reasons unrelated to what's writable here. Do not read this ENV block as
-# lualatex support; it exists for pdflatex/xelatex.
+# TEXMFSYSVAR and TEXMFSYSCONFIG must NEVER be added to this block. They
+# used to be, and it broke pdflatex -- the DEFAULT engine -- for every
+# IEEEtran/acmart/elsarticle-style document, which is the single most
+# common thing this service exists to compile. Unlike the six vars below,
+# the SYS* trees are not a per-run cache: they are build-time SYSTEM data
+# (`pdftex.map` above all, generated once by `updmap-sys` when the base
+# image was built) baked into the read-only layer, needing no runtime
+# write at all. Redirecting them to an empty tmpfs directory does not fix
+# a write problem -- it SHADOWS real data with nothing. kpathsea then
+# fails to find
+# `/usr/local/texlive/2026/texmf-var/fonts/map/pdftex/updmap/pdftex.map`
+# (`kpsewhich pdftex.map` returns empty with them set, and the real path
+# with them unset), so pdflatex cannot resolve ANY font routed through the
+# PostScript font map -- which is Times, the default body font of every
+# real publisher template. Symptom: a class that loads fine still dies
+# with `! pdfTeX error: pdflatex (file ptmr8r): Font ptmr8r at 480 not
+# found`, which reads like a missing template but is not one. xelatex
+# does not touch `pdftex.map` (it resolves fonts via fontconfig instead),
+# so it produces an identical PDF whether or not these two vars are set --
+# testing a fix on xelatex alone proves nothing about pdflatex.
+#
+# They were added chasing a DIFFERENT problem: this service does NOT offer
+# lualatex (see the comment above _ENGINE_FLAG in app.py). Widening this
+# block to the whole TEXMF family, SYS* included, was tried specifically
+# to fix lualatex and did not -- luaotfload still refuses to run for
+# reasons unrelated to what's writable here -- so lualatex was dropped
+# instead of fixed, and the SYS* redirect that never helped it was left
+# behind, silently breaking pdflatex in its place. Do not read this ENV
+# block as lualatex support; it exists for pdflatex/xelatex only, and
+# adding TEXMFSYSVAR/TEXMFSYSCONFIG back in -- e.g. while chasing some
+# future font-cache error -- reintroduces exactly this regression.
 ENV HOME=/tmp \
     TMPDIR=/tmp \
     TEXMFHOME=/tmp/texmf-home \
     TEXMFVAR=/tmp/texmf-var \
     TEXMFCONFIG=/tmp/texmf-config \
-    TEXMFSYSVAR=/tmp/texmf-sysvar \
-    TEXMFSYSCONFIG=/tmp/texmf-sysconfig \
     TEXMFCACHE=/tmp/texmf-cache
 
 EXPOSE 8080
