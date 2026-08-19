@@ -165,6 +165,36 @@ class Paper(Base):
     )
 
 
+class LatexDocument(Base):
+    """One LaTeX document in a project.
+
+    `source` is the ONLY durable artifact. The PDF and the SyncTeX map are
+    derived, cached in memory, and regenerated on a miss -- see
+    services/latex_cache.py.
+    """
+
+    __tablename__ = "latex_documents"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE", name="fk_latex_documents_project_id"),
+        index=True,
+    )
+    name: Mapped[str] = mapped_column(String(200))
+    source: Mapped[str] = mapped_column(Text, default="")
+    # String(16), not Enum(): adding an engine needs no migration, exactly as
+    # StepKind/RunStatus already work in this schema.
+    engine: Mapped[str] = mapped_column(String(16), default="pdflatex", server_default="pdflatex")
+    created_by: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL", name="fk_latex_documents_created_by"),
+        default=None,
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, onupdate=_now
+    )
+
+
 class ChatConversation(Base):
     __tablename__ = "chat_conversations"
 
