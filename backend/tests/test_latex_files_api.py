@@ -95,6 +95,8 @@ async def test_a_binary_upload_round_trips_its_bytes(
     assert got.status_code == 200
     assert got.content == png
     assert got.headers["content-type"] == "application/octet-stream"
+    assert got.headers["x-content-type-options"] == "nosniff"
+    assert got.headers["content-disposition"] == "attachment"
 
 
 async def test_a_traversal_path_is_a_422_naming_the_path(
