@@ -23,6 +23,16 @@ MAX_DEPTH = 16
 
 _DRIVE = re.compile(r"^[A-Za-z]:")
 
+# Reserved. Written by /export as the round-trip manifest (main_path/engine),
+# consumed and dropped by /import -- see `latex_import_service.py`. A write
+# route letting a user create a real file at this path would make export
+# emit a duplicate zip member (the user's file AND the manifest, same name)
+# and silently shadow/consume the user's own content on both sides of a
+# round trip. Lives here, not in latex_import_service.py or
+# latex_files_service.py, so both can enforce the same reservation without
+# either importing the other.
+MANIFEST_PATH = ".researcherx.json"
+
 
 class InvalidPath(ValueError):
     """Carries the offending path so a route can name it in its 422.

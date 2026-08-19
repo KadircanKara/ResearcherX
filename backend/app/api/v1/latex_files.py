@@ -45,8 +45,7 @@ from app.services.latex_archive import (
     read_archive,
 )
 from app.services.latex_detect import AmbiguousMain, NoMainFile
-from app.services.latex_import_service import MANIFEST_PATH
-from app.services.latex_paths import InvalidPath, normalize_path
+from app.services.latex_paths import MANIFEST_PATH, InvalidPath, normalize_path
 
 router = APIRouter(tags=["latex"])
 
@@ -341,6 +340,14 @@ async def write_binary_file(
         raise HTTPException(
             status_code=409,
             detail="That is the document's main file. Point main_path elsewhere first.",
+        )
+    # Also checked before streaming, not just relied on inside
+    # `files.write_binary`: a user file at this exact path would make
+    # export emit a duplicate zip member and silently shadow the user's own
+    # content on both sides of a round trip.
+    if normalized == MANIFEST_PATH:
+        raise HTTPException(
+            status_code=422, detail=f"{normalized} is reserved for the export manifest"
         )
 
     # Streamed against a running counter rather than `await request.body()`:

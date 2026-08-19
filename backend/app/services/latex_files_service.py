@@ -21,7 +21,7 @@ from sqlalchemy.orm import defer
 
 from app.core.config import settings
 from app.db.models import LatexDocument, LatexFile
-from app.services.latex_paths import collision_key, normalize_path
+from app.services.latex_paths import MANIFEST_PATH, InvalidPath, collision_key, normalize_path
 
 
 class QuotaExceeded(Exception):
@@ -61,6 +61,17 @@ class InvalidEncoding(Exception):
     def __init__(self, path: str) -> None:
         super().__init__(f"{path!r} is not valid UTF-8 text")
         self.path = path
+
+
+def _reject_reserved(path: str) -> None:
+    """`MANIFEST_PATH` is reserved for the export round trip (see its
+    docstring in `latex_paths.py`). A user file at that exact path would
+    make export emit a duplicate zip member and silently shadow the user's
+    own content -- so every write path that can CREATE or RENAME a file
+    checks this, on the already-normalized path so a denormalized spelling
+    can't sneak past it."""
+    if path == MANIFEST_PATH:
+        raise InvalidPath(path, "reserved for the export manifest")
 
 
 async def list_files(db: AsyncSession, document_id: str) -> list[LatexFile]:
@@ -180,6 +191,7 @@ async def _guard_write(
 
 async def write_text(db: AsyncSession, document_id: str, path: str, content: str) -> LatexFile:
     path = normalize_path(path)
+    _reject_reserved(path)
     size = len(content.encode("utf-8"))
     existing = await _guard_write(db, document_id, path, size)
 
@@ -212,6 +224,7 @@ async def write_text(db: AsyncSession, document_id: str, path: str, content: str
 
 async def write_binary(db: AsyncSession, document_id: str, path: str, data: bytes) -> LatexFile:
     path = normalize_path(path)
+    _reject_reserved(path)
     existing = await _guard_write(db, document_id, path, len(data))
 
     if existing is None:
@@ -308,6 +321,7 @@ async def delete_file(db: AsyncSession, document_id: str, path: str) -> bool:
 async def rename_file(db: AsyncSession, document_id: str, src: str, dst: str) -> LatexFile:
     src = normalize_path(src)
     dst = normalize_path(dst)
+    _reject_reserved(dst)
     row = await read_file(db, document_id, src)
     if row is None:
         raise FileNotFound(src)

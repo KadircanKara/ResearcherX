@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import LatexDocument, Project, ProjectMember, User
 from app.db.seed import seed_users
-from app.services.latex_import_service import MANIFEST_PATH
+from app.services.latex_paths import MANIFEST_PATH
 
 DOC = b"\\documentclass{article}\n\\begin{document}\nHi\n\\end{document}"
 
@@ -752,3 +752,157 @@ async def test_concurrent_imports_are_bounded_by_the_semaphore(
     assert max_entered == 2
     for r in responses:
         assert r.status_code == 201
+
+
+# --- Corrective fix: regressions introduced by the manifest surface itself ---
+
+
+async def test_a_manifest_engine_that_is_a_list_falls_back_to_detected_engine(
+    client: AsyncClient, you: User, project: Project
+):
+    """`obj.get("engine")` can be ANY JSON type, not just a string -- a list
+    is unhashable and must never reach the `in _VALID_ENGINES` frozenset
+    check un-type-checked. Must degrade to detection, not 500."""
+    manifest = json.dumps({"main_path": "main.tex", "engine": ["xelatex"]}).encode()
+    blob = _zip({"main.tex": DOC, MANIFEST_PATH: manifest})
+    resp = await client.post(
+        f"/v1/projects/{project.id}/latex/import", content=blob, headers=_h(you)
+    )
+    assert resp.status_code == 201
+    assert resp.json()["engine"] == "pdflatex"
+
+
+async def test_a_manifest_engine_that_is_a_dict_falls_back_to_detected_engine(
+    client: AsyncClient, you: User, project: Project
+):
+    manifest = json.dumps({"main_path": "main.tex", "engine": {}}).encode()
+    blob = _zip({"main.tex": DOC, MANIFEST_PATH: manifest})
+    resp = await client.post(
+        f"/v1/projects/{project.id}/latex/import", content=blob, headers=_h(you)
+    )
+    assert resp.status_code == 201
+    assert resp.json()["engine"] == "pdflatex"
+
+
+async def test_a_deeply_nested_manifest_body_imports_rather_than_500ing(
+    client: AsyncClient, you: User, project: Project
+):
+    """`json.loads` on attacker-controlled JSON can raise more than
+    JSONDecodeError -- a `[` repeated deeply enough blows the C parser's
+    recursion limit with a bare RecursionError."""
+    manifest = b"[" * 200_000
+    blob = _zip({"main.tex": DOC, MANIFEST_PATH: manifest})
+    resp = await client.post(
+        f"/v1/projects/{project.id}/latex/import", content=blob, headers=_h(you)
+    )
+    assert resp.status_code == 201
+    assert resp.json()["main_path"] == "main.tex"
+
+
+async def test_writing_a_file_at_the_manifest_path_is_a_422(
+    client: AsyncClient, you: User, project: Project
+):
+    created = await client.post(
+        f"/v1/projects/{project.id}/latex/import",
+        content=_zip({"main.tex": DOC}),
+        headers=_h(you),
+    )
+    doc_id = created.json()["id"]
+    resp = await client.put(
+        f"/v1/projects/{project.id}/latex/{doc_id}/file",
+        params={"path": MANIFEST_PATH},
+        json={"content": "not a manifest"},
+        headers={"X-Dev-User-Id": you.id},
+    )
+    assert resp.status_code == 422
+
+
+async def test_writing_a_binary_file_at_the_manifest_path_is_a_422(
+    client: AsyncClient, you: User, project: Project
+):
+    created = await client.post(
+        f"/v1/projects/{project.id}/latex/import",
+        content=_zip({"main.tex": DOC}),
+        headers=_h(you),
+    )
+    doc_id = created.json()["id"]
+    resp = await client.post(
+        f"/v1/projects/{project.id}/latex/{doc_id}/file/binary",
+        params={"path": MANIFEST_PATH},
+        content=b"\x89PNG\x00",
+        headers={"X-Dev-User-Id": you.id},
+    )
+    assert resp.status_code == 422
+
+
+async def test_renaming_a_file_onto_the_manifest_path_is_a_422(
+    client: AsyncClient, you: User, project: Project
+):
+    created = await client.post(
+        f"/v1/projects/{project.id}/latex/import",
+        content=_zip({"main.tex": DOC, "notes.txt": b"hi"}),
+        headers=_h(you),
+    )
+    doc_id = created.json()["id"]
+    resp = await client.post(
+        f"/v1/projects/{project.id}/latex/{doc_id}/file/rename",
+        json={"from_path": "notes.txt", "to_path": MANIFEST_PATH},
+        headers={"X-Dev-User-Id": you.id},
+    )
+    assert resp.status_code == 422
+
+
+async def test_a_reserved_path_document_can_no_longer_be_built_so_export_never_duplicates(
+    client: AsyncClient, you: User, project: Project
+):
+    """The regression this guards: before the write-path guard, a user file
+    at MANIFEST_PATH plus the unconditional manifest write on export produced
+    a zip with a DUPLICATE member, and re-importing it 422'd on a collision
+    with itself. Since a real file can no longer land at that path, this now
+    just proves the tree stays at one member of that name -- the manifest --
+    and the round trip stays clean."""
+    created = await client.post(
+        f"/v1/projects/{project.id}/latex/import",
+        content=_zip({"main.tex": DOC}),
+        headers=_h(you),
+    )
+    doc_id = created.json()["id"]
+    blocked = await client.put(
+        f"/v1/projects/{project.id}/latex/{doc_id}/file",
+        params={"path": MANIFEST_PATH},
+        json={"content": "not a manifest"},
+        headers={"X-Dev-User-Id": you.id},
+    )
+    assert blocked.status_code == 422
+
+    exported = await client.get(
+        f"/v1/projects/{project.id}/latex/{doc_id}/export",
+        headers={"X-Dev-User-Id": you.id},
+    )
+    with zipfile.ZipFile(io.BytesIO(exported.content)) as z:
+        assert z.namelist().count(MANIFEST_PATH) == 1
+
+    reimported = await client.post(
+        f"/v1/projects/{project.id}/latex/import", content=exported.content, headers=_h(you)
+    )
+    assert reimported.status_code == 201
+
+
+async def test_a_user_authored_manifest_named_file_that_is_not_valid_json_is_dropped_not_imported(
+    client: AsyncClient, you: User, project: Project
+):
+    """An archive built before this rule existed, or crafted by hand, can
+    still contain a real file at the reserved path. Import must not break --
+    and must not let that entry land in the tree, valid manifest or not."""
+    blob = _zip({"main.tex": DOC, MANIFEST_PATH: b"this is not JSON at all"})
+    resp = await client.post(
+        f"/v1/projects/{project.id}/latex/import", content=blob, headers=_h(you)
+    )
+    assert resp.status_code == 201
+    assert resp.json()["file_count"] == 1
+
+    tree = await client.get(
+        f"/v1/projects/{project.id}/latex/{resp.json()['id']}/files",
+        headers={"X-Dev-User-Id": you.id},
+    )
+    assert [f["path"] for f in tree.json()["files"]] == ["main.tex"]

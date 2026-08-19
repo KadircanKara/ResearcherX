@@ -15,14 +15,7 @@ from app.db.models import LatexDocument
 from app.services import latex_files_service as files
 from app.services.latex_archive import ArchiveEntry
 from app.services.latex_detect import detect_engine, detect_main
-
-# Written by our own /export, consumed (and discarded) by /import so a round
-# trip preserves the two decisions detection cannot re-derive on its own: an
-# ambiguous main_path the user already resolved, and an engine set by PATCH
-# without a triggering package in the source. Never appears in the imported
-# tree, `file_count`, or the document's quota -- it describes the export, it
-# is not part of it.
-MANIFEST_PATH = ".researcherx.json"
+from app.services.latex_paths import MANIFEST_PATH
 
 _VALID_ENGINES = frozenset({"pdflatex", "xelatex"})
 
@@ -41,19 +34,26 @@ def _manifest_main_path(raw: object, entries: list[ArchiveEntry]) -> str | None:
 
 
 def _parse_manifest(data: bytes, entries: list[ArchiveEntry]) -> tuple[str | None, str | None]:
-    """Best-effort only. ANY problem -- malformed JSON, wrong shape, an
-    engine that isn't one of the two real values, a main_path that fails its
-    guard -- degrades to "manifest absent", never raises. The manifest is
-    read from a zip entry an attacker fully controls."""
+    """Best-effort only. ANY problem -- malformed JSON, wrong shape, deeply
+    nested/pathological JSON, an engine that isn't one of the two real
+    values, a main_path that fails its guard -- degrades to "manifest
+    absent", never raises. The manifest is read from a zip entry an
+    attacker fully controls, so this is a hostile-input boundary like
+    `parse_structured`: `json.loads` on attacker JSON can raise more than
+    `JSONDecodeError` (a `[` repeated deeply enough blows the C parser's
+    recursion limit with a bare `RecursionError`), and a value read out of
+    the parsed object can be any JSON type, not just the expected one (an
+    `engine` of `["xelatex"]` or `{}` is unhashable and must never reach an
+    `in <frozenset>` check un-type-checked)."""
     try:
         obj = json.loads(data)
-    except (json.JSONDecodeError, UnicodeDecodeError):
+    except (json.JSONDecodeError, UnicodeDecodeError, RecursionError, ValueError):
         return None, None
     if not isinstance(obj, dict):
         return None, None
     main_path = _manifest_main_path(obj.get("main_path"), entries)
     engine = obj.get("engine")
-    engine = engine if engine in _VALID_ENGINES else None
+    engine = engine if isinstance(engine, str) and engine in _VALID_ENGINES else None
     return main_path, engine
 
 
