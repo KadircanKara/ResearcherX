@@ -7,6 +7,7 @@ navigation. The chat pipeline's fail-open convention, applied to a different
 subsystem.
 """
 
+import asyncio
 import base64
 from dataclasses import dataclass
 
@@ -14,6 +15,14 @@ import httpx
 
 from app.core.config import settings
 from app.core.logging import log
+
+# Bounds concurrent COMPILES only -- synctex is short and cheap and does not
+# spawn latexmk, so it is deliberately left outside this gate (see the call
+# site in compile_source below). Module-level, valid only because uvicorn
+# runs a single worker -- the same invariant the event bus, the rate limiter
+# and latex_cache already depend on. See `latex_max_concurrent_compiles` in
+# config.py for the pids_limit math behind the number.
+_compile_semaphore = asyncio.Semaphore(settings.latex_max_concurrent_compiles)
 
 
 @dataclass(frozen=True)
@@ -49,7 +58,13 @@ async def _post(path: str, payload: dict) -> dict | None:
 
 
 async def compile_source(source: str, engine: str) -> CompileResult:
-    payload = await _post("/compile", {"source": source, "engine": engine})
+    # Queue rather than reject beyond the limit: a compile is normally
+    # sub-second, and the failure this guards against -- pid exhaustion in
+    # the compiler container -- is neither self-limiting nor confined to
+    # whoever caused it, so a slower response beats a 429 that some other
+    # request's flood earned this one.
+    async with _compile_semaphore:
+        payload = await _post("/compile", {"source": source, "engine": engine})
     if payload is None:
         return CompileResult(ok=False, log=_UNAVAILABLE, pdf=None, synctex_gz=None)
     try:

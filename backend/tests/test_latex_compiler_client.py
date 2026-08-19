@@ -1,6 +1,7 @@
 """Client for the sandboxed compile service. The HTTP layer is mocked; the
 container is exercised in the integration task."""
 
+import asyncio
 import base64
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -188,3 +189,75 @@ async def test_reverse_sync_returns_a_line():
 async def test_reverse_sync_returns_none_when_unavailable():
     with patch("httpx.AsyncClient", return_value=_client_returning({"found": False})):
         assert await synctex_reverse("src", b"pdf", b"gz", page=1, x=0.0, y=0.0) is None
+
+
+async def test_concurrent_compiles_are_bounded_by_the_semaphore():
+    """A fresh Semaphore(2) for the test -- the point under test is that a
+    third concurrent compile has to wait for one of the first two to finish,
+    not that the production default (8) is exactly right. Without the
+    semaphore in compile_source, all four tasks below would enter `_post`
+    immediately and `entered` would reach 4, not 2."""
+    limit = asyncio.Semaphore(2)
+    entered = 0
+    max_entered = 0
+    release = asyncio.Event()
+    entered_two = asyncio.Event()
+
+    async def fake_post(path, payload):
+        nonlocal entered, max_entered
+        entered += 1
+        max_entered = max(max_entered, entered)
+        if entered == 2:
+            entered_two.set()
+        await release.wait()
+        entered -= 1
+        return {"ok": True, "log": "", "pdf_b64": None, "synctex_b64": None}
+
+    with (
+        patch("app.services.latex_compiler._compile_semaphore", limit),
+        patch("app.services.latex_compiler._post", fake_post),
+    ):
+        tasks = [asyncio.create_task(compile_source("x", "pdflatex")) for _ in range(4)]
+        await asyncio.wait_for(entered_two.wait(), timeout=2)
+        # Yield once so a wrongly-admitted third task would have a chance to
+        # run before we check.
+        await asyncio.sleep(0)
+        assert entered == 2
+
+        release.set()
+        results = await asyncio.gather(*tasks)
+
+    assert max_entered == 2
+    assert all(r.ok for r in results)
+
+
+async def test_synctex_calls_are_not_gated_by_the_compile_semaphore():
+    """synctex is short and cheap and does not spawn latexmk -- it must stay
+    outside the compile gate, or a burst of navigation clicks would queue
+    behind unrelated compiles for no reason. The holder below occupies the
+    semaphore's only slot for far longer than synctex's own timeout below,
+    so if a future change wrongly wraps synctex_forward in the same
+    semaphore, this test TIMES OUT instead of passing by luck."""
+    limit = asyncio.Semaphore(1)
+    payload = {"found": True, "page": 1, "x": 1.0, "y": 1.0, "width": 1.0, "height": 1.0}
+
+    async def hold_compile_semaphore():
+        async with limit:
+            await asyncio.sleep(10)
+
+    with (
+        patch("app.services.latex_compiler._compile_semaphore", limit),
+        patch("httpx.AsyncClient", return_value=_client_returning(payload)),
+    ):
+        holder = asyncio.create_task(hold_compile_semaphore())
+        await asyncio.sleep(0)  # let it acquire the semaphore's only slot first
+        position = await asyncio.wait_for(
+            synctex_forward("src", b"pdf", b"gz", line=1), timeout=1
+        )
+        holder.cancel()
+        try:
+            await holder
+        except asyncio.CancelledError:
+            pass
+
+    assert position is not None

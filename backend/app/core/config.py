@@ -333,6 +333,21 @@ class Settings(BaseSettings):
     latex_cache_entries: int = 32
     latex_cache_bytes: int = 256 * 1024 * 1024
 
+    # Ceiling on compiles running at once, enforced by a module-level
+    # asyncio.Semaphore in latex_compiler.py -- meaningful ONLY because
+    # uvicorn runs a single worker, the same invariant the event bus, the
+    # rate limiter and the cache above already depend on. Each compile
+    # spawns latexmk plus an engine (roughly 4 processes) inside a
+    # container whose `pids_limit` is 64; ~20 concurrent compiles exhausts
+    # that budget and every later compile fails to fork, for every user,
+    # not just whoever caused it. 8 concurrent * ~4 processes = ~32,
+    # leaving comfortable headroom under 64 for latexmk's own transient
+    # children and zombie reaping. Requests beyond the limit QUEUE rather
+    # than being rejected: compiles are normally sub-second, and pid
+    # exhaustion is neither self-limiting nor confined to the request that
+    # caused it, so queueing is the safer default over a 429.
+    latex_max_concurrent_compiles: int = 8
+
     @field_validator("cors_origins", mode="before")
     @classmethod
     def _split_cors(cls, v: object) -> object:
