@@ -8,7 +8,10 @@ service up and a real TeX Live. Run it explicitly:
 
 import base64
 import io
+import json
+import socket
 import tarfile
+from urllib.parse import urlparse
 
 import httpx
 import pytest
@@ -342,6 +345,12 @@ def test_a_self_contained_document_with_no_hostile_entries_compiles():
 
 @pytest.mark.container
 def test_a_main_path_outside_the_tar_is_refused():
+    """`ok is False` alone is vacuous here: point X-Main-Path at a real file
+    outside the tree (e.g. /etc/passwd) and latexmk runs on it, fails to
+    typeset it, and reports ok:false too -- while ALSO echoing the file's
+    content into the log via _first_error, an arbitrary-file-read reachable
+    through a header instead of \\input. Pinning the log message is what
+    tells the two apart: only the containment check produces this string."""
     body = _tar({"main.tex": ROOT_DOC})
     resp = httpx.post(
         f"{COMPILER_URL}/compile",
@@ -355,7 +364,9 @@ def test_a_main_path_outside_the_tar_is_refused():
     )
     assert resp.status_code in (200, 400)
     if resp.status_code == 200:
-        assert resp.json()["ok"] is False
+        payload = resp.json()
+        assert payload["ok"] is False
+        assert "main file is not in the project" in payload["log"]
 
 
 @pytest.mark.container
@@ -371,3 +382,131 @@ def test_the_json_compile_form_still_works():
         timeout=120,
     )
     assert resp.json()["ok"] is True
+
+
+def _raw_post(path: str, headers: dict[str, str], body: bytes, timeout: float = 40) -> bytes:
+    """Post raw bytes over a plain socket, bypassing httpx entirely.
+
+    httpx rejects control characters (including NUL) inside a header value
+    before the request ever reaches the wire, so the NUL-byte test below has
+    no other way to reach the server. Returns the full raw HTTP response (or
+    b"" if the connection closed with nothing sent) rather than raising, so
+    a dropped connection shows up as an assertion failure, not a socket
+    exception with a stack trace that obscures what happened.
+    """
+    parsed = urlparse(COMPILER_URL)
+    host, port = parsed.hostname, parsed.port or 80
+    header_lines = "".join(f"{name}: {value}\r\n" for name, value in headers.items())
+    request = (
+        f"POST {path} HTTP/1.1\r\nHost: {host}\r\n{header_lines}"
+        f"Content-Length: {len(body)}\r\nConnection: close\r\n\r\n"
+    ).encode("latin-1")
+    with socket.create_connection((host, port), timeout=timeout) as sock:
+        sock.sendall(request + body)
+        sock.shutdown(socket.SHUT_WR)
+        sock.settimeout(timeout)
+        chunks = []
+        while True:
+            try:
+                chunk = sock.recv(65536)
+            except TimeoutError:
+                break
+            if not chunk:
+                break
+            chunks.append(chunk)
+    return b"".join(chunks)
+
+
+@pytest.mark.container
+def test_a_nul_byte_in_the_main_path_header_gets_a_clean_response_not_a_dropped_connection():
+    """A NUL in X-Main-Path reaches Path.resolve() as `ValueError: embedded
+    null character in path`. If the tar dispatch sits outside do_POST's
+    exception handler, that exception propagates out of the handler
+    entirely: no HTTP response is ever written and the client sees a bare
+    dropped connection -- the same failure mode the 413 branch's own
+    comment calls indistinguishable from the service being down."""
+    body = _tar({"main.tex": SELF_CONTAINED})
+    headers = {
+        "Content-Type": "application/x-tar",
+        "X-Engine": "pdflatex",
+        "X-Main-Path": "ma\x00in.tex",
+    }
+    response = _raw_post("/compile", headers, body)
+    assert response, "connection dropped with no HTTP response"
+    header, _, raw_body = response.partition(b"\r\n\r\n")
+    assert header.startswith(b"HTTP/1."), header
+    payload = json.loads(raw_body)
+    assert isinstance(payload, dict)
+    assert payload.get("ok") is not True
+
+
+@pytest.mark.container
+def test_a_lying_content_length_larger_than_the_body_sent_gets_a_clean_response_not_a_hang():
+    """`_Bounded` is defence in depth against tarfile reading past the
+    declared body; this is the mirror case -- a Content-Length claiming MORE
+    than the client actually sends must not hang the server waiting for
+    bytes that are never coming. Shutting down the write half of the socket
+    right after the real (short) body simulates exactly that: the server's
+    next read sees a clean EOF, not a stall."""
+    body = _tar({"main.tex": SELF_CONTAINED})
+    parsed = urlparse(COMPILER_URL)
+    host, port = parsed.hostname, parsed.port or 80
+    declared_length = len(body) + 4096
+    request = (
+        f"POST /compile HTTP/1.1\r\nHost: {host}\r\n"
+        f"Content-Type: application/x-tar\r\nX-Engine: pdflatex\r\nX-Main-Path: main.tex\r\n"
+        f"Content-Length: {declared_length}\r\nConnection: close\r\n\r\n"
+    ).encode("latin-1")
+    with socket.create_connection((host, port), timeout=40) as sock:
+        sock.sendall(request + body)
+        sock.shutdown(socket.SHUT_WR)  # no more bytes are coming, ever
+        sock.settimeout(35)
+        chunks = []
+        while True:
+            chunk = sock.recv(65536)
+            if not chunk:
+                break
+            chunks.append(chunk)
+    response = b"".join(chunks)
+    assert response, "connection produced no HTTP response (hang or drop)"
+    assert response.startswith(b"HTTP/1."), response[:200]
+
+
+@pytest.mark.container
+def test_a_20mb_tar_compiles_proving_the_tar_cap_is_32mb_not_16mb():
+    """Nothing before this exercised a body between the 16MB JSON cap and
+    the 32MB tar cap. The padding lives in a file the main document never
+    references, so this only proves the SIZE cap, not compile correctness
+    for large content."""
+    body = _tar({"main.tex": SELF_CONTAINED, "pad.bin": b"\x00" * (20 * 1024 * 1024)})
+    assert len(body) > 16 * 1024 * 1024
+    resp = httpx.post(
+        f"{COMPILER_URL}/compile",
+        content=body,
+        headers={
+            "Content-Type": "application/x-tar",
+            "X-Engine": "pdflatex",
+            "X-Main-Path": "main.tex",
+        },
+        timeout=120,
+    )
+    payload = resp.json()
+    assert payload["ok"] is True, payload["log"]
+
+
+@pytest.mark.container
+def test_a_33mb_tar_body_is_rejected_with_413():
+    """The Content-Length check runs before any tar parsing, so this body
+    does not need to be a well-formed archive."""
+    body = b"x" * (33 * 1024 * 1024)
+    resp = httpx.post(
+        f"{COMPILER_URL}/compile",
+        content=body,
+        headers={
+            "Content-Type": "application/x-tar",
+            "X-Engine": "pdflatex",
+            "X-Main-Path": "main.tex",
+        },
+        timeout=120,
+    )
+    assert resp.status_code == 413

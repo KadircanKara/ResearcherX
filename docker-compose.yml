@@ -91,7 +91,14 @@ services:
     init: true
     read_only: true
     tmpfs:
-      - /tmp
+      # Sized explicitly: an unbounded tmpfs mount reports the host's full
+      # RAM (measured: 3.9G) regardless of mem_limit, so filling /tmp does
+      # not fail one request -- it OOM-kills the container and every
+      # concurrent compile with it. 1g leaves headroom above the 64MB
+      # MAX_EXTRACTED_BYTES cap in app.py plus TeX Live's own caches under
+      # /tmp (see the Dockerfile's ENV block) at the container's full 8-way
+      # compile concurrency.
+      - /tmp:size=1g
     cap_drop:
       - ALL
     security_opt:

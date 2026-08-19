@@ -169,12 +169,30 @@ def compile_tex(body: dict) -> dict:
 
 class _Bounded:
     """Reads at most `limit` bytes from `stream`. tarfile in stream mode will
-    happily read as much as it is given; the socket does not end where the
-    request does."""
+    happily read as much as it is given, and nothing else stops it reading
+    past the declared body.
+
+    That does not smuggle bytes into a NEXT request today: `Handler` never
+    sets `protocol_version`, so every response here is HTTP/1.0 and each
+    connection serves exactly one request -- verified live, a pipelined
+    `GET /health` sent after a short-`Content-Length` tar body gets exactly
+    one response, not two. This class is defence in depth against that
+    assumption changing (keep-alive, a future `protocol_version` bump), not
+    a fix for a smuggling window that exists today.
+
+    `remaining` exposes how much of `limit` is still unread so a caller can
+    drain it before answering -- see the 413 branch's comment on why an
+    unread remainder in the kernel buffer can turn a clean response into a
+    TCP RST on the client.
+    """
 
     def __init__(self, stream, limit: int) -> None:
         self._stream = stream
         self._left = limit
+
+    @property
+    def remaining(self) -> int:
+        return self._left
 
     def read(self, size: int = -1) -> bytes:
         if self._left <= 0:
@@ -203,7 +221,20 @@ def _strict_filter(member: tarfile.TarInfo, path: str) -> tarfile.TarInfo:
     return tarfile.data_filter(member, path)
 
 
-def _extract_tree(stream, length: int, directory: Path) -> None:
+# The backend caps an uploaded tree at 25MB and 2000 files (latex_archive).
+# 4000 members and 64MB extracted leaves ample headroom for anything
+# legitimate while turning a pathological tar into one clean rejection
+# instead of exhausting the container's mem_limit for everyone. The member
+# count is the load-bearing half of this pair: measured in-container, a
+# 31.3MB tar of 32,000 one-byte files extracted to 125MB of tmpfs -- each
+# file costs a 4096-byte page regardless of its declared size, so summing
+# declared sizes alone would not have caught it. Tar itself is uncompressed,
+# so there is no separate decompression-bomb case to guard against here.
+MAX_TAR_MEMBERS = 4000
+MAX_EXTRACTED_BYTES = 64 * 1024 * 1024
+
+
+def _extract_tree(bounded: "_Bounded", directory: Path) -> None:
     """Extract the posted tar into `directory`.
 
     `_strict_filter` runs our own absolute/`..` refusal first, then delegates
@@ -213,17 +244,40 @@ def _extract_tree(stream, length: int, directory: Path) -> None:
     path in the backend process -- and it is deliberately not hand-rolled
     here, in the one container where being wrong about it is worst; the
     strict layer on top only tightens what it accepts, never replaces it.
+    A running member count and declared-byte total wrap that filter so a
+    pathological tar (too many entries, or a declared size too large) is
+    refused mid-stream rather than fully extracted first.
 
     Streamed with mode "r|" so the archive is never materialised: a 32MB tar
     read into memory before extraction would double the tmpfs cost of every
     compile, and /tmp is RAM charged against this container's mem_limit.
+    `bounded` is passed in already constructed so the caller can inspect
+    `.remaining` afterwards and drain any unconsumed request body.
     """
-    with tarfile.open(fileobj=_Bounded(stream, length), mode="r|") as tf:
-        tf.extractall(directory, filter=_strict_filter)
+    member_count = 0
+    extracted_bytes = 0
+
+    def _filter(member: tarfile.TarInfo, path: str) -> tarfile.TarInfo:
+        nonlocal member_count, extracted_bytes
+        member_count += 1
+        if member_count > MAX_TAR_MEMBERS:
+            raise ValueError(f"archive has more than {MAX_TAR_MEMBERS} entries")
+        extracted_bytes += max(member.size, 0)
+        if extracted_bytes > MAX_EXTRACTED_BYTES:
+            raise ValueError(f"archive extracts to more than {MAX_EXTRACTED_BYTES} bytes")
+        return _strict_filter(member, path)
+
+    with tarfile.open(fileobj=bounded, mode="r|") as tf:
+        tf.extractall(directory, filter=_filter)
 
 
-def compile_tree(stream, length: int, engine: str, main_path: str) -> dict:
+def compile_tree(bounded: "_Bounded", engine: str, main_path: str) -> dict:
     """Compile a whole tree. `main_path` is tree-relative.
+
+    `bounded` is a `_Bounded` wrapper the caller already constructed around
+    the request body, so its `.remaining` is meaningful to the caller after
+    this returns (or raises) -- see the `finally: self._drain(...)` in
+    `do_POST` for why the caller needs that.
 
     latexmk runs with `-cd`, which chdirs into the main file's directory --
     WITHOUT it, a `\\input{chapters/intro}` in `src/paper.tex` resolves
@@ -235,7 +289,7 @@ def compile_tree(stream, length: int, engine: str, main_path: str) -> dict:
     with tempfile.TemporaryDirectory(prefix="rx-latex-") as tmp:
         directory = Path(tmp)
         try:
-            _extract_tree(stream, length, directory)
+            _extract_tree(bounded, directory)
         except Exception:
             return {
                 "ok": False,
@@ -498,9 +552,42 @@ class Handler(BaseHTTPRequestHandler):
             self._send(413, {"error": "request too large"})
             return
         if is_tar:
+            # Inside a try/except -> 500 just like the JSON dispatch below --
+            # `compile_tree` can raise on attacker-controlled input it does
+            # not fully validate itself (a NUL byte in X-Main-Path reaches
+            # Path.resolve() as ValueError: embedded null character in
+            # path). Left outside this handler, that exception used to
+            # propagate out of do_POST entirely: no HTTP response is ever
+            # written, the client sees a bare dropped connection (the same
+            # "indistinguishable from the service being down" failure the
+            # 413 branch above exists to avoid), and the traceback goes to
+            # container logs via socketserver's default handler, routing
+            # around log_message's override that exists to keep request
+            # data out of logs.
             engine = self.headers.get("X-Engine", "pdflatex")
             main_path = self.headers.get("X-Main-Path", "")
-            self._send(200, compile_tree(self.rfile, length, engine, main_path))
+            bounded = _Bounded(self.rfile, length)
+            try:
+                result = compile_tree(bounded, engine, main_path)
+            except Exception:
+                result = None
+            finally:
+                # Drain before responding, for the same reason the 413
+                # branch does: `compile_tree` stops reading at the tar's
+                # end-of-archive marker, so any declared bytes beyond that
+                # (padding, or a lying Content-Length) are still sitting
+                # unread in the kernel receive buffer. Responding and
+                # closing without draining them answers with a TCP RST
+                # instead of a clean FIN, which can land mid-write on the
+                # client and turn a valid response into a bare connection
+                # error -- measured live: a tar followed by ~25MB of
+                # trailing bytes under a 32MB Content-Length produced
+                # BrokenPipeError on the client with no response delivered.
+                self._drain(bounded.remaining)
+            if result is None:
+                self._send(500, {"error": "compile service failure"})
+            else:
+                self._send(200, result)
             return
         try:
             body = json.loads(self.rfile.read(length) or b"{}")
