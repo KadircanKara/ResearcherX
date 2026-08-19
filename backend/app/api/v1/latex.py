@@ -144,15 +144,26 @@ async def compile_document(
 ) -> CompileOut:
     await project_service.require_member(db, project_id, user.id, "editor")
     document = await _get_document_or_404(db, project_id, document_id)
+    # Read what the compile needs into plain values, then END THE TRANSACTION
+    # before the external call. A compile is bounded by
+    # `latex_compile_timeout` (60s) and the pool is 5 + 5 overflow, so holding
+    # the checked-out connection across it means ten concurrent compiles
+    # starve every other request in the app — including the ones that are not
+    # about LaTeX at all. `research_service` already establishes this pattern
+    # for slow LLM calls. Extract BEFORE the commit: touching an ORM attribute
+    # afterwards would trigger a refresh and check a connection straight back
+    # out.
+    doc_id, source, engine = document.id, document.source, document.engine
+    await db.commit()
 
-    key = source_hash(document.source, document.engine)
+    key = source_hash(source, engine)
     cached = cache.get(key)
     if cached is not None:
         # Identical source and engine cannot produce a different PDF, so a
         # repeat compile is a lookup rather than another 30s of CPU.
         return CompileOut(ok=True, log=cached.log, pdf_hash=key)
 
-    result = await compile_source(document.source, document.engine)
+    result = await compile_source(source, engine)
     if not result.ok or result.pdf is None:
         # No hash on failure: the client keeps the PDF it already has, so a
         # broken edit never blanks the preview.
@@ -160,10 +171,8 @@ async def compile_document(
 
     cache.put(
         key,
-        CachedBuild(
-            source=document.source, pdf=result.pdf, synctex_gz=result.synctex_gz, log=result.log
-        ),
-        document_id=document.id,
+        CachedBuild(source=source, pdf=result.pdf, synctex_gz=result.synctex_gz, log=result.log),
+        document_id=doc_id,
     )
     return CompileOut(ok=True, log=result.log, pdf_hash=key)
 
@@ -202,7 +211,12 @@ async def synctex_forward_route(
     document = await _get_document_or_404(db, project_id, document_id)
 
     # The map answers for the LAST COMPILED source, not what is on screen now.
-    build = cache.latest_for(document.id)
+    doc_id = document.id
+    # Same reason as the compile route: no pooled connection is held across
+    # the external synctex call.
+    await db.commit()
+
+    build = cache.latest_for(doc_id)
     if build is None or build.synctex_gz is None:
         return SynctexForwardOut(found=False)
 
@@ -233,7 +247,12 @@ async def synctex_reverse_route(
     await project_service.require_member(db, project_id, user.id, "viewer")
     document = await _get_document_or_404(db, project_id, document_id)
 
-    build = cache.latest_for(document.id)
+    doc_id = document.id
+    # Same reason as the compile route: no pooled connection is held across
+    # the external synctex call.
+    await db.commit()
+
+    build = cache.latest_for(doc_id)
     if build is None or build.synctex_gz is None:
         return SynctexReverseOut(found=False)
 
