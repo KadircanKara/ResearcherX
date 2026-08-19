@@ -133,3 +133,40 @@ async def test_the_compiler_has_no_secrets_to_leak():
     for secret in (b"LLM_API_KEY", b"DATABASE_URL", b"OWNER_API_KEY", b"POSTGRES_PASSWORD"):
         assert secret not in pdf
         assert secret not in result.log.encode()
+
+
+async def test_a_broken_environ_read_would_be_caught_not_pass_tautologically():
+    """Companion to test_the_compiler_has_no_secrets_to_leak: proves its
+    TEXMFHOME assertion is a real guard, not a second tautology written on
+    top of the first one. Pointing \\openin at a path that cannot exist on
+    the compiler image simulates the read breaking -- a TeX Live upgrade
+    that restricts filesystem access, a sandbox change that empties /proc,
+    a typo in the probe. If that ever happens for real, the no-secrets
+    test must FAIL, not stay green forever verifying nothing."""
+    probe = r"""
+\pdfcompresslevel=0
+\pdfobjcompresslevel=0
+\documentclass{article}
+\begin{document}
+\begingroup
+\catcode0=9
+\catcode`\{=12 \catcode`\}=12
+\catcode`\$=12 \catcode`\&=12 \catcode`\#=12
+\catcode`\^=12 \catcode`\_=12 \catcode`\%=12 \catcode`\~=12
+\openin0=/this-path-cannot-exist-on-the-compiler-image
+\read0 to \envcontents
+\closein0
+\ttfamily\obeyspaces
+\envcontents
+\endgroup
+\end{document}
+"""
+    result = await compile_source(probe, "pdflatex")
+
+    # A stream that never opened makes \read fall through to terminal
+    # input, which -halt-on-error turns into a failed, PDF-less compile --
+    # verified live. A broken read does not silently produce an
+    # empty-but-successful build that could slip the TEXMFHOME assertion
+    # by accident.
+    assert not result.ok
+    assert b"TEXMFHOME" not in (result.pdf or b"")
