@@ -519,6 +519,70 @@ async def test_main_path_can_be_repointed_at_another_tex_file(
     assert resp.json()["source"] == "b"
 
 
+async def test_repointing_main_path_bumps_the_revision(
+    client: AsyncClient, you: User, project: Project
+):
+    """`revision` is the staleness signal plan 4's client compares without
+    recomputing any hash -- repointing main_path changes what compiles, so a
+    PATCH that changes it and leaves revision behind would read as fresh."""
+    created = await client.post(
+        f"/v1/projects/{project.id}/latex",
+        json={"name": "paper", "source": "a"},
+        headers={"X-Dev-User-Id": you.id},
+    )
+    doc_id = created.json()["id"]
+    await client.put(
+        f"/v1/projects/{project.id}/latex/{doc_id}/file",
+        params={"path": "other.tex"},
+        json={"content": "b"},
+        headers={"X-Dev-User-Id": you.id},
+    )
+    before = (
+        await client.get(
+            f"/v1/projects/{project.id}/latex/{doc_id}", headers={"X-Dev-User-Id": you.id}
+        )
+    ).json()["revision"]
+
+    resp = await client.patch(
+        f"/v1/projects/{project.id}/latex/{doc_id}",
+        json={"main_path": "other.tex"},
+        headers={"X-Dev-User-Id": you.id},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["revision"] == before + 1
+
+
+async def test_changing_the_engine_bumps_the_revision(
+    client: AsyncClient, you: User, project: Project
+):
+    created = await client.post(
+        f"/v1/projects/{project.id}/latex",
+        json={"name": "paper", "source": "a"},
+        headers={"X-Dev-User-Id": you.id},
+    )
+    doc_id = created.json()["id"]
+    before = created.json()["revision"]
+    assert created.json()["engine"] == "pdflatex"
+
+    resp = await client.patch(
+        f"/v1/projects/{project.id}/latex/{doc_id}",
+        json={"engine": "xelatex"},
+        headers={"X-Dev-User-Id": you.id},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["revision"] == before + 1
+
+    # Setting it to its EXISTING value is not a change -- must not bump.
+    unchanged_revision = resp.json()["revision"]
+    same = await client.patch(
+        f"/v1/projects/{project.id}/latex/{doc_id}",
+        json={"engine": "xelatex"},
+        headers={"X-Dev-User-Id": you.id},
+    )
+    assert same.status_code == 200
+    assert same.json()["revision"] == unchanged_revision
+
+
 async def test_main_path_pointing_at_a_missing_file_is_refused(
     client: AsyncClient, you: User, project: Project
 ):

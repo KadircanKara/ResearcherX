@@ -1,8 +1,10 @@
 """In-memory cache of compiled artifacts, keyed by source hash.
 
-The PDF is DERIVED: the source of truth is `latex_documents.source` in
-Postgres, and a cache miss simply recompiles. Nothing here is persisted, and
-nothing here may be treated as durable.
+The PDF is DERIVED: the source of truth is the `latex_files` tree in
+Postgres (read through `latex_files_service`), specifically the file named
+by the document's `main_path`. A cache miss simply re-reads that file and
+recompiles. Nothing here is persisted, and nothing here may be treated as
+durable.
 
 Valid only because uvicorn runs a single worker -- the same invariant the
 event bus and the in-memory rate limiter already depend on. Under multiple

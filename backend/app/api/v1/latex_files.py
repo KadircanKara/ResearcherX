@@ -108,7 +108,14 @@ async def read_file(
         # Raw bytes, not base64 in JSON: the editor hands these straight to an
         # <img> or a download, and a 10MB file does not need a 4/3 inflation
         # to make that trip.
-        return Response(content=row.blob or b"", media_type="application/octet-stream")
+        return Response(
+            content=row.blob or b"",
+            media_type="application/octet-stream",
+            headers={
+                "X-Content-Type-Options": "nosniff",
+                "Content-Disposition": "attachment",
+            },
+        )
     return Response(
         content=LatexFileContentOut(path=row.path, content=row.content or "").model_dump_json(),
         media_type="application/json",
@@ -146,7 +153,20 @@ async def write_binary_file(
     db: AsyncSession = Depends(get_session),
 ) -> LatexFileOut:
     await project_service.require_member(db, project_id, user.id, "editor")
-    await _document_or_404(db, project_id, document_id)
+    document = await _document_or_404(db, project_id, document_id)
+
+    try:
+        normalized = normalize_path(path)
+    except InvalidPath as exc:
+        raise _translate(exc) from exc
+    # Checked BEFORE the body is streamed, same invariant the delete route
+    # already guards: overwriting the main file with binary bytes leaves the
+    # document with no source at all, and no compile can recover it.
+    if document.main_path == normalized:
+        raise HTTPException(
+            status_code=409,
+            detail="That is the document's main file. Point main_path elsewhere first.",
+        )
 
     # Streamed against a running counter rather than `await request.body()`:
     # a client that lies in Content-Length, or sends chunked (where there is
@@ -169,7 +189,11 @@ async def write_binary_file(
         await db.rollback()
         raise _translate(exc) from exc
     await db.commit()
-    await db.refresh(row)
+    # No `db.refresh` here (unlike the text routes): `SessionLocal` sets
+    # `expire_on_commit=False`, so attributes are not expired by the commit,
+    # and a refresh would re-SELECT up to 10MB of `blob` just to serialize
+    # four scalar fields -- doubling peak memory on exactly the path the
+    # streaming byte counter exists to bound.
     return LatexFileOut.model_validate(row)
 
 
@@ -227,8 +251,11 @@ async def rename_file(
         row = await files.rename_file(db, document_id, src, payload.to_path)
         # The main file following its own rename is the only sane behaviour:
         # the alternative is a document whose main_path silently points at
-        # nothing.
+        # nothing. But it must still be a .tex file afterwards -- the same
+        # constraint `update_document` enforces on a direct main_path PATCH.
         if document.main_path == src:
+            if not row.path.endswith(".tex"):
+                raise HTTPException(status_code=422, detail="The main file must be a .tex file")
             document.main_path = row.path
     except Exception as exc:
         await db.rollback()

@@ -317,6 +317,27 @@ async def test_renaming_the_main_file_by_a_denormalized_path_still_moves_main_pa
     assert delete.status_code == 409
 
 
+async def test_renaming_the_main_file_to_a_non_tex_path_is_a_422(
+    client: AsyncClient, you: User, project: Project, document: LatexDocument
+):
+    """Same constraint `update_document` enforces on a direct main_path
+    PATCH: a document whose main file isn't a .tex file can't compile."""
+    base = f"/v1/projects/{project.id}/latex/{document.id}"
+    await client.put(
+        f"{base}/file", params={"path": "main.tex"}, json={"content": "a"}, headers=_h(you)
+    )
+
+    resp = await client.post(
+        f"{base}/file/rename", json={"from": "main.tex", "to": "notes.txt"}, headers=_h(you)
+    )
+    assert resp.status_code == 422
+
+    # The file itself must not have moved either -- rolled back, not just
+    # refused after the fact.
+    tree = await client.get(f"{base}/files", headers=_h(you))
+    assert [f["path"] for f in tree.json()["files"]] == ["main.tex"]
+
+
 # (method, path suffix, request body, permission level the route requires)
 _ROUTES = [
     ("GET", "/files", None, "viewer"),
@@ -374,9 +395,10 @@ async def test_a_non_member_gets_404_on_every_file_route(
     the DELETE case would 409 instead of 204/404 -- a different ambiguity.
     `b.tex` is left absent so the rename case has a real destination."""
     base = f"/v1/projects/{project.id}/latex/{document.id}"
-    await client.put(
+    put = await client.put(
         f"{base}/file", params={"path": "a.tex"}, json={"content": "x"}, headers=_h(you)
     )
+    assert put.status_code == 200
 
     stranger = (
         await db_session.execute(select(User).where(User.email == "marco@lab.io"))
@@ -447,6 +469,29 @@ async def test_a_document_from_another_project_404s_on_the_write_routes(
     assert rename.status_code == 404
 
 
+async def test_uploading_a_binary_over_the_main_file_is_a_409_and_leaves_the_source_intact(
+    client: AsyncClient, you: User, project: Project
+):
+    """The sibling of the delete route's main-file guard: binary bytes over
+    the main file destroy the document's source just as thoroughly as a
+    delete would, and with no undo."""
+    created = await client.post(
+        f"/v1/projects/{project.id}/latex",
+        json={"name": "paper", "source": "\\documentclass{article}"},
+        headers=_h(you),
+    )
+    doc_id = created.json()["id"]
+    base = f"/v1/projects/{project.id}/latex/{doc_id}"
+
+    resp = await client.post(
+        f"{base}/file/binary", params={"path": "main.tex"}, content=b"\x89PNG", headers=_h(you)
+    )
+    assert resp.status_code == 409
+
+    got = await client.get(base, headers=_h(you))
+    assert got.json()["source"] == "\\documentclass{article}"
+
+
 async def test_a_binary_upload_over_the_cap_is_a_413(
     client: AsyncClient, you: User, project: Project, document: LatexDocument, monkeypatch
 ):
@@ -457,6 +502,11 @@ async def test_a_binary_upload_over_the_cap_is_a_413(
         f"{base}/file/binary", params={"path": "f.bin"}, content=b"x" * 64, headers=_h(you)
     )
     assert resp.status_code == 413
+    # httpx sends a plain `bytes` body as ONE chunk over ASGITransport, so
+    # the running counter sees the whole 64 bytes on its first iteration --
+    # pinning this number is what stops the guard silently degenerating into
+    # `request.body()` (which would report the same 64, masking the switch).
+    assert resp.json()["detail"] == "64 bytes exceeds the 16 byte limit"
 
     tree = await client.get(f"{base}/files", headers=_h(you))
     assert tree.json()["files"] == []
@@ -480,6 +530,12 @@ async def test_a_chunked_binary_upload_with_no_content_length_is_still_capped(
         f"{base}/file/binary", params={"path": "f.bin"}, content=body(), headers=_h(you)
     )
     assert resp.status_code == 413
+    # 8-byte chunks against a 16-byte cap: the running total crosses the cap
+    # on the THIRD chunk (8, 16, 24) and aborts there rather than reading all
+    # 64 bytes the generator would eventually produce -- the number a
+    # `request.body()` implementation would report instead. This is exactly
+    # the distinction that makes this test catch that regression.
+    assert resp.json()["detail"] == "24 bytes exceeds the 16 byte limit"
 
     tree = await client.get(f"{base}/files", headers=_h(you))
     assert tree.json()["files"] == []

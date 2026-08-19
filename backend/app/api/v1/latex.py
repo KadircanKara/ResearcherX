@@ -175,15 +175,18 @@ async def update_document(
             )
         if not normalized_main.endswith(".tex"):
             raise HTTPException(status_code=422, detail="The main file must be a .tex file")
-        document.main_path = normalized_main
+        if document.main_path != normalized_main:
+            document.main_path = normalized_main
+            await files.bump_revision(db, document.id)
     if payload.source is not None:
         try:
             await files.write_text(db, document.id, document.main_path, payload.source)
         except Exception as exc:
             await db.rollback()
             raise _translate(exc) from exc
-    if payload.engine is not None:
+    if payload.engine is not None and payload.engine != document.engine:
         document.engine = payload.engine
+        await files.bump_revision(db, document.id)
     await db.commit()
     await db.refresh(document)
     return await _as_out(db, document)

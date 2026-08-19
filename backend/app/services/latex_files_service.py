@@ -101,14 +101,26 @@ async def used_bytes(
     return int((await db.execute(stmt)).scalar_one())
 
 
-async def _bump_revision(db: AsyncSession, document_id: str) -> None:
-    # Core UPDATE: `onupdate=_now` on the model still fires, so updated_at
-    # moves too, and no ORM instance has to be loaded to do it.
+async def bump_revision(db: AsyncSession, document_id: str) -> None:
+    """Move `latex_documents.revision`. Every mutation that changes what a
+    compile would produce -- a file write, a delete, a rename, or (in
+    `app.api.v1.latex.update_document`) repointing `main_path` or switching
+    `engine` -- must call this. `revision` is the designated staleness
+    signal a client compares against without recomputing any hash itself, so
+    a change that forgets to bump it makes a stale PDF read as fresh.
+
+    Core UPDATE: `onupdate=_now` on the model still fires, so updated_at
+    moves too, and no ORM instance has to be loaded to do it.
+    """
     await db.execute(
         update(LatexDocument)
         .where(LatexDocument.id == document_id)
         .values(revision=LatexDocument.revision + 1)
     )
+
+
+# Old private name, kept as an alias in case anything still imports it.
+_bump_revision = bump_revision
 
 
 async def _guard_write(
