@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { DocumentList } from "@/components/latex/document-list";
 import { EditorPane } from "@/components/latex/editor-pane";
 import { LogPanel } from "@/components/latex/log-panel";
-import { PdfViewer } from "@/components/latex/pdf-viewer";
+import { PdfViewer, type PdfHighlight } from "@/components/latex/pdf-viewer";
 import {
   compileDocument,
   createDocument,
@@ -15,15 +15,27 @@ import {
   getDocument,
   listDocuments,
   patchDocument,
+  synctexForward,
+  synctexReverse,
   type LatexDocument,
   type LatexEngine,
 } from "@/lib/latex";
-import { isStale, type CompiledState } from "@/lib/latex-sync";
+import { isStale, type CompiledState, type TexPoint } from "@/lib/latex-sync";
 import type { Role } from "@/lib/types";
 
 const CAN_EDIT: Role[] = ["owner", "editor"];
 const AUTOSAVE_MS = 800;
 const STALE_NOTE = "Out of date — compile to sync";
+
+// Both sync directions answer for the LAST COMPILED source; after an
+// edit the line numbers have drifted, so a jump is still shown but
+// labelled stale rather than presented as confidently correct. Declared
+// at MODULE level, beside AUTOSAVE_MS and STARTER -- not inside the
+// component: a value created during render is a new binding every
+// render, and react-hooks/exhaustive-deps would demand it in the
+// dependency arrays of both jumpToPdf and jumpToSource below, defeating
+// their memoisation.
+const SYNC_STALE_NOTE = "The PDF is out of date, so this may be a few lines off.";
 
 const STARTER = `\\documentclass[conference]{IEEEtran}
 \\begin{document}
@@ -60,6 +72,14 @@ export function LatexWorkspace({ projectId, role }: LatexWorkspaceProps) {
   const [log, setLog] = useState<string | null>(null);
   const [compiling, setCompiling] = useState(false);
   const [engine, setEngine] = useState<LatexEngine>("pdflatex");
+  const [highlight, setHighlight] = useState<PdfHighlight | null>(null);
+  const [scrollToPage, setScrollToPage] = useState<number | null>(null);
+  const [gotoLine, setGotoLine] = useState<{ line: number; nonce: number } | null>(
+    null
+  );
+  const [syncNote, setSyncNote] = useState<string | null>(null);
+  // Monotonic, so jumping twice to the same line still scrolls the editor.
+  const nonce = useRef(0);
 
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // The id of the document `source` actually holds right now. A save must be
@@ -176,6 +196,10 @@ export function LatexWorkspace({ projectId, role }: LatexWorkspaceProps) {
       setCompiled(null);
       setPdfBytes(null);
       setLog(null);
+      setHighlight(null);
+      setScrollToPage(null);
+      setGotoLine(null);
+      setSyncNote(null);
       bufferDocId.current = doc.id;
       savedSourceByDoc.current.set(doc.id, doc.source);
     });
@@ -289,6 +313,73 @@ export function LatexWorkspace({ projectId, role }: LatexWorkspaceProps) {
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [compile]);
+
+  // Both directions answer for the LAST COMPILED source. After an edit the
+  // line numbers have drifted, so the result is still shown -- it is usually
+  // close -- but labelled stale. Silently jumping to a confidently wrong line
+  // is the failure the spec singles out as worse than admitting the map is old.
+  //
+  // Guard: `docId` is captured before the `await`, exactly like `compile`'s
+  // own guard (see `selectedIdRef`'s comment above for why that ref, not
+  // `bufferDocId`, is the right one here) -- "is the user still on this
+  // document" is a question about the SELECTION, not the editor buffer, and
+  // it must be re-asked after every await, before any state write. Without
+  // this, a slow SyncTeX lookup for document A resolving after the user has
+  // switched to document B would scroll B's viewer to a position from A, or
+  // select a line in a file the user is no longer looking at -- the same
+  // failure family `compile` and `flush` were both hardened against.
+  const jumpToPdf = useCallback(
+    async (line: number) => {
+      if (!selectedId || !compiled) return;
+      const docId = selectedId;
+      try {
+        const res = await synctexForward(projectId, docId, line);
+        if (selectedIdRef.current !== docId) return; // user moved on; discard
+        if (!res.found || res.page === null || res.x === null || res.y === null) {
+          setSyncNote("No place in the PDF matches that line.");
+          return;
+        }
+        setHighlight({
+          page: res.page,
+          x: res.x,
+          y: res.y,
+          width: res.width ?? 0,
+          height: res.height ?? 0,
+        });
+        setScrollToPage(res.page);
+        setSyncNote(stale ? SYNC_STALE_NOTE : null);
+      } catch {
+        // Navigation is an enhancement. A failed query leaves a working
+        // editor and a working viewer.
+        if (selectedIdRef.current === docId) {
+          setSyncNote("Sync is unavailable right now.");
+        }
+      }
+    },
+    [compiled, projectId, selectedId, stale]
+  );
+
+  const jumpToSource = useCallback(
+    async (page: number, point: TexPoint) => {
+      if (!selectedId || !compiled) return;
+      const docId = selectedId;
+      try {
+        const res = await synctexReverse(projectId, docId, page, point.x, point.y);
+        if (selectedIdRef.current !== docId) return; // user moved on; discard
+        if (!res.found || res.line === null) {
+          setSyncNote("No source line matches that spot.");
+          return;
+        }
+        setGotoLine({ line: res.line, nonce: ++nonce.current });
+        setSyncNote(stale ? SYNC_STALE_NOTE : null);
+      } catch {
+        if (selectedIdRef.current === docId) {
+          setSyncNote("Sync is unavailable right now.");
+        }
+      }
+    },
+    [compiled, projectId, selectedId, stale]
+  );
 
   async function handleCreate(name: string) {
     const doc = await createDocument(projectId, { name, source: STARTER });
@@ -412,8 +503,8 @@ export function LatexWorkspace({ projectId, role }: LatexWorkspaceProps) {
               <EditorPane
                 value={source}
                 onChange={handleChange}
-                onLineDoubleClick={() => {}}
-                gotoLine={null}
+                onLineDoubleClick={(line) => void jumpToPdf(line)}
+                gotoLine={gotoLine}
                 readOnly={!canEdit}
               />
             </div>
@@ -434,6 +525,9 @@ export function LatexWorkspace({ projectId, role }: LatexWorkspaceProps) {
                   <span className="rounded-full bg-amber-500/15 px-2 py-0.5 text-[11px] font-medium text-amber-700 dark:text-amber-400">
                     {STALE_NOTE}
                   </span>
+                )}
+                {syncNote && (
+                  <span className="text-[11px] text-muted-foreground">{syncNote}</span>
                 )}
               </div>
               <div className="flex items-center gap-2">
@@ -466,13 +560,17 @@ export function LatexWorkspace({ projectId, role }: LatexWorkspaceProps) {
               <PdfViewer
                 bytes={pdfBytes}
                 scale={1.25}
-                highlight={null}
-                scrollToPage={null}
-                onPageDoubleClick={() => {}}
+                highlight={highlight}
+                scrollToPage={scrollToPage}
+                onPageDoubleClick={(page, point) => void jumpToSource(page, point)}
               />
             </div>
             {log !== null && (
-              <LogPanel log={log} onClose={() => setLog(null)} onJumpToLine={() => {}} />
+              <LogPanel
+                log={log}
+                onClose={() => setLog(null)}
+                onJumpToLine={(line) => setGotoLine({ line, nonce: ++nonce.current })}
+              />
             )}
           </div>
         </div>
