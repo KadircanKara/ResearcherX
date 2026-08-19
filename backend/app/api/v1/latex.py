@@ -15,11 +15,18 @@ from app.core.identity import get_current_user
 from app.db.models import LatexDocument, User
 from app.db.session import get_session
 from app.schemas.latex import (
+    CompileOut,
     LatexDocumentCreate,
     LatexDocumentOut,
     LatexDocumentUpdate,
+    SynctexForwardIn,
+    SynctexForwardOut,
+    SynctexReverseIn,
+    SynctexReverseOut,
 )
 from app.services import project_service
+from app.services.latex_cache import CachedBuild, cache, source_hash
+from app.services.latex_compiler import compile_source, synctex_forward, synctex_reverse
 
 router = APIRouter(tags=["latex"])
 
@@ -126,3 +133,113 @@ async def delete_document(
     await db.delete(document)
     await db.commit()
     return Response(status_code=204)
+
+
+@router.post("/projects/{project_id}/latex/{document_id}/compile", response_model=CompileOut)
+async def compile_document(
+    project_id: str,
+    document_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
+) -> CompileOut:
+    await project_service.require_member(db, project_id, user.id, "editor")
+    document = await _get_document_or_404(db, project_id, document_id)
+
+    key = source_hash(document.source, document.engine)
+    cached = cache.get(key)
+    if cached is not None:
+        # Identical source and engine cannot produce a different PDF, so a
+        # repeat compile is a lookup rather than another 30s of CPU.
+        return CompileOut(ok=True, log=cached.log, pdf_hash=key)
+
+    result = await compile_source(document.source, document.engine)
+    if not result.ok or result.pdf is None:
+        # No hash on failure: the client keeps the PDF it already has, so a
+        # broken edit never blanks the preview.
+        return CompileOut(ok=False, log=result.log, pdf_hash=None)
+
+    cache.put(
+        key,
+        CachedBuild(
+            source=document.source, pdf=result.pdf, synctex_gz=result.synctex_gz, log=result.log
+        ),
+        document_id=document.id,
+    )
+    return CompileOut(ok=True, log=result.log, pdf_hash=key)
+
+
+@router.get("/projects/{project_id}/latex/{document_id}/pdf")
+async def get_document_pdf(
+    project_id: str,
+    document_id: str,
+    hash: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
+) -> Response:
+    await project_service.require_member(db, project_id, user.id, "viewer")
+    await _get_document_or_404(db, project_id, document_id)
+    build = cache.get(hash)
+    if build is None:
+        # The cache is in-process and bounded, so a hash can age out. A 404
+        # tells the client to recompile rather than pretending the PDF is gone
+        # forever.
+        raise HTTPException(status_code=404, detail="No compiled PDF for that hash")
+    return Response(content=build.pdf, media_type="application/pdf")
+
+
+@router.post(
+    "/projects/{project_id}/latex/{document_id}/synctex/forward",
+    response_model=SynctexForwardOut,
+)
+async def synctex_forward_route(
+    project_id: str,
+    document_id: str,
+    payload: SynctexForwardIn,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
+) -> SynctexForwardOut:
+    await project_service.require_member(db, project_id, user.id, "viewer")
+    document = await _get_document_or_404(db, project_id, document_id)
+
+    # The map answers for the LAST COMPILED source, not what is on screen now.
+    build = cache.latest_for(document.id)
+    if build is None or build.synctex_gz is None:
+        return SynctexForwardOut(found=False)
+
+    position = await synctex_forward(build.source, build.pdf, build.synctex_gz, payload.line)
+    if position is None:
+        return SynctexForwardOut(found=False)
+    return SynctexForwardOut(
+        found=True,
+        page=position.page,
+        x=position.x,
+        y=position.y,
+        width=position.width,
+        height=position.height,
+    )
+
+
+@router.post(
+    "/projects/{project_id}/latex/{document_id}/synctex/reverse",
+    response_model=SynctexReverseOut,
+)
+async def synctex_reverse_route(
+    project_id: str,
+    document_id: str,
+    payload: SynctexReverseIn,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
+) -> SynctexReverseOut:
+    await project_service.require_member(db, project_id, user.id, "viewer")
+    document = await _get_document_or_404(db, project_id, document_id)
+
+    build = cache.latest_for(document.id)
+    if build is None or build.synctex_gz is None:
+        return SynctexReverseOut(found=False)
+
+    line = await synctex_reverse(
+        build.source, build.pdf, build.synctex_gz, payload.page, payload.x, payload.y
+    )
+    if line is None:
+        return SynctexReverseOut(found=False)
+    return SynctexReverseOut(found=True, line=line)
