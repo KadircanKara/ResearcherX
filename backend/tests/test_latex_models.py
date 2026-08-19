@@ -1,7 +1,10 @@
 """The document row. Source is the only durable artifact; the PDF is derived."""
 
+import uuid
+from datetime import datetime, timezone
+
 import pytest
-from sqlalchemy import delete, select
+from sqlalchemy import column, delete, insert, select, table
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -60,6 +63,47 @@ async def test_a_new_document_defaults_to_main_tex_at_revision_one(db_session: A
 
     assert doc.main_path == "main.tex"
     assert doc.revision == 1
+
+
+async def test_a_row_inserted_without_main_path_or_revision_gets_the_column_server_defaults(
+    db_session: AsyncSession,
+):
+    """The ORM test above only exercises the Python-side `default=`. This
+    inserts through a bare Core `table()` construct that carries none of the
+    mapped Column's client-side defaults, so `main.tex`/`1` can only come
+    from the `server_default` the migration wrote into the schema."""
+    project = await _project(db_session)
+    doc_id = str(uuid.uuid4())
+    now = datetime.now(timezone.utc)
+    latex_documents = table(
+        "latex_documents",
+        column("id"),
+        column("project_id"),
+        column("name"),
+        column("source"),
+        column("engine"),
+        column("created_at"),
+        column("updated_at"),
+    )
+
+    await db_session.execute(
+        insert(latex_documents).values(
+            id=doc_id,
+            project_id=project.id,
+            name="raw.tex",
+            source="",
+            engine="pdflatex",
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    await db_session.commit()
+
+    row = (
+        await db_session.execute(select(LatexDocument).where(LatexDocument.id == doc_id))
+    ).scalar_one()
+    assert row.main_path == "main.tex"
+    assert row.revision == 1
 
 
 async def test_a_text_file_persists_against_its_document(db_session: AsyncSession):
