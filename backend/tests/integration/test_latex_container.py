@@ -11,6 +11,7 @@ import io
 import json
 import socket
 import tarfile
+import time
 from urllib.parse import urlparse
 
 import httpx
@@ -442,12 +443,16 @@ def test_a_nul_byte_in_the_main_path_header_gets_a_clean_response_not_a_dropped_
 
 @pytest.mark.container
 def test_a_lying_content_length_larger_than_the_body_sent_gets_a_clean_response_not_a_hang():
-    """`_Bounded` is defence in depth against tarfile reading past the
-    declared body; this is the mirror case -- a Content-Length claiming MORE
-    than the client actually sends must not hang the server waiting for
-    bytes that are never coming. Shutting down the write half of the socket
-    right after the real (short) body simulates exactly that: the server's
-    next read sees a clean EOF, not a stall."""
+    """NOTE: this test is vacuous against any mutation of the drain/guard
+    logic -- `sock.shutdown(SHUT_WR)` hands the server a clean EOF, so the
+    response is guaranteed by socket semantics (a read past EOF returns b""
+    immediately) rather than by anything the drain/guard code does. It
+    passes unmodified even with `_Bounded`, the drain, and its try/except
+    all removed. Kept as a baseline (a client that finishes and closes
+    cleanly must still work), but
+    test_an_over_declared_content_length_still_gets_a_response_when_the_client_stays_open
+    below is the one that actually exercises the guard -- see its
+    docstring."""
     body = _tar({"main.tex": SELF_CONTAINED})
     parsed = urlparse(COMPILER_URL)
     host, port = parsed.hostname, parsed.port or 80
@@ -470,6 +475,53 @@ def test_a_lying_content_length_larger_than_the_body_sent_gets_a_clean_response_
     response = b"".join(chunks)
     assert response, "connection produced no HTTP response (hang or drop)"
     assert response.startswith(b"HTTP/1."), response[:200]
+
+
+@pytest.mark.container
+def test_an_over_declared_content_length_still_gets_a_response_when_the_client_stays_open():
+    """The client sends a complete tar but declares more than it sends, and
+    keeps the socket open -- no shutdown, no more data, exactly what an
+    ordinary HTTP client does after writing its request and turning to read
+    the response. This is the scenario that reproduced the bug: with the
+    drain unguarded, the server's read for the (never-coming) declared
+    remainder blocks until the connection's own socket timeout, then raises,
+    and that exception used to propagate out of do_POST entirely -- no
+    response, an empty connection. The fix wraps the drain in try/except AND
+    gives it its own short socket timeout (DRAIN_TIMEOUT, far below the
+    connection's 30s) so a lying Content-Length costs the client a couple of
+    seconds, not silence."""
+    body = _tar({"main.tex": SELF_CONTAINED})
+    parsed = urlparse(COMPILER_URL)
+    host, port = parsed.hostname, parsed.port or 80
+    declared_length = len(body) + 4096
+    request = (
+        f"POST /compile HTTP/1.1\r\nHost: {host}\r\n"
+        f"Content-Type: application/x-tar\r\nX-Engine: pdflatex\r\nX-Main-Path: main.tex\r\n"
+        f"Content-Length: {declared_length}\r\nConnection: close\r\n\r\n"
+    ).encode("latin-1")
+    started = time.monotonic()
+    with socket.create_connection((host, port), timeout=40) as sock:
+        sock.sendall(request + body)
+        # Deliberately no shutdown(SHUT_WR) -- the socket stays open exactly
+        # as a normal client leaves it while waiting for a response.
+        sock.settimeout(35)
+        chunks = []
+        while True:
+            chunk = sock.recv(65536)
+            if not chunk:
+                break
+            chunks.append(chunk)
+    elapsed = time.monotonic() - started
+    response = b"".join(chunks)
+    assert response, "connection produced no HTTP response (hang or drop)"
+    header, _, raw_body = response.partition(b"\r\n\r\n")
+    assert header.startswith(b"HTTP/1."), header
+    assert b" 200 " in header.split(b"\r\n", 1)[0], header
+    payload = json.loads(raw_body)
+    assert payload["ok"] is True, payload.get("log")
+    # Well under the connection's 30s socket timeout -- proves the drain
+    # used its own short deadline rather than the handler's full one.
+    assert elapsed < 10, f"took {elapsed:.1f}s -- drain is not using a short timeout"
 
 
 @pytest.mark.container
@@ -510,3 +562,29 @@ def test_a_33mb_tar_body_is_rejected_with_413():
         timeout=120,
     )
     assert resp.status_code == 413
+
+
+@pytest.mark.container
+def test_a_tar_over_the_member_cap_is_refused_before_extraction_finishes():
+    """MAX_TAR_MEMBERS (4000) is the load-bearing half of the extraction
+    cap -- inode amplification (each file costs a 4096-byte tmpfs page
+    regardless of its declared size) is what a byte-total cap alone cannot
+    catch. 4001 one-byte members plus a valid main.tex is a small tar (a
+    few hundred KB), so this stays fast despite the member count."""
+    entries = {"main.tex": SELF_CONTAINED}
+    for i in range(4001):
+        entries[f"pad/{i}.txt"] = b"x"
+    body = _tar(entries)
+    resp = httpx.post(
+        f"{COMPILER_URL}/compile",
+        content=body,
+        headers={
+            "Content-Type": "application/x-tar",
+            "X-Engine": "pdflatex",
+            "X-Main-Path": "main.tex",
+        },
+        timeout=120,
+    )
+    payload = resp.json()
+    assert payload["ok"] is False
+    assert "unpacked" in payload["log"]

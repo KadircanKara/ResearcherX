@@ -39,6 +39,19 @@ from pathlib import Path, PurePosixPath
 COMPILE_TIMEOUT = 30
 SYNCTEX_TIMEOUT = 10
 
+# The socket-level ceiling for the courtesy drain after a tar compile (see
+# the `finally`-turned-guarded drain in do_POST). Deliberately much shorter
+# than `Handler.timeout` (30s): bytes the client already sent are on a
+# same-host Docker bridge and arrive within milliseconds, so a short wait
+# is plenty for the legitimate case (real trailing padding under a CORRECT
+# Content-Length). Bytes an over-declared Content-Length promised but never
+# sent are never coming regardless of how long this waits -- reproduced
+# live, a client that lies about Content-Length and then goes silent (no
+# more data, no close) makes an unbounded-timeout drain sit for the FULL
+# 30s despite the response already being computed. 2s bounds that stall to
+# something a caller notices as "slightly slow," not "did this die."
+DRAIN_TIMEOUT = 2
+
 # LaTeX source is text; a request claiming more than this is a mistake or an
 # attempt to make us buffer a huge body before compilation even starts.
 #
@@ -230,6 +243,15 @@ def _strict_filter(member: tarfile.TarInfo, path: str) -> tarfile.TarInfo:
 # file costs a 4096-byte page regardless of its declared size, so summing
 # declared sizes alone would not have caught it. Tar itself is uncompressed,
 # so there is no separate decompression-bomb case to guard against here.
+#
+# MAX_EXTRACTED_BYTES is UNREACHABLE over HTTP today, and that is fine: the
+# 32MB wire cap (MAX_TAR_LENGTH) binds first for an uncompressed tar, so no
+# request can ever declare a byte total this filter would refuse before the
+# wire cap already rejected it with a 413. It stays as a second, independent
+# ceiling in case that relationship ever changes (a compressed transport, a
+# raised wire cap) -- this is not dead code to be pruned, it is a guard for
+# an invariant (uncompressed tar, 32MB cap) that lives in a different part
+# of this file and could drift out of sync with this one.
 MAX_TAR_MEMBERS = 4000
 MAX_EXTRACTED_BYTES = 64 * 1024 * 1024
 
@@ -571,19 +593,39 @@ class Handler(BaseHTTPRequestHandler):
                 result = compile_tree(bounded, engine, main_path)
             except Exception:
                 result = None
-            finally:
-                # Drain before responding, for the same reason the 413
-                # branch does: `compile_tree` stops reading at the tar's
-                # end-of-archive marker, so any declared bytes beyond that
-                # (padding, or a lying Content-Length) are still sitting
-                # unread in the kernel receive buffer. Responding and
-                # closing without draining them answers with a TCP RST
-                # instead of a clean FIN, which can land mid-write on the
-                # client and turn a valid response into a bare connection
-                # error -- measured live: a tar followed by ~25MB of
-                # trailing bytes under a 32MB Content-Length produced
-                # BrokenPipeError on the client with no response delivered.
+            # Drain before responding, for the same reason the 413 branch
+            # does: `compile_tree` stops reading at the tar's end-of-archive
+            # marker, so any declared bytes beyond that (padding, or a lying
+            # Content-Length) are still sitting unread in the kernel receive
+            # buffer. Responding and closing without draining them answers
+            # with a TCP RST instead of a clean FIN, which can land
+            # mid-write on the client and turn a valid response into a bare
+            # connection error -- measured live: a tar followed by ~25MB of
+            # trailing bytes under a 32MB Content-Length produced
+            # BrokenPipeError on the client with no response delivered.
+            #
+            # But draining is a COURTESY, never a reason to lose an already-
+            # computed response: a client that over-declares Content-Length
+            # and then stops sending (an honest but generous header, not
+            # malice -- our own backend client does not do this, but nothing
+            # requires a caller not to) makes this read hang until
+            # `Handler.timeout` (30s) and then raise `OSError: cannot read
+            # from timed out object` -- reproduced live. Unguarded, that
+            # exception used to propagate out of do_POST exactly like
+            # Finding 1's NUL-path bug: no response written, and a
+            # traceback (with the client's address) dumped to container
+            # logs by socketserver's default handler, around
+            # log_message's override. Guarding it here keeps the courtesy
+            # from ever costing the client its answer.
+            try:
+                # Shorten the socket timeout for JUST this best-effort read
+                # -- see DRAIN_TIMEOUT's comment for why 2s, not 30s. HTTP/1.0
+                # + Connection: close means this socket is never reused for
+                # another request, so there is nothing to restore afterwards.
+                self.connection.settimeout(DRAIN_TIMEOUT)
                 self._drain(bounded.remaining)
+            except Exception:
+                pass
             if result is None:
                 self._send(500, {"error": "compile service failure"})
             else:

@@ -94,10 +94,18 @@ services:
       # Sized explicitly: an unbounded tmpfs mount reports the host's full
       # RAM (measured: 3.9G) regardless of mem_limit, so filling /tmp does
       # not fail one request -- it OOM-kills the container and every
-      # concurrent compile with it. 1g leaves headroom above the 64MB
-      # MAX_EXTRACTED_BYTES cap in app.py plus TeX Live's own caches under
-      # /tmp (see the Dockerfile's ENV block) at the container's full 8-way
-      # compile concurrency.
+      # concurrent compile with it. 1g is NOT sized against
+      # MAX_EXTRACTED_BYTES (64MB in app.py) -- that cap is unreachable over
+      # HTTP in the first place (see its own comment in app.py) and would be
+      # the wrong number to size against even if it weren't, since inode
+      # amplification (a 4096-byte page per file regardless of declared
+      # size) is what actually drives tmpfs usage, not declared bytes. The
+      # real driver is the 32MB wire cap (MAX_TAR_LENGTH) times worst-case
+      # per-file page rounding, at up to 8 concurrent compiles, plus TeX
+      # Live's own caches under /tmp (see the Dockerfile's ENV block).
+      # Measured in-container at full 8-way concurrency: peak usage 250MB of
+      # the 1024MB budget -- so 1g is generous headroom against that
+      # measurement, not a computed minimum.
       - /tmp:size=1g
     cap_drop:
       - ALL
