@@ -10,6 +10,8 @@ interface DocumentListProps {
   documents: LatexDocument[];
   selectedId: string | null;
   canEdit: boolean;
+  /** A list/create/delete failure, surfaced here since it isn't about any one document. */
+  error?: string | null;
   onSelect: (id: string) => void;
   onCreate: (name: string) => Promise<void>;
   onDelete: (id: string) => Promise<void>;
@@ -19,6 +21,7 @@ export function DocumentList({
   documents,
   selectedId,
   canEdit,
+  error,
   onSelect,
   onCreate,
   onDelete,
@@ -57,6 +60,8 @@ export function DocumentList({
           <Plus className="size-4" />
         </Button>
       </div>
+
+      {error && <p className="pb-1 text-xs text-destructive">{error}</p>}
 
       {creating && (
         <input

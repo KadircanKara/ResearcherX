@@ -78,6 +78,14 @@ export function LatexWorkspace({ projectId, role }: LatexWorkspaceProps) {
     null
   );
   const [syncNote, setSyncNote] = useState<string | null>(null);
+  // A list/create/delete failure -- not about any one document, so it is
+  // shown beside the list itself (DocumentList's own `error` prop) rather
+  // than in the main pane, which is about whichever document IS selected.
+  const [documentsError, setDocumentsError] = useState<string | null>(null);
+  // Set only when THIS document's own `getDocument` rejects. Shown on the
+  // placeholder pane -- see the load effect's `.catch` below for why that is
+  // always the branch on screen when this is non-null.
+  const [loadError, setLoadError] = useState<string | null>(null);
   // Monotonic, so jumping twice to the same line still scrolls the editor.
   const nonce = useRef(0);
 
@@ -163,11 +171,19 @@ export function LatexWorkspace({ projectId, role }: LatexWorkspaceProps) {
 
   useEffect(() => {
     let cancelled = false;
+    setDocumentsError(null);
     listDocuments(projectId)
       .then((docs) => {
         if (cancelled) return;
         setDocuments(docs);
         setSelectedId((current) => current ?? docs[0]?.id ?? null);
+      })
+      .catch(() => {
+        // Without this, a failed list left `documents` at its initial `[]`
+        // and DocumentList reads that as "No documents yet" -- indistinguishable
+        // from a genuinely empty, working project.
+        if (cancelled) return;
+        setDocumentsError("Could not load your documents. Please try again.");
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -189,20 +205,55 @@ export function LatexWorkspace({ projectId, role }: LatexWorkspaceProps) {
       return;
     }
     let cancelled = false;
-    getDocument(projectId, selectedId).then((doc) => {
-      if (cancelled) return;
-      setSource(doc.source);
-      setEngine(doc.engine);
-      setCompiled(null);
-      setPdfBytes(null);
-      setLog(null);
-      setHighlight(null);
-      setScrollToPage(null);
-      setGotoLine(null);
-      setSyncNote(null);
-      bufferDocId.current = doc.id;
-      savedSourceByDoc.current.set(doc.id, doc.source);
-    });
+    // Cleared here, not inside the `!selectedId` branch above: the failure
+    // path below sets `selectedId` back to null itself, which re-runs this
+    // very effect and would otherwise wipe the message it just set before
+    // the user ever saw it. Clearing here instead means it is cleared only
+    // when a NEW load attempt genuinely begins -- which covers picking a
+    // different document, and covers retrying the same one, since either
+    // sets `selectedId` to a value that re-enters this branch.
+    setLoadError(null);
+    getDocument(projectId, selectedId)
+      .then((doc) => {
+        if (cancelled) return;
+        setSource(doc.source);
+        setEngine(doc.engine);
+        setCompiled(null);
+        setPdfBytes(null);
+        setLog(null);
+        setHighlight(null);
+        setScrollToPage(null);
+        setGotoLine(null);
+        setSyncNote(null);
+        bufferDocId.current = doc.id;
+        savedSourceByDoc.current.set(doc.id, doc.source);
+      })
+      .catch(() => {
+        // A collaborator deletes this document, the backend 5xxs, a reload
+        // races the request -- whatever the cause, this tab must not go on
+        // presenting a document it does not have. Without a rejection path
+        // at all, `bufferDocId` never moved off null (or off whatever it
+        // held before), but `selectedId`/the document list still pointed at
+        // this one, and every keystroke from here kept saving into
+        // whichever OTHER document the buffer last actually held --
+        // silently, with no banner anywhere.
+        //
+        // Fix is to clear the selection rather than invent a per-document
+        // error panel: it reuses the `!selectedId` branch just above --
+        // already exercised, already correct -- to guarantee `source` and
+        // `bufferDocId` end up EXACTLY as they do for "nothing selected", so
+        // there is no second place that guarantee has to be kept correct.
+        // It also uniformly covers both failure shapes the review called
+        // out: an initial load (bufferDocId was already null) and a switch
+        // (bufferDocId pointed at the PREVIOUS document) end at the same
+        // state either way, with scheduleSave's `!bufferDocId.current`
+        // guard making a keystroke unsaveable rather than misattributed.
+        if (cancelled) return;
+        bufferDocId.current = null;
+        setSource("");
+        setSelectedId(null);
+        setLoadError("Could not load that document. Please try again.");
+      });
     return () => {
       cancelled = true;
       // Runs before the next document's effect body -- i.e. exactly when
@@ -382,9 +433,14 @@ export function LatexWorkspace({ projectId, role }: LatexWorkspaceProps) {
   );
 
   async function handleCreate(name: string) {
-    const doc = await createDocument(projectId, { name, source: STARTER });
-    setDocuments((prev) => [...prev, doc]);
-    setSelectedId(doc.id);
+    setDocumentsError(null);
+    try {
+      const doc = await createDocument(projectId, { name, source: STARTER });
+      setDocuments((prev) => [...prev, doc]);
+      setSelectedId(doc.id);
+    } catch {
+      setDocumentsError("Could not create the document. Please try again.");
+    }
   }
 
   // The engine is persisted here, explicitly, rather than from an effect
@@ -414,7 +470,13 @@ export function LatexWorkspace({ projectId, role }: LatexWorkspaceProps) {
         saveTimer.current = null;
       }
     }
-    await deleteDocument(projectId, id);
+    setDocumentsError(null);
+    try {
+      await deleteDocument(projectId, id);
+    } catch {
+      setDocumentsError("Could not delete the document. Please try again.");
+      return;
+    }
     setDocuments((prev) => prev.filter((d) => d.id !== id));
     setSelectedId((current) => (current === id ? null : current));
   }
@@ -478,14 +540,16 @@ export function LatexWorkspace({ projectId, role }: LatexWorkspaceProps) {
         documents={documents}
         selectedId={selectedId}
         canEdit={canEdit}
+        error={documentsError}
         onSelect={setSelectedId}
         onCreate={handleCreate}
         onDelete={handleDelete}
       />
 
       {selectedId === null ? (
-        <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
-          Select a document, or create one to start writing.
+        <div className="flex flex-1 flex-col items-center justify-center gap-2 text-sm text-muted-foreground">
+          {loadError && <p className="text-destructive">{loadError}</p>}
+          <p>Select a document, or create one to start writing.</p>
         </div>
       ) : (
         <div className="relative flex flex-1 overflow-hidden rounded-xl border border-border">
