@@ -1,4 +1,5 @@
-"""The document row. Source is the only durable artifact; the PDF is derived."""
+"""The document row. The `latex_files` tree is the only durable artifact; the
+PDF is derived."""
 
 import uuid
 from datetime import datetime, timezone
@@ -22,23 +23,22 @@ async def _project(db: AsyncSession) -> Project:
     return project
 
 
-async def test_a_document_persists_its_source_and_defaults_to_pdflatex(db_session: AsyncSession):
+async def test_a_document_defaults_to_pdflatex(db_session: AsyncSession):
     project = await _project(db_session)
-    doc = LatexDocument(project_id=project.id, name="main.tex", source="\\documentclass{article}")
+    doc = LatexDocument(project_id=project.id, name="main.tex")
     db_session.add(doc)
     await db_session.commit()
     await db_session.refresh(doc)
 
     assert doc.engine == "pdflatex"
-    assert doc.source == "\\documentclass{article}"
     assert doc.created_at is not None
     assert doc.updated_at is not None
 
 
 async def test_documents_are_scoped_to_their_project(db_session: AsyncSession):
     project = await _project(db_session)
-    db_session.add(LatexDocument(project_id=project.id, name="a.tex", source=""))
-    db_session.add(LatexDocument(project_id=project.id, name="b.tex", source=""))
+    db_session.add(LatexDocument(project_id=project.id, name="a.tex"))
+    db_session.add(LatexDocument(project_id=project.id, name="b.tex"))
     await db_session.commit()
 
     rows = (
@@ -56,7 +56,7 @@ async def test_documents_are_scoped_to_their_project(db_session: AsyncSession):
 
 async def test_a_new_document_defaults_to_main_tex_at_revision_one(db_session: AsyncSession):
     project = await _project(db_session)
-    doc = LatexDocument(project_id=project.id, name="paper", source="")
+    doc = LatexDocument(project_id=project.id, name="paper")
     db_session.add(doc)
     await db_session.commit()
     await db_session.refresh(doc)
@@ -80,7 +80,6 @@ async def test_a_row_inserted_without_main_path_or_revision_gets_the_column_serv
         column("id"),
         column("project_id"),
         column("name"),
-        column("source"),
         column("engine"),
         column("created_at"),
         column("updated_at"),
@@ -91,7 +90,6 @@ async def test_a_row_inserted_without_main_path_or_revision_gets_the_column_serv
             id=doc_id,
             project_id=project.id,
             name="raw.tex",
-            source="",
             engine="pdflatex",
             created_at=now,
             updated_at=now,
@@ -108,7 +106,7 @@ async def test_a_row_inserted_without_main_path_or_revision_gets_the_column_serv
 
 async def test_a_text_file_persists_against_its_document(db_session: AsyncSession):
     project = await _project(db_session)
-    doc = LatexDocument(project_id=project.id, name="paper", source="")
+    doc = LatexDocument(project_id=project.id, name="paper")
     db_session.add(doc)
     await db_session.flush()
     db_session.add(
@@ -134,7 +132,7 @@ async def test_a_text_file_persists_against_its_document(db_session: AsyncSessio
 
 async def test_a_binary_file_persists_its_blob(db_session: AsyncSession):
     project = await _project(db_session)
-    doc = LatexDocument(project_id=project.id, name="paper", source="")
+    doc = LatexDocument(project_id=project.id, name="paper")
     db_session.add(doc)
     await db_session.flush()
     db_session.add(
@@ -157,7 +155,7 @@ async def test_a_binary_file_persists_its_blob(db_session: AsyncSession):
 
 async def test_two_files_cannot_share_a_path_within_one_document(db_session: AsyncSession):
     project = await _project(db_session)
-    doc = LatexDocument(project_id=project.id, name="paper", source="")
+    doc = LatexDocument(project_id=project.id, name="paper")
     db_session.add(doc)
     await db_session.flush()
     db_session.add(
@@ -173,8 +171,8 @@ async def test_two_files_cannot_share_a_path_within_one_document(db_session: Asy
 
 async def test_the_same_path_in_two_documents_is_fine(db_session: AsyncSession):
     project = await _project(db_session)
-    a = LatexDocument(project_id=project.id, name="a", source="")
-    b = LatexDocument(project_id=project.id, name="b", source="")
+    a = LatexDocument(project_id=project.id, name="a")
+    b = LatexDocument(project_id=project.id, name="b")
     db_session.add_all([a, b])
     await db_session.flush()
     db_session.add(
@@ -193,7 +191,7 @@ async def test_a_row_claiming_to_be_text_while_holding_a_blob_is_refused(db_sess
     """The CHECK is what stops the two content columns drifting into a third
     state no reader handles."""
     project = await _project(db_session)
-    doc = LatexDocument(project_id=project.id, name="paper", source="")
+    doc = LatexDocument(project_id=project.id, name="paper")
     db_session.add(doc)
     await db_session.flush()
     db_session.add(
@@ -213,7 +211,7 @@ async def test_a_row_claiming_to_be_text_while_holding_a_blob_is_refused(db_sess
 
 async def test_a_row_with_neither_content_nor_blob_is_refused(db_session: AsyncSession):
     project = await _project(db_session)
-    doc = LatexDocument(project_id=project.id, name="paper", source="")
+    doc = LatexDocument(project_id=project.id, name="paper")
     db_session.add(doc)
     await db_session.flush()
     db_session.add(LatexFile(document_id=doc.id, path="main.tex", is_binary=False, size_bytes=0))
@@ -224,7 +222,7 @@ async def test_a_row_with_neither_content_nor_blob_is_refused(db_session: AsyncS
 
 async def test_deleting_a_document_deletes_its_files(db_session: AsyncSession):
     project = await _project(db_session)
-    doc = LatexDocument(project_id=project.id, name="paper", source="")
+    doc = LatexDocument(project_id=project.id, name="paper")
     db_session.add(doc)
     await db_session.flush()
     db_session.add(

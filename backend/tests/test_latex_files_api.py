@@ -34,7 +34,7 @@ async def project(db_session: AsyncSession, you: User) -> Project:
 
 @pytest_asyncio.fixture
 async def document(db_session: AsyncSession, project: Project) -> LatexDocument:
-    doc = LatexDocument(project_id=project.id, name="paper", source="")
+    doc = LatexDocument(project_id=project.id, name="paper")
     db_session.add(doc)
     await db_session.commit()
     await db_session.refresh(doc)
@@ -271,7 +271,7 @@ async def test_a_document_from_another_project_404s_on_the_tree(
     db_session.add(other)
     await db_session.flush()
     db_session.add(ProjectMember(project_id=other.id, user_id=you.id, role="owner"))
-    doc = LatexDocument(project_id=other.id, name="elsewhere", source="")
+    doc = LatexDocument(project_id=other.id, name="elsewhere")
     db_session.add(doc)
     await db_session.commit()
 
@@ -427,7 +427,7 @@ async def test_a_document_from_another_project_404s_on_the_write_routes(
     db_session.add(other)
     await db_session.flush()
     db_session.add(ProjectMember(project_id=other.id, user_id=you.id, role="owner"))
-    doc = LatexDocument(project_id=other.id, name="elsewhere", source="")
+    doc = LatexDocument(project_id=other.id, name="elsewhere")
     db_session.add(doc)
     await db_session.commit()
 

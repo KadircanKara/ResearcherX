@@ -21,7 +21,7 @@ async def document(db_session: AsyncSession) -> LatexDocument:
     project = Project(owner_id=user.id, title="Tree Test", topic_keywords=[])
     db_session.add(project)
     await db_session.flush()
-    doc = LatexDocument(project_id=project.id, name="paper", source="")
+    doc = LatexDocument(project_id=project.id, name="paper")
     db_session.add(doc)
     await db_session.commit()
     await db_session.refresh(doc)

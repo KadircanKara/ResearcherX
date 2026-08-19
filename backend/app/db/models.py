@@ -179,10 +179,11 @@ class Paper(Base):
 class LatexDocument(Base):
     """One LaTeX document in a project.
 
-    The tree in `latex_files` is the ONLY durable artifact. The PDF and the
-    SyncTeX map are derived, cached in memory, and regenerated on a miss --
-    see services/latex_cache.py. `source` is a shim retained for the
-    single-file editor and removed in Task 7.
+    The tree in `latex_files` is the ONLY durable artifact -- there is no
+    `source` column on this table any more. The PDF and the SyncTeX map are
+    derived, cached in memory, and regenerated on a miss -- see
+    services/latex_cache.py. The API's `source` field is a compatibility
+    shim resolved from and written to the main file at request time.
     """
 
     __tablename__ = "latex_documents"
@@ -193,7 +194,6 @@ class LatexDocument(Base):
         index=True,
     )
     name: Mapped[str] = mapped_column(String(200))
-    source: Mapped[str] = mapped_column(Text, default="")
     # String(16), not Enum(): adding an engine needs no migration, exactly as
     # StepKind/RunStatus already work in this schema.
     engine: Mapped[str] = mapped_column(String(16), default="pdflatex", server_default="pdflatex")

@@ -75,7 +75,7 @@ async def test_a_document_from_another_project_404s(
     other = Project(owner_id=you.id, title="Other", topic_keywords=[])
     db_session.add(other)
     await db_session.flush()
-    foreign = LatexDocument(project_id=other.id, name="theirs.tex", source="")
+    foreign = LatexDocument(project_id=other.id, name="theirs.tex")
     db_session.add(foreign)
     await db_session.commit()
     await db_session.refresh(foreign)
@@ -106,7 +106,7 @@ async def test_a_non_member_cannot_read_documents(
 async def test_delete_removes_the_document(
     client: AsyncClient, you: User, project: Project, db_session: AsyncSession
 ):
-    doc = LatexDocument(project_id=project.id, name="gone.tex", source="")
+    doc = LatexDocument(project_id=project.id, name="gone.tex")
     db_session.add(doc)
     await db_session.commit()
     await db_session.refresh(doc)
@@ -158,7 +158,7 @@ async def test_a_failed_compile_returns_the_log_and_no_hash(
 ):
     """No hash means the client keeps showing the PDF it already has -- the
     last good PDF survives a broken edit."""
-    doc = LatexDocument(project_id=project.id, name="main.tex", source="\\bogus")
+    doc = LatexDocument(project_id=project.id, name="main.tex")
     db_session.add(doc)
     await db_session.commit()
     await db_session.refresh(doc)
@@ -179,7 +179,7 @@ async def test_a_failed_compile_returns_the_log_and_no_hash(
 async def test_fetching_a_pdf_hash_that_is_not_cached_404s(
     client: AsyncClient, you: User, project: Project, db_session: AsyncSession
 ):
-    doc = LatexDocument(project_id=project.id, name="main.tex", source="x")
+    doc = LatexDocument(project_id=project.id, name="main.tex")
     db_session.add(doc)
     await db_session.commit()
     await db_session.refresh(doc)
@@ -195,7 +195,7 @@ async def test_fetching_a_pdf_hash_that_is_not_cached_404s(
 async def test_forward_sync_maps_a_line_to_a_page_position(
     client: AsyncClient, you: User, project: Project, db_session: AsyncSession
 ):
-    doc = LatexDocument(project_id=project.id, name="main.tex", source="src")
+    doc = LatexDocument(project_id=project.id, name="main.tex")
     db_session.add(doc)
     await db_session.commit()
     await db_session.refresh(doc)
@@ -233,7 +233,7 @@ async def test_sync_before_any_compile_reports_not_found_rather_than_erroring(
 ):
     """Navigation is an enhancement: with no build cached there is nothing to
     map, and the editor must keep working."""
-    doc = LatexDocument(project_id=project.id, name="main.tex", source="src")
+    doc = LatexDocument(project_id=project.id, name="main.tex")
     db_session.add(doc)
     await db_session.commit()
     await db_session.refresh(doc)
@@ -252,7 +252,7 @@ async def test_sync_before_any_compile_reports_not_found_rather_than_erroring(
 async def test_reverse_sync_maps_a_point_to_a_line(
     client: AsyncClient, you: User, project: Project, db_session: AsyncSession
 ):
-    doc = LatexDocument(project_id=project.id, name="main.tex", source="src")
+    doc = LatexDocument(project_id=project.id, name="main.tex")
     db_session.add(doc)
     await db_session.commit()
     await db_session.refresh(doc)
@@ -285,8 +285,8 @@ async def test_a_cache_hit_lets_a_second_identical_document_sync(
     cache-hit branch used to return before ever calling it -- so the second
     document's build was never recorded and its SyncTeX queries answered
     `found: False` forever, even though a correct PDF was on screen."""
-    doc1 = LatexDocument(project_id=project.id, name="a.tex", source="\\documentclass{article}")
-    doc2 = LatexDocument(project_id=project.id, name="b.tex", source="\\documentclass{article}")
+    doc1 = LatexDocument(project_id=project.id, name="a.tex")
+    doc2 = LatexDocument(project_id=project.id, name="b.tex")
     db_session.add_all([doc1, doc2])
     await db_session.commit()
     await db_session.refresh(doc1)
@@ -409,7 +409,7 @@ async def test_an_oversized_source_is_also_rejected_on_update(
     not just to creation -- an editor pasting a huge block must get the same
     real-cause 422, not a generic compiler-unavailable message five steps
     later."""
-    doc = LatexDocument(project_id=project.id, name="main.tex", source="small")
+    doc = LatexDocument(project_id=project.id, name="main.tex")
     db_session.add(doc)
     await db_session.commit()
     await db_session.refresh(doc)

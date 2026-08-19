@@ -108,7 +108,6 @@ async def create_document(
     document = LatexDocument(
         project_id=project_id,
         name=payload.name,
-        source=payload.source,
         engine=payload.engine,
         created_by=user.id,
     )
