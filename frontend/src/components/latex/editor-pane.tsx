@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef } from "react";
-import { EditorState } from "@codemirror/state";
+import { Compartment, EditorState } from "@codemirror/state";
 import { EditorView, keymap, lineNumbers, highlightActiveLine } from "@codemirror/view";
 import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
 import { StreamLanguage, bracketMatching } from "@codemirror/language";
@@ -31,6 +31,11 @@ export function EditorPane({
   // every parent render, losing the cursor and the undo history each time.
   const handlers = useRef({ onChange, onLineDoubleClick });
   handlers.current = { onChange, onLineDoubleClick };
+  // readOnly is reconfigured through a Compartment rather than being baked
+  // into the initial EditorState and left there. The same reason the
+  // callbacks live in a ref applies: rebuilding the view to pick up a new
+  // value would lose the cursor and the undo history.
+  const readOnlyCompartment = useRef(new Compartment());
 
   useEffect(() => {
     if (!hostRef.current || viewRef.current) return;
@@ -61,7 +66,7 @@ export function EditorPane({
               return false;
             },
           }),
-          EditorState.readOnly.of(readOnly),
+          readOnlyCompartment.current.of(EditorState.readOnly.of(readOnly)),
         ],
       }),
     });
@@ -84,6 +89,18 @@ export function EditorPane({
     if (current === value) return;
     view.dispatch({ changes: { from: 0, to: current.length, insert: value } });
   }, [value]);
+
+  // Previously readOnly was only read once, inside the construct-once effect
+  // above -- a parent flipping it after mount (e.g. locking the editor while
+  // a compile runs) silently had no effect on actual editability. Dispatching
+  // through the compartment reconfigures the live view instead.
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view) return;
+    view.dispatch({
+      effects: readOnlyCompartment.current.reconfigure(EditorState.readOnly.of(readOnly)),
+    });
+  }, [readOnly]);
 
   useEffect(() => {
     const view = viewRef.current;
