@@ -278,19 +278,24 @@ async def test_reverse_sync_maps_a_point_to_a_line(
 
 
 async def test_a_cache_hit_lets_a_second_identical_document_sync(
-    client: AsyncClient, you: User, project: Project, db_session: AsyncSession
+    client: AsyncClient, you: User, project: Project
 ):
     """Two documents created from the same template compile to the same
     cache key. `_latest` is written only by `LatexCache.put`, and the
     cache-hit branch used to return before ever calling it -- so the second
     document's build was never recorded and its SyncTeX queries answered
     `found: False` forever, even though a correct PDF was on screen."""
-    doc1 = LatexDocument(project_id=project.id, name="a.tex")
-    doc2 = LatexDocument(project_id=project.id, name="b.tex")
-    db_session.add_all([doc1, doc2])
-    await db_session.commit()
-    await db_session.refresh(doc1)
-    await db_session.refresh(doc2)
+    payload = {"name": "a.tex", "source": "\\documentclass{article}"}
+    doc1_resp = await client.post(
+        f"/v1/projects/{project.id}/latex", json=payload, headers={"X-Dev-User-Id": you.id}
+    )
+    doc2_resp = await client.post(
+        f"/v1/projects/{project.id}/latex",
+        json={**payload, "name": "b.tex"},
+        headers={"X-Dev-User-Id": you.id},
+    )
+    doc1_id = doc1_resp.json()["id"]
+    doc2_id = doc2_resp.json()["id"]
 
     result = CompileResult(ok=True, log="", pdf=b"%PDF-good", synctex_gz=b"gz")
     position = PdfPosition(page=1, x=1.0, y=2.0, width=3.0, height=4.0)
@@ -300,19 +305,20 @@ async def test_a_cache_hit_lets_a_second_identical_document_sync(
         patch("app.api.v1.latex.synctex_forward", AsyncMock(return_value=position)),
     ):
         first = await client.post(
-            f"/v1/projects/{project.id}/latex/{doc1.id}/compile",
+            f"/v1/projects/{project.id}/latex/{doc1_id}/compile",
             headers={"X-Dev-User-Id": you.id},
         )
         second = await client.post(
-            f"/v1/projects/{project.id}/latex/{doc2.id}/compile",
+            f"/v1/projects/{project.id}/latex/{doc2_id}/compile",
             headers={"X-Dev-User-Id": you.id},
         )
-        # Identical source and engine hash the same -- doc2's compile is a
-        # cache HIT, not a second miss.
+        # Both documents' trees hold the identical, non-empty source above,
+        # so they hash the same -- doc2's compile is a cache HIT, not a
+        # second miss.
         assert second.json()["pdf_hash"] == first.json()["pdf_hash"]
 
         sync_doc2 = await client.post(
-            f"/v1/projects/{project.id}/latex/{doc2.id}/synctex/forward",
+            f"/v1/projects/{project.id}/latex/{doc2_id}/synctex/forward",
             json={"line": 1},
             headers={"X-Dev-User-Id": you.id},
         )
