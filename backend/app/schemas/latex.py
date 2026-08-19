@@ -74,3 +74,44 @@ class SynctexReverseIn(BaseModel):
 class SynctexReverseOut(BaseModel):
     found: bool
     line: int | None = None
+
+
+class LatexFileOut(BaseModel):
+    path: str
+    is_binary: bool
+    size_bytes: int
+    updated_at: datetime
+    model_config = {"from_attributes": True}
+
+
+class LatexTreeOut(BaseModel):
+    """The tree plus the quota, in one response.
+
+    The editor shows used-of-cap in the sidebar footer; a cap the user cannot
+    see is a cap they hit as an unexplained failure. Sending it with the tree
+    avoids a second round trip on every document open.
+    """
+
+    files: list[LatexFileOut]
+    used_bytes: int
+    max_bytes: int
+
+
+class LatexFileContentOut(BaseModel):
+    path: str
+    content: str
+
+
+class LatexFileWrite(BaseModel):
+    # Bounded in CHARACTERS here purely to reject an absurd body at the edge;
+    # the real cap is `latex_file_max_bytes` in UTF-8 bytes, enforced in the
+    # service, because a character count is not a byte count.
+    content: str = Field(max_length=_MAX_SOURCE_LENGTH * 5)
+
+
+class LatexFileRename(BaseModel):
+    # `from` is a Python keyword, so the field is aliased. populate_by_name
+    # lets tests construct it either way.
+    from_path: str = Field(alias="from", min_length=1, max_length=400)
+    to_path: str = Field(alias="to", min_length=1, max_length=400)
+    model_config = {"populate_by_name": True}
