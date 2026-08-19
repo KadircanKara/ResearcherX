@@ -353,3 +353,90 @@ async def test_a_non_member_gets_404_on_export(
         headers={"X-Dev-User-Id": stranger.id},
     )
     assert resp.status_code == 404
+
+
+async def test_exporting_a_document_whose_name_contains_a_newline_still_returns_a_zip(
+    client: AsyncClient, you: User, project: Project
+):
+    created = await client.post(
+        f"/v1/projects/{project.id}/latex/import",
+        content=_zip({"main.tex": DOC}),
+        headers=_h(you),
+    )
+    doc_id = created.json()["id"]
+    patched = await client.patch(
+        f"/v1/projects/{project.id}/latex/{doc_id}",
+        json={"name": "line1\nline2"},
+        headers={"X-Dev-User-Id": you.id},
+    )
+    assert patched.status_code == 200
+
+    resp = await client.get(
+        f"/v1/projects/{project.id}/latex/{doc_id}/export",
+        headers={"X-Dev-User-Id": you.id},
+    )
+    assert resp.status_code == 200
+    disposition = resp.headers["content-disposition"]
+    # The real bug this guards: a raw newline in a header value crashes
+    # uvicorn's httptools AFTER the 200 status line is already sent (a reset
+    # connection, not a clean error) -- invisible to this in-process ASGI
+    # test client, which happily returns the header verbatim. Assert on the
+    # header's own bytes, not just that the response completed.
+    assert "\n" not in disposition
+    assert "\r" not in disposition
+    assert disposition == "attachment; filename=\"line1line2.zip\"; filename*=UTF-8''line1line2.zip"
+    with zipfile.ZipFile(io.BytesIO(resp.content)) as z:
+        assert z.namelist() == ["main.tex"]
+
+
+async def test_exporting_a_document_with_a_non_ascii_name_sets_an_rfc6266_filename(
+    client: AsyncClient, you: User, project: Project
+):
+    created = await client.post(
+        f"/v1/projects/{project.id}/latex/import",
+        content=_zip({"main.tex": DOC}),
+        headers=_h(you),
+    )
+    doc_id = created.json()["id"]
+    patched = await client.patch(
+        f"/v1/projects/{project.id}/latex/{doc_id}",
+        json={"name": "café"},
+        headers={"X-Dev-User-Id": you.id},
+    )
+    assert patched.status_code == 200
+
+    resp = await client.get(
+        f"/v1/projects/{project.id}/latex/{doc_id}/export",
+        headers={"X-Dev-User-Id": you.id},
+    )
+    assert resp.status_code == 200
+    disposition = resp.headers["content-disposition"]
+    assert "filename*=UTF-8''caf%C3%A9.zip" in disposition
+    ascii_part = disposition.split("filename=")[1].split(";")[0].strip()
+    assert ascii_part == '"caf.zip"'
+    assert "café" not in disposition
+
+
+async def test_a_viewer_can_export(
+    client: AsyncClient, db_session: AsyncSession, project: Project, you: User
+):
+    viewer = (
+        await db_session.execute(select(User).where(User.email == "amelia@lab.io"))
+    ).scalar_one()
+    db_session.add(ProjectMember(project_id=project.id, user_id=viewer.id, role="viewer"))
+    await db_session.commit()
+
+    created = await client.post(
+        f"/v1/projects/{project.id}/latex/import",
+        content=_zip({"main.tex": DOC, "chapters/intro.tex": b"\\section{I}"}),
+        headers=_h(you),
+    )
+    doc_id = created.json()["id"]
+
+    resp = await client.get(
+        f"/v1/projects/{project.id}/latex/{doc_id}/export",
+        headers={"X-Dev-User-Id": viewer.id},
+    )
+    assert resp.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(resp.content)) as z:
+        assert sorted(z.namelist()) == ["chapters/intro.tex", "main.tex"]

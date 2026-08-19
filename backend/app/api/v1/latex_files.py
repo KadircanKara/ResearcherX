@@ -13,6 +13,7 @@ message is specific rather than sanitized.
 from __future__ import annotations
 
 import io
+import urllib.parse
 import zipfile
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
@@ -192,11 +193,22 @@ async def export_archive_route(
             archive.writestr(full.path, full.blob if full.is_binary else (full.content or ""))
     await db.commit()
 
-    filename = f"{document.name or 'project'}.zip".replace('"', "")
+    raw = document.name or "project"
+    # Control characters cannot appear in a header value at all -- uvicorn
+    # rejects them AFTER the status line is sent, so the failure is a reset
+    # connection rather than a clean error. Strip them, and the quote that
+    # would end the quoted-string early.
+    safe = "".join(c for c in raw if c.isprintable() and c != '"').strip() or "project"
+    ascii_fallback = safe.encode("ascii", "ignore").decode() or "project"
+    encoded = urllib.parse.quote(f"{safe}.zip", safe="")
     return Response(
         content=buf.getvalue(),
         media_type="application/zip",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        headers={
+            "Content-Disposition": (
+                f"attachment; filename=\"{ascii_fallback}.zip\"; filename*=UTF-8''{encoded}"
+            )
+        },
     )
 
 
