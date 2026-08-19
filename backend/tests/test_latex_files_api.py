@@ -364,11 +364,23 @@ async def test_a_non_member_gets_404_on_every_file_route(
 ):
     """Pins `require_member` on all six routes, not just the two that
     happened to have coverage before -- deleting the call from any one of
-    the other four left the suite green."""
+    the other four left the suite green.
+
+    Every probed resource is made to EXIST first, as the owner: an absent
+    file would 404 from `read_file`/`_document_or_404` alone, which is
+    indistinguishable from a membership 404 and would leave this test green
+    even with `require_member` deleted from the route. `a.tex` is
+    deliberately not the document's `main_path` ("main.tex" by default), or
+    the DELETE case would 409 instead of 204/404 -- a different ambiguity.
+    `b.tex` is left absent so the rename case has a real destination."""
+    base = f"/v1/projects/{project.id}/latex/{document.id}"
+    await client.put(
+        f"{base}/file", params={"path": "a.tex"}, json={"content": "x"}, headers=_h(you)
+    )
+
     stranger = (
         await db_session.execute(select(User).where(User.email == "marco@lab.io"))
     ).scalar_one()
-    base = f"/v1/projects/{project.id}/latex/{document.id}"
 
     resp = await _call(client, base, method, suffix, body, _h(stranger))
     assert resp.status_code == 404
