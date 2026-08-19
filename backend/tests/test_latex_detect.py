@@ -53,8 +53,16 @@ def test_no_documentclass_anywhere_raises():
 
 
 def test_a_commented_out_documentclass_does_not_count():
+    """main.tex's declaration is commented out, so it must not be a
+    candidate at all -- and it must not win on its preferred name either."""
     assert (
-        detect_main([("main.tex", DOC), ("old.tex", b"% \\documentclass{article}")]) == "main.tex"
+        detect_main(
+            [
+                ("main.tex", b"% \\documentclass{article}\n\\section{old draft}"),
+                ("real.tex", DOC),
+            ]
+        )
+        == "real.tex"
     )
 
 
@@ -84,3 +92,33 @@ def test_a_commented_fontspec_does_not_select_xelatex():
 
 def test_fontspec_among_several_packages_selects_xelatex():
     assert detect_engine("\\usepackage{amsmath,fontspec,graphicx}") == "xelatex"
+
+
+def test_a_non_tex_file_containing_documentclass_text_is_not_a_candidate():
+    """The .tex extension filter is load-bearing: a .bib or .txt file that
+    happens to contain the literal string is never a candidate."""
+    assert (
+        detect_main(
+            [
+                ("real.tex", DOC),
+                ("notes.txt", b"\\documentclass{article}"),
+                ("refs.bib", b"% \\documentclass{article}"),
+            ]
+        )
+        == "real.tex"
+    )
+
+
+def test_two_different_preferred_root_names_both_declaring_is_a_genuine_tie():
+    """A leftover main.tex beside a renamed paper.tex is a common real shape.
+    Neither name is more canonical than the other -- detection must not
+    guess between them."""
+    with pytest.raises(AmbiguousMain) as exc:
+        detect_main([("main.tex", DOC), ("paper.tex", DOC)])
+    assert sorted(exc.value.paths) == ["main.tex", "paper.tex"]
+
+
+def test_a_package_name_that_merely_contains_fontspec_does_not_select_xelatex():
+    assert detect_engine("\\usepackage{nofontspec}") == "pdflatex"
+    assert detect_engine("\\usepackage{fontspec-xyz}") == "pdflatex"
+    assert detect_engine("We discuss unicode-math notation in the appendix.") == "pdflatex"
