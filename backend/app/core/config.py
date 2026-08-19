@@ -348,6 +348,17 @@ class Settings(BaseSettings):
     # caused it, so queueing is the safer default over a 429.
     latex_max_concurrent_compiles: int = 8
 
+    # Per-document tree bounds. Postgres holds the blobs (no object store in
+    # this stack), so the cap is a deliberate trade: 25MB covers a normal
+    # paper with a dozen figures and keeps every pg_dump a sane size. It is
+    # NOT a guess about what LaTeX needs -- raising it means re-measuring the
+    # compile container, whose /tmp is a tmpfs charged against mem_limit: 2g.
+    latex_project_max_bytes: int = 25 * 1024 * 1024
+    latex_file_max_bytes: int = 10 * 1024 * 1024
+    # A real project is tens of files. The bound exists so a hostile archive
+    # cannot make the tree endpoint or the editor sidebar the slow part.
+    latex_max_files: int = 2000
+
     @field_validator("cors_origins", mode="before")
     @classmethod
     def _split_cors(cls, v: object) -> object:
