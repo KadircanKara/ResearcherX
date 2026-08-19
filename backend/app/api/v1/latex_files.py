@@ -25,10 +25,19 @@ from app.schemas.latex import (
     LatexFileOut,
     LatexFileRename,
     LatexFileWrite,
+    LatexImportOut,
     LatexTreeOut,
 )
 from app.services import latex_files_service as files
+from app.services import latex_import_service
 from app.services import project_service
+from app.services.latex_archive import (
+    ArchiveTooLarge,
+    EncryptedArchive,
+    InvalidArchive,
+    read_archive,
+)
+from app.services.latex_detect import AmbiguousMain, NoMainFile
 from app.services.latex_paths import InvalidPath, normalize_path
 
 router = APIRouter(tags=["latex"])
@@ -69,6 +78,78 @@ def _translate(exc: Exception) -> HTTPException:
     if isinstance(exc, files.FileNotFound):
         return HTTPException(status_code=404, detail=f"{exc.path} is not in this document")
     raise exc
+
+
+@router.post("/projects/{project_id}/latex/import", response_model=LatexImportOut, status_code=201)
+async def import_archive_route(
+    project_id: str,
+    request: Request,
+    name: str = "Imported project",
+    main_path: str | None = None,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
+) -> LatexImportOut:
+    """Create a NEW document from an uploaded .zip. Never overwrites one.
+
+    The body is streamed against a running counter rather than `await
+    request.body()`: a client can lie in Content-Length, or send chunked with
+    no Content-Length at all, and the counter is the only real bound.
+    """
+    await project_service.require_member(db, project_id, user.id, "editor")
+
+    cap = settings.latex_project_max_bytes
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in request.stream():
+        total += len(chunk)
+        if total > cap:
+            raise HTTPException(
+                status_code=413, detail=f"{total} bytes exceeds the {cap} byte limit"
+            )
+        chunks.append(chunk)
+
+    try:
+        entries = read_archive(b"".join(chunks))
+    except ArchiveTooLarge as exc:
+        raise HTTPException(status_code=413, detail=str(exc)) from exc
+    except (EncryptedArchive, InvalidArchive) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    if main_path is not None and not any(e.path == main_path for e in entries):
+        raise HTTPException(status_code=422, detail=f"{main_path} is not in the archive")
+
+    try:
+        document, count = await latex_import_service.import_archive(
+            db,
+            project_id=project_id,
+            user_id=user.id,
+            entries=entries,
+            name=name,
+            main_path=main_path,
+        )
+    except AmbiguousMain as exc:
+        await db.rollback()
+        raise HTTPException(
+            status_code=422,
+            detail={"error": "ambiguous_main", "candidates": exc.paths},
+        ) from exc
+    except NoMainFile as exc:
+        await db.rollback()
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        await db.rollback()
+        raise _translate(exc) from exc
+
+    await db.commit()
+    await db.refresh(document)
+    return LatexImportOut(
+        id=document.id,
+        name=document.name,
+        main_path=document.main_path,
+        engine=document.engine,
+        revision=document.revision,
+        file_count=count,
+    )
 
 
 @router.get(f"{_BASE}/files", response_model=LatexTreeOut)

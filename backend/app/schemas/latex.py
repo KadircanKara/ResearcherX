@@ -127,3 +127,16 @@ class LatexFileRename(BaseModel):
     from_path: str = Field(alias="from", min_length=1, max_length=400)
     to_path: str = Field(alias="to", min_length=1, max_length=400)
     model_config = {"populate_by_name": True}
+
+
+class LatexImportOut(BaseModel):
+    """What an import returns. Deliberately the document's identity plus the
+    two things detection decided, so the client can show "we picked main.tex
+    and xelatex" without a second request."""
+
+    id: str
+    name: str
+    main_path: str
+    engine: str
+    revision: int
+    file_count: int
