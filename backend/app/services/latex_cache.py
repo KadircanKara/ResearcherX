@@ -69,9 +69,21 @@ class LatexCache:
     def latest_for(self, document_id: str) -> CachedBuild | None:
         """The last successful build of a document, whatever its source is
         now. This is what keeps the last good PDF on screen when the next
-        compile fails."""
+        compile fails.
+
+        Promotes on read, exactly as `get` does. Without that, the fallback
+        PDF gets no protection from the eviction pressure it is supposed to
+        survive: a user whose compiles keep failing keeps asking for this
+        build, and unrelated documents' traffic evicts it anyway. Measured in
+        review -- five consecutive reads did not save it.
+        """
         key = self._latest.get(document_id)
-        return self._entries.get(key) if key else None
+        if key is None:
+            return None
+        build = self._entries.get(key)
+        if build is not None:
+            self._entries.move_to_end(key)
+        return build
 
     def _evict(self) -> None:
         while len(self._entries) > self._max_entries or self._total_bytes() > self._max_bytes:
@@ -80,7 +92,20 @@ class LatexCache:
                 # otherwise be dropped the moment it lands, making every
                 # request recompile it forever.
                 return
-            self._entries.popitem(last=False)
+            key, _ = self._entries.popitem(last=False)
+            self._forget(key)
+
+    def _forget(self, key: str) -> None:
+        """Drop document pointers to an evicted key.
+
+        `_latest` is otherwise never pruned and grows for the life of the
+        process -- measured in review at 100,000 live mappings after 100,000
+        one-off documents, while `_entries` stayed correctly bounded. A
+        dangling pointer is also dead weight: `latest_for` would look up a key
+        that is gone and return None anyway.
+        """
+        for document_id in [d for d, k in self._latest.items() if k == key]:
+            del self._latest[document_id]
 
     def _total_bytes(self) -> int:
         return sum(build.size for build in self._entries.values())

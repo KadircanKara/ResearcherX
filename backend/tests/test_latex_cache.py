@@ -70,3 +70,27 @@ def test_latest_for_a_document_survives_a_failed_recompile():
 
 def test_latest_for_an_unknown_document_is_none():
     assert LatexCache(max_entries=4, max_bytes=10_000).latest_for("nobody") is None
+
+
+def test_reading_the_fallback_build_protects_it_from_eviction():
+    """The last-good-PDF path must survive the pressure it exists to survive.
+    Without promotion on read, another document's traffic evicts the build a
+    user is actively falling back on."""
+    cache = LatexCache(max_entries=2, max_bytes=10_000)
+    cache.put("a", _build(), document_id="doc1")
+    cache.put("b", _build())
+    cache.latest_for("doc1")  # doc1's build is now newest
+    cache.put("c", _build())
+
+    assert cache.latest_for("doc1") is not None
+
+
+def test_evicting_a_build_forgets_the_documents_pointing_at_it():
+    """`_latest` must not grow for the life of the process: an entry that has
+    been evicted can never be served again, so its pointers are dead weight."""
+    cache = LatexCache(max_entries=1, max_bytes=10_000)
+    cache.put("a", _build(), document_id="doc1")
+    cache.put("b", _build(), document_id="doc2")
+
+    assert cache.latest_for("doc1") is None
+    assert cache._latest == {"doc2": "b"}
