@@ -81,6 +81,21 @@ export async function compileDocument(
 }
 
 /**
+ * Thrown by `fetchPdfBytes` specifically for a 404: the compiler already
+ * reported success and handed back a hash, but the cache evicted that build
+ * before this fetch ran. Distinguished from every other failure (typed,
+ * rather than parsing `.message`) because the correct user-facing story is
+ * "compile again to rebuild it", not "the compiler is unavailable" -- the
+ * compiler just worked.
+ */
+export class PdfNotFoundError extends Error {
+  constructor() {
+    super("pdf not found");
+    this.name = "PdfNotFoundError";
+  }
+}
+
+/**
  * The PDF bytes for one build.
  *
  * Raw fetch rather than apiGet because the response is application/pdf, not
@@ -102,6 +117,7 @@ export async function fetchPdfBytes(
     `${API_BASE}/v1/projects/${projectId}/latex/${documentId}/pdf?hash=${encodeURIComponent(hash)}`,
     { headers, cache: "no-store" }
   );
+  if (r.status === 404) throw new PdfNotFoundError();
   if (!r.ok) throw new Error(`GET pdf -> ${r.status}`);
   return new Uint8Array(await r.arrayBuffer());
 }

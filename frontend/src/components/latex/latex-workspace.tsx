@@ -17,6 +17,7 @@ import {
   patchDocument,
   synctexForward,
   synctexReverse,
+  PdfNotFoundError,
   type LatexDocument,
   type LatexEngine,
 } from "@/lib/latex";
@@ -58,6 +59,12 @@ interface PendingSave {
   text: string;
 }
 
+/** An in-flight `PATCH .../engine` call, so a racing `compile()` can wait for it. */
+interface PendingEnginePatch {
+  docId: string;
+  promise: Promise<void>;
+}
+
 export function LatexWorkspace({ projectId, role }: LatexWorkspaceProps) {
   const canEdit = CAN_EDIT.includes(role);
 
@@ -86,6 +93,10 @@ export function LatexWorkspace({ projectId, role }: LatexWorkspaceProps) {
   // placeholder pane -- see the load effect's `.catch` below for why that is
   // always the branch on screen when this is non-null.
   const [loadError, setLoadError] = useState<string | null>(null);
+  // Set only when a `PATCH .../engine` for the CURRENTLY selected document
+  // fails. See `handleEngineChange` for why it is guarded on `selectedIdRef`
+  // rather than always shown.
+  const [engineError, setEngineError] = useState<string | null>(null);
   // Monotonic, so jumping twice to the same line still scrolls the editor.
   const nonce = useRef(0);
 
@@ -106,6 +117,21 @@ export function LatexWorkspace({ projectId, role }: LatexWorkspaceProps) {
   // into at schedule time. `scheduleSave` is the only writer; `flush` is
   // the only reader.
   const pending = useRef<PendingSave | null>(null);
+  // The Promise of whichever save is CURRENTLY on the wire, so a `flush()`
+  // call that finds nothing new pending -- because an EARLIER `flush()` call
+  // already claimed it via the synchronous capture-and-null below -- can
+  // still wait for THAT save to land, instead of resolving immediately while
+  // its PATCH is still in flight. Without this, `compile()`'s `await
+  // flush()` was a no-op whenever the 800ms autosave had already started the
+  // network request: type, let the debounce fire, then hit Cmd/Ctrl+S inside
+  // that PATCH's round trip -- the backend compiles the PREVIOUS text while
+  // `compiled.source` records the CURRENT one, and `isStale` reports a
+  // SyncTeX map built from stale source as fresh.
+  const inFlightSave = useRef<Promise<void> | null>(null);
+  // The in-flight `PATCH .../engine` for whichever document requested it, so
+  // `compile` can await the one for the document it is about to compile --
+  // see `handleEngineChange`'s own comment for the failure this closes.
+  const enginePatch = useRef<PendingEnginePatch | null>(null);
 
   // Mirrors `selectedId`, updated right here in the render body (not from an
   // effect, which would land one render late) so it is always exactly as
@@ -156,16 +182,42 @@ export function LatexWorkspace({ projectId, role }: LatexWorkspaceProps) {
       saveTimer.current = null;
     }
     const toSend = pending.current;
-    if (!toSend) return;
+    if (!toSend) {
+      // Nothing NEW was scheduled, but an EARLIER call to this same
+      // function may already have claimed one and put it on the wire (see
+      // the synchronous capture-and-null just below) -- wait for that one,
+      // so a caller can rely on "the server is caught up" once this
+      // resolves, rather than racing its own in-flight PATCH.
+      if (inFlightSave.current) await inFlightSave.current;
+      return;
+    }
+    // Synchronous, and above the first `await` in this function on purpose:
+    // this is what makes a second concurrent `flush()` call -- one that
+    // finds `pending.current` already null -- incapable of ever sending a
+    // duplicate PATCH for the same edit. Do not move this below the `await`
+    // below; that would reopen the double-send window this closes.
     pending.current = null;
     if (toSend.text === savedSourceByDoc.current.get(toSend.docId)) return;
     setSaveState("saving");
+    const send = (async () => {
+      try {
+        await patchDocument(projectId, toSend.docId, { source: toSend.text });
+        savedSourceByDoc.current.set(toSend.docId, toSend.text);
+        setSaveState("idle");
+      } catch {
+        setSaveState("error");
+      }
+    })();
+    inFlightSave.current = send;
     try {
-      await patchDocument(projectId, toSend.docId, { source: toSend.text });
-      savedSourceByDoc.current.set(toSend.docId, toSend.text);
-      setSaveState("idle");
-    } catch {
-      setSaveState("error");
+      await send;
+    } finally {
+      // Only clear if this call's own send is still the one on record -- a
+      // newer `flush()` call may have already replaced it with a LATER
+      // edit's send (same "only clear what's still mine" rule `enginePatch`
+      // below and `pending` above both follow), and clearing that out from
+      // under it would make a still-in-flight save briefly look finished.
+      if (inFlightSave.current === send) inFlightSave.current = null;
     }
   }, [projectId]);
 
@@ -199,6 +251,7 @@ export function LatexWorkspace({ projectId, role }: LatexWorkspaceProps) {
     // unconditionally on every selection change, before the new document
     // (if any) has even started loading.
     setSaveState("idle");
+    setEngineError(null);
     if (!selectedId) {
       setSource("");
       bufferDocId.current = null;
@@ -326,8 +379,23 @@ export function LatexWorkspace({ projectId, role }: LatexWorkspaceProps) {
       // so compiling mid-debounce would build the previous keystroke's text
       // and hand back a SyncTeX map that does not match what is on screen.
       // This is the same `flush` the document-switch cleanup uses -- no
-      // second save path.
+      // second save path. `flush` itself now also waits out an autosave that
+      // was ALREADY on the wire when this ran (see `inFlightSave`'s comment)
+      // -- previously this await could return immediately mid-PATCH.
       await flush();
+
+      // Same idea, for the engine: `flush` knows nothing about it, so
+      // picking xelatex and hitting Compile inside that PATCH's round trip
+      // would otherwise reach the line below while the SERVER still has
+      // whatever engine it had before -- the backend compiles with the OLD
+      // engine while this document's `compiled.engine` records the NEW one,
+      // and `isStale` reports the preview fresh for an engine it was never
+      // built with. Scoped to `docId`: an in-flight patch for some OTHER
+      // document the user has since switched away from has no bearing on
+      // compiling this one.
+      if (enginePatch.current?.docId === docId) {
+        await enginePatch.current.promise;
+      }
 
       const result = await compileDocument(projectId, docId);
       if (selectedIdRef.current !== docId) return; // user moved on; discard
@@ -339,12 +407,39 @@ export function LatexWorkspace({ projectId, role }: LatexWorkspaceProps) {
         setLog(result.log);
         return;
       }
-      const bytes = await fetchPdfBytes(projectId, docId, result.pdf_hash);
+
+      let bytes: Uint8Array;
+      try {
+        bytes = await fetchPdfBytes(projectId, docId, result.pdf_hash);
+      } catch (err) {
+        // The compiler just reported success and handed back a hash, but
+        // the build is gone by the time this fetch runs -- the cache
+        // evicted it, not a compiler outage. "Unavailable" would tell the
+        // user to wait for something that was never coming back on its own;
+        // recompiling produces a fresh hash and a fresh file immediately.
+        if (selectedIdRef.current === docId) {
+          setLog(
+            err instanceof PdfNotFoundError
+              ? "That build is no longer cached. Compile again to rebuild it."
+              : "The LaTeX compiler is unavailable. Please try again."
+          );
+        }
+        return;
+      }
       if (selectedIdRef.current !== docId) return; // user moved on; discard
 
       setPdfBytes(bytes);
       setCompiled({ source, engine, hash: result.pdf_hash });
       setLog(null);
+      // A fresh PDF invalidates both: `highlight` marks coordinates in the
+      // PREVIOUS build, meaningless against this one, and `syncNote` may
+      // still be the "PDF is out of date" message from a jump made while
+      // stale -- which this compile, having just succeeded, made false.
+      // Its render below is ALSO gated on `stale` directly for the same
+      // invariant, but clearing here means it does not linger even for the
+      // one render before that recomputes.
+      setHighlight(null);
+      setSyncNote(null);
     } catch {
       if (selectedIdRef.current === docId) {
         setLog("The LaTeX compiler is unavailable. Please try again.");
@@ -449,11 +544,35 @@ export function LatexWorkspace({ projectId, role }: LatexWorkspaceProps) {
   // on that render `engine` still holds the PREVIOUS document's value, so an
   // effect would PATCH the newly-opened document to the old one's engine.
   function handleEngineChange(next: LatexEngine) {
+    const previous = engine;
     setEngine(next);
+    setEngineError(null);
     if (!canEdit || !selectedId) return;
-    void patchDocument(projectId, selectedId, { engine: next }).then((doc) =>
-      setDocuments((prev) => prev.map((d) => (d.id === doc.id ? doc : d)))
-    );
+    const docId = selectedId;
+    const promise = patchDocument(projectId, docId, { engine: next })
+      .then((doc) => {
+        setDocuments((prev) => prev.map((d) => (d.id === doc.id ? doc : d)));
+      })
+      .catch(() => {
+        // The server never got the new engine -- the dropdown must not go
+        // on claiming it did, or every compile from here on silently uses
+        // whatever the server actually has while the badge (and `isStale`,
+        // which trusts `engine`) says otherwise. Guarded on `selectedIdRef`,
+        // not unconditional: by the time this settles the user may have
+        // switched to a different document entirely, whose OWN `engine`
+        // this must not stomp -- the same "is the user still here" question
+        // `compile` and the SyncTeX callbacks ask, so it uses the same ref.
+        if (selectedIdRef.current === docId) {
+          setEngine(previous);
+          setEngineError(`Could not change the engine. It is still ${previous}.`);
+        }
+      })
+      .finally(() => {
+        // Only clear if this call is still the one on record -- see
+        // `inFlightSave`'s identical guard in `flush` above.
+        if (enginePatch.current?.promise === promise) enginePatch.current = null;
+      });
+    enginePatch.current = { docId, promise };
   }
 
   async function handleDelete(id: string) {
@@ -590,11 +709,22 @@ export function LatexWorkspace({ projectId, role }: LatexWorkspaceProps) {
                     {STALE_NOTE}
                   </span>
                 )}
-                {syncNote && (
+                {/* `syncNote` is cleared on a successful compile (see `compile`'s
+                    own comment), but this gate is the STRUCTURAL guarantee: the
+                    "PDF is out of date" message can never render while the PDF
+                    is not, in fact, out of date, regardless of whether some
+                    future call site remembers to clear it. Every OTHER message
+                    this state can hold ("No place in the PDF matches...", "Sync
+                    is unavailable...") is not a staleness claim and is shown
+                    unconditionally. */}
+                {syncNote && (syncNote !== SYNC_STALE_NOTE || stale) && (
                   <span className="text-[11px] text-muted-foreground">{syncNote}</span>
                 )}
               </div>
               <div className="flex items-center gap-2">
+                {engineError && (
+                  <span className="text-[11px] text-destructive">{engineError}</span>
+                )}
                 <select
                   value={engine}
                   disabled={!canEdit}
