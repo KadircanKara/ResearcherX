@@ -204,7 +204,14 @@ def read_archive(blob: bytes) -> list[ArchiveEntry]:
     with zf:
         infos = zf.infolist()
         # Counted from the central directory BEFORE any decompression, so a
-        # hostile archive cannot make us work before we refuse it.
+        # hostile archive cannot make us DECOMPRESS before we refuse it. This
+        # does NOT mean the count is free: `zf.infolist()` above already
+        # materialised every ZipInfo, and on a many-entry archive that parse
+        # itself is the expensive part (measured: 8.1s / 152MB peak for a
+        # 24MB archive of 270,000 empty entries, comfortably under the 25MB
+        # body cap). The real control for THAT phase is running this whole
+        # function off the event loop in a bounded threadpool -- see
+        # `_import_semaphore` in `api/v1/latex_files.py`.
         if len(infos) > settings.latex_max_files:
             raise ArchiveTooLarge(
                 f"{len(infos)} entries exceeds the {settings.latex_max_files} entry limit"

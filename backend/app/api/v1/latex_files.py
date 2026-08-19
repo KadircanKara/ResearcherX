@@ -12,13 +12,16 @@ message is specific rather than sanitized.
 
 from __future__ import annotations
 
+import asyncio
 import io
+import json
 import urllib.parse
 import zipfile
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.concurrency import run_in_threadpool
 
 from app.core.config import settings
 from app.core.identity import get_current_user
@@ -42,11 +45,25 @@ from app.services.latex_archive import (
     read_archive,
 )
 from app.services.latex_detect import AmbiguousMain, NoMainFile
+from app.services.latex_import_service import MANIFEST_PATH
 from app.services.latex_paths import InvalidPath, normalize_path
 
 router = APIRouter(tags=["latex"])
 
 _BASE = "/projects/{project_id}/latex/{document_id}"
+
+# Bounds concurrent archive PARSES only. `zipfile.ZipFile(...).infolist()`
+# materialises the whole central directory before the entry-count guard can
+# reject an oversized archive (measured: 8.1s / 152MB peak for a 24MB/270k
+# entry archive, comfortably under the 25MB body cap). Running the parse in
+# a threadpool (below) keeps it off the event loop; this semaphore keeps N
+# concurrent parses from each holding ~152MB at once. Module-level and valid
+# only because uvicorn runs a single worker -- see `_compile_semaphore` in
+# `latex_compiler.py` for the same invariant and the same reason its tests
+# patch in a fresh semaphore rather than contending this one (an
+# asyncio.Semaphore binds to the event loop that first contends it, and
+# pytest hands out a fresh loop per test).
+_import_semaphore = asyncio.Semaphore(settings.latex_max_concurrent_imports)
 
 
 async def _document_or_404(db: AsyncSession, project_id: str, document_id: str) -> LatexDocument:
@@ -81,6 +98,8 @@ def _translate(exc: Exception) -> HTTPException:
         )
     if isinstance(exc, files.FileNotFound):
         return HTTPException(status_code=404, detail=f"{exc.path} is not in this document")
+    if isinstance(exc, files.InvalidEncoding):
+        return HTTPException(status_code=422, detail=f"{exc.path} is not valid UTF-8 text")
     raise exc
 
 
@@ -112,8 +131,10 @@ async def import_archive_route(
             )
         chunks.append(chunk)
 
+    blob = b"".join(chunks)
     try:
-        entries = read_archive(b"".join(chunks))
+        async with _import_semaphore:
+            entries = await run_in_threadpool(read_archive, blob)
     except ArchiveTooLarge as exc:
         raise HTTPException(status_code=413, detail=str(exc)) from exc
     except (EncryptedArchive, InvalidArchive) as exc:
@@ -191,6 +212,19 @@ async def export_archive_route(
             if full is None:
                 continue
             archive.writestr(full.path, full.blob if full.is_binary else (full.content or ""))
+        # Round-trip manifest: `main_path` and `engine` are decisions
+        # detection cannot re-derive on its own (an ambiguity the user
+        # already resolved, an engine set by PATCH with no triggering
+        # package). Import consumes and discards this entry -- it never
+        # lands in the re-imported tree. Its mere presence as a root-level
+        # file also defeats the wrapper-stripping heuristic in
+        # `latex_archive._common_prefix` (a root-level file already means
+        # "don't strip", so a tree entirely under one directory, e.g.
+        # `src/`, round-trips with its paths unchanged).
+        archive.writestr(
+            MANIFEST_PATH,
+            json.dumps({"main_path": document.main_path, "engine": document.engine}),
+        )
     await db.commit()
 
     raw = document.name or "project"

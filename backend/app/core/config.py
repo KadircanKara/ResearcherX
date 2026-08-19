@@ -348,6 +348,19 @@ class Settings(BaseSettings):
     # caused it, so queueing is the safer default over a 429.
     latex_max_concurrent_compiles: int = 8
 
+    # Ceiling on archive PARSES running at once, enforced by a module-level
+    # asyncio.Semaphore in api/v1/latex_files.py -- same loop-bound-on-first-
+    # use caveat as `_compile_semaphore` above, same single-worker
+    # precondition. `zipfile.ZipFile(...).infolist()` materialises the WHOLE
+    # central directory into ZipInfo objects before the entry-count guard can
+    # reject an oversized archive: measured at 8.1s / 152MB peak RSS for a
+    # 24MB archive of 270,000 empty entries (under the 25MB body cap, so the
+    # streaming byte counter never fires either). The parse itself runs in a
+    # threadpool so it cannot block the event loop, but a threadpool alone
+    # still lets N parses each hold ~152MB at once -- this bounds how many
+    # run concurrently.
+    latex_max_concurrent_imports: int = 4
+
     # Per-document tree bounds. Postgres holds the blobs (no object store in
     # this stack), so the cap is a deliberate trade: 25MB covers a normal
     # paper with a dozen figures and keeps every pg_dump a sane size. It is

@@ -92,9 +92,22 @@ def test_a_drive_letter_entry_rejects_the_archive_even_when_a_sibling_would_mask
 
 
 def test_git_metadata_sharing_a_prefix_is_filtered_not_treated_as_a_shared_wrapper():
-    blob = _zip({".git/config": b"x", ".git/HEAD": b"y"})
-    with pytest.raises(InvalidArchive):
-        read_archive(blob)
+    """A real project file alongside the `.git/` entries: this pins that
+    `.git/*` is filtered as junk specifically, not merely that an
+    all-junk archive is rejected as empty (`.git/config` and `.git/HEAD`
+    alone, with no other file, passed the old version of this test for the
+    wrong reason -- `test_an_archive_of_only_junk_is_rejected_as_empty`
+    already covers that case)."""
+    blob = _zip({"main.tex": b"x", ".git/config": b"y", ".git/HEAD": b"z"})
+    assert [e.path for e in read_archive(blob)] == ["main.tex"]
+
+
+def test_a_single_surviving_top_level_directory_still_strips_when_alone():
+    """Deliberate behaviour, previously held only by the ruling in
+    `_common_prefix`'s docstring: a lone top-level directory strips even
+    though there is nothing else at the root to compare it against."""
+    blob = _zip({"chapters/intro.tex": b"x"})
+    assert [e.path for e in read_archive(blob)] == ["intro.tex"]
 
 
 def test_a_macosx_sibling_does_not_prevent_a_real_wrapper_from_being_stripped():

@@ -55,6 +55,14 @@ class FileNotFound(Exception):
         self.path = path
 
 
+class InvalidEncoding(Exception):
+    """`is_binary=False` was claimed for bytes that are not valid UTF-8."""
+
+    def __init__(self, path: str) -> None:
+        super().__init__(f"{path!r} is not valid UTF-8 text")
+        self.path = path
+
+
 async def list_files(db: AsyncSession, document_id: str) -> list[LatexFile]:
     """Every file in the tree, sorted by path. Content columns deferred.
 
@@ -242,6 +250,15 @@ async def bulk_create(
     Still enforces the total-bytes and per-count caps in Python over
     `entries` -- defence in depth, not reliance on the archive reader having
     already done it.
+
+    PRECONDITION callers must uphold: `is_binary=False` means `data` decodes
+    as UTF-8. `latex_archive.classify_binary` is what establishes this today.
+    The decode below still does not TRUST that blindly -- it is guarded, so a
+    caller that violates the precondition gets a typed `InvalidEncoding`
+    (translated to a 422) rather than an unhandled `UnicodeDecodeError`
+    surfacing as a 500 mid-transaction. Never falls back to
+    `errors="replace"`: that would silently persist corrupted source instead
+    of refusing it.
     """
     total = 0
     count = 0
@@ -255,12 +272,18 @@ async def bulk_create(
 
     for path, data, is_binary in entries:
         normalized = normalize_path(path)
+        content: str | None = None
+        if not is_binary:
+            try:
+                content = data.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise InvalidEncoding(normalized) from exc
         db.add(
             LatexFile(
                 document_id=document_id,
                 path=normalized,
                 is_binary=is_binary,
-                content=None if is_binary else data.decode("utf-8"),
+                content=content,
                 blob=data if is_binary else None,
                 size_bytes=len(data),
             )
