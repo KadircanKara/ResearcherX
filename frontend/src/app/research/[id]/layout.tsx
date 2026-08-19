@@ -1,15 +1,17 @@
 "use client"
 
 import { useEffect, useState } from "react"
-import { useParams } from "next/navigation"
+import { useParams, usePathname } from "next/navigation"
 import { ProjectHeader } from "@/components/project-header"
 import { ProjectTabs } from "@/components/project-tabs"
 import { getProject } from "@/lib/projects"
 import { useIdentity } from "@/lib/identity"
+import { cn } from "@/lib/utils"
 import type { ProjectDetail } from "@/lib/types"
 
 export default function ProjectLayout({ children }: { children: React.ReactNode }) {
   const { id } = useParams<{ id: string }>()
+  const pathname = usePathname()
   const { me } = useIdentity()
   const [detail, setDetail] = useState<ProjectDetail | null>(null)
   const [notFound, setNotFound] = useState(false)
@@ -54,8 +56,12 @@ export default function ProjectLayout({ children }: { children: React.ReactNode 
     )
   }
 
+  // The LaTeX tab is a two-pane editor; 5xl is roughly one pane wide. Every
+  // other tab is a reading column and stays where it is.
+  const wide = pathname.startsWith(`/research/${id}/latex`)
+
   return (
-    <div className="mx-auto w-full max-w-5xl px-6 py-8">
+    <div className={cn("mx-auto w-full px-6 py-8", wide ? "max-w-[110rem]" : "max-w-5xl")}>
       <ProjectHeader detail={detail} />
       <div className="mt-5">
         <ProjectTabs projectId={id} />
