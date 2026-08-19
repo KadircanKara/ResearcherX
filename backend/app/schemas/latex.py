@@ -11,16 +11,24 @@ from pydantic import BaseModel, Field
 # `source_hash` as an arbitrary user-controlled string.
 Engine = Literal["pdflatex", "xelatex"]
 
+# A LaTeX source is text, and 2MB is far beyond any real paper. Bounding it
+# here turns an oversized document into a 422 naming the real problem at the
+# edge. Left unbounded, the request instead reaches the compile service and
+# fails there with a generic "unavailable" message -- measured live, an
+# unbounded 6MB source returned exactly that log line, reading as an infra
+# problem rather than a size problem the user could act on.
+_MAX_SOURCE_LENGTH = 2_000_000
+
 
 class LatexDocumentCreate(BaseModel):
     name: str = Field(min_length=1, max_length=200)
-    source: str = ""
+    source: str = Field(default="", max_length=_MAX_SOURCE_LENGTH)
     engine: Engine = "pdflatex"
 
 
 class LatexDocumentUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=200)
-    source: str | None = None
+    source: str | None = Field(default=None, max_length=_MAX_SOURCE_LENGTH)
     engine: Engine | None = None
 
 

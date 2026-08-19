@@ -379,3 +379,42 @@ async def test_a_cache_hit_after_an_edit_and_undo_syncs_the_reverted_build_not_t
     called_source, called_pdf, called_synctex, called_line = forward.call_args.args
     assert called_pdf == b"%PDF-S1"
     assert called_synctex == b"gz-s1"
+
+
+async def test_an_oversized_source_is_rejected_with_a_422_not_silently_stored(
+    client: AsyncClient, you: User, project: Project
+):
+    """Unbounded, this reaches the compile service and fails there with the
+    generic 'unavailable' message -- measured live against a real 6MB
+    source. A 422 at the edge names the actual problem (too large) instead
+    of reading as an infra outage the user retries forever."""
+    resp = await client.post(
+        f"/v1/projects/{project.id}/latex",
+        json={"name": "huge.tex", "source": "x" * 2_000_001},
+        headers={"X-Dev-User-Id": you.id},
+    )
+
+    assert resp.status_code == 422
+    assert any(err["type"] == "string_too_long" for err in resp.json()["detail"])
+
+
+async def test_an_oversized_source_is_also_rejected_on_update(
+    client: AsyncClient, you: User, project: Project, db_session: AsyncSession
+):
+    """The same bound applies to an edit growing a document past the limit,
+    not just to creation -- an editor pasting a huge block must get the same
+    real-cause 422, not a generic compiler-unavailable message five steps
+    later."""
+    doc = LatexDocument(project_id=project.id, name="main.tex", source="small")
+    db_session.add(doc)
+    await db_session.commit()
+    await db_session.refresh(doc)
+
+    resp = await client.patch(
+        f"/v1/projects/{project.id}/latex/{doc.id}",
+        json={"source": "x" * 2_000_001},
+        headers={"X-Dev-User-Id": you.id},
+    )
+
+    assert resp.status_code == 422
+    assert any(err["type"] == "string_too_long" for err in resp.json()["detail"])
