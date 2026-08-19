@@ -213,12 +213,22 @@ async def rename_file(
 ) -> LatexFileOut:
     await project_service.require_member(db, project_id, user.id, "editor")
     document = await _document_or_404(db, project_id, document_id)
+    # Normalized once, up front, and compared/passed as the normalized value:
+    # `main_path` is always stored normalized, so comparing it against the
+    # raw client string lets a denormalized spelling (`./main.tex`) rename
+    # the row while leaving `main_path` pointing at a path that no longer
+    # exists -- the same class of bug the delete route already guards
+    # against for the exact same reason.
     try:
-        row = await files.rename_file(db, document_id, payload.from_path, payload.to_path)
+        src = normalize_path(payload.from_path)
+    except InvalidPath as exc:
+        raise _translate(exc) from exc
+    try:
+        row = await files.rename_file(db, document_id, src, payload.to_path)
         # The main file following its own rename is the only sane behaviour:
         # the alternative is a document whose main_path silently points at
         # nothing.
-        if document.main_path == payload.from_path:
+        if document.main_path == src:
             document.main_path = row.path
     except Exception as exc:
         await db.rollback()
