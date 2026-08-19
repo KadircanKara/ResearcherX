@@ -209,6 +209,22 @@ export function LatexWorkspace({ projectId, role }: LatexWorkspaceProps) {
 
   const compile = useCallback(async () => {
     if (!canEdit || !selectedId || compiling) return;
+    // Captured now, before any await, and compared against `bufferDocId`
+    // (the LIVE "what document is actually loaded" ref) on every path below
+    // that writes pdfBytes/compiled/log -- comparing against `selectedId`
+    // instead would be comparing this closure's own value against itself,
+    // always equal, never catching a switch. Without this, a slow compile of
+    // A completing after the user has switched to B unconditionally
+    // overwrites B's screen with A's PDF or log: the same failure family
+    // autosave was hardened against twice, and `bufferDocId` is the existing
+    // guard for it, just never extended to compile. `isStale` does NOT catch
+    // this -- two untouched documents both created from STARTER have
+    // identical source and engine, so A's PDF rendered under B reports
+    // itself as perfectly up to date, with no signal anything is wrong. An
+    // id comparison (not a sequence counter) is deliberate: switching away
+    // from A and back to A before this resolves must still apply the
+    // result, and A's id is the same both times.
+    const docId = selectedId;
     setCompiling(true);
     try {
       // Flush a pending autosave first: the backend compiles the SAVED source,
@@ -218,7 +234,9 @@ export function LatexWorkspace({ projectId, role }: LatexWorkspaceProps) {
       // second save path.
       await flush();
 
-      const result = await compileDocument(projectId, selectedId);
+      const result = await compileDocument(projectId, docId);
+      if (bufferDocId.current !== docId) return; // user moved on; discard
+
       if (!result.ok || !result.pdf_hash) {
         // The last good PDF stays on screen on purpose: a broken edit should
         // not blank the preview, and the previous render is still the most
@@ -226,12 +244,16 @@ export function LatexWorkspace({ projectId, role }: LatexWorkspaceProps) {
         setLog(result.log);
         return;
       }
-      const bytes = await fetchPdfBytes(projectId, selectedId, result.pdf_hash);
+      const bytes = await fetchPdfBytes(projectId, docId, result.pdf_hash);
+      if (bufferDocId.current !== docId) return; // user moved on; discard
+
       setPdfBytes(bytes);
       setCompiled({ source, engine, hash: result.pdf_hash });
       setLog(null);
     } catch {
-      setLog("The LaTeX compiler is unavailable. Please try again.");
+      if (bufferDocId.current === docId) {
+        setLog("The LaTeX compiler is unavailable. Please try again.");
+      }
     } finally {
       setCompiling(false);
     }
