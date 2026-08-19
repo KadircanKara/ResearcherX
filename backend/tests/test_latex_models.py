@@ -1,9 +1,11 @@
 """The document row. Source is the only durable artifact; the PDF is derived."""
 
-from sqlalchemy import select
+import pytest
+from sqlalchemy import delete, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import LatexDocument, Project, User
+from app.db.models import LatexDocument, LatexFile, Project, User
 from app.db.seed import seed_users
 
 
@@ -47,3 +49,146 @@ async def test_documents_are_scoped_to_their_project(db_session: AsyncSession):
     )
 
     assert {r.name for r in rows} == {"a.tex", "b.tex"}
+
+
+async def test_a_new_document_defaults_to_main_tex_at_revision_one(db_session: AsyncSession):
+    project = await _project(db_session)
+    doc = LatexDocument(project_id=project.id, name="paper", source="")
+    db_session.add(doc)
+    await db_session.commit()
+    await db_session.refresh(doc)
+
+    assert doc.main_path == "main.tex"
+    assert doc.revision == 1
+
+
+async def test_a_text_file_persists_against_its_document(db_session: AsyncSession):
+    project = await _project(db_session)
+    doc = LatexDocument(project_id=project.id, name="paper", source="")
+    db_session.add(doc)
+    await db_session.flush()
+    db_session.add(
+        LatexFile(
+            document_id=doc.id,
+            path="chapters/intro.tex",
+            is_binary=False,
+            content="\\section{Intro}",
+            size_bytes=15,
+        )
+    )
+    await db_session.commit()
+
+    rows = (
+        (await db_session.execute(select(LatexFile).where(LatexFile.document_id == doc.id)))
+        .scalars()
+        .all()
+    )
+    assert [r.path for r in rows] == ["chapters/intro.tex"]
+    assert rows[0].blob is None
+    assert rows[0].created_at is not None
+
+
+async def test_a_binary_file_persists_its_blob(db_session: AsyncSession):
+    project = await _project(db_session)
+    doc = LatexDocument(project_id=project.id, name="paper", source="")
+    db_session.add(doc)
+    await db_session.flush()
+    db_session.add(
+        LatexFile(
+            document_id=doc.id,
+            path="figures/fig1.png",
+            is_binary=True,
+            blob=b"\x89PNG\r\n\x1a\n",
+            size_bytes=8,
+        )
+    )
+    await db_session.commit()
+
+    row = (
+        await db_session.execute(select(LatexFile).where(LatexFile.path == "figures/fig1.png"))
+    ).scalar_one()
+    assert row.blob == b"\x89PNG\r\n\x1a\n"
+    assert row.content is None
+
+
+async def test_two_files_cannot_share_a_path_within_one_document(db_session: AsyncSession):
+    project = await _project(db_session)
+    doc = LatexDocument(project_id=project.id, name="paper", source="")
+    db_session.add(doc)
+    await db_session.flush()
+    db_session.add(
+        LatexFile(document_id=doc.id, path="main.tex", is_binary=False, content="a", size_bytes=1)
+    )
+    db_session.add(
+        LatexFile(document_id=doc.id, path="main.tex", is_binary=False, content="b", size_bytes=1)
+    )
+
+    with pytest.raises(IntegrityError):
+        await db_session.commit()
+
+
+async def test_the_same_path_in_two_documents_is_fine(db_session: AsyncSession):
+    project = await _project(db_session)
+    a = LatexDocument(project_id=project.id, name="a", source="")
+    b = LatexDocument(project_id=project.id, name="b", source="")
+    db_session.add_all([a, b])
+    await db_session.flush()
+    db_session.add(
+        LatexFile(document_id=a.id, path="main.tex", is_binary=False, content="a", size_bytes=1)
+    )
+    db_session.add(
+        LatexFile(document_id=b.id, path="main.tex", is_binary=False, content="b", size_bytes=1)
+    )
+    await db_session.commit()
+
+    rows = (await db_session.execute(select(LatexFile))).scalars().all()
+    assert len(rows) == 2
+
+
+async def test_a_row_claiming_to_be_text_while_holding_a_blob_is_refused(db_session: AsyncSession):
+    """The CHECK is what stops the two content columns drifting into a third
+    state no reader handles."""
+    project = await _project(db_session)
+    doc = LatexDocument(project_id=project.id, name="paper", source="")
+    db_session.add(doc)
+    await db_session.flush()
+    db_session.add(
+        LatexFile(
+            document_id=doc.id,
+            path="main.tex",
+            is_binary=False,
+            content="a",
+            blob=b"also",
+            size_bytes=1,
+        )
+    )
+
+    with pytest.raises(IntegrityError):
+        await db_session.commit()
+
+
+async def test_a_row_with_neither_content_nor_blob_is_refused(db_session: AsyncSession):
+    project = await _project(db_session)
+    doc = LatexDocument(project_id=project.id, name="paper", source="")
+    db_session.add(doc)
+    await db_session.flush()
+    db_session.add(LatexFile(document_id=doc.id, path="main.tex", is_binary=False, size_bytes=0))
+
+    with pytest.raises(IntegrityError):
+        await db_session.commit()
+
+
+async def test_deleting_a_document_deletes_its_files(db_session: AsyncSession):
+    project = await _project(db_session)
+    doc = LatexDocument(project_id=project.id, name="paper", source="")
+    db_session.add(doc)
+    await db_session.flush()
+    db_session.add(
+        LatexFile(document_id=doc.id, path="main.tex", is_binary=False, content="a", size_bytes=1)
+    )
+    await db_session.commit()
+
+    await db_session.execute(delete(LatexDocument).where(LatexDocument.id == doc.id))
+    await db_session.commit()
+
+    assert (await db_session.execute(select(LatexFile))).scalars().all() == []
