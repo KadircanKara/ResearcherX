@@ -1,21 +1,29 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { Loader2, Play } from "lucide-react";
+import { Button } from "@/components/ui/button";
 import { DocumentList } from "@/components/latex/document-list";
 import { EditorPane } from "@/components/latex/editor-pane";
+import { LogPanel } from "@/components/latex/log-panel";
 import { PdfViewer } from "@/components/latex/pdf-viewer";
 import {
+  compileDocument,
   createDocument,
   deleteDocument,
+  fetchPdfBytes,
   getDocument,
   listDocuments,
   patchDocument,
   type LatexDocument,
+  type LatexEngine,
 } from "@/lib/latex";
+import { isStale, type CompiledState } from "@/lib/latex-sync";
 import type { Role } from "@/lib/types";
 
 const CAN_EDIT: Role[] = ["owner", "editor"];
 const AUTOSAVE_MS = 800;
+const STALE_NOTE = "Out of date — compile to sync";
 
 const STARTER = `\\documentclass[conference]{IEEEtran}
 \\begin{document}
@@ -47,6 +55,11 @@ export function LatexWorkspace({ projectId, role }: LatexWorkspaceProps) {
   const [loading, setLoading] = useState(true);
   const [saveState, setSaveState] = useState<"idle" | "saving" | "error">("idle");
   const [splitPercent, setSplitPercent] = useState(50);
+  const [compiled, setCompiled] = useState<CompiledState | null>(null);
+  const [pdfBytes, setPdfBytes] = useState<Uint8Array | null>(null);
+  const [log, setLog] = useState<string | null>(null);
+  const [compiling, setCompiling] = useState(false);
+  const [engine, setEngine] = useState<LatexEngine>("pdflatex");
 
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // The id of the document `source` actually holds right now. A save must be
@@ -66,6 +79,13 @@ export function LatexWorkspace({ projectId, role }: LatexWorkspaceProps) {
   // the only reader.
   const pending = useRef<PendingSave | null>(null);
 
+  // Declared HERE, above every callback, and not lower down beside the JSX.
+  // Task 6's sync callbacks list `stale` in their dependency ARRAY, which is
+  // evaluated the moment useCallback runs -- a `const` declared further down
+  // the component body is still in its temporal dead zone at that point and
+  // throws a ReferenceError on first render.
+  const stale = isStale(source, engine, compiled);
+
   // Sends `pending` right now, bypassing the debounce. A single timer/string
   // ref cannot represent two documents at once, so switching documents while
   // an edit is still waiting out its debounce must FLUSH that edit, not
@@ -75,7 +95,12 @@ export function LatexWorkspace({ projectId, role }: LatexWorkspaceProps) {
   // misattributing it. Flushing sends it synchronously, against the
   // document it was actually typed into, before that document stops being
   // "current" in any sense.
-  const flush = useCallback(() => {
+  //
+  // Returns the in-flight save as a Promise (rather than firing the PATCH
+  // and forgetting it, as before) so `compile` below can await it: every
+  // existing call site (the debounce timeout, the document-switch cleanup)
+  // still just calls `flush()` and ignores the return value, unchanged.
+  const flush = useCallback(async () => {
     if (saveTimer.current) {
       clearTimeout(saveTimer.current);
       saveTimer.current = null;
@@ -85,12 +110,13 @@ export function LatexWorkspace({ projectId, role }: LatexWorkspaceProps) {
     pending.current = null;
     if (toSend.text === savedSourceByDoc.current.get(toSend.docId)) return;
     setSaveState("saving");
-    patchDocument(projectId, toSend.docId, { source: toSend.text })
-      .then(() => {
-        savedSourceByDoc.current.set(toSend.docId, toSend.text);
-        setSaveState("idle");
-      })
-      .catch(() => setSaveState("error"));
+    try {
+      await patchDocument(projectId, toSend.docId, { source: toSend.text });
+      savedSourceByDoc.current.set(toSend.docId, toSend.text);
+      setSaveState("idle");
+    } catch {
+      setSaveState("error");
+    }
   }, [projectId]);
 
   useEffect(() => {
@@ -124,6 +150,10 @@ export function LatexWorkspace({ projectId, role }: LatexWorkspaceProps) {
     getDocument(projectId, selectedId).then((doc) => {
       if (cancelled) return;
       setSource(doc.source);
+      setEngine(doc.engine);
+      setCompiled(null);
+      setPdfBytes(null);
+      setLog(null);
       bufferDocId.current = doc.id;
       savedSourceByDoc.current.set(doc.id, doc.source);
     });
@@ -177,10 +207,64 @@ export function LatexWorkspace({ projectId, role }: LatexWorkspaceProps) {
     [scheduleSave]
   );
 
+  const compile = useCallback(async () => {
+    if (!canEdit || !selectedId || compiling) return;
+    setCompiling(true);
+    try {
+      // Flush a pending autosave first: the backend compiles the SAVED source,
+      // so compiling mid-debounce would build the previous keystroke's text
+      // and hand back a SyncTeX map that does not match what is on screen.
+      // This is the same `flush` the document-switch cleanup uses -- no
+      // second save path.
+      await flush();
+
+      const result = await compileDocument(projectId, selectedId);
+      if (!result.ok || !result.pdf_hash) {
+        // The last good PDF stays on screen on purpose: a broken edit should
+        // not blank the preview, and the previous render is still the most
+        // useful thing available.
+        setLog(result.log);
+        return;
+      }
+      const bytes = await fetchPdfBytes(projectId, selectedId, result.pdf_hash);
+      setPdfBytes(bytes);
+      setCompiled({ source, engine, hash: result.pdf_hash });
+      setLog(null);
+    } catch {
+      setLog("The LaTeX compiler is unavailable. Please try again.");
+    } finally {
+      setCompiling(false);
+    }
+  }, [canEdit, compiling, engine, flush, projectId, selectedId, source]);
+
+  useEffect(() => {
+    function onKeyDown(e: KeyboardEvent) {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "s") {
+        e.preventDefault();
+        void compile();
+      }
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [compile]);
+
   async function handleCreate(name: string) {
     const doc = await createDocument(projectId, { name, source: STARTER });
     setDocuments((prev) => [...prev, doc]);
     setSelectedId(doc.id);
+  }
+
+  // The engine is persisted here, explicitly, rather than from an effect
+  // watching `engine`. An effect can't tell a user's choice apart from the
+  // `setEngine(doc.engine)` that runs while loading a different document --
+  // on that render `engine` still holds the PREVIOUS document's value, so an
+  // effect would PATCH the newly-opened document to the old one's engine.
+  function handleEngineChange(next: LatexEngine) {
+    setEngine(next);
+    if (!canEdit || !selectedId) return;
+    void patchDocument(projectId, selectedId, { engine: next }).then((doc) =>
+      setDocuments((prev) => prev.map((d) => (d.id === doc.id ? doc : d)))
+    );
   }
 
   async function handleDelete(id: string) {
@@ -301,18 +385,53 @@ export function LatexWorkspace({ projectId, role }: LatexWorkspaceProps) {
           />
 
           <div className="flex flex-1 flex-col overflow-hidden">
-            <div className="border-b border-border px-3 py-1.5 text-xs text-muted-foreground">
-              Preview
+            <div className="flex items-center justify-between border-b border-border px-3 py-1.5 text-xs">
+              <div className="flex items-center gap-2">
+                <span className="text-muted-foreground">Preview</span>
+                {pdfBytes && stale && (
+                  <span className="rounded-full bg-amber-500/15 px-2 py-0.5 text-[11px] font-medium text-amber-700 dark:text-amber-400">
+                    {STALE_NOTE}
+                  </span>
+                )}
+              </div>
+              <div className="flex items-center gap-2">
+                <select
+                  value={engine}
+                  disabled={!canEdit}
+                  onChange={(e) => handleEngineChange(e.target.value as LatexEngine)}
+                  className="rounded-md border border-input bg-background px-1.5 py-0.5 text-[11px]"
+                >
+                  <option value="pdflatex">pdflatex</option>
+                  <option value="xelatex">xelatex</option>
+                </select>
+                <Button
+                  size="sm"
+                  className="h-6 gap-1 px-2 text-[11px]"
+                  disabled={!canEdit || compiling}
+                  title={canEdit ? "Compile (Cmd/Ctrl+S)" : "You need editor access to compile"}
+                  onClick={() => void compile()}
+                >
+                  {compiling ? (
+                    <Loader2 className="size-3 animate-spin" />
+                  ) : (
+                    <Play className="size-3" />
+                  )}
+                  Compile
+                </Button>
+              </div>
             </div>
             <div className="flex-1 overflow-hidden">
               <PdfViewer
-                bytes={null}
+                bytes={pdfBytes}
                 scale={1.25}
                 highlight={null}
                 scrollToPage={null}
                 onPageDoubleClick={() => {}}
               />
             </div>
+            {log !== null && (
+              <LogPanel log={log} onClose={() => setLog(null)} onJumpToLine={() => {}} />
+            )}
           </div>
         </div>
       )}
