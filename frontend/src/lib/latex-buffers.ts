@@ -27,6 +27,16 @@ export class SaveEngine {
   private baseline = new Map<string, string>();
   /** Paths whose last send REJECTED. Dirty until a later send succeeds. */
   private failed = new Set<string>();
+  /**
+   * Bumped for a path whenever `rename` or `forget` makes an in-flight send
+   * for it obsolete. A send captures the epoch it started under and refuses
+   * to write `baseline`/`failed`/state if the value has moved since -- its
+   * result is about a path that no longer means what it meant.
+   */
+  private epoch = new Map<string, number>();
+  /** The text each in-flight send is carrying, so `rename` can re-queue it. */
+  private inFlightText = new Map<string, string>();
+  private disposed = false;
 
   constructor(opts: SaveEngineOptions) {
     this.opts = opts;
@@ -53,6 +63,7 @@ export class SaveEngine {
    * then.
    */
   forget(path: string): void {
+    this.invalidate(path);
     const timer = this.timers.get(path);
     if (timer) clearTimeout(timer);
     this.timers.delete(path);
@@ -62,12 +73,22 @@ export class SaveEngine {
   }
 
   rename(from: string, to: string): void {
+    const flying = this.inFlightText.get(from);
+    this.invalidate(from);
     const timer = this.timers.get(from);
     if (timer) clearTimeout(timer);
     this.timers.delete(from);
     if (this.pending.has(from)) {
       this.pending.set(to, this.pending.get(from) as string);
       this.pending.delete(from);
+    } else if (flying !== undefined) {
+      // The edit is already on the wire under the OLD name and its result is
+      // now ignored, so the only way the user's text reaches the file is to
+      // send it again under the new one. Without this the text is lost with
+      // the engine reporting clean.
+      this.pending.set(to, flying);
+    }
+    if (this.pending.has(to)) {
       this.timers.set(to, setTimeout(() => void this.flushPath(to), this.opts.delayMs));
     }
     if (this.baseline.has(from)) {
@@ -95,6 +116,22 @@ export class SaveEngine {
     return [...new Set([...this.pending.keys(), ...this.inFlight.keys(), ...this.failed])];
   }
 
+  private obsolete(path: string, epoch: number): boolean {
+    return this.disposed || (this.epoch.get(path) ?? 0) !== epoch;
+  }
+
+  /**
+   * Make any in-flight send for `path` a no-op and forget it. The network
+   * call cannot be recalled -- what this guarantees is that its RESULT is
+   * never believed, so it can neither resurrect a baseline for a path that
+   * has moved nor make a renamed file look clean.
+   */
+  private invalidate(path: string): void {
+    this.epoch.set(path, (this.epoch.get(path) ?? 0) + 1);
+    this.inFlight.delete(path);
+    this.inFlightText.delete(path);
+  }
+
   async flushPath(path: string): Promise<void> {
     const timer = this.timers.get(path);
     if (timer) clearTimeout(timer);
@@ -106,6 +143,7 @@ export class SaveEngine {
     // await.
     const text = this.pending.get(path);
     this.pending.delete(path);
+    const epoch = this.epoch.get(path) ?? 0;
 
     if (text === undefined) {
       // Nothing NEW was queued -- but an earlier flush may already have put
@@ -116,10 +154,13 @@ export class SaveEngine {
     }
     if (text === this.baseline.get(path)) return;
 
+    if (this.disposed) return;
     this.opts.onStateChange?.("saving");
+    this.inFlightText.set(path, text);
     const send = (async () => {
       try {
         await this.opts.send(path, text);
+        if (this.obsolete(path, epoch)) return;
         this.baseline.set(path, text);
         this.failed.delete(path);
         this.opts.onStateChange?.("idle");
@@ -127,6 +168,7 @@ export class SaveEngine {
         // Deliberately swallowed and recorded rather than rethrown: a
         // failed autosave is a banner, not an unhandled rejection out of a
         // debounce timer.
+        if (this.obsolete(path, epoch)) return;
         this.failed.add(path);
         this.opts.onStateChange?.("error");
       }
@@ -139,6 +181,7 @@ export class SaveEngine {
       // newer flush may already have replaced it with a later edit's send,
       // and clearing that would make a still-in-flight save look finished.
       if (this.inFlight.get(path) === send) this.inFlight.delete(path);
+      if (this.inFlightText.get(path) === text) this.inFlightText.delete(path);
     }
   }
 
@@ -157,6 +200,7 @@ export class SaveEngine {
   }
 
   dispose(): void {
+    this.disposed = true;
     for (const timer of this.timers.values()) clearTimeout(timer);
     this.timers.clear();
   }

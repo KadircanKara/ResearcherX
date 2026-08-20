@@ -98,6 +98,66 @@ describe("forget and rename", () => {
     await e.flushAll();
     expect(send).toHaveBeenCalledWith("b.tex", "x");
   });
+
+  it("rename while a send for the old path is in flight re-sends under the new name", async () => {
+    // The regression this closes: a send already on the wire for "a.tex"
+    // used to be able to write `baseline.set("a.tex", ...)` AFTER the rename,
+    // resurrecting a baseline for a path that no longer exists while
+    // "b.tex" never received the edit at all -- reported clean, text lost.
+    let release: () => void = () => {};
+    const send = vi.fn(() => new Promise<void>((r) => { release = r; }));
+    const { e } = engine(send);
+    e.setBaseline("a.tex", "");
+    e.schedule("a.tex", "x");
+    await vi.advanceTimersByTimeAsync(800); // send starts under "a.tex", does not settle
+    e.rename("a.tex", "b.tex");
+    expect(e.isDirty()).toBe(true);
+    release();
+    await vi.advanceTimersByTimeAsync(800); // the re-queued send under "b.tex" fires
+    expect(send).toHaveBeenCalledTimes(2);
+    expect(send).toHaveBeenNthCalledWith(2, "b.tex", "x");
+  });
+
+  it("forget while a send is in flight does not resurrect a baseline on success", async () => {
+    let release: () => void = () => {};
+    const send = vi.fn(() => new Promise<void>((r) => { release = r; }));
+    const { e } = engine(send);
+    e.setBaseline("a.tex", "");
+    e.schedule("a.tex", "x");
+    await vi.advanceTimersByTimeAsync(800); // send starts, does not settle
+    e.forget("a.tex");
+    release();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(e.isDirty()).toBe(false);
+    expect(e.dirtyPaths()).toEqual([]);
+  });
+
+  it("dispose while a send is in flight fires no further state change", async () => {
+    let release: () => void = () => {};
+    const send = vi.fn(() => new Promise<void>((r) => { release = r; }));
+    const { e, states } = engine(send);
+    e.setBaseline("a.tex", "");
+    e.schedule("a.tex", "x");
+    await vi.advanceTimersByTimeAsync(800); // send starts, does not settle
+    const countBeforeDispose = states.length;
+    e.dispose();
+    release();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(states.length).toBe(countBeforeDispose);
+  });
+
+  it("rename carries the failed flag to the new path", async () => {
+    const send = vi.fn(async () => { throw new Error("boom"); });
+    const { e } = engine(send);
+    e.setBaseline("a.tex", "");
+    e.schedule("a.tex", "x");
+    await e.flushAll();
+    expect(e.dirtyPaths()).toEqual(["a.tex"]);
+    e.rename("a.tex", "b.tex");
+    expect(e.dirtyPaths()).toEqual(["b.tex"]);
+  });
 });
 
 describe("dirtiness", () => {
