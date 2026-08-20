@@ -28,6 +28,11 @@
   border: 1px solid oklch(var(--border));
   border-radius: calc(var(--radius) * 2);
 }
+/* Same reason as LaTeX: the concept's 44px assumes the top of a page, and
+   this screen is a tab under the project header and the tab strip. */
+.rx-pp .rx-head {
+  padding-top: 26px;
+}
 
 /* Four columns, so four tracks. The title column takes the slack. */
 .rx-pp {
@@ -39,33 +44,33 @@
   }
 }
 
-.rx-pgrid {
+.rx-pp .rx-pgrid {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   gap: 0;
 }
 @media (min-width: 1240px) {
-  .rx-pgrid {
+  .rx-pp .rx-pgrid {
     grid-template-columns: minmax(0, 1fr) minmax(300px, 400px);
     gap: 0 clamp(44px, 3.4vw, 88px);
   }
 }
 
-.rx-pintro {
+.rx-pp .rx-pintro {
   margin: 0 0 14px;
   color: oklch(var(--muted-foreground));
   font-size: 14px;
   max-width: 62ch;
 }
 
-.rx-pcols {
+.rx-pp .rx-pcols {
   display: grid;
   grid-template-columns: var(--rx-pgrid);
   gap: 8px 28px;
   padding: 0 6px 9px 0;
   border-bottom: 1px solid oklch(var(--border));
 }
-.rx-pcols span {
+.rx-pp .rx-pcols span {
   font-size: 11px;
   letter-spacing: 0.09em;
   text-transform: uppercase;
@@ -75,15 +80,15 @@
 /* The Added column is the first to go when the table narrows — a date is the
    least load-bearing thing on the row. */
 @media (max-width: 1239px) {
-  .rx-pcols span:nth-child(2) {
+  .rx-pp .rx-pcols span:nth-child(2) {
     display: none;
   }
 }
 
-.rx-paper {
+.rx-pp .rx-paper {
   border-bottom: 1px solid oklch(var(--rx-hair));
 }
-.rx-prow {
+.rx-pp .rx-prow {
   width: 100%;
   display: grid;
   grid-template-columns: var(--rx-pgrid);
@@ -93,10 +98,10 @@
   padding: 20px 6px 20px 0;
   transition: background var(--rx-t) var(--rx-ease);
 }
-.rx-prow:hover {
+.rx-pp .rx-prow:hover {
   background: oklch(var(--foreground) / 0.05);
 }
-.rx-pttl {
+.rx-pp .rx-pttl {
   font-family: var(--font-serif);
   font-size: 17px;
   font-weight: 500;
@@ -107,18 +112,18 @@
   color: oklch(var(--foreground));
 }
 @media (min-width: 1240px) {
-  .rx-pttl {
+  .rx-pp .rx-pttl {
     max-width: 62ch;
   }
 }
-.rx-pby {
+.rx-pp .rx-pby {
   display: block;
   font-size: 13px;
   color: oklch(var(--muted-foreground));
   margin-top: 4px;
 }
-.rx-padd,
-.rx-pnum {
+.rx-pp .rx-padd,
+.rx-pp .rx-pnum {
   font-family: var(--font-mono);
   font-size: 12.5px;
   color: oklch(var(--muted-foreground));
@@ -128,11 +133,11 @@
    three remaining tracks — hiding a cell without dropping a track leaves the
    grid one short and shifts every value one column left. */
 @media (max-width: 1239px) {
-  .rx-padd {
+  .rx-pp .rx-padd {
     display: none;
   }
 }
-.rx-pst {
+.rx-pp .rx-pst {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -141,46 +146,46 @@
   font-family: var(--font-mono);
   white-space: nowrap;
 }
-.rx-pst-bad {
+.rx-pp .rx-pst-bad {
   color: oklch(var(--destructive));
   font-family: var(--rx-sans);
 }
-.rx-dot {
+.rx-pp .rx-dot {
   width: 6px;
   height: 6px;
   border-radius: 50%;
   background: oklch(var(--accent-foreground));
   flex: none;
 }
-.rx-dot-idle {
+.rx-pp .rx-dot-idle {
   background: oklch(var(--border));
 }
-.rx-dot-bad {
+.rx-pp .rx-dot-bad {
   background: oklch(var(--destructive));
 }
 
 /* The opened row. `.rx-reveal`/`.rx-reveal-body` are the shared primitives. */
-.rx-paper .rx-reveal-body {
+.rx-pp .rx-paper .rx-reveal-body {
   max-width: 92ch;
 }
-.rx-paper .rx-reveal-body.rx-bad {
+.rx-pp .rx-paper .rx-reveal-body.rx-bad {
   background: oklch(var(--rx-danger-wash));
   border-left-color: oklch(var(--destructive));
 }
-.rx-psrc {
+.rx-pp .rx-psrc {
   margin-bottom: 6px;
 }
-.rx-psrc .rx-mono {
+.rx-pp .rx-psrc .rx-mono {
   font-family: var(--font-mono);
   font-size: 11.5px;
 }
-.rx-pfoot {
+.rx-pp .rx-pfoot {
   display: flex;
   flex-wrap: wrap;
   gap: 18px;
   margin-top: 14px;
 }
-.rx-pfoot button {
+.rx-pp .rx-pfoot button {
   font-size: 12.5px;
   color: oklch(var(--foreground));
   border-bottom: 1px solid oklch(var(--border));
@@ -189,33 +194,33 @@
     color var(--rx-t) var(--rx-ease),
     border-color var(--rx-t) var(--rx-ease);
 }
-.rx-pfoot button:hover:not(:disabled) {
+.rx-pp .rx-pfoot button:hover:not(:disabled) {
   color: oklch(var(--accent-foreground));
   border-bottom-color: oklch(var(--rx-accent-line));
 }
-.rx-pfoot button:disabled {
+.rx-pp .rx-pfoot button:disabled {
   opacity: 0.5;
   cursor: not-allowed;
 }
-.rx-pfoot .rx-danger:hover:not(:disabled) {
+.rx-pp .rx-pfoot .rx-danger:hover:not(:disabled) {
   color: oklch(var(--destructive));
   border-bottom-color: oklch(var(--destructive));
 }
 
 /* ── The rail ─────────────────────────────────────────────────────────── */
-.rx-prail {
+.rx-pp .rx-prail {
   padding-top: 34px;
 }
 @media (min-width: 1240px) {
-  .rx-prail {
+  .rx-pp .rx-prail {
     padding-top: 0;
   }
 }
-.rx-prail .rx-fl-list {
+.rx-pp .rx-prail .rx-fl-list {
   margin-top: 14px;
 }
 
-.rx-drop {
+.rx-pp .rx-drop {
   margin-top: 24px;
   padding: 30px 24px;
   text-align: center;
@@ -227,25 +232,25 @@
     border-color var(--rx-t) var(--rx-ease),
     background var(--rx-t) var(--rx-ease);
 }
-.rx-drop:hover:not(:disabled),
-.rx-drop-over {
+.rx-pp .rx-drop:hover:not(:disabled),
+.rx-pp .rx-drop-over {
   border-color: oklch(var(--rx-accent-line));
   background: oklch(var(--accent));
 }
-.rx-drop:disabled {
+.rx-pp .rx-drop:disabled {
   opacity: 0.6;
   cursor: not-allowed;
 }
 /* A <span>, not a heading — this whole block is one button, and a heading or
    a paragraph inside a button is invalid content. */
-.rx-drop .rx-drop-h {
+.rx-pp .rx-drop .rx-drop-h {
   display: block;
   margin: 10px 0 4px;
   font-family: var(--font-serif);
   font-size: 16px;
   color: oklch(var(--foreground));
 }
-.rx-drop small {
+.rx-pp .rx-drop small {
   display: block;
   color: oklch(var(--muted-foreground));
   font-size: 13px;
@@ -253,13 +258,13 @@
 }
 
 /* ── Empty and loading ────────────────────────────────────────────────── */
-.rx-pempty {
+.rx-pp .rx-pempty {
   padding: 64px 0;
   text-align: center;
   color: oklch(var(--muted-foreground));
   font-size: 14px;
 }
-.rx-pskel {
+.rx-pp .rx-pskel {
   height: 74px;
   border-bottom: 1px solid oklch(var(--rx-hair));
   background: linear-gradient(
@@ -274,10 +279,10 @@
   .rx-pp {
     padding: 8px 16px 32px;
   }
-  .rx-pcols {
+  .rx-pp .rx-pcols {
     display: none;
   }
-  .rx-prow {
+  .rx-pp .rx-prow {
     grid-template-columns: minmax(0, 1fr);
     gap: 4px;
   }
