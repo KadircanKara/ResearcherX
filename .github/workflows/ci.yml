@@ -50,6 +50,11 @@ jobs:
       # jumps to when a compile fails, and every fixture it runs against is a
       # REAL log captured from the container (see the test's own header).
       - run: python3 test_analyse_log.py
+      # Same shape, same reason: `_strict_filter` is the second, independent
+      # traversal guard this container owns on top of `filter="data"`, and
+      # it must not lean on the backend's own `normalize_path` guard to
+      # cover for it.
+      - run: python3 test_strict_filter.py
 
   # Finding I1 (2026-08-20 whole-plan review): the `latex-compiler` job above
   # is lint + one stdlib unit test -- it never boots a real TeX Live, so it

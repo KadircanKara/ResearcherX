@@ -403,10 +403,12 @@ def _staged_path(printed: str, main_dir: str, staged: set[str]) -> str | None:
 
     SyncTeX's asymmetry applies here too: `latexmk -cd` chdirs into the main
     file's directory, so TeX prints paths relative to THAT, while the wire
-    protocol this service speaks is tree-relative. The absolute form is
-    tried as well -- nothing in a normal run prints one, but a document is
-    free to `\\input` an absolute path and a staged file reached that way is
-    still a staged file.
+    protocol this service speaks is tree-relative. The absolute-path branch
+    below can never match in practice -- `staged` holds only tree-relative
+    paths, so an absolute candidate is never a member of it -- but it costs
+    nothing to keep: a document is free to `\\input` an absolute path, and if
+    `staged` ever comes to hold absolute paths this branch is what makes that
+    work rather than silently doing nothing.
     """
     candidates = []
     if printed.startswith("/"):
@@ -755,12 +757,27 @@ def _strict_filter(member: tarfile.TarInfo, path: str) -> tarfile.TarInfo:
     rejects both in the backend process before a tar is ever built. Refusing
     here keeps the two guards saying the same thing, so a tar that violates
     the first is not quietly normalised by the second.
+
+    The control-character check below duplicates `normalize_path`'s in the
+    backend on purpose. "`filter="data"` (CPython's own extraction guard) is
+    a SECOND, independent traversal check, in a DIFFERENT PROCESS from
+    `latex_archive`'s ... Neither guard is trusted to cover for the other
+    being disabled or drifting; both must pass." If this check were dropped
+    on the theory that the backend already rejects control characters, a tar
+    built or replayed by any other path -- bypassing `latex_archive` entirely
+    -- would reach this filter with only the absolute/`..` checks standing
+    between it and `data_filter`, which does not itself reject them. That is
+    exactly the "one guard covering for the other" this file's docstring
+    forbids. Do not remove this on the grounds that the backend already does
+    it; the backend doing it is not why this one exists.
     """
     name = member.name
     if name.startswith("/") or name.startswith("\\"):
         raise ValueError(f"absolute path in archive: {name}")
     if ".." in PurePosixPath(name).parts:
         raise ValueError(f"parent-directory segment in archive: {name}")
+    if any(ord(c) < 32 or ord(c) == 127 for c in name):
+        raise ValueError(f"control character in archive member name: {name!r}")
     return tarfile.data_filter(member, path)
 
 
