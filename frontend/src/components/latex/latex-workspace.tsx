@@ -219,9 +219,15 @@ export function LatexWorkspace({ projectId, role }: LatexWorkspaceProps) {
       // for why: Safari can cancel a download still being handed to the OS
       // if its blob: URL is revoked synchronously after `click()`.
       setTimeout(() => URL.revokeObjectURL(url), 0);
-    } catch {
-      // Nothing to show here beyond `doc.error`-style state -- this is a
-      // best-effort download, not a form submission with its own dialog.
+    } catch (err) {
+      // Routed to the SAME surface every other failure in this shell uses.
+      // An empty catch here left a failed export (a 413 over the size cap, a
+      // 5xx, a dropped connection) with no surface at all: the button simply
+      // appeared inert, which reads as a broken build rather than a failed
+      // request. `reportError` applies the hook's own 4xx-shows-the-detail /
+      // 5xx-shows-a-generic-line rule, so the size-cap message reaches the
+      // user and a server fault's text never does.
+      doc.reportError(err);
     }
   }
 
