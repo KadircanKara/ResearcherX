@@ -195,7 +195,9 @@ def compile_tex(body: dict) -> dict:
             # A compile can succeed without a map (an engine that ignored
             # -synctex=1). Navigation is an enhancement; the PDF still ships.
             "synctex_b64": (
-                base64.b64encode(synctex.read_bytes()).decode() if synctex.exists() else None
+                base64.b64encode(synctex.read_bytes()).decode()
+                if synctex.exists()
+                else None
             ),
         }
 
@@ -306,7 +308,9 @@ def _extract_tree(bounded: "_Bounded", directory: Path) -> None:
             raise ValueError(f"archive has more than {MAX_TAR_MEMBERS} entries")
         extracted_bytes += max(member.size, 0)
         if extracted_bytes > MAX_EXTRACTED_BYTES:
-            raise ValueError(f"archive extracts to more than {MAX_EXTRACTED_BYTES} bytes")
+            raise ValueError(
+                f"archive extracts to more than {MAX_EXTRACTED_BYTES} bytes"
+            )
         return _strict_filter(member, path)
 
     with tarfile.open(fileobj=bounded, mode="r|") as tf:
@@ -345,7 +349,10 @@ def compile_tree(bounded: "_Bounded", engine: str, main_path: str) -> dict:
         # Belt and braces with filter="data": the main path is a separate
         # input from the tar's member names and gets its own containment
         # check. `resolve()` collapses any `..` before the comparison.
-        if not str(main).startswith(str(directory.resolve()) + os.sep) or not main.is_file():
+        if (
+            not str(main).startswith(str(directory.resolve()) + os.sep)
+            or not main.is_file()
+        ):
             return {
                 "ok": False,
                 "log": "The document's main file is not in the project.",
@@ -405,7 +412,9 @@ def compile_tree(bounded: "_Bounded", engine: str, main_path: str) -> dict:
             "log": _first_error(log_text) if proc.returncode else "",
             "pdf_b64": base64.b64encode(pdf.read_bytes()).decode(),
             "synctex_b64": (
-                base64.b64encode(synctex.read_bytes()).decode() if synctex.exists() else None
+                base64.b64encode(synctex.read_bytes()).decode()
+                if synctex.exists()
+                else None
             ),
             "root": str(directory),
         }
@@ -489,7 +498,9 @@ def query_synctex(body: dict) -> dict:
         directory = Path(tmp)
         pdf = directory / f"{stem}.pdf"
         pdf.write_bytes(base64.b64decode(body["pdf_b64"]))
-        (directory / f"{stem}.synctex.gz").write_bytes(base64.b64decode(body["synctex_b64"]))
+        (directory / f"{stem}.synctex.gz").write_bytes(
+            base64.b64decode(body["synctex_b64"])
+        )
 
         # `-d <dir>` is load-bearing: the map records ABSOLUTE paths from the
         # directory it was compiled in, which no longer exists by the time
@@ -501,16 +512,23 @@ def query_synctex(body: dict) -> dict:
             # tree-relative -> main-dir-relative
             rel = posixpath.relpath(tree_file, main_dir) if main_dir else tree_file
             args = [
-                "synctex", "view",
-                "-i", f"{body['line']}:0:{rel}",
-                "-o", str(pdf),
-                "-d", str(directory),
+                "synctex",
+                "view",
+                "-i",
+                f"{body['line']}:0:{rel}",
+                "-o",
+                str(pdf),
+                "-d",
+                str(directory),
             ]
         else:
             args = [
-                "synctex", "edit",
-                "-o", f"{body['page']}:{body['x']}:{body['y']}:{pdf}",
-                "-d", str(directory),
+                "synctex",
+                "edit",
+                "-o",
+                f"{body['page']}:{body['x']}:{body['y']}:{pdf}",
+                "-d",
+                str(directory),
             ]
         # Same process-group treatment as compile_tex's subprocess call, for
         # consistency: synctex is much less likely to fork a runaway child,
@@ -559,7 +577,11 @@ def query_synctex(body: dict) -> dict:
             # navigation entirely. Tree mode (root present) is unaffected:
             # this only fires when main_path/root were never sent at all.
             if not main_path:
-                return {"found": True, "file": legacy_default_file, "line": int(record["Line"])}
+                return {
+                    "found": True,
+                    "file": legacy_default_file,
+                    "line": int(record["Line"]),
+                }
             return {"found": False}
         return {"found": True, "file": resolved, "line": int(record["Line"])}
 
@@ -589,7 +611,7 @@ def _tree_path(raw_input: str, root: str | None) -> str | None:
     prefix = root.rstrip("/") + "/"
     if not raw_input.startswith(prefix):
         return None
-    tail = raw_input[len(prefix):]
+    tail = raw_input[len(prefix) :]
     # `/./` is how synctex separates the recorded cwd from the relative path.
     # Collapse it IN PLACE; do not treat it as a split point.
     tail = tail.replace("/./", "/")
@@ -681,7 +703,10 @@ class Handler(BaseHTTPRequestHandler):
         # BEFORE the size check that applies it, or a 20MB tar would be
         # rejected against the 16MB JSON cap before ever being recognised
         # as a tar.
-        is_tar = self.path == "/compile" and self.headers.get("Content-Type") == "application/x-tar"
+        is_tar = (
+            self.path == "/compile"
+            and self.headers.get("Content-Type") == "application/x-tar"
+        )
         if length > (MAX_TAR_LENGTH if is_tar else MAX_CONTENT_LENGTH):
             # Drain the body before answering. By the time we know it is too
             # large, the client has typically already written most or all of

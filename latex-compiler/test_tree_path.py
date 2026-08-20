@@ -34,7 +34,9 @@ class TreePathTests(unittest.TestCase):
         )
 
     def test_a_parent_relative_input_normalises_to_its_real_tree_path(self):
-        self.assertEqual(_tree_path("/tmp/R/src/../shared/x.tex", "/tmp/R"), "shared/x.tex")
+        self.assertEqual(
+            _tree_path("/tmp/R/src/../shared/x.tex", "/tmp/R"), "shared/x.tex"
+        )
 
     def test_an_input_that_still_escapes_after_normalisation_is_refused(self):
         self.assertIsNone(_tree_path("/tmp/R/../../etc/hostname", "/tmp/R"))
@@ -56,7 +58,9 @@ class TreePathTests(unittest.TestCase):
     def test_the_root_alone_with_a_trailing_slash_and_nothing_after_it_is_refused(self):
         self.assertIsNone(_tree_path("/tmp/R/", "/tmp/R"))
 
-    def test_a_sibling_directory_whose_name_merely_extends_the_root_is_not_a_prefix_match(self):
+    def test_a_sibling_directory_whose_name_merely_extends_the_root_is_not_a_prefix_match(
+        self,
+    ):
         # `/tmp/RX` is not `/tmp/R` plus a path separator -- a bare
         # `raw_input.startswith(root)` would wrongly accept it (eating "RX"'s
         # leading "R" as if it were the root, and returning "X/main.tex").
