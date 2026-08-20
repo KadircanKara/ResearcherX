@@ -310,6 +310,10 @@
   font-size: 12.5px;
   margin: 10px 0 0;
 }
+/* A second heading in the same rail, under the first block. */
+.rx-flank-h-next {
+  margin-top: 26px;
+}
 
 /* The header is the one shared primitive that has to give at small widths: at
    768px the right-aligned meta block and the 29px serif title stop fitting on
