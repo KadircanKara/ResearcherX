@@ -6,6 +6,7 @@ import {
   deleteFile,
   renameFile,
   importArchive,
+  patchDocument,
   AmbiguousMainError,
   LatexRequestError,
 } from "./latex";
@@ -93,6 +94,30 @@ describe("errors", () => {
     const err = await importArchive("p1", new Blob(["x"]), "Project").catch((e) => e);
     expect(err).toBeInstanceOf(AmbiguousMainError);
     expect((err as AmbiguousMainError).candidates).toEqual(["main.tex", "paper.tex"]);
+  });
+
+  it("a document-level route surfaces the backend's own detail too", async () => {
+    // The document routes went through `apiSend`, which throws a bare
+    // `Error("PATCH ... -> 422")` carrying no server detail -- so "The main
+    // file must be a .tex file" and every 403 behind Set-as-main and the
+    // engine picker showed the generic line instead, on controls that have
+    // no other feedback path. Pinned here because nothing else in the suite
+    // covers the document routes' error path, and a silent regression to
+    // `apiSend` would look identical from the outside.
+    mockFetch(422, { detail: "The main file must be a .tex file." });
+    await expect(patchDocument("p1", "d1", { main_path: "fig.png" })).rejects.toMatchObject({
+      status: 422,
+      detail: "The main file must be a .tex file.",
+    });
+  });
+
+  it("a document-level 5xx still does not leak server text", async () => {
+    mockFetch(500, { detail: "Traceback (most recent call last): ..." });
+    const err = await patchDocument("p1", "d1", { engine: "xelatex" }).catch((e) => e);
+    expect((err as LatexRequestError).userMessage).toBe(
+      "Something went wrong. Please try again."
+    );
+    expect((err as LatexRequestError).userMessage).not.toContain("Traceback");
   });
 
   it("a 5xx does not leak the server's text to the user", async () => {
