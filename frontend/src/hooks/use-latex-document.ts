@@ -553,9 +553,37 @@ export function useLatexDocument(projectId: string, canEdit: boolean): UseLatexD
       const docId = selectedIdRef.current;
       if (!docId || !canEdit) return;
       setError(null);
-      engineRef.current?.rename(from, to);
+      // CONFIRM, then rename the engine -- never the other way round.
+      //
+      // Renaming the engine first moved the pending text under the
+      // DESTINATION path and armed a timer for it. When the backend then
+      // refused with 409 `PathCollision` -- which exists precisely to
+      // protect the file already at the destination -- that timer fired
+      // anyway and PUT one file's text into the protected file, and since
+      // `refreshTree` is not called on the failure path the tree did not
+      // even show it. Undoing the engine rename in the catch would close
+      // the same hole, but only after the timer has had a whole round trip
+      // to fire; not moving it until the server has agreed leaves no window
+      // at all.
+      //
+      // The pending edit for `from` is flushed FIRST, while `from` is still
+      // the name the server knows. Without that, a debounce timer firing
+      // during the round trip races the server-side rename and 404s against
+      // a path that has just stopped existing -- the same stray "Could not
+      // save" `removeFile` forgets a path to avoid. After the flush the
+      // engine carries only a baseline (and possibly a `failed` flag) for
+      // `from`, which `rename` moves across without a timer.
+      const saveEngine = engineRef.current;
+      if (saveEngine?.dirtyPaths().includes(from)) {
+        await saveEngine.flushPath(from);
+        if (selectedIdRef.current !== docId) return;
+      }
       try {
         const m = await renameFile(projectId, docId, from, to);
+        // The engine captured ABOVE, not `engineRef.current`: by the time
+        // this resolves the ref may already name the next document's engine,
+        // and renaming a path inside that one is a different file entirely.
+        saveEngine?.rename(from, to);
         applyMutation(m, docId);
         if (selectedIdRef.current !== docId) return;
         setOpenPaths((prev) => prev.map((p) => (p === from ? to : p)));
