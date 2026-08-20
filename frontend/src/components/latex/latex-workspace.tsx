@@ -28,6 +28,12 @@ const STALE_NOTE = "Out of date — compile to sync";
 // outside it has no representable coordinate -- this is a documented
 // limitation of the design, not a bug. See `isBeneath` in `lib/latex-tree.ts`.
 const OUTSIDE_MAIN_NOTE = "Sync only covers files beside or below the main file.";
+// TeX's `l.<n>` is relative to whichever file it was reading -- in a
+// multi-file project usually a chapter, often one that is not open. When the
+// log does not make that file unambiguous (or it is not in this tree), the
+// jump is DECLINED rather than landed on that line of whatever buffer
+// happens to be active: a confident wrong jump is worse than no jump.
+const LOG_FILE_UNKNOWN_NOTE = "Couldn't tell which file that error is in, so the editor didn't jump.";
 
 // The backend itself defaults a new document's main file to EMPTY -- a
 // starter template is a client-side choice, not a server default, so it is
@@ -250,6 +256,28 @@ export function LatexWorkspace({ projectId, role }: LatexWorkspaceProps) {
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [activePath, mainDir, compile.jumpToPdf, compile.setSyncNote]
+  );
+
+  // Same note as `handleChange` above, for `doc.files`/`doc.openFile` and
+  // `compile`'s two setters, none of which are stable across a render of the
+  // whole `doc` object.
+  const handleJumpToError = useCallback(
+    (line: number, file: string | null) => {
+      // Declined on BOTH unknowns: the log named no file, or it named one
+      // this document does not have (a package under `/usr/share`, or a file
+      // deleted since the compile). Either way the line number means nothing
+      // against the active buffer.
+      if (file === null || !doc.files.some((f) => f.path === file)) {
+        compile.setSyncNote(LOG_FILE_UNKNOWN_NOTE);
+        return;
+      }
+      // Opened BEFORE the jump, exactly as `jumpToSource` does it:
+      // `gotoLine` only means anything to whichever file is active when the
+      // editor reads it.
+      void doc.openFile(file).then(() => compile.jumpToLine(line));
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [doc.files, doc.openFile, compile.jumpToLine, compile.setSyncNote]
   );
 
   if (doc.loading) {
@@ -503,7 +531,7 @@ export function LatexWorkspace({ projectId, role }: LatexWorkspaceProps) {
               <LogPanel
                 log={compile.log}
                 onClose={() => compile.setLog(null)}
-                onJumpToLine={compile.jumpToLine}
+                onJumpToError={handleJumpToError}
               />
             )}
           </div>

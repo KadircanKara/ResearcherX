@@ -6,10 +6,16 @@ import { firstError } from "@/lib/latex-log";
 interface LogPanelProps {
   log: string;
   onClose: () => void;
-  onJumpToLine: (line: number) => void;
+  /**
+   * `file` is the tree-relative file the error's `l.<n>` is relative to, or
+   * null when the log did not make that unambiguous. It is passed on rather
+   * than resolved here: this panel knows nothing about which files exist,
+   * and the decision to decline a jump belongs with whoever does.
+   */
+  onJumpToError: (line: number, file: string | null) => void;
 }
 
-export function LogPanel({ log, onClose, onJumpToLine }: LogPanelProps) {
+export function LogPanel({ log, onClose, onJumpToError }: LogPanelProps) {
   const error = firstError(log);
 
   return (
@@ -23,9 +29,12 @@ export function LogPanel({ log, onClose, onJumpToLine }: LogPanelProps) {
               {error.line !== null && (
                 <button
                   className="ml-2 underline underline-offset-2 hover:text-primary"
-                  onClick={() => onJumpToLine(error.line as number)}
+                  onClick={() => onJumpToError(error.line as number, error.file)}
                 >
-                  line {error.line}
+                  {/* Naming the file is not decoration: in a multi-file
+                      project the blamed line is usually in a chapter, not in
+                      whatever happens to be on screen. */}
+                  {error.file ? `${error.file}:${error.line}` : `line ${error.line}`}
                 </button>
               )}
             </span>
