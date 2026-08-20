@@ -246,6 +246,46 @@ async def test_a_forgery_alone_on_a_run_that_raised_no_error_is_not_attributed(e
 
 
 @pytest.mark.parametrize("engine", ["pdflatex", "xelatex"])
+async def test_a_file_named_after_latexmks_own_error_summary_cannot_open_the_gate(engine: str):
+    r"""The round-5 break, end to end.
+
+    The gate asks latexmk whether the ENGINE exited nonzero. latexmk writes
+    its summary to stdout and `Failure to make '<target>'` -- which contains
+    the user's own file name -- to STDERR. Those are separately buffered
+    pipes, so `stdout + stderr` puts that file name AFTER the summary block
+    however the run really interleaved, and a main file called
+    `Command for 'x' gave return code 1.tex` then reads as an engine
+    failure on a run where nothing failed. `normalize_path` permits spaces
+    and quotes, so the name arrives through an ordinary create, rename or
+    zip import.
+
+    This document raises no error at all (it typesets nothing), so if the
+    gate opens the forged `\typeout` block is the only candidate in the log
+    and the editor jumps into `chapters/intro.tex:3` -- a line whose content
+    is the word `three`.
+    """
+    hostile = "Command for 'x' gave return code 1.tex"
+    result = await compile_tree(
+        [
+            (
+                hostile,
+                b"\\documentclass{article}\n"
+                b"\\typeout{./chapters/intro.tex:3: Undefined control sequence.}\n"
+                b"\\typeout{l.3 zz}\n"
+                b"\\begin{document}\n\\end{document}\n",
+            ),
+            ("chapters/intro.tex", b"one\ntwo\nthree\nfour\nfive\n"),
+        ],
+        engine,
+        hostile,
+    )
+
+    assert not result.ok
+    assert result.pdf is None
+    assert (result.error_file, result.error_line) == (None, None)
+
+
+@pytest.mark.parametrize("engine", ["pdflatex", "xelatex"])
 async def test_a_genuine_error_still_attributes_and_still_jumps(engine: str):
     """The other half of the gate, and the test that fails LOUDLY if a future
     latexmk rewords the summary line the witness reads. A mechanism that only

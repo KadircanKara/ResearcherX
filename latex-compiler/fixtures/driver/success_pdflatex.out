@@ -1,7 +1,7 @@
 Rc files read (in order):
   NONE
 Latexmk: This is Latexmk, John Collins, 9 March 2026. Version 4.88.
-Latexmk: Changing directory to '/tmp/w_success_pdflatex/'
+Latexmk: Changing directory to '/tmp/s_r_success_pdflatex_pdflatex/'
 No existing .aux file, so I'll make a simple one, and require run of *latex.
 Latexmk: applying rule 'pdflatex'...
 Rule 'pdflatex':  Reasons for rerun
@@ -32,4 +32,3 @@ Latexmk: Examining 'main.log'
 Latexmk: Log file says output to 'main.pdf'
 Latexmk: All targets (main.pdf) are up-to-date
 Latexmk: Undoing directory change
-

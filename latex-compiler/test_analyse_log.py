@@ -15,6 +15,7 @@ Run: `python3 test_analyse_log.py` (wired into the `latex-compiler` CI job).
 """
 
 import pathlib
+import re
 import unittest
 
 from app import analyse_log, engine_errored
@@ -24,7 +25,9 @@ FIXTURES = pathlib.Path(__file__).parent / "fixtures"
 TEXLIVE = "/usr/local/texlive/"
 
 
-def analyse(name, staged, counts, main_dir="", on_disk=(), driver=None):
+def analyse(
+    name, staged, counts, main_dir="", on_disk=(), driver=None, driver_engine="pdflatex"
+):
     """Run the analyser over a captured log.
 
     `staged` is the tree as the compiler staged it, `counts` is each staged
@@ -46,7 +49,9 @@ def analyse(name, staged, counts, main_dir="", on_disk=(), driver=None):
         return rel in present or rel.startswith(TEXLIVE)
 
     errored = (
-        engine_errored((FIXTURES / "driver" / f"{driver}.out").read_text())
+        engine_errored(
+            (FIXTURES / "driver" / f"{driver}.out").read_text(), driver_engine
+        )
         if driver
         else True
     )
@@ -268,18 +273,108 @@ class NoErrorHappenedTests(unittest.TestCase):
     candidate scan does assumes one was. This is the hole that shipped."""
 
     def test_the_witness_separates_a_real_error_from_every_other_outcome(self):
-        """Measured across BOTH engines and five run shapes -- the whole
-        table is in `fixtures/driver/`, captured from latexmk itself."""
-        for case in ("genuine_error", "chapter_error", "missing_pkg"):
+        """Measured across BOTH engines and every run shape -- the whole
+        table is in `fixtures/driver/`, captured from latexmk itself with
+        stdout and stderr kept in SEPARATE files (`.out` / `.err`), which is
+        how they arrive and how they must be read."""
+        for case in (
+            "genuine_error",
+            "chapter_error",
+            "missing_pkg",
+            "bibtex_and_error",
+        ):
             for eng in ("pdflatex", "xelatex"):
                 with self.subTest(case=case, engine=eng):
                     out = (FIXTURES / "driver" / f"{case}_{eng}.out").read_text()
-                    self.assertTrue(engine_errored(out))
-        for case in ("no_pages_forged", "no_pages_plain", "success"):
+                    self.assertTrue(engine_errored(out, eng))
+        for case in (
+            "no_pages_forged",
+            "no_pages_plain",
+            "success",
+            "filename_attack",
+            "marker_named_file",
+            "bibtex_fail",
+            "bibtex_jobname_collision",
+        ):
             for eng in ("pdflatex", "xelatex"):
                 with self.subTest(case=case, engine=eng):
                     out = (FIXTURES / "driver" / f"{case}_{eng}.out").read_text()
-                    self.assertFalse(engine_errored(out))
+                    self.assertFalse(engine_errored(out, eng))
+
+    def test_the_witness_is_read_from_stdout_alone(self):
+        r"""THE round-5 break. stdout and stderr are separately buffered
+        pipes: concatenating them puts EVERY stderr line after EVERY stdout
+        line whatever their real order, and latexmk writes
+        `Failure to make '<target>'` -- which names the user's own file --
+        to stderr. So a project whose main file is called
+        `Command for 'x' gave return code 1.tex` (spaces and quotes are
+        legal here) put the witness sentence after latexmk's summary on the
+        merged stream.
+
+        This asserts the DEFECT is real on the merged stream under the old
+        free-regex rule, and that reading stdout alone closes it. Without
+        the first half the test could pass for an unrelated reason.
+        """
+        old_rule = re.compile(r"Command for '[^']*' gave return code [1-9]\d*")
+        for eng in ("pdflatex", "xelatex"):
+            with self.subTest(engine=eng):
+                out = (FIXTURES / "driver" / f"filename_attack_{eng}.out").read_text()
+                err = (FIXTURES / "driver" / f"filename_attack_{eng}.err").read_text()
+                merged = out + err
+                marker = merged.rfind("Collected error summary")
+                self.assertTrue(
+                    old_rule.search(merged[marker:]), "attack no longer reproduces"
+                )
+                self.assertFalse(
+                    old_rule.search(out[out.rfind("Collected error summary") :])
+                )
+                self.assertFalse(engine_errored(out, eng))
+
+    def test_the_block_parse_holds_even_if_the_streams_were_merged_again(self):
+        """The second, INDEPENDENT defence. Reading stdout alone and parsing
+        the block structurally must both fail before the gate can open, so
+        this feeds the analyser exactly what broke it -- the merged stream --
+        and requires the answer to still be no."""
+        for case in (
+            "filename_attack",
+            "no_pages_forged",
+            "no_pages_plain",
+            "bibtex_fail",
+        ):
+            for eng in ("pdflatex", "xelatex"):
+                with self.subTest(case=case, engine=eng):
+                    out = (FIXTURES / "driver" / f"{case}_{eng}.out").read_text()
+                    err = (FIXTURES / "driver" / f"{case}_{eng}.err").read_text()
+                    self.assertFalse(engine_errored(out + err, eng))
+
+    def test_a_failing_bibliography_is_not_read_as_a_tex_error(self):
+        r"""latexmk's block carries one entry per failing RULE, and a failing
+        `bibtex` contributes its own: `  bibtex <jobname>: Bibtex errors:
+        See file '<jobname>.blg'`. That is an indented line inside the block
+        carrying the jobname TWICE -- so with the jobname
+        `Command for 'pdflatex' gave return code 1` the witness sentence
+        appears inside a legitimate entry. Requiring the entry's RULE to be
+        the engine refuses it, and refuses to call a bibliography failure a
+        TeX error at the same time."""
+        for eng in ("pdflatex", "xelatex"):
+            with self.subTest(engine=eng):
+                out = (
+                    FIXTURES / "driver" / f"bibtex_jobname_collision_{eng}.out"
+                ).read_text()
+                self.assertIn("bibtex Command for 'pdflatex' gave return code 1:", out)
+                self.assertFalse(engine_errored(out, eng))
+                # ... while a bibliography failure ALONGSIDE a real error
+                # still opens the gate: every entry is checked, not the first.
+                both = (FIXTURES / "driver" / f"bibtex_and_error_{eng}.out").read_text()
+                self.assertTrue(engine_errored(both, eng))
+
+    def test_an_engine_this_service_does_not_offer_falls_back_like_the_flag_does(self):
+        """`_ENGINE_FLAG` maps an unknown engine to pdflatex, so the rule
+        name latexmk prints is pdflatex too. The witness has to resolve it
+        the same way or every compile under a mistyped engine would decline."""
+        out = (FIXTURES / "driver" / "genuine_error_pdflatex.out").read_text()
+        self.assertTrue(engine_errored(out, "lualatex"))
+        self.assertFalse(engine_errored(out, "xelatex"))
 
     def test_a_forgery_standing_alone_on_a_no_pages_run_is_not_attributed(self):
         r"""THE round-4 regression, and the configuration the forgery rule was
@@ -295,6 +390,7 @@ class NoErrorHappenedTests(unittest.TestCase):
                     {"main.tex", "chapters/decoy.tex"},
                     {"main.tex": 5, "chapters/decoy.tex": 5},
                     driver=f"no_pages_forged_{eng}",
+                    driver_engine=eng,
                 )
                 self.assertEqual((file, line), (None, None))
 
@@ -324,11 +420,25 @@ class NoErrorHappenedTests(unittest.TestCase):
                     {"main.tex", "chapters/decoy.tex"},
                     {"main.tex": 5, "chapters/decoy.tex": 5},
                     driver=f"no_pages_forged_{eng}",
+                    driver_engine=eng,
                 )
                 self.assertTrue(
                     excerpt.startswith("The document produced no pages"), excerpt[:80]
                 )
                 self.assertNotIn("Undefined control sequence", excerpt.splitlines()[0])
+
+    def test_a_file_named_after_the_marker_cannot_move_where_the_block_begins(self):
+        """latexmk echoes the file name in its `Running '...'` line, so a file
+        called `Collected error summary (may duplicate other messages).tex`
+        puts the marker text in the middle of a line. The marker is matched
+        at the START of a line for exactly that reason."""
+        for eng in ("pdflatex", "xelatex"):
+            with self.subTest(engine=eng):
+                out = (FIXTURES / "driver" / f"marker_named_file_{eng}.out").read_text()
+                self.assertIn(
+                    "Collected error summary (may duplicate other messages).tex", out
+                )
+                self.assertFalse(engine_errored(out, eng))
 
     def test_the_gate_defaults_to_closed(self):
         """A caller that forgets the argument declines rather than guesses."""

@@ -1,7 +1,7 @@
 Rc files read (in order):
   NONE
 Latexmk: This is Latexmk, John Collins, 9 March 2026. Version 4.88.
-Latexmk: Changing directory to '/tmp/s_r_genuine_error_xelatex_xelatex/'
+Latexmk: Changing directory to '/tmp/s_a2_bibtex_fail_plus_real_error_xelatex_xelatex/'
 No existing .aux file, so I'll make a simple one, and require run of *latex.
 Latexmk: applying rule 'xelatex'...
 Rule 'xelatex':  Reasons for rerun
@@ -23,8 +23,9 @@ L3 programming layer <2026-07-20>
 (/usr/local/texlive/2026/texmf-dist/tex/latex/base/article.cls
 Document Class: article 2025/01/22 v1.4n Standard LaTeX document class
 (/usr/local/texlive/2026/texmf-dist/tex/latex/base/size10.clo)) (/usr/local/texlive/2026/texmf-dist/tex/latex/l3backend/l3backend-xetex.def) (./main.aux)
-./main.tex:3: Undefined control sequence.
-l.3 \bogusmacro
+No file main.bbl.
+./main.tex:7: Undefined control sequence.
+l.7 \bogusmacro
                
 No pages of output.
 Transcript written on main.log.
@@ -33,8 +34,14 @@ Latexmk: Examining 'main.fls'
 Latexmk: Examining 'main.log'
 Latexmk: Log file says no output from latex
 Latexmk: For rule 'xelatex', no output was made
+  ===Source file 'main.bbl' for 'xelatex'
+Create bibtex main
+Latexmk: Found bibliography file(s):
+  ./refs.bib
 Latexmk: Errors, so I did not complete making targets
 Collected error summary (may duplicate other messages):
   xelatex: Command for 'xelatex' gave return code 1
       Refer to 'main.log' and/or above output for details
 Latexmk: Undoing directory change
+
+

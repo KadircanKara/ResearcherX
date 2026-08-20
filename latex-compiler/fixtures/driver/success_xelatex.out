@@ -1,7 +1,7 @@
 Rc files read (in order):
   NONE
 Latexmk: This is Latexmk, John Collins, 9 March 2026. Version 4.88.
-Latexmk: Changing directory to '/tmp/w_success_xelatex/'
+Latexmk: Changing directory to '/tmp/s_r_success_xelatex_xelatex/'
 No existing .aux file, so I'll make a simple one, and require run of *latex.
 Latexmk: applying rule 'xelatex'...
 Rule 'xelatex':  Reasons for rerun
@@ -47,7 +47,3 @@ Running 'xdvipdfmx -E -o "main.pdf"  "main.xdv"'
 ------------
 Latexmk: All targets (main.xdv main.pdf) are up-to-date
 Latexmk: Undoing directory change
-
-main.xdv -> main.pdf
-[1]
-2552 bytes written

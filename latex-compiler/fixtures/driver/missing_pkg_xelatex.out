@@ -1,7 +1,7 @@
 Rc files read (in order):
   NONE
 Latexmk: This is Latexmk, John Collins, 9 March 2026. Version 4.88.
-Latexmk: Changing directory to '/tmp/w_missing_pkg_xelatex/'
+Latexmk: Changing directory to '/tmp/s_r_missing_pkg_xelatex_xelatex/'
 No existing .aux file, so I'll make a simple one, and require run of *latex.
 Latexmk: applying rule 'xelatex'...
 Rule 'xelatex':  Reasons for rerun
@@ -47,12 +47,3 @@ Collected error summary (may duplicate other messages):
   xelatex: Command for 'xelatex' gave return code 1
       Refer to 'main.log' and/or above output for details
 Latexmk: Undoing directory change
-
-Latexmk: Missing input file 'nopesuchpkg.sty' message in .log file:
-  ! LaTeX Error: File `nopesuchpkg.sty' not found.
-Latexmk: Sometimes, the -f option can be used to get latexmk
-  to try to force complete processing.
-  But normally, you will need to correct the file(s) that caused the
-  error, and then rerun latexmk.
-  In some cases, it is best to clean out generated files before rerunning
-  latexmk after you've corrected the files.

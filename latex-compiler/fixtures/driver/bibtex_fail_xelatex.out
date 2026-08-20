@@ -1,7 +1,7 @@
 Rc files read (in order):
   NONE
 Latexmk: This is Latexmk, John Collins, 9 March 2026. Version 4.88.
-Latexmk: Changing directory to '/tmp/s_r_genuine_error_xelatex_xelatex/'
+Latexmk: Changing directory to '/tmp/s_r_bibtex_fail_xelatex_xelatex/'
 No existing .aux file, so I'll make a simple one, and require run of *latex.
 Latexmk: applying rule 'xelatex'...
 Rule 'xelatex':  Reasons for rerun
@@ -23,18 +23,46 @@ L3 programming layer <2026-07-20>
 (/usr/local/texlive/2026/texmf-dist/tex/latex/base/article.cls
 Document Class: article 2025/01/22 v1.4n Standard LaTeX document class
 (/usr/local/texlive/2026/texmf-dist/tex/latex/base/size10.clo)) (/usr/local/texlive/2026/texmf-dist/tex/latex/l3backend/l3backend-xetex.def) (./main.aux)
-./main.tex:3: Undefined control sequence.
-l.3 \bogusmacro
-               
-No pages of output.
+No file main.bbl.
+[1] (./main.aux) )
+Output written on main.xdv (1 page, 436 bytes).
+SyncTeX written on main.synctex.gz.
 Transcript written on main.log.
 Latexmk: Getting log file 'main.log'
 Latexmk: Examining 'main.fls'
 Latexmk: Examining 'main.log'
-Latexmk: Log file says no output from latex
-Latexmk: For rule 'xelatex', no output was made
+Latexmk: Log file says output to 'main.xdv'
+  ===Source file 'main.bbl' for 'xelatex'
+Create bibtex main
+Latexmk: Found bibliography file(s):
+  ./refs.bib
+Latexmk: applying rule 'bibtex main'...
+Rule 'bibtex main':  Reasons for rerun
+Category 'other':
+  Rerun of 'bibtex main' forced or previously required:
+    Reason or flag: 'Initial set up of rule'
+
+------------
+Run number 1 of rule 'bibtex main'
+------------
+------------
+Running 'bibtex  "main.aux"'
+------------
+This is BibTeX, Version 0.99e (TeX Live 2026)
+The top-level auxiliary file: main.aux
+The style file: plain.bst
+Database file #1: refs.bib
+I was expecting an "="---line 1 of file refs.bib
+ : @article{broken, this 
+ :                       is not bibtex at all ]]]
+I'm skipping whatever remains of this entry
+Warning--to sort, need author or key in broken
+Warning--empty author in broken
+Warning--empty title in broken
+Warning--empty journal in broken
+Warning--empty year in broken
+(There was 1 error message)
 Latexmk: Errors, so I did not complete making targets
 Collected error summary (may duplicate other messages):
-  xelatex: Command for 'xelatex' gave return code 1
-      Refer to 'main.log' and/or above output for details
+  bibtex main: Bibtex errors: See file 'main.blg'
 Latexmk: Undoing directory change

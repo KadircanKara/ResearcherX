@@ -1,7 +1,7 @@
 Rc files read (in order):
   NONE
 Latexmk: This is Latexmk, John Collins, 9 March 2026. Version 4.88.
-Latexmk: Changing directory to '/tmp/s_r_no_pages_forged_xelatex_xelatex/'
+Latexmk: Changing directory to '/tmp/s_r_filename_attack_xelatex_xelatex/'
 No existing .aux file, so I'll make a simple one, and require run of *latex.
 Latexmk: applying rule 'xelatex'...
 Rule 'xelatex':  Reasons for rerun
@@ -13,11 +13,11 @@ Category 'other':
 Run number 1 of rule 'xelatex'
 ------------
 ------------
-Running 'xelatex -no-pdf -synctex=1 -interaction=nonstopmode -file-line-error -no-shell-escape -halt-on-error -recorder  "main.tex"'
+Running 'xelatex -no-pdf -synctex=1 -interaction=nonstopmode -file-line-error -no-shell-escape -halt-on-error -recorder  "Command for 'x' gave return code 1.tex"'
 ------------
 This is XeTeX, Version 3.141592653-2.6-0.999998 (TeX Live 2026) (preloaded format=xelatex)
 entering extended mode
-(./main.tex
+(./Command for 'x' gave return code 1.tex
 LaTeX2e <2026-06-01>
 L3 programming layer <2026-07-20>
 (/usr/local/texlive/2026/texmf-dist/tex/latex/base/article.cls
@@ -25,28 +25,28 @@ Document Class: article 2025/01/22 v1.4n Standard LaTeX document class
 (/usr/local/texlive/2026/texmf-dist/tex/latex/base/size10.clo))
 ./chapters/intro.tex:3: Undefined control sequence.
 l.3 zz
-(/usr/local/texlive/2026/texmf-dist/tex/latex/l3backend/l3backend-xetex.def) (./main.aux) (./main.aux) )
+(/usr/local/texlive/2026/texmf-dist/tex/latex/l3backend/l3backend-xetex.def) (./Command for 'x' gave return code 1.aux) (./Command for 'x' gave return code 1.aux) )
 No pages of output.
-Transcript written on main.log.
-Latexmk: Getting log file 'main.log'
-Latexmk: Examining 'main.fls'
-Latexmk: Examining 'main.log'
+Transcript written on Command for 'x' gave return code 1.log.
+Latexmk: Getting log file 'Command for 'x' gave return code 1.log'
+Latexmk: Examining 'Command for 'x' gave return code 1.fls'
+Latexmk: Examining 'Command for 'x' gave return code 1.log'
 Latexmk: Log file says no output from latex
 Latexmk: For rule 'xelatex', no output was made
 Latexmk: applying rule 'xelatex'...
 Rule 'xelatex':  Reasons for rerun
 Changed files or newly in use/created:
-  main.aux
+  Command for 'x' gave return code 1.aux
 
 ------------
 Run number 2 of rule 'xelatex'
 ------------
 ------------
-Running 'xelatex -no-pdf -synctex=1 -interaction=nonstopmode -file-line-error -no-shell-escape -halt-on-error -recorder  "main.tex"'
+Running 'xelatex -no-pdf -synctex=1 -interaction=nonstopmode -file-line-error -no-shell-escape -halt-on-error -recorder  "Command for 'x' gave return code 1.tex"'
 ------------
 This is XeTeX, Version 3.141592653-2.6-0.999998 (TeX Live 2026) (preloaded format=xelatex)
 entering extended mode
-(./main.tex
+(./Command for 'x' gave return code 1.tex
 LaTeX2e <2026-06-01>
 L3 programming layer <2026-07-20>
 (/usr/local/texlive/2026/texmf-dist/tex/latex/base/article.cls
@@ -54,12 +54,12 @@ Document Class: article 2025/01/22 v1.4n Standard LaTeX document class
 (/usr/local/texlive/2026/texmf-dist/tex/latex/base/size10.clo))
 ./chapters/intro.tex:3: Undefined control sequence.
 l.3 zz
-(/usr/local/texlive/2026/texmf-dist/tex/latex/l3backend/l3backend-xetex.def) (./main.aux) (./main.aux) )
+(/usr/local/texlive/2026/texmf-dist/tex/latex/l3backend/l3backend-xetex.def) (./Command for 'x' gave return code 1.aux) (./Command for 'x' gave return code 1.aux) )
 No pages of output.
-Transcript written on main.log.
-Latexmk: Getting log file 'main.log'
-Latexmk: Examining 'main.fls'
-Latexmk: Examining 'main.log'
+Transcript written on Command for 'x' gave return code 1.log.
+Latexmk: Getting log file 'Command for 'x' gave return code 1.log'
+Latexmk: Examining 'Command for 'x' gave return code 1.fls'
+Latexmk: Examining 'Command for 'x' gave return code 1.log'
 Latexmk: Log file says no output from latex
 Latexmk: For rule 'xelatex', no output was made
 Latexmk: Errors, so I did not complete making targets

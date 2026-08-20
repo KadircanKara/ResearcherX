@@ -239,12 +239,12 @@ _COMPILE_ENV = {**os.environ, "max_print_line": "10000"}
 #   "No pages of output."   `<eng>: failed to create output file` -- no code
 #   success                 no summary block at all
 #
-# Why this is not one more forgeable string: latexmk writes that block
-# AFTER the engine process has exited, so nothing the document printed can
-# appear below it -- and only the text after the LAST marker is read. It is
-# the same end-of-stream argument `analyse_log` uses inside the log,
-# applied to the driver's stream, where the document's writes strictly
-# precede the driver's verdict.
+# latexmk writes that block after the engine process has exited, on its own
+# stdout, so nothing the DOCUMENT printed can appear below it. That
+# argument is about the stdout stream ALONE and was false of stdout+stderr
+# concatenated -- see `engine_errored` for the attack that exploited the
+# difference, which is why the pipes are kept apart and the block is parsed
+# rather than searched.
 #
 # The cost is stated plainly: if a future latexmk reworded this line, the
 # gate would close permanently and the feature would silently become
@@ -258,20 +258,88 @@ _COMPILE_ENV = {**os.environ, "max_print_line": "10000"}
 _NO_PAGES = "No pages of output."
 
 _SUMMARY_MARKER = "Collected error summary"
-_ENGINE_RETURN_CODE = re.compile(r"Command for '[^']*' gave return code ([1-9]\d*)")
 
 
-def engine_errored(driver_output: str) -> bool:
-    """Did the TeX engine exit nonzero, per latexmk's own summary?
+# ONE ENTRY of latexmk's summary block, for the engine WE RAN.
+#
+# Anchored end to end, with the engine's name interpolated at BOTH ends,
+# because every loose part of this pattern has been shown to be
+# attacker-reachable:
+#
+#   - The block's deeper-indented detail line is
+#     `      Refer to '<jobname>.log' and/or above output for details`, and
+#     the jobname is the user's file name.
+#   - A failing `bibtex` rule contributes its OWN entry,
+#     `  bibtex <jobname>: Bibtex errors: See file '<jobname>.blg'` --
+#     an indented entry line, inside the block, carrying the jobname twice.
+#     Requiring the rule prefix to be the engine also refuses to read a
+#     BIBTEX failure as a TeX error, which it is not.
+#
+# So the rule prefix, the quoted command and the trailing code are all
+# pinned, and `$` closes the line. `latex_paths.normalize_path` permits
+# spaces, quotes and colons in a file name, so a jobname can contain this
+# entire sentence -- it just cannot be an entire line of it.
+def _summary_entry(rule: str) -> "re.Pattern[str]":
+    quoted = re.escape(rule)
+    return re.compile(
+        rf"^  {quoted}: Command for '{quoted}' gave return code [1-9]\d*$"
+    )
 
-    `driver_output` is latexmk's stdout+stderr, NOT the `.log` file. The
-    two are different streams and only this one carries the driver's
-    verdict on the engine's exit status.
+
+def engine_errored(driver_stdout: str, engine: str) -> bool:
+    """Did the TeX engine exit nonzero, per latexmk's own summary block?
+
+    `driver_stdout` is latexmk's STDOUT ALONE. Not stdout+stderr -- that
+    concatenation is what broke this gate on review, and the evidence was
+    already sitting in this repository's own captured fixtures:
+
+        Collected error summary (may duplicate other messages):
+          pdflatex: failed to create output file
+        Latexmk: Undoing directory change
+                                       <- stdout ends here
+        Failure to make 'main.pdf'     <- STDERR, appended after everything
+
+    Two separately buffered pipes concatenated put every stderr line after
+    every stdout line whatever their real order, so "latexmk writes the
+    block last, nothing can follow it" was never true of the merged stream.
+    `Failure to make '<target>'` names the user's own file, so a project
+    whose main file is called `Command for 'x' gave return code 1.tex`
+    made a free regex over the tail report an error on a run where nothing
+    errored -- and that name arrives through an ordinary file create,
+    rename or zip import.
+
+    The two defences are independent on purpose, so both must fail before
+    the gate can open: the stream is stdout only, AND the block is parsed
+    structurally rather than searched. Measured shape, identical on both
+    engines (`fixtures/driver/`):
+
+        Collected error summary (may duplicate other messages):   <- col 0
+          pdflatex: Command for 'pdflatex' gave return code 1     <- entry
+              Refer to 'main.log' and/or above output for details <- detail
+        Latexmk: Undoing directory change                         <- ends it
+
+    The marker is matched at the START OF A LINE, so a file NAMED
+    `Collected error summary (may duplicate other messages).tex` -- which
+    latexmk echoes in its `Running '...'` line -- cannot move where the
+    block is thought to begin. The block ends at the first line that is not
+    indented. Every entry is checked, not just the first: a multi-pass run
+    with a failing bibliography contributes several.
     """
-    marker = driver_output.rfind(_SUMMARY_MARKER)
-    if marker < 0:
+    entry = _summary_entry(engine if engine in _ENGINE_FLAG else "pdflatex")
+    lines = driver_stdout.splitlines()
+    start = None
+    for i in range(len(lines) - 1, -1, -1):
+        if lines[i].startswith(_SUMMARY_MARKER):
+            start = i
+            break
+    if start is None:
         return False
-    return bool(_ENGINE_RETURN_CODE.search(driver_output[marker:]))
+    for line in lines[start + 1 :]:
+        if not line.startswith(" "):
+            return False
+        if entry.match(line):
+            return True
+    return False
 
 
 # A `path:line: message` split of one log line. Every candidate split is
@@ -898,14 +966,20 @@ def compile_tree(bounded: "_Bounded", engine: str, main_path: str) -> dict:
         )
         try:
             stdout, stderr = proc.communicate(timeout=COMPILE_TIMEOUT)
-            # TWO DIFFERENT STREAMS, and the distinction is load-bearing.
-            # `driver_output` is latexmk's own, and carries its post-run
-            # verdict on whether the ENGINE exited nonzero -- the gate
-            # `analyse_log` gets as `errored`. `log_text` is replaced by the
-            # `.log` file below when there is one, because that is what the
-            # user needs to read.
-            driver_output = stdout + stderr
-            log_text = driver_output
+            # THREE DIFFERENT STREAMS, and keeping them apart is
+            # load-bearing. `stdout` alone carries latexmk's post-run
+            # summary block -- the gate `analyse_log` gets as `errored`.
+            # CONCATENATING stderr onto it is what broke that gate on
+            # review: two separately buffered pipes joined end to end put
+            # `Failure to make '<the user's own file name>'` after
+            # latexmk's summary, so a project whose main file is called
+            # `Command for 'x' gave return code 1.tex` reported an error on
+            # a run where nothing errored. See `engine_errored`.
+            #
+            # `log_text` keeps BOTH, because when no `.log` file exists it
+            # is all the user has to read; it is replaced by the `.log`
+            # itself below whenever there is one.
+            log_text = stdout + stderr
         except subprocess.TimeoutExpired:
             os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
             proc.communicate()
@@ -955,7 +1029,8 @@ def compile_tree(bounded: "_Bounded", engine: str, main_path: str) -> dict:
             main_dir,
             _line_count,
             _exists,
-            errored=engine_errored(driver_output),
+            # STDOUT ONLY, and the engine name, both deliberate.
+            errored=engine_errored(stdout, engine),
         )
 
         pdf = main.parent / f"{stem}.pdf"
