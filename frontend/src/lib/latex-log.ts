@@ -1,102 +1,55 @@
-export interface LatexError {
-  message: string;
-  /**
-   * The source line TeX blamed, or null when the log does not state it in a
-   * form that also names the file.
-   *
-   * `line` and `file` are set or null TOGETHER, on purpose. A line number
-   * without a file is worse than no line number at all in a multi-file
-   * project: the caller would jump that many lines into whatever buffer
-   * happens to be on screen, which is usually not the file the error is in.
-   */
-  line: number | null;
-  /** The file TeX blamed, tree-relative, or null. See `line`. */
-  file: string | null;
-}
-
 /**
- * Errors, as `-file-line-error` writes them.
+ * WHAT THIS MODULE IS NOT: it is not where the editor learns which file an
+ * error is in. That is decided by the compile service, against the tree it
+ * actually staged, and arrives on the compile response as `error_file` /
+ * `error_line` (see `analyse_log` in `latex-compiler/app.py`). Nothing here
+ * is used for navigation.
  *
- * The compiler runs `latexmk ... -file-line-error` (see
- * `latex-compiler/app.py`), which makes every TeX error self-describing:
+ * Two shipped attempts read the file out of the log TEXT and both were
+ * withdrawn after producing a confident jump into the wrong file:
  *
- *     ./chapters/intro.tex:3: Undefined control sequence.
+ *   1. Counting `(` and `)` to track TeX's file stack. TeX echoes the
+ *      offending typeset text inside `Overfull \hbox` warnings, so one
+ *      literal `)` in the user's own prose popped a real frame and the
+ *      parser named the enclosing file -- with a line number belonging to a
+ *      different one. Two stray parens instead emptied the stack, so the
+ *      failure was INTERMITTENT.
+ *   2. Parsing the `-file-line-error` shape (`./chapters/intro.tex:3: msg`).
+ *      Broken four ways, every one reproduced end to end against the real
+ *      container: TeX wraps log lines at 79 columns, so a path over ~77
+ *      characters is split and the CONTINUATION fragment is a suffix that
+ *      matches a different real file; an `Overfull \hbox` echo's
+ *      continuation lines carry ordinary prose (a `verbatim` block holding
+ *      `parser.c:42: error: ...` is normal content in a research writing
+ *      tool); `\typeout{./chapters/hacked.tex:42: ...}` needs no wrapping at
+ *      all; and a colon in a filename matched nothing, which fell through to
+ *      handing the client TeX's memory statistics.
  *
- * instead of a bare `! Undefined control sequence.` whose file had to be
- * INFERRED from somewhere else in the log.
+ * The lesson, and the constraint on anything added here: A TEX LOG IS NOT
+ * STRUCTURED OUTPUT. The user's own source flows into it, so any rule that
+ * infers structure from the text alone can be forged by the text. Do not
+ * reintroduce a file or a line number here, in any form, however careful the
+ * regex looks -- there is no careful regex, that was the discovery.
  *
- * This replaced a parser that tracked TeX's file stack by counting `(` and
- * `)`. That parser was disproved against the real compiler in this project's
- * own container: TeX echoes the offending typeset text inside `Overfull
- * \hbox` warnings, and that echo carries literal parentheses straight out of
- * the user's source. One stray `)` in a long line pops a real file frame and
- * the parser then names the ENCLOSING file -- confidently, with a line
- * number belonging to a different file -- and the shell happily opens it and
- * jumps. Two stray parens instead emptied the stack and it answered null, so
- * the failure was INTERMITTENT, which is worse than consistent. Reproduced
- * verbatim with a stock `article` and no packages; the fixtures in
- * `latex-log.test.ts` are that real log.
- *
- * There is no fallback to the old machinery, deliberately. A fallback that
- * can produce a confident WRONG answer is exactly the thing being removed --
- * a wrong jump is worse than no jump, which is the same line
- * `paper_resolver.py` and `latex_detect.py` hold on the backend.
- *
- * The path may contain spaces (measured: `./my chapter/deep.tex:2: ...`, no
- * quoting) so a space cannot terminate it. It may NOT contain a colon -- a
- * colon is what separates the three fields, and a path holding one simply
- * fails to match and yields no file, which is the safe direction. Requiring
- * a trailing extension and forbidding a backslash is what keeps a wrapped
- * line of echoed font/typeset text (`\OT1/cmr/m/n/10 ...`) from ever being
- * read as a path.
+ * What is left is display: the one-line headline shown above the log. Being
+ * wrong about that shows the user a misleading sentence with the real log
+ * directly underneath it. Being wrong about a FILE opens the wrong document
+ * and scrolls it, which is why the two are no longer the same decision.
  */
-const FILE_LINE_ERROR = /^(?!!)([^\\:]*\.[A-Za-z0-9_-]+):(\d+):\s*(.+?)\s*$/;
 
-/**
- * The legacy, file-less error line: `! <message>`.
- *
- * Still emitted even with `-file-line-error` on, for errors TeX raises when
- * it is not positioned in a file it can name -- measured: a missing package
- * prints `! LaTeX Error: File \`nopesuchpkg.sty' not found.` with no path
- * prefix, and only the FALLOUT (`./main.tex:3: Emergency stop.`) carries
- * one. Matching this form keeps the useful message; it names no file and no
- * line, so the shell declines to jump rather than jumping to the fallout.
- *
- * Anchoring on the start of a line matters: logs are full of prose
- * containing exclamation marks, and a loose search reports package chatter
- * as a compile error.
- */
-const BANG_ERROR = /^!\s*(.+?)\s*$/;
-
-/** Paths are printed relative to the compile root, with a `./` TeX adds. */
-function normalize(name: string): string {
-  return name.replace(/^\.\//, "");
-}
-
-/**
- * The first error in a LaTeX log, or null if there is none.
- *
- * The FIRST is what matters: TeX keeps going after an error in nonstop mode,
- * and everything after the first is usually fallout from it. With
- * `-file-line-error` even `==> Fatal error occurred` gets a path prefix, so
- * the log holds several matching lines and only the earliest is the cause.
- *
- * A log with no error line -- a compile timeout, or the generic message from
- * an unreachable compiler -- yields null, and the caller shows the log
- * verbatim.
- */
-export function firstError(log: string): LatexError | null {
+/** The first error-looking line's message, for the panel headline only. */
+export function firstErrorMessage(log: string): string | null {
   for (const line of log.split("\n")) {
-    const located = FILE_LINE_ERROR.exec(line);
-    if (located) {
-      return { message: located[3], line: Number(located[2]), file: normalize(located[1]) };
-    }
-    // Checked second, and the two forms are made mutually exclusive by the
-    // `(?!!)` above: a `! ...` line is never read as a path, so a message
-    // like "! Foo Error: see bar.tex:12: below" cannot be mined for a file
-    // it does not actually name.
-    const bang = BANG_ERROR.exec(line);
-    if (bang) return { message: bang[1], line: null, file: null };
+    // `path:line: message`, as `-file-line-error` writes it. Everything
+    // before the message is dropped: the file is not read from here, and
+    // the panel prints the compiler's own `error_file` instead.
+    const located = /^[^\s].*?:\d+:\s*(.+?)\s*$/.exec(line);
+    if (located) return located[1];
+    // The file-less form TeX still writes when it has no position to report
+    // -- a missing package is the common one. Anchored at the start of the
+    // line because logs are full of prose containing exclamation marks.
+    const bang = /^!\s*(.+?)\s*$/.exec(line);
+    if (bang) return bang[1];
   }
   return null;
 }

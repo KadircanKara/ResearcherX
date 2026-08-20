@@ -20,6 +20,16 @@ export interface LatexDocument {
 export interface CompileResult {
   ok: boolean;
   log: string;
+  /**
+   * Where the error is, decided by the COMPILE SERVICE against the tree it
+   * actually staged and passed through the backend untouched. Both are null
+   * together whenever it declined to attribute -- an ambiguous log, a path
+   * that was never staged, a line TeX would not corroborate. The client
+   * never re-derives them from `log`: see `lib/latex-log.ts` for the two
+   * withdrawn attempts that did and the wrong-file jumps they shipped.
+   */
+  error_file: string | null;
+  error_line: number | null;
   /** Present only on success, so a failed compile leaves the last good PDF alone. */
   pdf_hash: string | null;
   /**

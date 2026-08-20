@@ -20,12 +20,32 @@ import { isStale, type CompiledState, type TexPoint } from "@/lib/latex-sync";
 // their memoisation. Copied verbatim from the file this hook replaces.
 const SYNC_STALE_NOTE = "The PDF is out of date, so this may be a few lines off.";
 
+/**
+ * The compile log, with the compiler's own verdict on where its error is.
+ *
+ * ONE object rather than three pieces of state, because the three must
+ * never drift apart: every path that sets the log must state the location
+ * or state that there is none. When the location lived in its own state, a
+ * `setLog("The LaTeX compiler is unavailable.")` from an unrelated branch
+ * left the PREVIOUS compile's file and line standing beside it, offering a
+ * jump for an error that was no longer on screen.
+ *
+ * `file` and `line` are set or null TOGETHER -- see `CompileOut` on the
+ * backend and `analyse_log` in `latex-compiler/app.py` for who decides
+ * them and why nothing on this side re-derives them from `text`.
+ */
+export interface CompileLog {
+  text: string;
+  file: string | null;
+  line: number | null;
+}
+
 export interface UseLatexCompile {
   compiling: boolean;
   compiled: CompiledState | null;
   pdfBytes: Uint8Array | null;
-  log: string | null;
-  setLog: (log: string | null) => void;
+  log: CompileLog | null;
+  setLog: (log: CompileLog | null) => void;
   highlight: PdfHighlight | null;
   scrollToPage: number | null;
   gotoLine: { line: number; nonce: number } | null;
@@ -93,7 +113,7 @@ export function useLatexCompile(args: {
   const [compiling, setCompiling] = useState(false);
   const [compiled, setCompiled] = useState<CompiledState | null>(null);
   const [pdfBytes, setPdfBytes] = useState<Uint8Array | null>(null);
-  const [log, setLog] = useState<string | null>(null);
+  const [log, setLog] = useState<CompileLog | null>(null);
   const [highlight, setHighlight] = useState<PdfHighlight | null>(null);
   const [scrollToPage, setScrollToPage] = useState<number | null>(null);
   const [gotoLine, setGotoLine] = useState<{ line: number; nonce: number } | null>(
@@ -191,7 +211,14 @@ export function useLatexCompile(args: {
         // The last good PDF stays on screen on purpose: a broken edit
         // should not blank the preview, and the previous render is still
         // the most useful thing available.
-        setLog(result.log);
+        setLog({
+          text: result.log,
+          // Straight from the compile response. Nothing here parses
+          // `result.log`; see `lib/latex-log.ts` for the two withdrawn
+          // attempts that did.
+          file: result.error_file ?? null,
+          line: result.error_line ?? null,
+        });
         return;
       }
 
@@ -206,11 +233,14 @@ export function useLatexCompile(args: {
         // own; recompiling produces a fresh hash and a fresh file
         // immediately.
         if (documentIdRef.current === docId) {
-          setLog(
-            err instanceof PdfNotFoundError
-              ? "That build is no longer cached. Compile again to rebuild it."
-              : "The LaTeX compiler is unavailable. Please try again."
-          );
+          setLog({
+            text:
+              err instanceof PdfNotFoundError
+                ? "That build is no longer cached. Compile again to rebuild it."
+                : "The LaTeX compiler is unavailable. Please try again.",
+            file: null,
+            line: null,
+          });
         }
         return;
       }
@@ -230,7 +260,11 @@ export function useLatexCompile(args: {
       setNote(null);
     } catch {
       if (documentIdRef.current === docId) {
-        setLog("The LaTeX compiler is unavailable. Please try again.");
+        setLog({
+          text: "The LaTeX compiler is unavailable. Please try again.",
+          file: null,
+          line: null,
+        });
       }
     } finally {
       setCompiling(false);

@@ -236,13 +236,26 @@ async def compile_document(
         # `_total_bytes`), and `move_to_end` is the LRU promotion a hit
         # should get anyway.
         cache.put(key, cached, document_id=doc_id)
-        return CompileOut(ok=True, log=cached.log, pdf_hash=key, revision=revision)
+        return CompileOut(
+            ok=True,
+            log=cached.log,
+            error_file=cached.error_file,
+            error_line=cached.error_line,
+            pdf_hash=key,
+            revision=revision,
+        )
 
     result = await compile_tree(entries, engine, main_path)
     if not result.ok or result.pdf is None:
         # No hash on failure: the client keeps the PDF it already has, so a
         # broken edit never blanks the preview.
-        return CompileOut(ok=False, log=result.log, pdf_hash=None)
+        return CompileOut(
+            ok=False,
+            log=result.log,
+            error_file=result.error_file,
+            error_line=result.error_line,
+            pdf_hash=None,
+        )
 
     cache.put(
         key,
@@ -252,10 +265,19 @@ async def compile_document(
             log=result.log,
             root=result.root,
             main_path=main_path,
+            error_file=result.error_file,
+            error_line=result.error_line,
         ),
         document_id=doc_id,
     )
-    return CompileOut(ok=True, log=result.log, pdf_hash=key, revision=revision)
+    return CompileOut(
+        ok=True,
+        log=result.log,
+        error_file=result.error_file,
+        error_line=result.error_line,
+        pdf_hash=key,
+        revision=revision,
+    )
 
 
 @router.get("/projects/{project_id}/latex/{document_id}/pdf")

@@ -46,6 +46,10 @@ jobs:
       # step. The compiler image itself runs Python 3.14; this is stdlib and
       # version-agnostic, so 3.12 here proves nothing version-specific.
       - run: python3 test_tree_path.py
+      # Same shape, same reason: `analyse_log` decides which file the editor
+      # jumps to when a compile fails, and every fixture it runs against is a
+      # REAL log captured from the container (see the test's own header).
+      - run: python3 test_analyse_log.py
 
   # Finding I1 (2026-08-20 whole-plan review): the `latex-compiler` job above
   # is lint + one stdlib unit test -- it never boots a real TeX Live, so it

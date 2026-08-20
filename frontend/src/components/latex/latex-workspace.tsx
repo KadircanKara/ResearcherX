@@ -269,12 +269,13 @@ export function LatexWorkspace({ projectId, role }: LatexWorkspaceProps) {
   // `compile`'s two setters, none of which are stable across a render of the
   // whole `doc` object.
   const handleJumpToError = useCallback(
-    (line: number, file: string | null) => {
-      // Declined on BOTH unknowns: the log named no file, or it named one
-      // this document does not have (a package under `/usr/share`, or a file
-      // deleted since the compile). Either way the line number means nothing
-      // against the active buffer.
-      if (file === null || !doc.files.some((f) => f.path === file)) {
+    (line: number, file: string) => {
+      // The compiler already cross-checked this path against the tree it
+      // STAGED, so this is not that check repeated -- it is the narrower
+      // one only the client can make: the tree may have changed since the
+      // compile (a file renamed or deleted while the build was in flight),
+      // and a line number means nothing against a buffer that is gone.
+      if (!doc.files.some((f) => f.path === file)) {
         compile.setSyncNote(LOG_FILE_UNKNOWN_NOTE);
         return;
       }
@@ -536,7 +537,9 @@ export function LatexWorkspace({ projectId, role }: LatexWorkspaceProps) {
             </div>
             {compile.log !== null && (
               <LogPanel
-                log={compile.log}
+                log={compile.log.text}
+                errorFile={compile.log.file}
+                errorLine={compile.log.line}
                 onClose={() => compile.setLog(null)}
                 onJumpToError={handleJumpToError}
               />

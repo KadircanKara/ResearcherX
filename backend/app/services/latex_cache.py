@@ -37,6 +37,11 @@ class CachedBuild:
     # read here and was never durable (see the module docstring).
     root: str | None
     main_path: str
+    # Cached WITH the log, because a cache hit answers a compile request in
+    # full: dropping these would make a repeat compile of an unchanged tree
+    # silently lose the jump the first compile offered.
+    error_file: str | None = None
+    error_line: int | None = None
 
     @property
     def size(self) -> int:

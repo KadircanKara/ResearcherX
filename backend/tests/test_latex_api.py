@@ -314,6 +314,126 @@ async def test_a_failed_compile_returns_the_log_and_no_hash(
     assert "Undefined control sequence" in body["log"]
 
 
+async def test_a_failed_compile_carries_the_compilers_own_error_location(
+    client: AsyncClient, you: User, project: Project, db_session: AsyncSession
+):
+    """Where the error is, is decided by the COMPILE SERVICE against the tree
+    it staged (`analyse_log` in `latex-compiler/app.py`), and this route
+    passes it through untouched. Nothing between there and the browser
+    re-derives it from the log text: that inference shipped a confident jump
+    into the wrong file twice."""
+    doc = LatexDocument(project_id=project.id, name="main.tex")
+    db_session.add(doc)
+    await db_session.commit()
+    await db_session.refresh(doc)
+
+    result = CompileResult(
+        ok=False,
+        log="./chapters/intro.tex:3: Undefined control sequence.",
+        pdf=None,
+        synctex_gz=None,
+        error_file="chapters/intro.tex",
+        error_line=3,
+    )
+    with patch("app.api.v1.latex.compile_tree", AsyncMock(return_value=result)):
+        resp = await client.post(
+            f"/v1/projects/{project.id}/latex/{doc.id}/compile",
+            headers={"X-Dev-User-Id": you.id},
+        )
+
+    body = resp.json()
+    assert body["error_file"] == "chapters/intro.tex"
+    assert body["error_line"] == 3
+
+
+async def test_a_compile_that_declines_to_attribute_reports_neither_half(
+    client: AsyncClient, you: User, project: Project, db_session: AsyncSession
+):
+    """A missing package, an ambiguous log, a path that was never staged: the
+    compiler answers with no location at all, and the client must be given
+    both halves as null so the jump control is simply absent. A line with no
+    file would send the editor that far into whatever buffer is open."""
+    doc = LatexDocument(project_id=project.id, name="main.tex")
+    db_session.add(doc)
+    await db_session.commit()
+    await db_session.refresh(doc)
+
+    result = CompileResult(
+        ok=False,
+        log="! LaTeX Error: File `nopesuchpkg.sty' not found.",
+        pdf=None,
+        synctex_gz=None,
+    )
+    with patch("app.api.v1.latex.compile_tree", AsyncMock(return_value=result)):
+        resp = await client.post(
+            f"/v1/projects/{project.id}/latex/{doc.id}/compile",
+            headers={"X-Dev-User-Id": you.id},
+        )
+
+    body = resp.json()
+    assert body["error_file"] is None
+    assert body["error_line"] is None
+
+
+async def test_a_cache_hit_still_reports_the_error_location_it_was_built_with(
+    client: AsyncClient, you: User, project: Project, db_session: AsyncSession
+):
+    """A cache hit answers a compile request in full. Dropping the location
+    there would make a repeat compile of an unchanged tree silently lose the
+    jump the first one offered -- the same class of bug as a cache hit not
+    updating `_latest` for SyncTeX."""
+    doc = LatexDocument(project_id=project.id, name="main.tex")
+    db_session.add(doc)
+    await db_session.commit()
+    await db_session.refresh(doc)
+
+    result = CompileResult(
+        ok=True,
+        log="./chapters/intro.tex:3: Undefined control sequence.",
+        pdf=b"%PDF-cached",
+        synctex_gz=b"gz",
+        root="/tmp/rx-loc",
+        error_file="chapters/intro.tex",
+        error_line=3,
+    )
+    with patch("app.api.v1.latex.compile_tree", AsyncMock(return_value=result)) as mock:
+        first = await client.post(
+            f"/v1/projects/{project.id}/latex/{doc.id}/compile",
+            headers={"X-Dev-User-Id": you.id},
+        )
+        second = await client.post(
+            f"/v1/projects/{project.id}/latex/{doc.id}/compile",
+            headers={"X-Dev-User-Id": you.id},
+        )
+
+    # The second really was served from the cache, or this proves nothing.
+    assert mock.await_count == 1
+    assert first.json()["error_file"] == "chapters/intro.tex"
+    assert second.json()["error_file"] == "chapters/intro.tex"
+    assert second.json()["error_line"] == 3
+
+
+async def test_a_non_string_error_file_from_the_compiler_is_dropped_not_coerced(
+    client: AsyncClient, you: User, project: Project, db_session: AsyncSession
+):
+    """The compile service is a separately deployed image, so its JSON is
+    untyped input here. `str(123)` and `str(None)` are confidently WRONG
+    paths, not missing ones -- and `True` passes an `isinstance(..., int)`
+    check and would reach the browser as line 1."""
+    from app.services import latex_compiler
+
+    for payload in (
+        {"ok": False, "log": "x", "error_file": 123, "error_line": 3},
+        {"ok": False, "log": "x", "error_file": "a.tex", "error_line": True},
+        {"ok": False, "log": "x", "error_file": "a.tex", "error_line": 0},
+        {"ok": False, "log": "x", "error_file": "", "error_line": 3},
+        {"ok": False, "log": "x", "error_file": "a.tex"},
+    ):
+        with patch.object(latex_compiler, "_post_body", AsyncMock(return_value=payload)):
+            result = await latex_compiler.compile_tree([("main.tex", b"x")], "pdflatex", "main.tex")
+        assert (result.error_file, result.error_line) == (None, None), payload
+
+
 async def test_fetching_a_pdf_hash_that_is_not_cached_404s(
     client: AsyncClient, you: User, project: Project, db_session: AsyncSession
 ):

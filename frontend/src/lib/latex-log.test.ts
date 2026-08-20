@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { firstError } from "./latex-log";
+import { firstErrorMessage } from "./latex-log";
 
 // EVERY fixture below is REAL text, captured from this project's own
 // `latex-compiler` container (TeX Live 2026, latexmk 4.88) by running the
@@ -91,84 +91,50 @@ PDF statistics:
  9 words of extra memory for PDF output out of 10000 (max. 10000000)
 `;
 
-describe("firstError", () => {
-  it("reads the file and line straight out of a -file-line-error line", () => {
-    expect(firstError(SPACE_IN_PATH)).toEqual({
-      message: "Undefined control sequence.",
-      line: 2,
-      file: "my chapter/deep.tex",
-    });
+describe("firstErrorMessage", () => {
+  // This function produces the panel's HEADLINE ONLY. The file and the line
+  // the editor jumps to come from the compile response (`error_file` /
+  // `error_line`), decided by the compile service against the tree it
+  // staged -- never from this text. See the module's own header for the two
+  // withdrawn attempts that read them from here.
+
+  it("takes the message after a -file-line-error prefix and DROPS the path", () => {
+    expect(firstErrorMessage(SPACE_IN_PATH)).toBe("Undefined control sequence.");
   });
 
-  it("attributes the error to the chapter even though an Overfull echo carries a stray ')'", () => {
-    // THE regression this whole rewrite exists for. The old file-stack
-    // parser answered `main.tex` here -- a real file in the tree, so the
-    // shell opened it and jumped to line 3 of the wrong document.
-    expect(firstError(OVERFULL_PARENS)).toEqual({
-      message: "Undefined control sequence.",
-      line: 3,
-      file: "chapters/intro.tex",
-    });
+  it("is not confused by the stray ')' an Overfull echo puts in the log", () => {
+    expect(firstErrorMessage(OVERFULL_PARENS)).toBe("Undefined control sequence.");
   });
 
-  it("names NO file when the compiler was not asked for one, rather than guessing", () => {
-    // If `-file-line-error` is ever dropped, this degrades to "no jump",
-    // never to "a jump into whichever file the parens happened to leave on
-    // top of a stack".
-    expect(firstError(OVERFULL_PARENS_NO_FLAG)).toEqual({
-      message: "Undefined control sequence.",
-      line: null,
-      file: null,
-    });
+  it("still reads the bare '! ...' form, which TeX writes with no position", () => {
+    expect(firstErrorMessage(OVERFULL_PARENS_NO_FLAG)).toBe("Undefined control sequence.");
   });
 
-  it("keeps the useful message for an error TeX raises with no file position", () => {
-    // The missing-package message comes FIRST and carries no path; the only
-    // located line in this log is `./main.tex:3: Emergency stop.`, which is
-    // the fallout, not the cause. Reporting the cause with no jump beats
-    // reporting the fallout with one.
-    expect(firstError(MISSING_PACKAGE)).toEqual({
-      message: "LaTeX Error: File `nopesuchpkg.sty' not found.",
-      line: null,
-      file: null,
-    });
-  });
-
-  it("returns the FIRST error, not the last, because later ones are usually fallout", () => {
-    // Both `==> Fatal error occurred` and any follow-on error carry a path
-    // prefix too under `-file-line-error`, so the log holds several
-    // matching lines.
-    const log =
-      "./chapters/intro.tex:3: Undefined control sequence.\n" +
-      "./chapters/intro.tex:3:  ==> Fatal error occurred, no output PDF file produced!\n";
-    expect(firstError(log)).toEqual({
-      message: "Undefined control sequence.",
-      line: 3,
-      file: "chapters/intro.tex",
-    });
+  it("keeps the CAUSE for a missing package, not the Emergency stop fallout", () => {
+    expect(firstErrorMessage(MISSING_PACKAGE)).toBe(
+      "LaTeX Error: File `nopesuchpkg.sty' not found."
+    );
   });
 
   it("finds nothing in a clean log, so a successful compile shows no error banner", () => {
-    expect(firstError(CLEAN)).toBeNull();
+    expect(firstErrorMessage(CLEAN)).toBeNull();
   });
 
   it("finds nothing in a timeout message, which is not a TeX error and is shown verbatim", () => {
-    expect(firstError("Compilation exceeded 30s and was stopped.")).toBeNull();
+    expect(firstErrorMessage("Compilation exceeded 30s and was stopped.")).toBeNull();
   });
 
-  it("ignores a '!' that is not at the start of a line, so prose in the log is not mistaken for an error", () => {
-    expect(firstError("Package foo warning: watch out! really\n")).toBeNull();
+  it("ignores a '!' that is not at the start of a line, so prose is not mistaken for an error", () => {
+    expect(firstErrorMessage("Package foo warning: watch out! really\n")).toBeNull();
   });
 
-  it("does not mine a path out of a '! ' message that merely mentions one", () => {
-    // A `!` line names no file BY DEFINITION here -- TeX only writes that
-    // form when it has no position to report. Letting a `foo.tex:12:`
-    // inside the message text stand in for one would reintroduce exactly
-    // the class of guess this module dropped.
-    expect(firstError("! Package foo Error: see bar.tex:12: for details.\n")).toEqual({
-      message: "Package foo Error: see bar.tex:12: for details.",
-      line: null,
-      file: null,
-    });
+  it("exports no way to read a file or a line out of a log", async () => {
+    // A GUARD, not a formality. Both withdrawn attempts were a helper in
+    // this module that returned a file name, and both were called in good
+    // faith by a caller that had no way to know the answer was a guess. If
+    // a future change reintroduces one, this fails and sends the reader to
+    // the header above.
+    const exported = await import("./latex-log");
+    expect(Object.keys(exported)).toEqual(["firstErrorMessage"]);
   });
 });

@@ -116,37 +116,438 @@ _ENGINE_FLAG = {
 }
 
 
-# An error line as `-file-line-error` writes it: `./chapters/intro.tex:3: msg`.
+# Environment for the compile subprocess.
 #
-# Kept deliberately loose here -- this function only has to find WHERE the
-# interesting 12 lines start, and it is the frontend's `latex-log.ts` that
-# extracts the file and the line and must be strict about it. The one thing
-# that matters is that it not match ordinary log chatter, which is what
-# requiring a trailing extension before the colon and digits after it buys.
-_FILE_LINE_ERROR = re.compile(r"^[^\\:]*\.[A-Za-z0-9_-]+:\d+: ")
+# `max_print_line` is what stops TeX wrapping log lines at its 79-column
+# default. That wrapping is not cosmetic: a path longer than ~77 characters
+# is SPLIT, and the continuation fragment is a SUFFIX of the real path that
+# still parses as a `path:line:` error line -- measured in this container, a
+# tree with one 76-character directory produced `chapters/intro.tex:1:` for
+# an error in `chapters/dddd.../chapters/intro.tex:1`, and because
+# `chapters/intro.tex` genuinely existed in that tree every "is it a real
+# file?" check passed and the wrong file was opened. Deep Overleaf-style
+# trees exceed 77 characters routinely, so this needed no adversary at all.
+#
+# Raising it also removes the continuation lines that echoed prose used to
+# hide behind: an `Overfull \hbox` echo is now a single line, and a single
+# echo line always begins with TeX's font selector (`[]\OT1/cmr/m/n/10 `),
+# which no path can.
+#
+# 10000 was verified to TAKE EFFECT rather than merely being accepted:
+# compiled in-container, a log line of 3019 characters came back unwrapped,
+# against the 79 the default produces. Both engines honour it (it is read by
+# kpathsea, not by our argv). A document CAN still exceed 10000 columns in
+# an echo, which is why it is one of four independent guards and not the
+# guard.
+#
+# `os.environ` is inherited deliberately: this container holds no secrets
+# (that is its containment story -- see the module docstring), and TeX needs
+# its own TEXMF* paths, which the image sets. Nothing is added here beyond
+# the print width.
+_COMPILE_ENV = {**os.environ, "max_print_line": "10000"}
 
 
-def _first_error(log_text: str) -> str:
-    """The first real TeX error, or the tail of the log.
+# --- Error attribution -------------------------------------------------
+#
+# THE LESSON THIS CODE EXISTS TO ENCODE: a TeX log is not structured
+# output. The user's own source flows into it -- through `Overfull \hbox`
+# echoes, through `\typeout`, through the error context TeX prints under
+# every error -- so ANY rule that infers structure from the log's TEXT
+# ALONE can be forged by the log's own content. Two shipped attempts were
+# broken exactly that way:
+#
+#   1. Counting `(`/`)` to track TeX's file stack. A literal `)` inside an
+#      Overfull echo of the user's prose popped a real frame, and the
+#      editor opened the wrong file with full confidence.
+#   2. Parsing the `-file-line-error` `path:line: message` shape out of the
+#      text. Broken four ways, all measured end to end in this container:
+#      a wrapped long path whose CONTINUATION fragment is a suffix that
+#      matches a different real file; prose inside an Overfull echo's
+#      continuation lines; a `\typeout` naming any path the author likes;
+#      and a colon in a filename, which matched nothing at all and handed
+#      the client TeX's memory statistics.
+#
+# So attribution here is built out of facts, not out of shapes:
+#
+#   A. `max_print_line` is raised (see `_COMPILE_ENV`) so TeX never wraps a
+#      line. That kills the suffix-fragment class outright, and with it the
+#      continuation lines the prose class hid behind.
+#   B. The named path is cross-checked against the tree THIS SERVICE JUST
+#      STAGED. The compiler extracted the tar; it knows every real file.
+#      A path naming something that was never staged attributes nothing.
+#      This check lives here and not in the frontend on purpose -- the
+#      frontend cannot do it, because it does not know what was staged.
+#   C. TeX must corroborate the line itself. A genuinely located error is
+#      followed by an `l.<n>` context line whose number agrees, and the
+#      blamed file must actually be that long. Where TeX legitimately emits
+#      no `l.<n>` (some `LaTeX Error:` forms), the message is reported with
+#      no jump -- which is already this codebase's chosen behaviour for the
+#      missing-package case.
+#   D. AMBIGUITY DECLINES, and this is the rule that does the real work.
+#      `-halt-on-error` means TeX reports ONE error and stops, so its log
+#      should hold exactly one thing that names a real file with a line
+#      number. If it holds two, one of them is the document talking, and
+#      there is no honest way to tell which -- so nothing is attributed.
+#      Anything else this cannot identify shows an honest, bounded excerpt
+#      and offers no jump.
+#
+# WHY THAT IS ENOUGH, and what it took to believe it. A forgery cannot be
+# the only candidate while a real error exists, because a real error is
+# always a candidate. Two weaker anchors were tried against the container
+# and both were broken by a measured attack:
+#
+#   - "Attribute from the `==> Fatal error occurred` line": xelatex does not
+#     write one at all. It survives as a secondary witness that must agree.
+#   - "Count candidates in a window above the statistics": `\errhelp` lets a
+#     document choose how long TeX's help paragraph is, so the real error can
+#     be padded out of any fixed window, leaving the forgery alone inside it.
+#     Measured at a 45-line pad; hence whole-log counting.
+#
+# The honest residual: the log is the only channel there is, so a document
+# can always make the log ambiguous and cost itself a jump. It cannot make
+# the log say something FALSE and be believed, which is the property that
+# matters. And nothing here crosses a tenancy boundary in any case -- a
+# document can only ever misdirect its own author's editor within their own
+# project.
 
-    A TeX log is thousands of lines of font loading; the error is the part a
-    human needs. Returning the tail rather than nothing when there is no
-    error line keeps a timeout or a driver failure diagnosable.
+# A `path:line: message` split of one log line. Every candidate split is
+# enumerated rather than assuming a path holds no colon: `chapters/a:b.tex`
+# is a legal path here (`latex_paths.normalize_path` accepts it), it is
+# printed unquoted, and a single-split regex silently failed to match it --
+# which is how a colon in a filename used to end with the client being
+# shown TeX's memory statistics.
+_LOCATED = re.compile(r":(\d+): ")
 
-    BOTH error shapes are recognised, and both are load-bearing. `latexmk`
-    runs with `-file-line-error` (see `compile_tree`), under which a located
-    error is written `./chapters/intro.tex:3: Undefined control sequence.`
-    and does NOT start with "!" -- when this scanned for "!" alone it found
-    nothing in such a log and returned the last 40 lines of memory
-    statistics instead of the error. TeX still writes the bare `! ...` form
-    for errors it raises with no file position to report (a missing package
-    is the common one), so the "!" branch is not dead.
+# TeX's own last words. Written after the memory statistics, once the run is
+# already over; in the located form it carries the same path and line as the
+# error that killed the run, and in the bare form (`! ==> Fatal error ...`)
+# it carries none, which is a decline.
+_FATAL_MARKER = "==> Fatal error occurred"
+
+# Fallout, not a cause: TeX reports `Emergency stop.` at whatever line it
+# happened to be reading when an EARLIER problem made it give up -- for a
+# missing package that is the `\begin{document}` line, several lines away
+# from the `\usepackage` that actually failed. The useful message is the
+# `! LaTeX Error: File ...' not found.` above it, which names no line at
+# all. Reporting the cause with no jump is this codebase's existing,
+# deliberate choice for that case (see `latex_detect.py` and
+# `paper_resolver.py` for the same line held elsewhere), so a corroborated
+# `Emergency stop.` attributes the message and declines the jump.
+_FALLOUT_MESSAGES = ("Emergency stop.",)
+
+# How far below a located error line TeX's context block may run before its
+# `l.<n>` line appears. Measured in-container: 1 line for an undefined
+# control sequence at top level, 3 with a `<recently read>` context, 6 for
+# `LaTeX Error: Environment nosuchenv undefined.`. 10 is that with room,
+# and it is bounded so a forged `l.<n>` far below an unrelated line cannot
+# be adopted as corroboration.
+_CONTEXT_WINDOW = 10
+
+# TeX's closing block, written on every run once typesetting is over. It is
+# the anchor: on a failed `-halt-on-error` run the error that killed the
+# compile is reported immediately above it, and nothing the document can
+# emit runs after the error.
+_STATS_MARKER = "Here is how much of TeX's memory you used:"
+
+# How much of the log an excerpt may show when nothing can be attributed.
+# A bound, not a rule about where errors live: the log is thousands of lines
+# of font loading and the reader needs the end of it, not all of it.
+_EXCERPT_SPAN = 40
+
+
+def _splits(line: str) -> list[tuple[str, int, str]]:
+    """Every `(path, line, message)` reading of one log line."""
+    out = []
+    for match in _LOCATED.finditer(line):
+        path = line[: match.start()]
+        if path:
+            out.append((path, int(match.group(1)), line[match.end() :].strip()))
+    return out
+
+
+def _staged_path(printed: str, main_dir: str, staged: set[str]) -> str | None:
+    """The tree-relative path a log line names, or None if it names nothing
+    that was staged.
+
+    SyncTeX's asymmetry applies here too: `latexmk -cd` chdirs into the main
+    file's directory, so TeX prints paths relative to THAT, while the wire
+    protocol this service speaks is tree-relative. The absolute form is
+    tried as well -- nothing in a normal run prints one, but a document is
+    free to `\\input` an absolute path and a staged file reached that way is
+    still a staged file.
+    """
+    candidates = []
+    if printed.startswith("/"):
+        candidates.append(posixpath.normpath(printed))
+    else:
+        rel = printed[2:] if printed.startswith("./") else printed
+        candidates.append(
+            posixpath.normpath(posixpath.join(main_dir, rel) if main_dir else rel)
+        )
+    for candidate in candidates:
+        if candidate in staged:
+            return candidate
+    return None
+
+
+def _located_at(
+    line: str, main_dir: str, staged: set[str]
+) -> tuple[str, int, str] | None:
+    """The one staged `(file, line, message)` a log line names, or None.
+
+    EVERY split of the line is enumerated (a path may contain a colon) and
+    the staged set decides which one is real. Two different staged readings
+    of one line is an AMBIGUITY, and an ambiguity attributes nothing --
+    `\\errmessage{./chapters/decoy.tex:3: boom}` makes TeX print its own
+    `./main.tex:9: ` prefix in front of the user's text, and a rule that
+    picked "the first" or "the longest" would be choosing between the
+    compiler's fact and the document's forgery on a coin toss. This is the
+    same line `paper_resolver.py` holds: one candidate or none.
+    """
+    found = {}
+    for path, number, message in _splits(line):
+        resolved = _staged_path(path, main_dir, staged)
+        if resolved is not None:
+            found[(resolved, number)] = message
+    if len(found) != 1:
+        return None
+    (resolved, number), message = next(iter(found.items()))
+    return resolved, number, message
+
+
+def _is_error_shaped(line: str) -> bool:
+    """Whether a line could be an error report at all. Shape only -- which
+    is exactly why nothing is attributed on the strength of it."""
+    return line.startswith("!") or bool(_splits(line))
+
+
+# TeX's error CONTEXT, printed under every error: the source line it had
+# reached (`l.21 \bogusmacro`), what it was in the middle of reading
+# (`<recently read> \bogusinsty`), and the continuation of either, indented
+# to line up under it. All three carry the user's own source text, so any of
+# them can be shaped like a located error -- measured: `\errmessage{./
+# chapters/decoy.tex:3: ...}` makes TeX quote the argument back as
+# `l.4 ...s/decoy.tex:3: ...`, which reads as a located error for a file the
+# error is not in. They are skipped when walking back to the error block,
+# and they are recognisable without inference: a real error report starts
+# with `!` or with a path at column zero, never with whitespace, an `l.<n>`
+# marker or an angle bracket.
+_CONTEXT_LINE = re.compile(r"^(\s|<|l\.\d)")
+
+
+def _is_context_line(line: str) -> bool:
+    return bool(_CONTEXT_LINE.match(line))
+
+
+def _is_candidate(line: str, main_dir: str, staged: set[str], exists) -> bool:
+    """Whether a line is an error report the closing-block scan must COUNT.
+
+    Deliberately wider than what can be ATTRIBUTED: counting is what makes
+    an ambiguous closing block decline, so a rule that counts too much costs
+    a jump and a rule that counts too little costs the wrong file. An error
+    inside a TeX Live package is not attributable (the file was never
+    staged) but must still count, or a forged block alongside it would be
+    the only candidate left and would win by default.
+
+    `exists(path)` -- does this printed path name a real file the compiler
+    can see -- is what separates "TeX naming a file" from an `Overfull
+    \\hbox` echo of the user's prose. The echo's own text reads as a path
+    (`[]\\OT1/cmr/m/n/10 chap-ters/intro.tex:5: Un-de-fined ...`), but no
+    such file is on disk, whereas both a staged chapter and
+    `/usr/local/texlive/.../foo.sty` are. Shape cannot tell those apart;
+    the filesystem can.
+    """
+    if _is_context_line(line):
+        return False
+    if line.startswith("!"):
+        return True
+    return any(
+        _staged_path(path, main_dir, staged) is not None or exists(path)
+        for path, _number, _message in _splits(line)
+    )
+
+
+def analyse_log(
+    log_text: str,
+    staged: set[str],
+    main_dir: str,
+    line_count,
+    exists=lambda path: False,
+) -> tuple[str, str | None, int | None]:
+    """`(excerpt, file, line)` for a compile log. `file` is tree-relative.
+
+    `line_count(path)` returns how many lines a staged file has, or None --
+    the one fact this needs from the filesystem, injected so the rest of the
+    function stays pure and unit-testable without a container.
+
+    `file` and `line` are set or null TOGETHER. A line number with no file
+    is worse than nothing in a multi-file project: the caller would jump
+    that far into whatever buffer happens to be on screen.
+
+    THE SEARCH RUNS AT THE END OF THE LOG, NOT THE TOP. `-halt-on-error`
+    stops the run at the first real error, so TeX's closing block --
+    `Here is how much of TeX's memory you used:` and what precedes it -- is
+    where that error is reported. Both withdrawn attempts scanned FORWARD
+    from the top and therefore met the document's own text first: a
+    `\\typeout` forging a whole error block, or an `Overfull \\hbox` echoing
+    the user's prose, wins every forward scan and neither can reach the
+    closing block, because after the real error TeX writes only its own
+    output.
+
+    Measured engine asymmetry: pdflatex ends a failed run with
+    `./chapters/intro.tex:21:  ==> Fatal error occurred, ...` AFTER the
+    statistics, and xelatex writes no such line at all -- so that line is an
+    optional extra witness that must AGREE, never the anchor. Anchoring on
+    it would have silently declined every xelatex error.
+
+    AMBIGUITY DECLINES, and that is what closes the one attack that survived
+    every other rule here: `\\errhelp` lets a document inject arbitrary text
+    into the help paragraph TeX prints AFTER the error, i.e. inside the
+    closing block itself. Measured in this container, `\\errhelp{./chapters/
+    decoy.tex:3: Undefined control sequence.^^Jl.3 \\zz}` puts a complete,
+    perfectly shaped, fully corroborated error block for another real file
+    below the real one -- under xelatex, with no fatal line to contradict
+    it. So the closing block is required to contain EXACTLY ONE attributable
+    candidate; two make the answer unknowable and unknowable means no jump.
     """
     lines = log_text.splitlines()
+
+    stats = None
+    for i in range(len(lines) - 1, -1, -1):
+        if lines[i].startswith(_STATS_MARKER):
+            stats = i
+            break
+
+    error_index = None
+    candidates: list[int] = []
+    if stats is not None:
+        # Counted over the WHOLE log up to the statistics, not a window above
+        # them. A window was tried and is not safe: `\errhelp` lets a
+        # document choose how long the help paragraph TeX prints after an
+        # error is, so any fixed window can be pushed off the real error's
+        # line by padding it. Whole-log counting cannot be pushed anywhere.
+        #
+        # The cost is false DECLINES, which is the direction this whole
+        # module errs in: any second thing in the log that names a real file
+        # with a line number gives up the jump. Measured against a realistic
+        # paper -- IEEEtran with graphicx, amsmath, hyperref, a 377-line log
+        # -- there is exactly ONE candidate, so the cost in practice is
+        # nil. `-halt-on-error` is what makes that true: TeX reports one
+        # error and stops.
+        candidates = [
+            i for i in range(stats) if _is_candidate(lines[i], main_dir, staged, exists)
+        ]
+        if len(candidates) == 1:
+            error_index = candidates[0]
+
+    if error_index is None and candidates:
+        # Ambiguous: the log holds more than one thing shaped like an error
+        # report and there is no honest way to pick. Show TeX's closing
+        # block -- from the first candidate, bounded -- rather than picking
+        # one of them to headline. No jump.
+        return (
+            "\n".join(lines[max(candidates[0], stats - _EXCERPT_SPAN) : stats]),
+            None,
+            None,
+        )
+
+    # The excerpt starts at the first error-shaped line, so a cause that
+    # names no line of its own is not lost -- for a missing package the
+    # useful message is `! LaTeX Error: File \`nopesuchpkg.sty\' not found.`
+    # and the located line below it says only `Emergency stop.`. It is
+    # pulled down to the identified error when that sits further away than
+    # the excerpt is long, so the excerpt always contains the error it
+    # describes.
+    start = _first_error_index(lines, staged, main_dir)
+    if error_index is not None and (start is None or error_index > start + 11):
+        start = error_index
+    if start is None:
+        return _undirected(lines, staged, main_dir), None, None
+    excerpt = "\n".join(lines[start : start + 12])
+
+    if error_index is None:
+        return excerpt, None, None
+
+    located = _located_at(lines[error_index], main_dir, staged)
+    if located is None:
+        # A bare `! ...` error (`File ended while scanning use of \\textbf`),
+        # an error inside a package under /usr/share, or a line naming a
+        # path that was never staged. The message is worth showing; the
+        # position is not knowable, so no jump is offered.
+        return excerpt, None, None
+    file, number, message = located
+
+    if message in _FALLOUT_MESSAGES:
+        return excerpt, None, None
+
+    # pdflatex's own last words, if this engine wrote them. They must name
+    # the same place: two witnesses that disagree are one witness too few.
+    for i in range(len(lines) - 1, -1, -1):
+        if _FATAL_MARKER in lines[i]:
+            fatal_at = _located_at(lines[i], main_dir, staged)
+            if fatal_at is None or fatal_at[:2] != (file, number):
+                return excerpt, None, None
+            break
+
+    # TeX's own corroboration: the error context ends in an `l.<n>` line
+    # whose number must be the one being attributed. A located error with no
+    # such line is a form TeX raises without a source position it can quote
+    # (some `LaTeX Error:` shapes), and those attribute the message only.
+    corroborated = any(
+        lines[i] == f"l.{number}" or lines[i].startswith(f"l.{number} ")
+        for i in range(
+            error_index + 1, min(error_index + 1 + _CONTEXT_WINDOW, len(lines))
+        )
+    )
+    if not corroborated:
+        return excerpt, None, None
+
+    # And the line has to exist in the file being blamed. A staged file
+    # shorter than the line number named is proof the two do not belong
+    # together, whatever the log says.
+    total = line_count(file)
+    if total is None or not 1 <= number <= total:
+        return excerpt, None, None
+
+    return excerpt, file, number
+
+
+def _first_error_index(lines: list[str], staged: set[str], main_dir: str) -> int | None:
+    """The first line that LOOKS like an error, for the excerpt only.
+
+    Deliberately not used for attribution: "looks like an error" is exactly
+    the inference this module refuses to navigate on. A located line counts
+    only if it names a file that was staged, so ordinary chatter and echoed
+    prose do not start the excerpt in the middle of nowhere.
+    """
     for i, line in enumerate(lines):
-        if line.startswith("!") or _FILE_LINE_ERROR.match(line):
-            return "\n".join(lines[i : i + 12])
-    return "\n".join(lines[-40:])
+        if line.startswith("!"):
+            return i
+        if any(
+            _staged_path(path, main_dir, staged) is not None
+            for path, _n, _m in _splits(line)
+        ):
+            return i
+    return None
+
+
+def _undirected(lines: list[str], staged: set[str], main_dir: str) -> str:
+    """What to show when no error can be identified.
+
+    NEVER a bare tail. The old fallback returned `lines[-40:]` unlabelled,
+    which in the colon-in-a-filename case meant the client was handed TeX's
+    memory statistics presented as "the first error" -- plainly wrong
+    whatever attribution decides. The tail is still the most useful thing
+    available, so it is still shown; it is just no longer passed off as
+    something it is not.
+    """
+    start = _first_error_index(lines, staged, main_dir)
+    if start is not None:
+        return "\n".join(lines[start : start + 12])
+    return (
+        "No TeX error line was found in the log. Its last lines were:\n\n"
+        + "\n".join(lines[-40:])
+    )
 
 
 class _Bounded:
@@ -287,6 +688,8 @@ def compile_tree(bounded: "_Bounded", engine: str, main_path: str) -> dict:
             return {
                 "ok": False,
                 "log": "The uploaded project could not be unpacked.",
+                "error_file": None,
+                "error_line": None,
                 "pdf_b64": None,
                 "synctex_b64": None,
                 "root": None,
@@ -303,6 +706,8 @@ def compile_tree(bounded: "_Bounded", engine: str, main_path: str) -> dict:
             return {
                 "ok": False,
                 "log": "The document's main file is not in the project.",
+                "error_file": None,
+                "error_line": None,
                 "pdf_b64": None,
                 "synctex_b64": None,
                 "root": None,
@@ -321,6 +726,19 @@ def compile_tree(bounded: "_Bounded", engine: str, main_path: str) -> dict:
         # `ok: False` instead of serving back the user's own stale upload.
         for suffix in (".pdf", ".log", ".synctex.gz"):
             (main.parent / f"{stem}{suffix}").unlink(missing_ok=True)
+
+        # The tree as STAGED, read now -- before latexmk writes its own
+        # artifacts into it -- so `.aux`/`.log`/`.pdf` files this run
+        # produces can never be mistaken for files the user sent. This set
+        # is the FACT that error attribution is cross-checked against: the
+        # compiler extracted the tar, so it alone knows what really exists.
+        # See `analyse_log` for why that check cannot live in the frontend.
+        staged = {
+            path.relative_to(directory).as_posix()
+            for path in directory.rglob("*")
+            if path.is_file()
+        }
+        main_dir = posixpath.dirname(posixpath.normpath(main_path))
 
         proc = subprocess.Popen(
             [
@@ -353,13 +771,26 @@ def compile_tree(bounded: "_Bounded", engine: str, main_path: str) -> dict:
                 # latexmk passes the flag through to pdflatex and to
                 # xelatex, and both write the `path:line:` form.
                 #
-                # `_first_error` below had to learn this form at the same
-                # time: with the flag on, the error line no longer starts
-                # with `!` (not even `==> Fatal error occurred`), so the old
+                # `analyse_log` had to learn this form at the same time:
+                # with the flag on, the error line no longer starts with `!`
+                # (not even `==> Fatal error occurred`), so the old
                 # `startswith("!")` scan found nothing and fell through to
                 # the tail of the log.
+                #
+                # The flag is NOT, on its own, a trustworthy attribution:
+                # parsing this shape out of the log text was the SECOND
+                # attempt this thread had to withdraw. See the "Error
+                # attribution" block above for the four measured ways user
+                # text forges it, and for the facts that replaced it.
                 "-file-line-error",
                 "-no-shell-escape",
+                # LOAD-BEARING FOR ATTRIBUTION as well as for speed: the run
+                # stops at the FIRST real error, so the `==> Fatal error
+                # occurred` line TeX writes last reports that error's
+                # position and nothing the document emits can follow it.
+                # `analyse_log` scans backwards from there; without
+                # -halt-on-error the log would hold several real errors and
+                # the last one would not be the cause.
                 "-halt-on-error",
                 str(main),
             ],
@@ -368,6 +799,10 @@ def compile_tree(bounded: "_Bounded", engine: str, main_path: str) -> dict:
             stderr=subprocess.PIPE,
             text=True,
             start_new_session=True,
+            # Raises TeX's print width so it never wraps a log line -- see
+            # `_COMPILE_ENV` for the measured wrong-file jump that wrapping
+            # caused.
+            env=_COMPILE_ENV,
         )
         try:
             stdout, stderr = proc.communicate(timeout=COMPILE_TIMEOUT)
@@ -378,6 +813,8 @@ def compile_tree(bounded: "_Bounded", engine: str, main_path: str) -> dict:
             return {
                 "ok": False,
                 "log": f"Compilation exceeded {COMPILE_TIMEOUT}s and was stopped.",
+                "error_file": None,
+                "error_line": None,
                 "pdf_b64": None,
                 "synctex_b64": None,
                 "root": None,
@@ -387,19 +824,53 @@ def compile_tree(bounded: "_Bounded", engine: str, main_path: str) -> dict:
         if log_file.exists():
             log_text = log_file.read_text(encoding="utf-8", errors="replace")
 
+        def _line_count(tree_path: str) -> int | None:
+            """How many lines a staged file has, or None if it cannot be read.
+
+            The last of `analyse_log`'s cross-checks: a file shorter than
+            the line number being blamed cannot be where that error is,
+            whatever the log claims.
+            """
+            try:
+                return len((directory / tree_path).read_bytes().split(b"\n"))
+            except OSError:
+                return None
+
+        def _exists(printed: str) -> bool:
+            """Does a path printed in the log name a real file this compile
+            can see? Staged files, and TeX Live's own packages, do; an
+            `Overfull \\hbox` echo of the user's prose does not. See
+            `_is_candidate`."""
+            rel = printed[2:] if printed.startswith("./") else printed
+            try:
+                if rel.startswith("/"):
+                    return Path(rel).is_file()
+                joined = posixpath.join(main_dir, rel) if main_dir else rel
+                return (directory / joined).is_file()
+            except (OSError, ValueError):
+                return False
+
+        excerpt, error_file, error_line = analyse_log(
+            log_text, staged, main_dir, _line_count, _exists
+        )
+
         pdf = main.parent / f"{stem}.pdf"
         synctex = main.parent / f"{stem}.synctex.gz"
         if not pdf.exists():
             return {
                 "ok": False,
-                "log": _first_error(log_text),
+                "log": excerpt,
+                "error_file": error_file,
+                "error_line": error_line,
                 "pdf_b64": None,
                 "synctex_b64": None,
                 "root": None,
             }
         return {
             "ok": True,
-            "log": _first_error(log_text) if proc.returncode else "",
+            "log": excerpt if proc.returncode else "",
+            "error_file": error_file if proc.returncode else None,
+            "error_line": error_line if proc.returncode else None,
             "pdf_b64": base64.b64encode(pdf.read_bytes()).decode(),
             "synctex_b64": (
                 base64.b64encode(synctex.read_bytes()).decode()

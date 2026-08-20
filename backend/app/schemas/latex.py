@@ -47,6 +47,15 @@ class LatexDocumentOut(BaseModel):
 class CompileOut(BaseModel):
     ok: bool
     log: str
+    # Where the log's error is, decided by the COMPILE SERVICE against the
+    # tree it staged (`analyse_log` in `latex-compiler/app.py`), and passed
+    # through untouched. Nothing between there and the editor re-derives it
+    # from the log text: that inference is what shipped a confident jump
+    # into the wrong file twice. Tree-relative, and present or absent
+    # TOGETHER -- a line with no file would send the editor that far into
+    # whatever buffer happens to be open.
+    error_file: str | None = None
+    error_line: int | None = None
     # Present only on success. The client fetches the bytes separately, so a
     # failed compile leaves the previous hash -- and therefore the last good
     # PDF -- untouched on screen.

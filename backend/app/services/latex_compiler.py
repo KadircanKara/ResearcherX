@@ -43,6 +43,16 @@ class CompileResult:
     log: str
     pdf: bytes | None
     synctex_gz: bytes | None
+    # WHERE the log's error is, as the COMPILER determined it -- not as
+    # anyone parsed it out of the log text afterwards. The compile service
+    # extracted the tar, so it alone can cross-check a path in the log
+    # against the tree that was actually staged; see `analyse_log` in
+    # `latex-compiler/app.py` for the two withdrawn text-only attempts and
+    # the four measured ways user source forges that text. Tree-relative,
+    # and set or None TOGETHER: a line with no file would send the editor
+    # that far into whatever buffer is on screen.
+    error_file: str | None = None
+    error_line: int | None = None
     # None for a degraded result. Set by compile_tree from the
     # tar-compile response -- the
     # extraction directory the tree was built in, needed so a later
@@ -237,12 +247,32 @@ async def compile_tree(
         # back out onto a later /synctex payload.
         raw_root = payload.get("root")
         root = raw_root if isinstance(raw_root, str) else None
+        # Same treatment, same reason: untyped JSON from a separately
+        # deployed image. A non-string file or non-int line would flow
+        # through the API into `openFile(...)` in the browser -- and the
+        # pair is taken only when BOTH are well-formed, because half an
+        # address is what makes a jump land somewhere confidently wrong.
+        raw_file = payload.get("error_file")
+        raw_line = payload.get("error_line")
+        error_file = raw_file if isinstance(raw_file, str) and raw_file else None
+        # `not isinstance(raw_line, bool)` is not pedantry: `bool` IS an
+        # `int` in Python, so `True` would pass every check here and reach
+        # the browser as line 1.
+        error_line = (
+            raw_line
+            if isinstance(raw_line, int) and not isinstance(raw_line, bool) and raw_line >= 1
+            else None
+        )
+        if error_file is None or error_line is None:
+            error_file, error_line = None, None
         return CompileResult(
             ok=bool(payload.get("ok")),
             log=payload.get("log") or "",
             pdf=base64.b64decode(pdf_b64) if pdf_b64 else None,
             synctex_gz=base64.b64decode(synctex_b64) if synctex_b64 else None,
             root=root,
+            error_file=error_file,
+            error_line=error_line,
         )
     except Exception as exc:
         # Same reasoning as compile_tree's matching except: shaping the

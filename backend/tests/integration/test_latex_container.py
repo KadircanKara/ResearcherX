@@ -157,6 +157,135 @@ async def test_the_log_names_the_file_an_error_is_actually_in(engine: str):
     # And the excerpt starts AT the error -- the parenthesised Overfull echo
     # sits above it and must not be what the client is handed instead.
     assert result.log.splitlines()[0].startswith("./chapters/intro.tex:3:")
+    # The FACT the editor navigates on, decided by the compiler against the
+    # tree it staged. The log text is what the user reads; this is what the
+    # jump uses, and the two are no longer the same decision.
+    assert (result.error_file, result.error_line) == ("chapters/intro.tex", 3)
+
+
+@pytest.mark.parametrize("engine", ["pdflatex", "xelatex"])
+async def test_a_forged_error_line_in_the_source_is_not_offered_as_a_jump(engine: str):
+    r"""THE regression this whole thread exists for, end to end.
+
+    `main.tex` prints a complete, perfectly shaped error block for
+    `chapters/decoy.tex` -- a file that really is in the tree, at a line
+    that really exists, with the matching `l.<n>` context TeX writes under a
+    real error. Every text-level check passes. The real error is elsewhere.
+
+    `\typeout` is the vehicle because it needs no adversary to be plausible:
+    packages print to the log constantly, and this product is a research
+    WRITING tool, so a document quoting compiler output at itself is
+    ordinary content. The client must not be told to jump into
+    `chapters/decoy.tex`.
+    """
+    forged = (
+        rb"\documentclass{article}"
+        rb"\typeout{./chapters/decoy.tex:2: Undefined control sequence."
+        rb"^^Jl.2 \noexpand\fakemacro}"
+        rb"\begin{document}\input{chapters/real}\end{document}"
+    )
+    result = await compile_tree(
+        [
+            ("main.tex", forged),
+            ("chapters/decoy.tex", b"one\ntwo\nthree\n"),
+            ("chapters/real.tex", b"fine\n\n\\bogusmacro\n"),
+        ],
+        engine,
+        "main.tex",
+    )
+
+    assert not result.ok
+    # The forgery IS in the log -- this test would be vacuous if it were not,
+    # the same way the no-secrets test would be vacuous without a real read.
+    assert "./chapters/decoy.tex:2: Undefined control sequence." in result.log
+    assert result.error_file != "chapters/decoy.tex"
+    # And whatever it decided, it is either the truth or nothing.
+    assert (result.error_file, result.error_line) in {
+        (None, None),
+        ("chapters/real.tex", 3),
+    }
+
+
+@pytest.mark.parametrize("engine", ["pdflatex", "xelatex"])
+async def test_a_colon_in_a_filename_is_attributed_instead_of_dumping_memory_statistics(
+    engine: str,
+):
+    """`chapters/a:b.tex` is a path `latex_paths.normalize_path` accepts. The
+    withdrawn regex could not match its error line, and with
+    `-file-line-error` on there is no `^!` line either, so the old
+    `_first_error` fell through to `lines[-40:]` and handed the client TeX's
+    memory statistics -- wrong however attribution turned out."""
+    result = await compile_tree(
+        [
+            (
+                "main.tex",
+                rb"\documentclass{article}\begin{document}"
+                rb"\input{chapters/a:b}\end{document}",
+            ),
+            ("chapters/a:b.tex", b"hello\n\\bogusmacro\n"),
+        ],
+        engine,
+        "main.tex",
+    )
+
+    assert not result.ok
+    assert (result.error_file, result.error_line) == ("chapters/a:b.tex", 2)
+    assert "Here is how much of TeX's memory you used" not in result.log.splitlines()[0]
+
+
+async def test_a_long_path_is_not_wrapped_by_tex_and_is_attributed_whole():
+    """Class 1, which needed no adversary at all: at TeX's default 79-column
+    print width a path over ~77 characters is SPLIT across two log lines,
+    and the continuation fragment is a SUFFIX that still parses as an error
+    line. This tree also contains `chapters/intro.tex`, so that fragment
+    names a file that really exists -- which is exactly how the wrong file
+    got opened. `max_print_line` in the compile environment is what removes
+    the wrap; this proves it takes effect through latexmk against a real
+    engine."""
+    deep = "chapters/" + "d" * 76 + "/chapters/intro.tex"
+    result = await compile_tree(
+        [
+            (
+                "main.tex",
+                (
+                    r"\documentclass{article}\begin{document}\input{"
+                    + deep[: -len(".tex")]
+                    + r"}\end{document}"
+                ).encode(),
+            ),
+            (deep, b"x\n\\bogusmacro\n"),
+            ("chapters/intro.tex", b"decoy\n"),
+        ],
+        "pdflatex",
+        "main.tex",
+    )
+
+    assert not result.ok
+    assert (result.error_file, result.error_line) == (deep, 2)
+    # The whole path on ONE line, which is the property `max_print_line` buys.
+    assert f"./{deep}:2: Undefined control sequence." in result.log
+
+
+async def test_a_missing_package_reports_the_cause_and_offers_no_jump():
+    r"""`Emergency stop.` is fallout -- TeX reports it at whatever line it had
+    reached, not at the `\usepackage` that failed -- so the cause is
+    reported and no jump is offered. Reporting the cause without a jump is
+    this codebase's existing choice for this case."""
+    result = await compile_tree(
+        [
+            (
+                "main.tex",
+                rb"\documentclass{article}\usepackage{nopesuchpkg}"
+                rb"\begin{document}Hi.\end{document}",
+            )
+        ],
+        "pdflatex",
+        "main.tex",
+    )
+
+    assert not result.ok
+    assert (result.error_file, result.error_line) == (None, None)
+    assert "nopesuchpkg.sty" in result.log
 
 
 async def test_the_compiler_has_no_secrets_to_leak():
