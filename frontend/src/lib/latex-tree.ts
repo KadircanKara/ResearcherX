@@ -45,6 +45,21 @@ export function parentDir(path: string): string {
   return slash === -1 ? "" : path.slice(0, slash);
 }
 
+/**
+ * Is `path` beside or below `dir` (a directory, e.g. `parentDir(mainPath)`)?
+ *
+ * A plain `path.startsWith(dir)` false-positives on sibling directories that
+ * merely share a prefix (`chapters2/x.tex` against dir `chapters`), so this
+ * requires the full next segment to be a `/`. `dir === ""` -- the main file
+ * lives at the tree root -- matches every path, since nothing is above the
+ * root. Used to decide whether a forward SyncTeX query is even
+ * representable: SyncTeX speaks paths relative to the main file's own
+ * directory, so a file outside it has no such path.
+ */
+export function isBeneath(path: string, dir: string): boolean {
+  return dir === "" || path.startsWith(`${dir}/`);
+}
+
 export function joinPath(dir: string, name: string): string {
   return dir ? `${dir}/${name}` : name;
 }

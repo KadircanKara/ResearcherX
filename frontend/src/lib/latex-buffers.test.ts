@@ -4,6 +4,7 @@ import { SaveEngine } from "./latex-buffers";
 beforeEach(() => vi.useFakeTimers());
 afterEach(() => vi.useRealTimers());
 
+// eslint-disable-next-line @typescript-eslint/no-unused-vars -- signature must match SaveEngineOptions.send
 function engine(send = vi.fn(async (_path: string, _text: string) => {})) {
   const states: string[] = [];
   const e = new SaveEngine({ delayMs: 800, send, onStateChange: (s) => states.push(s) });

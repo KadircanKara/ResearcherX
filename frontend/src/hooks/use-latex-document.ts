@@ -76,8 +76,16 @@ export interface UseLatexDocument {
   moveFile: (from: string, to: string) => Promise<void>;
   uploadBinary: (path: string, data: Blob) => Promise<void>;
   setEngine: (engine: LatexEngine) => Promise<void>;
+  /**
+   * Awaits the in-flight `PATCH .../engine` for `docId`, if there is one --
+   * so a racing `compile()` can build against the engine the user actually
+   * picked rather than whatever the server still has. A patch for a
+   * DIFFERENT document (the user has since switched away) is ignored: it has
+   * no bearing on compiling this one. See `setEngine`'s own comment.
+   */
+  awaitEnginePatch: (docId: string) => Promise<void>;
   setMainPath: (path: string) => Promise<void>;
-  createDoc: (name: string) => Promise<void>;
+  createDoc: (name: string, source?: string) => Promise<void>;
   removeDoc: (id: string) => Promise<void>;
   importZip: (zip: Blob, name: string, mainPath?: string) => Promise<void>;
 }
@@ -165,6 +173,15 @@ export function useLatexDocument(projectId: string, canEdit: boolean): UseLatexD
   // see that effect's comment for why "one instance in a ref" and "rebuilt
   // per document" are not in tension.
   const engineRef = useRef<SaveEngine | null>(null);
+
+  // The in-flight `PATCH .../engine` for whichever document requested it, so
+  // `awaitEnginePatch` can hand a racing `compile()` a promise to wait on --
+  // see that method and `setEngine`'s own comment for the failure this
+  // closes. Only ever cleared by the send whose OWN promise is still the one
+  // on record (the same "only clear what's still mine" rule `inFlightSave`
+  // follows in every autosave engine in this codebase), so a later patch
+  // replacing this ref is never stomped by an earlier one settling after it.
+  const enginePatchRef = useRef<{ docId: string; promise: Promise<void> } | null>(null);
 
   /**
    * Applies a `LatexMutation` response (every file write/delete/rename
@@ -386,9 +403,17 @@ export function useLatexDocument(projectId: string, canEdit: boolean): UseLatexD
       // A binary path is never fetched as text here -- `binary-preview.tsx`
       // fetches it on demand. Guards on the server's own `is_binary` flag
       // (not an extension heuristic): a stale click reaching here must not
-      // corrupt a blob into a JS string.
+      // corrupt a blob into a JS string. The TAB still opens, though --
+      // only the text fetch and buffer are skipped, so the shell's
+      // `isTexPath` check can route the pane to `BinaryPreview` once
+      // `activePath` names it. `BinaryPreview` never reads `buffers`, so an
+      // absent entry for this path is not a missing state, it is correct.
       const meta = filesRef.current.find((f) => f.path === path);
-      if (meta?.is_binary) return;
+      if (meta?.is_binary) {
+        setOpenPaths((prev) => (prev.includes(path) ? prev : [...prev, path]));
+        setActivePath(path);
+        return;
+      }
       let text: string;
       try {
         text = await readTextFile(projectId, docId, path);
@@ -557,31 +582,51 @@ export function useLatexDocument(projectId: string, canEdit: boolean): UseLatexD
   // ---------------------------------------------------------------------
 
   const setEngine = useCallback(
-    async (next: LatexEngine) => {
+    (next: LatexEngine): Promise<void> => {
       const docId = selectedIdRef.current;
-      if (!docId || !canEdit) return;
+      if (!docId || !canEdit) return Promise.resolve();
       const previous = engineValueRef.current;
       setEngineState(next);
       setError(null);
-      try {
-        const doc = await patchDocument(projectId, docId, { engine: next });
-        if (selectedIdRef.current !== docId) return;
-        setDocumentState(doc);
-        setRevision(doc.revision);
-        setEngineState(doc.engine);
-        setMainPathState(doc.main_path);
-        setDocuments((prev) => prev.map((d) => (d.id === doc.id ? doc : d)));
-      } catch (err) {
-        // Guarded on `selectedIdRef`: by the time this settles the user may
-        // have switched to a different document entirely, whose OWN engine
-        // this must not stomp.
-        if (selectedIdRef.current !== docId) return;
-        setEngineState(previous);
-        setError(errorText(err));
-      }
+      // Stored in `enginePatchRef` BEFORE the network call settles, not
+      // just awaited inline: `awaitEnginePatch` needs something to hand a
+      // racing `compile()` while this is still on the wire, or picking
+      // xelatex and hitting Compile inside this PATCH's round trip builds
+      // with whatever engine the server still has.
+      const promise = patchDocument(projectId, docId, { engine: next })
+        .then((doc) => {
+          if (selectedIdRef.current !== docId) return;
+          setDocumentState(doc);
+          setRevision(doc.revision);
+          setEngineState(doc.engine);
+          setMainPathState(doc.main_path);
+          setDocuments((prev) => prev.map((d) => (d.id === doc.id ? doc : d)));
+        })
+        .catch((err) => {
+          // Guarded on `selectedIdRef`: by the time this settles the user
+          // may have switched to a different document entirely, whose OWN
+          // engine this must not stomp.
+          if (selectedIdRef.current !== docId) return;
+          setEngineState(previous);
+          setError(errorText(err));
+        })
+        .finally(() => {
+          // Only clear if this call's own patch is still the one on
+          // record -- see `inFlightSave`'s identical guard in the
+          // single-file predecessor this hook replaces.
+          if (enginePatchRef.current?.promise === promise) enginePatchRef.current = null;
+        });
+      enginePatchRef.current = { docId, promise };
+      return promise;
     },
     [projectId, canEdit]
   );
+
+  const awaitEnginePatch = useCallback(async (docId: string) => {
+    if (enginePatchRef.current?.docId === docId) {
+      await enginePatchRef.current.promise;
+    }
+  }, []);
 
   const setMainPath = useCallback(
     async (path: string) => {
@@ -611,10 +656,15 @@ export function useLatexDocument(projectId: string, canEdit: boolean): UseLatexD
   // ---------------------------------------------------------------------
 
   const createDoc = useCallback(
-    async (name: string) => {
+    async (name: string, source?: string) => {
       setError(null);
       try {
-        const doc = await createDocument(projectId, { name });
+        // `source` seeds the new document's main file -- the backend
+        // itself defaults to an EMPTY file, so a starter template is the
+        // caller's choice, not this hook's. Passed through verbatim (never
+        // defaulted here) so a caller that wants a blank document still
+        // gets one.
+        const doc = await createDocument(projectId, { name, source });
         setDocuments((prev) => [...prev, doc]);
         setSelectedId(doc.id);
       } catch (err) {
@@ -728,6 +778,7 @@ export function useLatexDocument(projectId: string, canEdit: boolean): UseLatexD
     moveFile,
     uploadBinary,
     setEngine,
+    awaitEnginePatch,
     setMainPath,
     createDoc,
     removeDoc,

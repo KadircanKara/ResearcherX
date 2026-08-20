@@ -1,5 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { basename, buildTree, formatBytes, isImagePath, isTexPath, joinPath, parentDir } from "./latex-tree";
+import {
+  basename,
+  buildTree,
+  formatBytes,
+  isBeneath,
+  isImagePath,
+  isTexPath,
+  joinPath,
+  parentDir,
+} from "./latex-tree";
 
 const meta = (path: string, size = 10, binary = false) => ({
   path,
@@ -62,6 +71,26 @@ describe("path arithmetic", () => {
   it("joinPath does not emit a leading slash at the root", () => {
     expect(joinPath("", "main.tex")).toBe("main.tex");
     expect(joinPath("chapters", "intro.tex")).toBe("chapters/intro.tex");
+  });
+});
+
+describe("isBeneath", () => {
+  it("treats every path as beneath the root", () => {
+    expect(isBeneath("main.tex", "")).toBe(true);
+    expect(isBeneath("chapters/intro.tex", "")).toBe(true);
+  });
+
+  it("accepts a file beside or below the given directory", () => {
+    expect(isBeneath("chapters/intro.tex", "chapters")).toBe(true);
+    expect(isBeneath("chapters/sub/deep.tex", "chapters")).toBe(true);
+  });
+
+  it("rejects a sibling directory that merely shares a name prefix", () => {
+    expect(isBeneath("chapters2/x.tex", "chapters")).toBe(false);
+  });
+
+  it("rejects a file above the given directory", () => {
+    expect(isBeneath("figure.png", "chapters")).toBe(false);
   });
 });
 

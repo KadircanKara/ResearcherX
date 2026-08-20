@@ -31,6 +31,13 @@ export interface UseLatexCompile {
   gotoLine: { line: number; nonce: number } | null;
   jumpToLine: (line: number) => void;
   syncNote: string | null;
+  /**
+   * Sets `syncNote` directly, for a sync attempt the CALLER declines before
+   * ever issuing a request -- e.g. a forward query for a file outside the
+   * main file's own directory, which has no representable SyncTeX path.
+   * Subject to the same staleness gate as every other write to this state.
+   */
+  setSyncNote: (note: string | null) => void;
   stale: boolean;
   compile: () => Promise<void>;
   jumpToPdf: (line: number, file: string) => Promise<void>;
@@ -46,8 +53,27 @@ export function useLatexCompile(args: {
   flushAll: () => Promise<void>;
   /** Called with the file a reverse-sync hit names, before the line jump. */
   onOpenFile: (path: string) => Promise<void>;
+  /**
+   * Awaited right before the compile request is issued, after `flushAll`.
+   * Both the Compile button and this hook's own Cmd/Ctrl+S handler funnel
+   * through the one `compile` built below, so wiring the guard in here --
+   * rather than wrapping `compile` a second time in the shell -- is what
+   * makes it apply to both. Closes the engine-patch race: picking xelatex
+   * and hitting Compile inside that PATCH's round trip must build with the
+   * NEW engine, not whatever the server still had.
+   */
+  beforeCompile?: () => Promise<void>;
 }): UseLatexCompile {
-  const { projectId, documentId, revision, canEdit, isDirty, flushAll, onOpenFile } = args;
+  const {
+    projectId,
+    documentId,
+    revision,
+    canEdit,
+    isDirty,
+    flushAll,
+    onOpenFile,
+    beforeCompile,
+  } = args;
 
   const [compiling, setCompiling] = useState(false);
   const [compiled, setCompiled] = useState<CompiledState | null>(null);
@@ -101,6 +127,9 @@ export function useLatexCompile(args: {
       // previous keystroke's text (in whichever files were dirty) and hand
       // back a SyncTeX map that does not match what is on screen.
       await flushAll();
+      if (documentIdRef.current !== docId) return; // user moved on; discard
+
+      await beforeCompile?.();
       if (documentIdRef.current !== docId) return; // user moved on; discard
 
       const result = await compileDocument(projectId, docId);
@@ -161,7 +190,26 @@ export function useLatexCompile(args: {
     } finally {
       setCompiling(false);
     }
-  }, [canEdit, compiling, documentId, flushAll, projectId]);
+  }, [beforeCompile, canEdit, compiling, documentId, flushAll, projectId]);
+
+  // The previous document's build is cleared the INSTANT the selection
+  // changes, not once a new compile lands -- otherwise switching to document
+  // B leaves A's PDF, log and highlight on screen. `documentIdRef`'s guards
+  // above only protect an ASYNC completion racing a switch; they do nothing
+  // for this synchronous case, where no compile is even in flight. This
+  // matters beyond a stale picture: two freshly-created documents both start
+  // at `revision` 1, so without this, `isStale` would compare B's own
+  // revision against A's leftover `compiled.revision` and read B's screen as
+  // confidently up to date.
+  useEffect(() => {
+    setCompiled(null);
+    setPdfBytes(null);
+    setLog(null);
+    setHighlight(null);
+    setScrollToPage(null);
+    setGotoLine(null);
+    setSyncNote(null);
+  }, [documentId]);
 
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
@@ -284,6 +332,7 @@ export function useLatexCompile(args: {
     gotoLine,
     jumpToLine,
     syncNote: visibleSyncNote,
+    setSyncNote,
     stale,
     compile,
     jumpToPdf,

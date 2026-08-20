@@ -1,43 +1,40 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Loader2, Play } from "lucide-react";
+import { Loader2, Play, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { DocumentList } from "@/components/latex/document-list";
+import { BinaryPreview } from "@/components/latex/binary-preview";
 import { EditorPane } from "@/components/latex/editor-pane";
+import { FileTree } from "@/components/latex/file-tree";
+import { ImportDropzone } from "@/components/latex/import-dropzone";
 import { LogPanel } from "@/components/latex/log-panel";
-import { PdfViewer, type PdfHighlight } from "@/components/latex/pdf-viewer";
+import { OpenTabs } from "@/components/latex/open-tabs";
+import { PdfViewer } from "@/components/latex/pdf-viewer";
+import { useLatexDocument } from "@/hooks/use-latex-document";
+import { useLatexCompile } from "@/hooks/use-latex-compile";
+import { getDevUserId } from "@/lib/api";
 import {
-  compileDocument,
-  createDocument,
-  deleteDocument,
-  fetchPdfBytes,
-  getDocument,
-  listDocuments,
-  patchDocument,
-  synctexForward,
-  synctexReverse,
-  PdfNotFoundError,
-  type LatexDocument,
+  AmbiguousMainError,
+  exportUrl,
+  fetchExport,
   type LatexEngine,
 } from "@/lib/latex";
-import { isStale, type CompiledState, type TexPoint } from "@/lib/latex-sync";
+import { buildTree, isBeneath, isTexPath, parentDir } from "@/lib/latex-tree";
 import type { Role } from "@/lib/types";
 
 const CAN_EDIT: Role[] = ["owner", "editor"];
-const AUTOSAVE_MS = 800;
 const STALE_NOTE = "Out of date — compile to sync";
+// SyncTeX speaks paths relative to the main file's own directory, so a file
+// outside it has no representable coordinate -- this is a documented
+// limitation of the design, not a bug. See `isBeneath` in `lib/latex-tree.ts`.
+const OUTSIDE_MAIN_NOTE = "Sync only covers files beside or below the main file.";
 
-// Both sync directions answer for the LAST COMPILED source; after an
-// edit the line numbers have drifted, so a jump is still shown but
-// labelled stale rather than presented as confidently correct. Declared
-// at MODULE level, beside AUTOSAVE_MS and STARTER -- not inside the
-// component: a value created during render is a new binding every
-// render, and react-hooks/exhaustive-deps would demand it in the
-// dependency arrays of both jumpToPdf and jumpToSource below, defeating
-// their memoisation.
-const SYNC_STALE_NOTE = "The PDF is out of date, so this may be a few lines off.";
-
+// The backend itself defaults a new document's main file to EMPTY -- a
+// starter template is a client-side choice, not a server default, so it is
+// seeded here and passed explicitly to `createDoc`. Declared at MODULE
+// level, not inside the component: a value created during render is a new
+// binding every render, which would sit oddly beside every other constant
+// here that already isn't.
 const STARTER = `\\documentclass[conference]{IEEEtran}
 \\begin{document}
 \\title{Untitled}
@@ -54,553 +51,45 @@ interface LatexWorkspaceProps {
   role: Role;
 }
 
-interface PendingSave {
-  docId: string;
-  text: string;
-}
-
-/** An in-flight `PATCH .../engine` call, so a racing `compile()` can wait for it. */
-interface PendingEnginePatch {
-  docId: string;
-  promise: Promise<void>;
-}
-
 export function LatexWorkspace({ projectId, role }: LatexWorkspaceProps) {
   const canEdit = CAN_EDIT.includes(role);
 
-  const [documents, setDocuments] = useState<LatexDocument[]>([]);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [source, setSource] = useState("");
-  const [loading, setLoading] = useState(true);
-  const [saveState, setSaveState] = useState<"idle" | "saving" | "error">("idle");
-  const [splitPercent, setSplitPercent] = useState(50);
-  const [compiled, setCompiled] = useState<CompiledState | null>(null);
-  const [pdfBytes, setPdfBytes] = useState<Uint8Array | null>(null);
-  const [log, setLog] = useState<string | null>(null);
-  const [compiling, setCompiling] = useState(false);
-  const [engine, setEngine] = useState<LatexEngine>("pdflatex");
-  const [highlight, setHighlight] = useState<PdfHighlight | null>(null);
-  const [scrollToPage, setScrollToPage] = useState<number | null>(null);
-  const [gotoLine, setGotoLine] = useState<{ line: number; nonce: number } | null>(
-    null
-  );
-  const [syncNote, setSyncNote] = useState<string | null>(null);
-  // A list/create/delete failure -- not about any one document, so it is
-  // shown beside the list itself (DocumentList's own `error` prop) rather
-  // than in the main pane, which is about whichever document IS selected.
-  const [documentsError, setDocumentsError] = useState<string | null>(null);
-  // Set only when THIS document's own `getDocument` rejects. Shown on the
-  // placeholder pane -- see the load effect's `.catch` below for why that is
-  // always the branch on screen when this is non-null.
-  const [loadError, setLoadError] = useState<string | null>(null);
-  // Set only when a `PATCH .../engine` for the CURRENTLY selected document
-  // fails. See `handleEngineChange` for why it is guarded on `selectedIdRef`
-  // rather than always shown.
-  const [engineError, setEngineError] = useState<string | null>(null);
-  // Monotonic, so jumping twice to the same line still scrolls the editor.
-  const nonce = useRef(0);
+  const doc = useLatexDocument(projectId, canEdit);
 
-  const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // The id of the document `source` actually holds right now. A save must be
-  // keyed to THIS, never to `selectedId` -- `selectedId` can flip to a new
-  // document before that document's own text has actually loaded into the
-  // buffer (getDocument is async), and a keystroke landing in that window
-  // must still save against the document the buffer really contains.
-  const bufferDocId = useRef<string | null>(null);
-  // Last-known-server text, per document. The previous single string ref
-  // can only describe ONE document at a time -- the moment a second
-  // document enters play, which switching always does, it has nothing to
-  // compare that document's own flushed save against. Keyed by id so every
-  // document keeps its own baseline.
-  const savedSourceByDoc = useRef<Map<string, string>>(new Map());
-  // The most recent not-yet-sent edit, bound to the document it was typed
-  // into at schedule time. `scheduleSave` is the only writer; `flush` is
-  // the only reader.
-  const pending = useRef<PendingSave | null>(null);
-  // The Promise of whichever save is CURRENTLY on the wire, so a `flush()`
-  // call that finds nothing new pending -- because an EARLIER `flush()` call
-  // already claimed it via the synchronous capture-and-null below -- can
-  // still wait for THAT save to land, instead of resolving immediately while
-  // its PATCH is still in flight. Without this, `compile()`'s `await
-  // flush()` was a no-op whenever the 800ms autosave had already started the
-  // network request: type, let the debounce fire, then hit Cmd/Ctrl+S inside
-  // that PATCH's round trip -- the backend compiles the PREVIOUS text while
-  // `compiled.source` records the CURRENT one, and `isStale` reports a
-  // SyncTeX map built from stale source as fresh.
-  const inFlightSave = useRef<Promise<void> | null>(null);
-  // The in-flight `PATCH .../engine` for whichever document requested it, so
-  // `compile` can await the one for the document it is about to compile --
-  // see `handleEngineChange`'s own comment for the failure this closes.
-  const enginePatch = useRef<PendingEnginePatch | null>(null);
+  // Scoped to the document `compile()` is about to build, exactly like the
+  // in-flight patch it awaits -- an engine change for some OTHER document
+  // the user has since switched away from has no bearing on this compile.
+  // Read through a ref rather than closed over directly: `beforeCompile` is
+  // handed to `useLatexCompile` once per render, but it must always ask
+  // about whichever document is CURRENT at the moment the compile actually
+  // reaches this point, not whichever was current when the callback was
+  // built.
+  const selectedIdForCompileRef = useRef(doc.selectedId);
+  selectedIdForCompileRef.current = doc.selectedId;
+  const beforeCompile = useCallback(async () => {
+    const docId = selectedIdForCompileRef.current;
+    if (docId) await doc.awaitEnginePatch(docId);
+    // `doc.awaitEnginePatch` is the only thing this reads off `doc` -- it is
+    // itself a `useCallback` scoped to `[]` in the hook, so listing the
+    // whole `doc` object (a fresh literal every render) here would rebuild
+    // this callback, and therefore `useLatexCompile`'s `compile`, every
+    // single render for no behavioural reason.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [doc.awaitEnginePatch]);
 
-  // Mirrors `selectedId`, updated right here in the render body (not from an
-  // effect, which would land one render late) so it is always exactly as
-  // fresh as `selectedId` itself. `compile`'s completion guard needs to ask
-  // "is the user still on this document?" -- that IS `selectedId`, updated
-  // SYNCHRONOUSLY the instant the user picks something else. It is a
-  // different question from `bufferDocId`'s "does the loaded buffer belong
-  // to this document?", which only moves once that document's own
-  // `getDocument` resolves -- ASYNCHRONOUSLY, and on a delay that has
-  // nothing to do with whether the user is still looking at it. Selecting a
-  // document and hitting Compile before its own load finishes -- unlikely,
-  // since a container compile should comfortably outlast a metadata GET,
-  // but neither the button nor Cmd/Ctrl+S is gated on the load completing --
-  // would otherwise compare the compile's own result against a
-  // `bufferDocId` that has not caught up yet, silently discarding a result
-  // that belongs to exactly the document on screen. Do not "simplify" this
-  // back to `bufferDocId` for consistency with `flush`: `flush` is correct
-  // to use `bufferDocId`, because for a save "which document does this text
-  // belong to" genuinely IS the buffer question. The two guards ask
-  // different questions on purpose.
-  const selectedIdRef = useRef(selectedId);
-  selectedIdRef.current = selectedId;
-
-  // Declared HERE, above every callback, and not lower down beside the JSX.
-  // Task 6's sync callbacks list `stale` in their dependency ARRAY, which is
-  // evaluated the moment useCallback runs -- a `const` declared further down
-  // the component body is still in its temporal dead zone at that point and
-  // throws a ReferenceError on first render.
-  const stale = isStale(source, engine, compiled);
-
-  // Sends `pending` right now, bypassing the debounce. A single timer/string
-  // ref cannot represent two documents at once, so switching documents while
-  // an edit is still waiting out its debounce must FLUSH that edit, not
-  // just clear the timer: clearing silently dropped it (a document's worth
-  // of typing, gone, no error shown), and leaving the old timer running
-  // would instead fire it later under whatever document is current BY THEN,
-  // misattributing it. Flushing sends it synchronously, against the
-  // document it was actually typed into, before that document stops being
-  // "current" in any sense.
-  //
-  // Returns the in-flight save as a Promise (rather than firing the PATCH
-  // and forgetting it, as before) so `compile` below can await it: every
-  // existing call site (the debounce timeout, the document-switch cleanup)
-  // still just calls `flush()` and ignores the return value, unchanged.
-  const flush = useCallback(async () => {
-    if (saveTimer.current) {
-      clearTimeout(saveTimer.current);
-      saveTimer.current = null;
-    }
-    const toSend = pending.current;
-    if (!toSend) {
-      // Nothing NEW was scheduled, but an EARLIER call to this same
-      // function may already have claimed one and put it on the wire (see
-      // the synchronous capture-and-null just below) -- wait for that one,
-      // so a caller can rely on "the server is caught up" once this
-      // resolves, rather than racing its own in-flight PATCH.
-      if (inFlightSave.current) await inFlightSave.current;
-      return;
-    }
-    // Synchronous, and above the first `await` in this function on purpose:
-    // this is what makes a second concurrent `flush()` call -- one that
-    // finds `pending.current` already null -- incapable of ever sending a
-    // duplicate PATCH for the same edit. Do not move this below the `await`
-    // below; that would reopen the double-send window this closes.
-    pending.current = null;
-    if (toSend.text === savedSourceByDoc.current.get(toSend.docId)) return;
-    setSaveState("saving");
-    const send = (async () => {
-      try {
-        await patchDocument(projectId, toSend.docId, { source: toSend.text });
-        savedSourceByDoc.current.set(toSend.docId, toSend.text);
-        setSaveState("idle");
-      } catch {
-        setSaveState("error");
-      }
-    })();
-    inFlightSave.current = send;
-    try {
-      await send;
-    } finally {
-      // Only clear if this call's own send is still the one on record -- a
-      // newer `flush()` call may have already replaced it with a LATER
-      // edit's send (same "only clear what's still mine" rule `enginePatch`
-      // below and `pending` above both follow), and clearing that out from
-      // under it would make a still-in-flight save briefly look finished.
-      if (inFlightSave.current === send) inFlightSave.current = null;
-    }
-  }, [projectId]);
-
-  useEffect(() => {
-    let cancelled = false;
-    setDocumentsError(null);
-    listDocuments(projectId)
-      .then((docs) => {
-        if (cancelled) return;
-        setDocuments(docs);
-        setSelectedId((current) => current ?? docs[0]?.id ?? null);
-      })
-      .catch(() => {
-        // Without this, a failed list left `documents` at its initial `[]`
-        // and DocumentList reads that as "No documents yet" -- indistinguishable
-        // from a genuinely empty, working project.
-        if (cancelled) return;
-        setDocumentsError("Could not load your documents. Please try again.");
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [projectId]);
-
-  useEffect(() => {
-    // A's "Could not save" (or a "Saving..." that resolves mid-switch) must
-    // not keep showing once B is on screen and was never touched -- reset
-    // unconditionally on every selection change, before the new document
-    // (if any) has even started loading.
-    setSaveState("idle");
-    setEngineError(null);
-    if (!selectedId) {
-      setSource("");
-      bufferDocId.current = null;
-      return;
-    }
-    let cancelled = false;
-    // Cleared here, not inside the `!selectedId` branch above: the failure
-    // path below sets `selectedId` back to null itself, which re-runs this
-    // very effect and would otherwise wipe the message it just set before
-    // the user ever saw it. Clearing here instead means it is cleared only
-    // when a NEW load attempt genuinely begins -- which covers picking a
-    // different document, and covers retrying the same one, since either
-    // sets `selectedId` to a value that re-enters this branch.
-    setLoadError(null);
-    getDocument(projectId, selectedId)
-      .then((doc) => {
-        if (cancelled) return;
-        setSource(doc.source);
-        setEngine(doc.engine);
-        setCompiled(null);
-        setPdfBytes(null);
-        setLog(null);
-        setHighlight(null);
-        setScrollToPage(null);
-        setGotoLine(null);
-        setSyncNote(null);
-        bufferDocId.current = doc.id;
-        savedSourceByDoc.current.set(doc.id, doc.source);
-      })
-      .catch(() => {
-        // A collaborator deletes this document, the backend 5xxs, a reload
-        // races the request -- whatever the cause, this tab must not go on
-        // presenting a document it does not have. Without a rejection path
-        // at all, `bufferDocId` never moved off null (or off whatever it
-        // held before), but `selectedId`/the document list still pointed at
-        // this one, and every keystroke from here kept saving into
-        // whichever OTHER document the buffer last actually held --
-        // silently, with no banner anywhere.
-        //
-        // Fix is to clear the selection rather than invent a per-document
-        // error panel: it reuses the `!selectedId` branch just above --
-        // already exercised, already correct -- to guarantee `source` and
-        // `bufferDocId` end up EXACTLY as they do for "nothing selected", so
-        // there is no second place that guarantee has to be kept correct.
-        // It also uniformly covers both failure shapes the review called
-        // out: an initial load (bufferDocId was already null) and a switch
-        // (bufferDocId pointed at the PREVIOUS document) end at the same
-        // state either way, with scheduleSave's `!bufferDocId.current`
-        // guard making a keystroke unsaveable rather than misattributed.
-        if (cancelled) return;
-        bufferDocId.current = null;
-        setSource("");
-        setSelectedId(null);
-        setLoadError("Could not load that document. Please try again.");
-      });
-    return () => {
-      cancelled = true;
-      // Runs before the next document's effect body -- i.e. exactly when
-      // the buffer is about to stop belonging to this document. See flush's
-      // own comment for why this must flush rather than just clear.
-      flush();
-    };
-  }, [projectId, selectedId, flush]);
-
-  // Autosave: debounced, and deliberately independent of compiling. Saving
-  // preserves work; compiling costs a container run. Tying them together
-  // would either lose edits or queue seconds-long runs behind every pause.
-  const scheduleSave = useCallback(
-    (next: string) => {
-      if (!canEdit || !bufferDocId.current) return;
-      // Loading a document redispatches its text into CodeMirror, which
-      // reports it as an ordinary change and calls back in here -- that
-      // redispatch is a normal consequence of setSource, not an edge case,
-      // and it happens on every load, not just a slow one. If a DIFFERENT
-      // document's edit is still sitting in `pending` at that moment,
-      // overwriting it here would drop it exactly the way a bare
-      // clearTimeout used to, so any call that targets a document other
-      // than the one already pending must flush that entry first -- the
-      // same "switch flushes, never just clears" rule the effect cleanup
-      // already follows, applied to the one path that reaches
-      // scheduleSave directly instead of going through it.
-      if (pending.current && pending.current.docId !== bufferDocId.current) {
-        flush();
-      }
-      pending.current = { docId: bufferDocId.current, text: next };
-      if (saveTimer.current) clearTimeout(saveTimer.current);
-      saveTimer.current = setTimeout(flush, AUTOSAVE_MS);
-    },
-    [canEdit, flush]
-  );
-
-  useEffect(() => {
-    return () => {
-      if (saveTimer.current) clearTimeout(saveTimer.current);
-    };
-  }, []);
-
-  const handleChange = useCallback(
-    (next: string) => {
-      setSource(next);
-      scheduleSave(next);
-    },
-    [scheduleSave]
-  );
-
-  const compile = useCallback(async () => {
-    if (!canEdit || !selectedId || compiling) return;
-    // Captured now, before any await, and compared against `selectedIdRef`
-    // -- NOT `bufferDocId` -- on every path below that writes
-    // pdfBytes/compiled/log. See `selectedIdRef`'s own comment for why the
-    // two guards in this file deliberately use different refs. Without this
-    // guard at all, a slow compile of A completing after the user has
-    // switched to B unconditionally overwrites B's screen with A's PDF or
-    // log: the same failure family autosave was hardened against twice.
-    // `isStale` does NOT catch this -- two untouched documents both created
-    // from STARTER have identical source and engine, so A's PDF rendered
-    // under B reports itself as perfectly up to date, with no signal
-    // anything is wrong. An id comparison (not a sequence counter) is
-    // deliberate: switching away from A and back to A before this resolves
-    // must still apply the result, and A's id is the same both times.
-    const docId = selectedId;
-    setCompiling(true);
-    try {
-      // Flush a pending autosave first: the backend compiles the SAVED source,
-      // so compiling mid-debounce would build the previous keystroke's text
-      // and hand back a SyncTeX map that does not match what is on screen.
-      // This is the same `flush` the document-switch cleanup uses -- no
-      // second save path. `flush` itself now also waits out an autosave that
-      // was ALREADY on the wire when this ran (see `inFlightSave`'s comment)
-      // -- previously this await could return immediately mid-PATCH.
-      await flush();
-
-      // Same idea, for the engine: `flush` knows nothing about it, so
-      // picking xelatex and hitting Compile inside that PATCH's round trip
-      // would otherwise reach the line below while the SERVER still has
-      // whatever engine it had before -- the backend compiles with the OLD
-      // engine while this document's `compiled.engine` records the NEW one,
-      // and `isStale` reports the preview fresh for an engine it was never
-      // built with. Scoped to `docId`: an in-flight patch for some OTHER
-      // document the user has since switched away from has no bearing on
-      // compiling this one.
-      if (enginePatch.current?.docId === docId) {
-        await enginePatch.current.promise;
-      }
-
-      const result = await compileDocument(projectId, docId);
-      if (selectedIdRef.current !== docId) return; // user moved on; discard
-
-      if (!result.ok || !result.pdf_hash) {
-        // The last good PDF stays on screen on purpose: a broken edit should
-        // not blank the preview, and the previous render is still the most
-        // useful thing available.
-        setLog(result.log);
-        return;
-      }
-
-      let bytes: Uint8Array;
-      try {
-        bytes = await fetchPdfBytes(projectId, docId, result.pdf_hash);
-      } catch (err) {
-        // The compiler just reported success and handed back a hash, but
-        // the build is gone by the time this fetch runs -- the cache
-        // evicted it, not a compiler outage. "Unavailable" would tell the
-        // user to wait for something that was never coming back on its own;
-        // recompiling produces a fresh hash and a fresh file immediately.
-        if (selectedIdRef.current === docId) {
-          setLog(
-            err instanceof PdfNotFoundError
-              ? "That build is no longer cached. Compile again to rebuild it."
-              : "The LaTeX compiler is unavailable. Please try again."
-          );
-        }
-        return;
-      }
-      if (selectedIdRef.current !== docId) return; // user moved on; discard
-
-      setPdfBytes(bytes);
-      setCompiled({ source, engine, hash: result.pdf_hash });
-      setLog(null);
-      // A fresh PDF invalidates both: `highlight` marks coordinates in the
-      // PREVIOUS build, meaningless against this one, and `syncNote` may
-      // still be the "PDF is out of date" message from a jump made while
-      // stale -- which this compile, having just succeeded, made false.
-      // Its render below is ALSO gated on `stale` directly for the same
-      // invariant, but clearing here means it does not linger even for the
-      // one render before that recomputes.
-      setHighlight(null);
-      setSyncNote(null);
-    } catch {
-      if (selectedIdRef.current === docId) {
-        setLog("The LaTeX compiler is unavailable. Please try again.");
-      }
-    } finally {
-      setCompiling(false);
-    }
-  }, [canEdit, compiling, engine, flush, projectId, selectedId, source]);
-
-  useEffect(() => {
-    function onKeyDown(e: KeyboardEvent) {
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "s") {
-        e.preventDefault();
-        void compile();
-      }
-    }
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [compile]);
-
-  // Both directions answer for the LAST COMPILED source. After an edit the
-  // line numbers have drifted, so the result is still shown -- it is usually
-  // close -- but labelled stale. Silently jumping to a confidently wrong line
-  // is the failure the spec singles out as worse than admitting the map is old.
-  //
-  // Guard: `docId` is captured before the `await`, exactly like `compile`'s
-  // own guard (see `selectedIdRef`'s comment above for why that ref, not
-  // `bufferDocId`, is the right one here) -- "is the user still on this
-  // document" is a question about the SELECTION, not the editor buffer, and
-  // it must be re-asked after every await, before any state write. Without
-  // this, a slow SyncTeX lookup for document A resolving after the user has
-  // switched to document B would scroll B's viewer to a position from A, or
-  // select a line in a file the user is no longer looking at -- the same
-  // failure family `compile` and `flush` were both hardened against.
-  const jumpToPdf = useCallback(
-    async (line: number) => {
-      if (!selectedId || !compiled) return;
-      const docId = selectedId;
-      try {
-        const res = await synctexForward(projectId, docId, line);
-        if (selectedIdRef.current !== docId) return; // user moved on; discard
-        if (!res.found || res.page === null || res.x === null || res.y === null) {
-          setSyncNote("No place in the PDF matches that line.");
-          return;
-        }
-        setHighlight({
-          page: res.page,
-          x: res.x,
-          y: res.y,
-          width: res.width ?? 0,
-          height: res.height ?? 0,
-        });
-        setScrollToPage(res.page);
-        setSyncNote(stale ? SYNC_STALE_NOTE : null);
-      } catch {
-        // Navigation is an enhancement. A failed query leaves a working
-        // editor and a working viewer.
-        if (selectedIdRef.current === docId) {
-          setSyncNote("Sync is unavailable right now.");
-        }
-      }
-    },
-    [compiled, projectId, selectedId, stale]
-  );
-
-  const jumpToSource = useCallback(
-    async (page: number, point: TexPoint) => {
-      if (!selectedId || !compiled) return;
-      const docId = selectedId;
-      try {
-        const res = await synctexReverse(projectId, docId, page, point.x, point.y);
-        if (selectedIdRef.current !== docId) return; // user moved on; discard
-        if (!res.found || res.line === null) {
-          setSyncNote("No source line matches that spot.");
-          return;
-        }
-        setGotoLine({ line: res.line, nonce: ++nonce.current });
-        setSyncNote(stale ? SYNC_STALE_NOTE : null);
-      } catch {
-        if (selectedIdRef.current === docId) {
-          setSyncNote("Sync is unavailable right now.");
-        }
-      }
-    },
-    [compiled, projectId, selectedId, stale]
-  );
-
-  async function handleCreate(name: string) {
-    setDocumentsError(null);
-    try {
-      const doc = await createDocument(projectId, { name, source: STARTER });
-      setDocuments((prev) => [...prev, doc]);
-      setSelectedId(doc.id);
-    } catch {
-      setDocumentsError("Could not create the document. Please try again.");
-    }
-  }
-
-  // The engine is persisted here, explicitly, rather than from an effect
-  // watching `engine`. An effect can't tell a user's choice apart from the
-  // `setEngine(doc.engine)` that runs while loading a different document --
-  // on that render `engine` still holds the PREVIOUS document's value, so an
-  // effect would PATCH the newly-opened document to the old one's engine.
-  function handleEngineChange(next: LatexEngine) {
-    const previous = engine;
-    setEngine(next);
-    setEngineError(null);
-    if (!canEdit || !selectedId) return;
-    const docId = selectedId;
-    const promise = patchDocument(projectId, docId, { engine: next })
-      .then((doc) => {
-        setDocuments((prev) => prev.map((d) => (d.id === doc.id ? doc : d)));
-      })
-      .catch(() => {
-        // The server never got the new engine -- the dropdown must not go
-        // on claiming it did, or every compile from here on silently uses
-        // whatever the server actually has while the badge (and `isStale`,
-        // which trusts `engine`) says otherwise. Guarded on `selectedIdRef`,
-        // not unconditional: by the time this settles the user may have
-        // switched to a different document entirely, whose OWN `engine`
-        // this must not stomp -- the same "is the user still here" question
-        // `compile` and the SyncTeX callbacks ask, so it uses the same ref.
-        if (selectedIdRef.current === docId) {
-          setEngine(previous);
-          setEngineError(`Could not change the engine. It is still ${previous}.`);
-        }
-      })
-      .finally(() => {
-        // Only clear if this call is still the one on record -- see
-        // `inFlightSave`'s identical guard in `flush` above.
-        if (enginePatch.current?.promise === promise) enginePatch.current = null;
-      });
-    enginePatch.current = { docId, promise };
-  }
-
-  async function handleDelete(id: string) {
-    // A pending save for this document must never be allowed to fire after
-    // it's gone -- the PATCH would 404, surfacing as the stale "Could not
-    // save" error banner (see the reset above) under whatever document is
-    // selected by the time it fails. The load effect's own flush-on-switch
-    // can't help here: it only runs on the NEXT selection change, which is
-    // too late if a switch doesn't happen to follow.
-    if (pending.current?.docId === id) {
-      pending.current = null;
-      if (saveTimer.current) {
-        clearTimeout(saveTimer.current);
-        saveTimer.current = null;
-      }
-    }
-    setDocumentsError(null);
-    try {
-      await deleteDocument(projectId, id);
-    } catch {
-      setDocumentsError("Could not delete the document. Please try again.");
-      return;
-    }
-    setDocuments((prev) => prev.filter((d) => d.id !== id));
-    setSelectedId((current) => (current === id ? null : current));
-  }
+  const compile = useLatexCompile({
+    projectId,
+    documentId: doc.selectedId,
+    revision: doc.revision,
+    canEdit,
+    isDirty: doc.isDirty,
+    flushAll: doc.flushAll,
+    onOpenFile: doc.openFile,
+    beforeCompile,
+  });
 
   // Drag handle. Clamped so neither pane can be dragged out of existence.
+  const [splitPercent, setSplitPercent] = useState(60);
   // The active drag's teardown, so an unmount mid-drag can still run it.
   const dragCleanup = useRef<(() => void) | null>(null);
 
@@ -641,55 +130,313 @@ export function LatexWorkspace({ projectId, role }: LatexWorkspaceProps) {
   }
 
   // A drag in progress when the component unmounts (e.g. a route change
-  // mid-drag) would otherwise leak its listeners forever -- nothing else
-  // is left to ever call `stop` for it.
+  // mid-drag) would otherwise leak its listeners forever -- nothing else is
+  // left to ever call `stop` for it.
   useEffect(() => {
     return () => {
       dragCleanup.current?.();
     };
   }, []);
 
-  if (loading) {
+  // Import dialog: open/candidate state only. Everything else about an
+  // import (busy, the archive itself) is transient and lives inside the
+  // handler below or inside `ImportDropzone` itself.
+  const [importOpen, setImportOpen] = useState(false);
+  const [importBusy, setImportBusy] = useState(false);
+  const [importCandidates, setImportCandidates] = useState<string[]>([]);
+
+  // Mirrors `doc.error`, read from inside `handleImport`'s async callback
+  // after `importZip` resolves without throwing -- `doc.error` itself would
+  // be the value captured when the callback was BUILT, not the value
+  // `importZip` just set moments ago, since `doc` is a fresh object every
+  // render.
+  const docErrorRef = useRef(doc.error);
+  docErrorRef.current = doc.error;
+
+  const [creatingDoc, setCreatingDoc] = useState(false);
+  const [newDocName, setNewDocName] = useState("");
+
+  function submitCreateDoc() {
+    const trimmed = newDocName.trim();
+    setCreatingDoc(false);
+    setNewDocName("");
+    if (trimmed) void doc.createDoc(trimmed, STARTER);
+  }
+
+  function handleImport(zip: File, name: string, mainPath?: string) {
+    setImportBusy(true);
+    setImportCandidates([]);
+    doc
+      .importZip(zip, name, mainPath)
+      .then(() => {
+        // `importZip` only rethrows for an ambiguous main file (caught
+        // below); every other failure resolves normally after recording
+        // itself in `doc.error`, which is what this checks to decide
+        // whether the import actually succeeded.
+        if (!docErrorRef.current) {
+          setImportOpen(false);
+          setImportCandidates([]);
+        }
+      })
+      .catch((err) => {
+        if (err instanceof AmbiguousMainError) {
+          setImportCandidates(err.candidates);
+          return;
+        }
+        // Anything else here would be a bug in this call, not a
+        // user-facing case -- `doc.error` (rendered in the dialog below)
+        // covers every real failure.
+      })
+      .finally(() => setImportBusy(false));
+  }
+
+  async function handleExport() {
+    const docId = doc.selectedId;
+    if (!docId) return;
+    // In dev the identity travels in an `X-Dev-User-Id` HEADER, which a
+    // plain link cannot send -- so a real fetch is needed there. In prod
+    // (cookie-based) a direct navigation lets the browser honour the
+    // response's own `Content-Disposition` filename instead of buffering
+    // 25MB into JS for nothing.
+    if (!getDevUserId()) {
+      window.location.href = exportUrl(projectId, docId);
+      return;
+    }
+    try {
+      const blob = await fetchExport(projectId, docId);
+      const url = URL.createObjectURL(blob);
+      const a = window.document.createElement("a");
+      a.href = url;
+      a.download = `${doc.document?.name ?? "export"}.zip`;
+      a.click();
+      // Deferred rather than revoked immediately -- see `binary-preview.tsx`
+      // for why: Safari can cancel a download still being handed to the OS
+      // if its blob: URL is revoked synchronously after `click()`.
+      setTimeout(() => URL.revokeObjectURL(url), 0);
+    } catch {
+      // Nothing to show here beyond `doc.error`-style state -- this is a
+      // best-effort download, not a form submission with its own dialog.
+    }
+  }
+
+  const activePath = doc.activePath;
+  const mainDir = doc.mainPath !== null ? parentDir(doc.mainPath) : "";
+
+  // Rebuilt on every render whose `activePath` differs from the last --
+  // never read from a ref updated elsewhere. `EditorPane`'s `onChange`
+  // carries no path of its own, so this closure is the only thing standing
+  // between a keystroke and the file it's supposed to land in; a stale
+  // closure here writes one file's typing into another file's buffer.
+  // Only `doc.editBuffer` (a `useCallback` scoped to `[canEdit]` in the
+  // hook) is read off `doc` here -- see `beforeCompile`'s identical note
+  // above for why the whole object is deliberately not listed.
+  const handleChange = useCallback(
+    (next: string) => {
+      if (activePath) doc.editBuffer(activePath, next);
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [activePath, doc.editBuffer]
+  );
+
+  // Same note as above, for `compile` in place of `doc`.
+  const handleLineDoubleClick = useCallback(
+    (line: number) => {
+      if (!activePath) return;
+      if (!isBeneath(activePath, mainDir)) {
+        compile.setSyncNote(OUTSIDE_MAIN_NOTE);
+        return;
+      }
+      void compile.jumpToPdf(line, activePath);
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [activePath, mainDir, compile.jumpToPdf, compile.setSyncNote]
+  );
+
+  if (doc.loading) {
     return <div className="h-[70vh] animate-pulse rounded-xl bg-muted" />;
   }
 
-  return (
-    <div className="flex h-[calc(100vh-14rem)] min-h-[32rem] gap-3">
-      <DocumentList
-        documents={documents}
-        selectedId={selectedId}
-        canEdit={canEdit}
-        error={documentsError}
-        onSelect={setSelectedId}
-        onCreate={handleCreate}
-        onDelete={handleDelete}
-      />
+  const activeMeta = activePath ? doc.files.find((f) => f.path === activePath) : undefined;
 
-      {selectedId === null ? (
+  return (
+    <div className="flex h-[calc(100vh-14rem)] min-h-[32rem] flex-col gap-2">
+      {/*
+        A save failure is a fact about the user's TEXT, not about which
+        document happens to be on screen -- it must survive a switch away
+        from the document that failed, so it is rendered here, unconditionally,
+        rather than folded into any per-document badge. No retry control: the
+        text lives in a buffer the user may have navigated away from, and
+        re-sending it over newer server state is a worse bug than the one
+        this surfaces.
+      */}
+      {doc.saveFailures.length > 0 && (
+        <div className="flex flex-col gap-1">
+          {doc.saveFailures.map((f) => (
+            <div
+              key={f.id}
+              className="flex items-center justify-between rounded-md border border-destructive/40 bg-destructive/10 px-3 py-1.5 text-xs text-destructive"
+            >
+              <span>Changes to {f.name} could not be saved.</span>
+              <button
+                onClick={() => doc.dismissSaveFailure(f.id)}
+                className="text-destructive/70 hover:text-destructive"
+              >
+                <X className="size-3.5" />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div className="flex items-center justify-between gap-2 rounded-xl border border-border px-3 py-2">
+        <div className="flex items-center gap-2">
+          <select
+            value={doc.selectedId ?? ""}
+            onChange={(e) => doc.select(e.target.value || null)}
+            className="rounded-md border border-input bg-background px-2 py-1 text-sm"
+          >
+            {doc.documents.length === 0 && <option value="">No documents yet</option>}
+            {doc.documents.map((d) => (
+              <option key={d.id} value={d.id}>
+                {d.name}
+              </option>
+            ))}
+          </select>
+
+          {creatingDoc ? (
+            <input
+              autoFocus
+              value={newDocName}
+              onChange={(e) => setNewDocName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") submitCreateDoc();
+                if (e.key === "Escape") {
+                  setCreatingDoc(false);
+                  setNewDocName("");
+                }
+              }}
+              onBlur={submitCreateDoc}
+              placeholder="paper.tex"
+              className="rounded-md border border-input bg-background px-2 py-1 text-sm"
+            />
+          ) : (
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={!canEdit}
+              title={canEdit ? "New document" : "You need editor access to add a document"}
+              onClick={() => setCreatingDoc(true)}
+            >
+              New
+            </Button>
+          )}
+
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={!canEdit || !doc.selectedId}
+            title={canEdit ? "Delete document" : "You need editor access to delete a document"}
+            onClick={() => doc.selectedId && void doc.removeDoc(doc.selectedId)}
+          >
+            Delete
+          </Button>
+
+          {doc.error && <span className="text-xs text-destructive">{doc.error}</span>}
+        </div>
+
+        {doc.selectedId && (
+          <div className="flex items-center gap-2">
+            <select
+              value={doc.engine}
+              disabled={!canEdit}
+              onChange={(e) => void doc.setEngine(e.target.value as LatexEngine)}
+              className="rounded-md border border-input bg-background px-1.5 py-0.5 text-[11px]"
+            >
+              <option value="pdflatex">pdflatex</option>
+              <option value="xelatex">xelatex</option>
+            </select>
+            <Button
+              size="sm"
+              className="h-7 gap-1 px-2 text-[11px]"
+              disabled={!canEdit || compile.compiling}
+              title={canEdit ? "Compile (Cmd/Ctrl+S)" : "You need editor access to compile"}
+              onClick={() => void compile.compile()}
+            >
+              {compile.compiling ? (
+                <Loader2 className="size-3 animate-spin" />
+              ) : (
+                <Play className="size-3" />
+              )}
+              Compile
+            </Button>
+          </div>
+        )}
+      </div>
+
+      {doc.selectedId === null ? (
         <div className="flex flex-1 flex-col items-center justify-center gap-2 text-sm text-muted-foreground">
-          {loadError && <p className="text-destructive">{loadError}</p>}
           <p>Select a document, or create one to start writing.</p>
         </div>
       ) : (
         <div className="relative flex flex-1 overflow-hidden rounded-xl border border-border">
+          <FileTree
+            nodes={buildTree(doc.files)}
+            activePath={doc.activePath}
+            mainPath={doc.mainPath}
+            canEdit={canEdit}
+            usedBytes={doc.usedBytes}
+            maxBytes={doc.maxBytes}
+            error={doc.error}
+            onOpen={(path) => void doc.openFile(path)}
+            onCreate={(path) => void doc.createFile(path)}
+            onDelete={(path) => void doc.removeFile(path)}
+            onRename={(from, to) => void doc.moveFile(from, to)}
+            onSetMain={(path) => void doc.setMainPath(path)}
+            onUpload={(path, data) => void doc.uploadBinary(path, data)}
+            onImportClick={() => {
+              setImportCandidates([]);
+              setImportOpen(true);
+            }}
+            onExport={() => void handleExport()}
+          />
+
           <div style={{ width: `${splitPercent}%` }} className="flex flex-col overflow-hidden">
-            <div className="flex items-center justify-between border-b border-border px-3 py-1.5 text-xs text-muted-foreground">
-              <span>Source</span>
-              <span>
-                {saveState === "saving" && "Saving…"}
-                {saveState === "error" && (
-                  <span className="text-destructive">Could not save</span>
-                )}
-              </span>
+            <OpenTabs
+              paths={doc.openPaths}
+              activePath={doc.activePath}
+              dirtyPaths={doc.dirtyPaths}
+              onSelect={(path) => void doc.openFile(path)}
+              onClose={doc.closeFile}
+            />
+            <div className="flex items-center justify-end border-b border-border px-3 py-1 text-[11px] text-muted-foreground">
+              {doc.saveState === "saving" && "Saving…"}
+              {doc.saveState === "error" && (
+                <span className="text-destructive">Could not save</span>
+              )}
             </div>
             <div className="flex-1 overflow-hidden">
-              <EditorPane
-                value={source}
-                onChange={handleChange}
-                onLineDoubleClick={(line) => void jumpToPdf(line)}
-                gotoLine={gotoLine}
-                readOnly={!canEdit}
-              />
+              {activePath === null ? (
+                <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
+                  Select or create a file to start writing.
+                </div>
+              ) : isTexPath(activePath) ? (
+                <EditorPane
+                  path={activePath}
+                  openPaths={doc.openPaths}
+                  value={doc.buffers[activePath] ?? ""}
+                  onChange={handleChange}
+                  onLineDoubleClick={handleLineDoubleClick}
+                  gotoLine={compile.gotoLine}
+                  readOnly={!canEdit}
+                />
+              ) : (
+                <BinaryPreview
+                  projectId={projectId}
+                  documentId={doc.selectedId}
+                  path={activePath}
+                  sizeBytes={activeMeta?.size_bytes ?? 0}
+                />
+              )}
             </div>
           </div>
 
@@ -704,71 +451,52 @@ export function LatexWorkspace({ projectId, role }: LatexWorkspaceProps) {
             <div className="flex items-center justify-between border-b border-border px-3 py-1.5 text-xs">
               <div className="flex items-center gap-2">
                 <span className="text-muted-foreground">Preview</span>
-                {pdfBytes && stale && (
+                {compile.pdfBytes && compile.stale && (
                   <span className="rounded-full bg-amber-500/15 px-2 py-0.5 text-[11px] font-medium text-amber-700 dark:text-amber-400">
                     {STALE_NOTE}
                   </span>
                 )}
-                {/* `syncNote` is cleared on a successful compile (see `compile`'s
-                    own comment), but this gate is the STRUCTURAL guarantee: the
-                    "PDF is out of date" message can never render while the PDF
-                    is not, in fact, out of date, regardless of whether some
-                    future call site remembers to clear it. Every OTHER message
-                    this state can hold ("No place in the PDF matches...", "Sync
-                    is unavailable...") is not a staleness claim and is shown
-                    unconditionally. */}
-                {syncNote && (syncNote !== SYNC_STALE_NOTE || stale) && (
-                  <span className="text-[11px] text-muted-foreground">{syncNote}</span>
+                {/* `compile.syncNote` is already gated inside the hook: the
+                    "PDF is out of date" message can never render while the
+                    PDF is not, in fact, out of date. Every OTHER message
+                    (declined-sync, "no place matches", "unavailable") passes
+                    through unconditionally. */}
+                {compile.syncNote && (
+                  <span className="text-[11px] text-muted-foreground">{compile.syncNote}</span>
                 )}
-              </div>
-              <div className="flex items-center gap-2">
-                {engineError && (
-                  <span className="text-[11px] text-destructive">{engineError}</span>
-                )}
-                <select
-                  value={engine}
-                  disabled={!canEdit}
-                  onChange={(e) => handleEngineChange(e.target.value as LatexEngine)}
-                  className="rounded-md border border-input bg-background px-1.5 py-0.5 text-[11px]"
-                >
-                  <option value="pdflatex">pdflatex</option>
-                  <option value="xelatex">xelatex</option>
-                </select>
-                <Button
-                  size="sm"
-                  className="h-6 gap-1 px-2 text-[11px]"
-                  disabled={!canEdit || compiling}
-                  title={canEdit ? "Compile (Cmd/Ctrl+S)" : "You need editor access to compile"}
-                  onClick={() => void compile()}
-                >
-                  {compiling ? (
-                    <Loader2 className="size-3 animate-spin" />
-                  ) : (
-                    <Play className="size-3" />
-                  )}
-                  Compile
-                </Button>
               </div>
             </div>
             <div className="flex-1 overflow-hidden">
               <PdfViewer
-                bytes={pdfBytes}
+                bytes={compile.pdfBytes}
                 scale={1.25}
-                highlight={highlight}
-                scrollToPage={scrollToPage}
-                onPageDoubleClick={(page, point) => void jumpToSource(page, point)}
+                highlight={compile.highlight}
+                scrollToPage={compile.scrollToPage}
+                onPageDoubleClick={(page, point) => void compile.jumpToSource(page, point)}
               />
             </div>
-            {log !== null && (
+            {compile.log !== null && (
               <LogPanel
-                log={log}
-                onClose={() => setLog(null)}
-                onJumpToLine={(line) => setGotoLine({ line, nonce: ++nonce.current })}
+                log={compile.log}
+                onClose={() => compile.setLog(null)}
+                onJumpToLine={compile.jumpToLine}
               />
             )}
           </div>
         </div>
       )}
+
+      <ImportDropzone
+        open={importOpen}
+        busy={importBusy}
+        error={doc.error}
+        candidates={importCandidates}
+        onClose={() => {
+          setImportOpen(false);
+          setImportCandidates([]);
+        }}
+        onImport={handleImport}
+      />
     </div>
   );
 }
