@@ -4,7 +4,13 @@ export interface SaveEngineOptions {
   delayMs: number;
   /** Rejects on failure. The engine never interprets the reason. */
   send: (path: string, text: string) => Promise<void>;
-  onStateChange?: (state: SaveState) => void;
+  /**
+   * `path` is carried because a save failure is a fact about ONE FILE. The
+   * consumer's failure record is keyed by path for exactly the reason the
+   * engine's own `failed` set is: a successful save of some other file is no
+   * evidence at all about this one.
+   */
+  onStateChange?: (state: SaveState, path: string) => void;
 }
 
 /**
@@ -178,7 +184,7 @@ export class SaveEngine {
     if (text === (flying !== undefined ? flying : this.baseline.get(path))) return;
 
     if (this.disposed) return;
-    this.opts.onStateChange?.("saving");
+    this.opts.onStateChange?.("saving", path);
     this.inFlightText.set(path, text);
     const send = (async () => {
       try {
@@ -186,14 +192,14 @@ export class SaveEngine {
         if (this.obsolete(path, epoch)) return;
         this.baseline.set(path, text);
         this.failed.delete(path);
-        this.opts.onStateChange?.("idle");
+        this.opts.onStateChange?.("idle", path);
       } catch {
         // Deliberately swallowed and recorded rather than rethrown: a
         // failed autosave is a banner, not an unhandled rejection out of a
         // debounce timer.
         if (this.obsolete(path, epoch)) return;
         this.failed.add(path);
-        this.opts.onStateChange?.("error");
+        this.opts.onStateChange?.("error", path);
       }
     })();
     this.inFlight.set(path, send);

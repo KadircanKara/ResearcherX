@@ -273,12 +273,20 @@ export function LatexWorkspace({ projectId, role }: LatexWorkspaceProps) {
         <div className="flex flex-col gap-1">
           {doc.saveFailures.map((f) => (
             <div
-              key={f.id}
+              // Keyed on BOTH halves of the record's identity: two files in
+              // the same document can be failing at once, and an id-only key
+              // collides between them.
+              key={`${f.id}\u0000${f.path}`}
               className="flex items-center justify-between rounded-md border border-destructive/40 bg-destructive/10 px-3 py-1.5 text-xs text-destructive"
             >
-              <span>Changes to {f.name} could not be saved.</span>
+              {/* Names the FILE as well as the document: a document-level
+                  message could not tell the user which of several open
+                  files is the one still unsaved. */}
+              <span>
+                Changes to {f.path} in {f.name} could not be saved.
+              </span>
               <button
-                onClick={() => doc.dismissSaveFailure(f.id)}
+                onClick={() => doc.dismissSaveFailure(f.id, f.path)}
                 className="text-destructive/70 hover:text-destructive"
               >
                 <X className="size-3.5" />

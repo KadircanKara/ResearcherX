@@ -56,13 +56,20 @@ export interface UseLatexDocument {
   /** Paths holding text the server does not, for the tab bar's dirty dot. */
   dirtyPaths: string[];
   /**
-   * Documents whose autosave failed, by id, with the name to show. Survives
-   * a switch away from the document that failed -- see `saveFailures`
-   * state's own comment for why.
+   * FILES whose autosave failed: the document id and name (what the user
+   * recognises in a banner) plus the tree-relative path that actually
+   * failed. Survives a switch away from the document that failed -- see
+   * `saveFailures` state's own comment for why.
    */
-  saveFailures: { id: string; name: string }[];
+  saveFailures: { id: string; path: string; name: string }[];
   /** Acknowledges one entry in `saveFailures`, removing it from the list. */
-  dismissSaveFailure: (id: string) => void;
+  dismissSaveFailure: (id: string, path: string) => void;
+  /**
+   * Routes a failure the SHELL owns (the export download, for one) through
+   * this hook's single `error` surface, under the same 4xx-shows-the-server's
+   * -detail / 5xx-shows-a-generic-line rule everything else here follows.
+   */
+  reportError: (err: unknown) => void;
   loading: boolean;
   /** Non-null only for a failure about the document as a whole. */
   error: string | null;
@@ -111,7 +118,8 @@ export function useLatexDocument(projectId: string, canEdit: boolean): UseLatexD
   const [docLoading, setDocLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   /**
-   * Documents whose autosave failed, by id, with the name to show.
+   * FILES whose autosave failed, keyed by document id AND tree-relative
+   * path.
    *
    * Deliberately OUTSIDE the per-document engine and NOT cleared on a
    * switch. `saveState` describes the document on screen and is rightly
@@ -120,8 +128,17 @@ export function useLatexDocument(projectId: string, canEdit: boolean): UseLatexD
    * and switching to B before the debounce fires loses the edit in silence
    * -- and worse, returning to A re-baselines from the server's un-updated
    * content, so the editor then reports the lost text as saved.
+   *
+   * The PATH is part of the key because the engine's own `failed` set is
+   * keyed that way and the two must not disagree. Clearing by document id
+   * alone was true in the single-file era and is false now: a
+   * `chapters/results.tex` that keeps 413-ing (the banner is its only loud
+   * surface) had its banner wiped the moment an unrelated `main.tex` saved
+   * successfully, while it was still unsaved.
    */
-  const [saveFailures, setSaveFailures] = useState<{ id: string; name: string }[]>([]);
+  const [saveFailures, setSaveFailures] = useState<
+    { id: string; path: string; name: string }[]
+  >([]);
 
   // Mirrors `selectedId` in the RENDER BODY, not from an effect (an effect
   // lands one render late). Every `await` below is followed by
@@ -271,19 +288,21 @@ export function useLatexDocument(projectId: string, canEdit: boolean): UseLatexD
         // runtime case that matters.
         if (docId === null) return;
         const m = await writeTextFile(projectId, docId, path, text);
-        // A later send that succeeds is proof this document's text is
-        // safe -- clear any earlier failure record UNCONDITIONALLY, same
-        // as recording one below: the recovery is a fact about the data,
-        // not about whether this document happens to be on screen right
-        // now.
-        setSaveFailures((prev) => prev.filter((f) => f.id !== docId));
+        // A later send of THIS PATH that succeeds is proof this file's text
+        // is safe -- and it is proof about nothing else. Cleared
+        // UNCONDITIONALLY of what is on screen, same as recording one below:
+        // the recovery is a fact about the data, not about whether this
+        // document happens to be selected right now.
+        setSaveFailures((prev) =>
+          prev.filter((f) => !(f.id === docId && f.path === path))
+        );
         // `SaveEngine` catches this rejection itself and turns it into the
         // "error" save state and a lasting dirty flag -- no try/catch here,
         // that would make a failed save look clean.
         if (selectedIdRef.current !== docId) return; // no longer on screen
         applyMutation(m, docId);
       },
-      onStateChange: (state) => {
+      onStateChange: (state, path) => {
         if (docId !== null && state === "error") {
           // Recorded UNCONDITIONALLY, before the display guard below. A
           // failed save is a fact about the user's TEXT, not about which
@@ -294,7 +313,9 @@ export function useLatexDocument(projectId: string, canEdit: boolean): UseLatexD
           // returning to A later re-baselines from the server's un-updated
           // content, so the editor then reports the lost text as saved.
           setSaveFailures((prev) =>
-            prev.some((f) => f.id === docId) ? prev : [...prev, { id: docId, name: docName }]
+            prev.some((f) => f.id === docId && f.path === path)
+              ? prev
+              : [...prev, { id: docId, path, name: docName }]
           );
         }
         // The badge IS per-document -- it describes whatever is on SCREEN
@@ -747,6 +768,10 @@ export function useLatexDocument(projectId: string, canEdit: boolean): UseLatexD
         return;
       }
       setDocuments((prev) => prev.filter((d) => d.id !== id));
+      // A save-failure entry must not outlive the document it names -- the
+      // banner would go on naming a document that no longer exists, with a
+      // dismiss button as its only way out.
+      setSaveFailures((prev) => prev.filter((f) => f.id !== id));
       setSelectedId((current) => (current === id ? null : current));
     },
     [projectId]
@@ -792,8 +817,12 @@ export function useLatexDocument(projectId: string, canEdit: boolean): UseLatexD
     await engineRef.current?.flushAll();
   }, []);
 
-  const dismissSaveFailure = useCallback((id: string) => {
-    setSaveFailures((prev) => prev.filter((f) => f.id !== id));
+  const dismissSaveFailure = useCallback((id: string, path: string) => {
+    setSaveFailures((prev) => prev.filter((f) => !(f.id === id && f.path === path)));
+  }, []);
+
+  const reportError = useCallback((err: unknown) => {
+    setError(errorText(err));
   }, []);
 
   return {
@@ -816,6 +845,7 @@ export function useLatexDocument(projectId: string, canEdit: boolean): UseLatexD
     dirtyPaths: engineRef.current?.dirtyPaths() ?? [],
     saveFailures,
     dismissSaveFailure,
+    reportError,
     loading: documentsLoading || docLoading,
     error,
     isDirty,
