@@ -181,6 +181,12 @@ export function CitationHoverCard({
       <PreviewCard.Trigger
         render={<span />}
         tabIndex={0}
+        // A styling hook, nothing more. The Reading Room screens re-point the
+        // colours from their own stylesheet (`.rx-ch [data-rx-citation=…]`,
+        // two class selectors, which beats the single-class Tailwind
+        // utilities below) rather than forking this component or growing a
+        // second visual variant of it.
+        data-rx-citation={variant}
         onKeyDown={(event) => {
           if (event.key === "ArrowLeft") { event.preventDefault(); step(-1); }
           if (event.key === "ArrowRight") { event.preventDefault(); step(1); }

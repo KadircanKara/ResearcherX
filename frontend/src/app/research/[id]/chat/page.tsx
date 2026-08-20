@@ -2,21 +2,26 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
-import { MessageSquarePlus, Plus, Trash2 } from "lucide-react";
-import { Button } from "@/components/ui/button";
 import { MentionTextarea } from "@/components/mention-textarea";
+import { RxTheme } from "@/components/rx-theme";
 import { createConversation, deleteConversation, listConversations } from "@/lib/chat";
+import { activityLabel, conversationCount, startedDay } from "@/lib/conversations";
 import type { Mention } from "@/lib/mentions";
 import { getProject, listPapers } from "@/lib/projects";
 import type { ChatConversation, Paper, Role } from "@/lib/types";
+import "./chat.css";
 
 // Matches the backend: delete_conversation requires require_member(..., "editor").
+// Creating a conversation and sending a message only require "viewer", which is
+// why the composer below is not gated on anything.
 const CAN_DELETE: Role[] = ["owner", "editor"];
 
-function fmtDate(iso: string): string {
-  return new Date(iso).toLocaleDateString("en-GB", {
-    day: "numeric", month: "short", year: "numeric",
-  });
+function TrashGlyph() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" aria-hidden="true">
+      <path d="M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.6 8h5.8l.6-8" />
+    </svg>
+  );
 }
 
 export default function ChatPage() {
@@ -27,7 +32,6 @@ export default function ChatPage() {
   const [myRole, setMyRole] = useState<Role | null>(null);
   const [loading, setLoading] = useState(true);
   const [deleting, setDeleting] = useState<string | null>(null);
-  const [showForm, setShowForm] = useState(false);
   const [content, setContent] = useState("");
   const [mentions, setMentions] = useState<Mention[]>([]);
   const [papers, setPapers] = useState<Paper[]>([]);
@@ -87,104 +91,128 @@ export default function ChatPage() {
     }
   }
 
-  if (loading) {
-    return (
-      <div className="space-y-3 py-4">
-        {[1, 2, 3].map((i) => (
-          <div key={i} className="h-14 animate-pulse rounded-xl bg-muted" />
-        ))}
-      </div>
-    );
-  }
+  const canDelete = myRole !== null && CAN_DELETE.includes(myRole);
+  const empty = !loading && conversations.length === 0;
 
   return (
-    <div>
-      <div className="mb-4 flex items-center justify-between">
-        <p className="text-sm text-muted-foreground">
-          {conversations.length === 0
-            ? "No conversations yet"
-            : `${conversations.length} conversation${conversations.length !== 1 ? "s" : ""}`}
-        </p>
-        {!showForm && (
-          <Button size="sm" onClick={() => setShowForm(true)}>
-            <Plus className="mr-1.5 size-3.5" />
-            New Chat
-          </Button>
-        )}
-      </div>
-
-      {showForm && (
-        <div className="mb-4 rounded-xl border border-border bg-card p-4">
-          <MentionTextarea
-            value={content}
-            onChange={setContent}
-            mentions={mentions}
-            onMentionsChange={setMentions}
-            papers={papers}
-            disabled={submitting}
-            onSubmit={handleStart}
-          />
-          {submitError && (
-            <p className="mt-1 text-xs text-destructive">{submitError}</p>
-          )}
-          <div className="mt-3 flex gap-2">
-            <Button size="sm" onClick={handleStart} disabled={!content.trim() || submitting}>
-              <MessageSquarePlus className="mr-1.5 size-3.5" />
-              {submitting ? "Starting…" : "Start Chat"}
-            </Button>
-            <Button
-              size="sm"
-              variant="ghost"
-              onClick={() => { setShowForm(false); setContent(""); setMentions([]); setSubmitError(null); }}
-            >
-              Cancel
-            </Button>
+    <RxTheme className="rx-ch">
+      <div className="rx-shell">
+        <header className="rx-head">
+          <div>
+            <div className="rx-eyebrow">Chat</div>
+            <h1>Conversations</h1>
           </div>
-        </div>
-      )}
-
-      {conversations.length === 0 && !showForm && (
-        <div className="flex flex-col items-center gap-2 py-24 text-center">
-          <p className="text-sm text-muted-foreground">
-            Start a conversation to ask questions about the assigned papers.
-          </p>
-        </div>
-      )}
-
-      <div className="space-y-2">
-        {conversations.map((conv) => (
-          // A div, not a button: the delete control is itself a button and
-          // nesting one inside another is invalid HTML.
-          <div
-            key={conv.id}
-            className="group flex w-full items-start gap-2 rounded-xl border border-border bg-card px-4 py-3 transition-colors hover:bg-muted"
-          >
-            <button
-              type="button"
-              onClick={() => router.push(`/research/${projectId}/chat/${conv.id}`)}
-              className="min-w-0 flex-1 text-left"
-            >
-              <p className="line-clamp-2 text-sm font-medium text-foreground">
-                {conv.title}
-              </p>
-              <p className="mt-0.5 text-xs text-muted-foreground">
-                {fmtDate(conv.updated_at)}
-              </p>
-            </button>
-            {myRole && CAN_DELETE.includes(myRole) && (
-              <button
-                type="button"
-                onClick={() => handleDelete(conv.id)}
-                disabled={deleting === conv.id}
-                className="mt-0.5 shrink-0 rounded p-1 text-muted-foreground/50 transition-colors hover:bg-destructive/10 hover:text-destructive disabled:opacity-40"
-                aria-label={`Delete conversation: ${conv.title}`}
-              >
-                <Trash2 className="size-3.5" />
-              </button>
+          <div className="rx-meta">
+            {loading ? "Reading the conversations" : conversationCount(conversations.length)}
+            {canDelete && (
+              <>
+                <br />
+                You can delete any of them
+              </>
             )}
           </div>
-        ))}
+        </header>
+
+        {!empty && (
+          <p className="rx-lede">
+            Ask something new below, or reopen a conversation to carry on where you left
+            off. Each one keeps its own citations.
+          </p>
+        )}
+
+        <div className="rx-newq">
+          <div className="rx-composer">
+            <MentionTextarea
+              value={content}
+              onChange={setContent}
+              mentions={mentions}
+              onMentionsChange={setMentions}
+              papers={papers}
+              disabled={submitting}
+              onSubmit={handleStart}
+            />
+            <div className="rx-bar">
+              <span>
+                Type <b>@</b> to name a paper and search only inside it
+              </span>
+              {submitError && (
+                <span role="status" className="rx-cherr">
+                  {submitError}
+                </span>
+              )}
+              <button
+                type="button"
+                className="rx-btn rx-push"
+                onClick={handleStart}
+                disabled={!content.trim() || submitting}
+              >
+                {submitting ? "Starting…" : "Start the conversation"}
+              </button>
+            </div>
+          </div>
+        </div>
+
+        {loading ? (
+          <div className="rx-clist" aria-hidden="true">
+            {[0, 1, 2].map((i) => (
+              <div key={i} className="rx-chskel" />
+            ))}
+          </div>
+        ) : empty ? (
+          <div className="rx-empty">
+            <h2>Nothing asked yet. Start with what you actually want to know.</h2>
+            <p>
+              Answers here are built only from the papers in this project, and every
+              sentence carries the excerpt it came from. Type @ to search inside one
+              paper instead of all of them.
+            </p>
+          </div>
+        ) : (
+          <div className="rx-clist">
+            {/* The concept's row also carries the last question asked, the
+                conversation's scope and its length. `GET
+                /projects/{id}/conversations` returns id, project_id, title,
+                created_by, created_at and updated_at — no messages, no counts,
+                no scope — so those three columns have no source and are left
+                out rather than invented. */}
+            <div className="rx-ccols" aria-hidden="true">
+              <span>Conversation</span>
+              <span>Started</span>
+              <span>Last activity</span>
+              <span />
+            </div>
+            {conversations.map((conv) => (
+              // A div, not a button: the delete control is itself a button and
+              // nesting one inside another is invalid HTML. `.rx-copen::after`
+              // is what makes the whole row clickable anyway.
+              <div key={conv.id} className="rx-crow">
+                <button
+                  type="button"
+                  onClick={() => router.push(`/research/${projectId}/chat/${conv.id}`)}
+                  className="rx-copen"
+                >
+                  <span className="rx-ct">{conv.title}</span>
+                </button>
+                <span className="rx-cmeta">
+                  <span className="rx-cd">{startedDay(conv.created_at)}</span>
+                  <span className="rx-cd">{activityLabel(conv.updated_at)}</span>
+                </span>
+                {canDelete && (
+                  <button
+                    type="button"
+                    onClick={() => void handleDelete(conv.id)}
+                    disabled={deleting === conv.id}
+                    className="rx-cdel"
+                    aria-label={`Delete conversation: ${conv.title}`}
+                  >
+                    <TrashGlyph />
+                  </button>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
       </div>
-    </div>
+    </RxTheme>
   );
 }

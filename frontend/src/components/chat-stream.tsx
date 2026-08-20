@@ -8,17 +8,24 @@ import { chatMessagesUrl, getConversation } from "@/lib/chat";
 import { getDevUserId } from "@/lib/api";
 import { CitationHoverCard, queryTermsFrom, resetChunkCache } from "@/components/citation-hover-card";
 import { citationMarks } from "@/lib/citation-marks";
+import { groupTurns } from "@/lib/conversations";
+import {
+  emptyMentionsNote,
+  scopeLine,
+  statusLabel,
+  type ChatStatus,
+  type RetrievingInfo,
+} from "@/lib/chat-scope";
 
-// Typography for markdown inside a chat bubble. `prose-invert` under .dark
-// (tailwind darkMode: "class"). max-w-none because the bubble already caps
-// width. The margin overrides matter: default prose spacing is tuned for
-// article bodies and leaves a short answer swimming in padding inside a bubble.
-const PROSE =
-  "prose prose-sm dark:prose-invert max-w-none " +
-  "prose-p:my-1.5 prose-ul:my-1.5 prose-ol:my-1.5 prose-li:my-0.5 " +
-  "prose-headings:mt-3 prose-headings:mb-1.5 prose-pre:my-2 " +
-  "prose-table:my-2 prose-th:px-2 prose-th:py-1 prose-td:px-2 prose-td:py-1 " +
-  "first:prose-p:mt-0 last:prose-p:mb-0";
+// Markdown inside the answer is styled by `chat.css` on `.rx-answer` in the
+// concept's serif measure, NOT by `@tailwindcss/typography`'s `prose`: that
+// scale was tuned for a 14px sans bubble, and mixing the two would leave two
+// stylesheets arguing over every element's font-size.
+//
+// A wide table is contained by CSS alone (`display:block; overflow-x:auto` on
+// the table itself), not by a wrapper component — the same trick
+// `citation-hover-card.tsx` already uses. A wrapper would mean a `components`
+// override whose only job is to drop react-markdown's `node` prop.
 
 interface Props {
   projectId: string;
@@ -63,10 +70,11 @@ function MentionedContent({ content, mentions, papers }: {
     <>
       {parts.map((part, i) =>
         part.startsWith("@") && titles.some((t) => part === `@${t}`) ? (
-          // Rendered only inside the user bubble (bg-primary text-primary-foreground):
-          // bg-primary/10 + text-primary from the brief is blue-on-blue there and
-          // renders invisible. primary-foreground/20 keeps contrast against bg-primary.
-          <span key={i} className="rounded bg-primary-foreground/20 px-1 font-semibold text-primary-foreground">
+          // Rendered only inside the filled user bubble: a tint mixed from the
+          // page accent is blue-on-blue there and renders invisible, so
+          // `.rx-mention` mixes from the bubble's OWN foreground instead. See
+          // the rule in chat.css.
+          <span key={i} className="rx-mention">
             {part}
           </span>
         ) : (
@@ -79,6 +87,16 @@ function MentionedContent({ content, mentions, papers }: {
 
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** The concept's scope glyph: a magnifier, at the head of the scope line. */
+function ScopeGlyph() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" aria-hidden="true">
+      <circle cx="7" cy="7" r="4.5" />
+      <path d="M10.4 10.4 14 14" />
+    </svg>
+  );
 }
 
 /**
@@ -114,17 +132,8 @@ export function ChatStream({
 }: Props) {
   const [messages, setMessages] = useState<ChatMessage[]>(initialMessages);
   const [streamingText, setStreamingText] = useState("");
-  const [status, setStatus] = useState<"idle" | "thinking" | "retrieving" | "streaming">("idle");
-  const [retrievingInfo, setRetrievingInfo] = useState<{
-    paper_count: number;
-    history_hits: number;
-    scoped: boolean;
-    scoped_count: number;
-    widened: boolean;
-    empty_mentions: string[];
-    scope_source: "mention" | "resolved";
-    scope_evidence: string[];
-  } | null>(null);
+  const [status, setStatus] = useState<ChatStatus>("idle");
+  const [retrievingInfo, setRetrievingInfo] = useState<RetrievingInfo | null>(null);
   const [error, setError] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
 
@@ -243,190 +252,165 @@ export function ChatStream({
     return () => { cancelled = true; controller.abort(); };
   }, [pendingContent, pendingMentions, projectId, conversationId]);
 
-  // The user message this answer replied to, for term highlighting. Resolving
-  // conversation state is this component's job, not the card's.
-  function questionFor(msg: ChatMessage): string[] {
-    return queryTermsFrom(
-      messages
-        .slice(0, messages.indexOf(msg))
-        .reverse()
-        .find((m) => m.role === "user")?.content ?? ""
+  // Turns, not messages: the reading treatment draws a hairline BETWEEN a
+  // question-and-answer pair, which a flat list cannot locate. `groupTurns`
+  // is pure and tested; see lib/conversations.ts.
+  const turns = groupTurns(messages);
+
+  // The question currently in flight, or null. Written as a value rather than
+  // a boolean so the JSX below narrows it: same condition as before
+  // (`pendingContent && status !== "idle"`), it just carries the string.
+  const live = pendingContent && status !== "idle" ? pendingContent : null;
+  const scope = live ? scopeLine(retrievingInfo) : null;
+  const emptyNote = live ? emptyMentionsNote(retrievingInfo) : null;
+  const working = live ? statusLabel(status, retrievingInfo) : null;
+
+  function renderAnswer(msg: ChatMessage, question: string) {
+    // The user message this answer replied to, for term highlighting.
+    // Resolving conversation state is this component's job, not the card's.
+    const queryTerms = queryTermsFrom(question);
+    return (
+      <div key={msg.id}>
+        <div className="rx-answer">
+          <ReactMarkdown
+            remarkPlugins={[remarkGfm]}
+            // Tuple form, not citationMarks({...}): unified treats a bare
+            // function as an ATTACHER and calls it with the options, using
+            // its return value as the transformer. Passing an
+            // already-invoked transformer makes unified call it again with
+            // no arguments, and it crashes on an undefined tree — after
+            // passing tsc, lint and build, so only a browser check finds it.
+            rehypePlugins={[
+              [citationMarks, { valid: new Set(msg.citations.map((c) => c.n)) }],
+            ]}
+            components={{
+              span: ({ node, children, ...props }) => {
+                const raw = props as Record<string, string | undefined>;
+                const n = Number(raw["data-citation-n"]);
+                const groupAttr = raw["data-citation-group"];
+                if (!groupAttr || Number.isNaN(n)) return <span {...props}>{children}</span>;
+                const group = groupAttr
+                  .split(",")
+                  .map(Number)
+                  .map((num) => msg.citations.find((c) => c.n === num))
+                  .filter((c): c is ChatCitation => c !== undefined);
+                const start = group.findIndex((c) => c.n === n);
+                if (start === -1) return <span {...props}>{children}</span>;
+                return (
+                  <CitationHoverCard
+                    citations={group}
+                    startIndex={start}
+                    projectId={projectId}
+                    queryTerms={queryTerms}
+                    variant="inline"
+                  />
+                );
+              },
+            }}
+          >
+            {msg.content}
+          </ReactMarkdown>
+        </div>
+        {msg.citations.length > 0 && (
+          <div className="rx-srcs">
+            <span className="rx-srcs-h">Sources</span>
+            {msg.citations.map((c, i) => (
+              <CitationHoverCard
+                key={c.n}
+                citations={msg.citations}
+                startIndex={i}
+                projectId={projectId}
+                queryTerms={queryTerms}
+                variant="chip"
+              />
+            ))}
+          </div>
+        )}
+      </div>
     );
   }
 
   return (
-    <div className="flex flex-col gap-4 py-4">
-      {messages.map((msg) => (
-        <div
-          key={msg.id}
-          className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}
-        >
-          <div
-            className={`max-w-[80%] rounded-2xl px-4 py-3 text-sm ${
-              msg.role === "user"
-                ? "bg-primary text-primary-foreground"
-                : "bg-muted text-foreground"
-            }`}
-          >
-            {msg.role === "assistant" ? (
-              <div className={PROSE}>
-                <ReactMarkdown
-                  remarkPlugins={[remarkGfm]}
-                  // Tuple form, not citationMarks({...}): unified treats a bare
-                  // function as an ATTACHER and calls it with the options, using
-                  // its return value as the transformer. Passing an
-                  // already-invoked transformer makes unified call it again with
-                  // no arguments, and it crashes on an undefined tree — after
-                  // passing tsc, lint and build, so only a browser check finds it.
-                  rehypePlugins={[
-                    [citationMarks, { valid: new Set(msg.citations.map((c) => c.n)) }],
-                  ]}
-                  components={{
-                    span: ({ node, children, ...props }) => {
-                      const raw = props as Record<string, string | undefined>;
-                      const n = Number(raw["data-citation-n"]);
-                      const groupAttr = raw["data-citation-group"];
-                      if (!groupAttr || Number.isNaN(n)) return <span {...props}>{children}</span>;
-                      const group = groupAttr
-                        .split(",")
-                        .map(Number)
-                        .map((num) => msg.citations.find((c) => c.n === num))
-                        .filter((c): c is ChatCitation => c !== undefined);
-                      const start = group.findIndex((c) => c.n === n);
-                      if (start === -1) return <span {...props}>{children}</span>;
-                      return (
-                        <CitationHoverCard
-                          citations={group}
-                          startIndex={start}
-                          projectId={projectId}
-                          queryTerms={questionFor(msg)}
-                          variant="inline"
-                        />
-                      );
-                    },
-                  }}
-                >
-                  {msg.content}
-                </ReactMarkdown>
+    // No width cap here: the page wraps this AND the composer in one
+    // `.rx-chcol`, so the two cannot drift apart.
+    <div>
+      {turns.map((turn) => (
+        <article className="rx-turn" key={turn.key}>
+          {turn.question && (
+            <div className="rx-user-row">
+              <div className="rx-bub-user">
+                <MentionedContent
+                  content={turn.question.content}
+                  mentions={turn.question.mentions}
+                  papers={papers}
+                />
               </div>
-            ) : (
-              <p>
-                <MentionedContent content={msg.content} mentions={msg.mentions} papers={papers} />
-              </p>
-            )}
-            {msg.role === "assistant" && msg.citations.length > 0 && (
-              <div className="mt-2 flex flex-wrap gap-1">
-                {msg.citations.map((c, i) => (
-                  <CitationHoverCard
-                    key={c.n}
-                    citations={msg.citations}
-                    startIndex={i}
-                    projectId={projectId}
-                    queryTerms={questionFor(msg)}
-                    variant="chip"
-                  />
-                ))}
-              </div>
-            )}
-          </div>
-        </div>
+            </div>
+          )}
+          {turn.answers.map((answer) => renderAnswer(answer, turn.question?.content ?? ""))}
+        </article>
       ))}
 
-      {/* Optimistic user bubble */}
-      {pendingContent && status !== "idle" && (
-        <div className="flex justify-end">
-          <div className="max-w-[80%] rounded-2xl bg-primary px-4 py-3 text-sm text-primary-foreground">
-            {pendingContent}
-          </div>
-        </div>
-      )}
-
-      {/* Resolved scope banner.
-          Deliberately NOT inside the status indicator, which the streaming
-          bubble replaces the moment the first token lands. The user picked
-          nothing this turn — the words they typed narrowed the search — so
-          this is the only place they can learn the answer was written from
-          part of the library, and it has to outlive retrieval to be read at
-          all. A mention scope needs no such banner: the chips are still in
-          their own composer.
-          It quotes their OWN phrase, not the paper title: the title is what
-          we picked, the phrase is what they typed, and only the phrase tells
-          them what to change to search wider. */}
-      {status !== "idle" &&
-        retrievingInfo?.scope_source === "resolved" &&
-        retrievingInfo.scoped_count > 0 && (
-          <div className="flex justify-start">
-            <div className="rounded-full border border-border px-3 py-1 text-xs text-muted-foreground">
-              {retrievingInfo.scope_evidence.length
-                ? `matched ${retrievingInfo.scope_evidence
-                    .map((e) => `“${e}”`)
-                    .join(", ")} in your question — `
-                : "your question named papers — "}
-              {`searching ${retrievingInfo.scoped_count} paper${
-                retrievingInfo.scoped_count === 1 ? "" : "s"
-              }${retrievingInfo.widened ? " + the rest of the library" : " only"}`}
+      {live !== null && (
+        <article className="rx-turn">
+          {/* Optimistic user bubble. The mentions are ids the composer just
+              handed over, so the same resolve-on-render rule applies. */}
+          <div className="rx-user-row">
+            <div className="rx-bub-user">
+              <MentionedContent
+                content={live}
+                mentions={pendingMentions ?? []}
+                papers={papers}
+              />
             </div>
           </div>
-        )}
 
-      {/* Streaming assistant bubble */}
-      {streamingText && (
-        <div className="flex justify-start">
-          <div className="max-w-[80%] rounded-2xl bg-muted px-4 py-3 text-sm text-foreground">
-            <div className={PROSE}>
-              {/* No citationMarks here: citations arrive with the `done` event,
-                  so mid-stream there is nothing to resolve a marker against. */}
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>{streamingText}</ReactMarkdown>
+          {/* The scope line. Deliberately NOT folded into the working line,
+              which is about the phase: on a RESOLVED scope the user clicked
+              nothing, so this is the only place they learn the answer was
+              written from part of the library, and it has to survive into
+              streaming to be read at all. Every word of it comes from
+              `lib/chat-scope.ts`, which reads only the backend's own
+              `retrieving` event. */}
+          {scope && (
+            <div className="rx-scope">
+              <ScopeGlyph />
+              <div>
+                {scope.map((segment, i) =>
+                  segment.emphasis ? <em key={i}>{segment.text}</em> : <span key={i}>{segment.text}</span>
+                )}
+                {/* A paper the user NAMED that returned nothing. Kept visible
+                    through streaming: the answer is being written from fewer
+                    papers than were asked for. */}
+                {emptyNote && <span className="rx-scope-warn">{emptyNote}</span>}
+              </div>
             </div>
-          </div>
-        </div>
+          )}
+
+          {working && (
+            <p className="rx-working" role="status">
+              <span>{working}</span>
+              <span className="rx-curdot" aria-hidden="true" />
+            </p>
+          )}
+
+          {streamingText && (
+            // `rx-live` is what puts the writing caret at the end of the last
+            // block, from CSS — appending a caret element to the markdown
+            // would put it on a line of its own.
+            //
+            // No citationMarks here: citations arrive with the `done` event,
+            // so mid-stream there is nothing to resolve a marker against.
+            <div className="rx-live">
+              <div className="rx-answer">
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>{streamingText}</ReactMarkdown>
+              </div>
+            </div>
+          )}
+        </article>
       )}
 
-      {/* Status indicator */}
-      {status !== "idle" && !streamingText && (
-        <div className="flex justify-start">
-          <div className="rounded-2xl bg-muted px-4 py-3 text-xs text-muted-foreground">
-            {status === "thinking" && "Analyzing…"}
-            {status === "retrieving" && (retrievingInfo
-              ? `Retrieving from ${retrievingInfo.paper_count} paper${retrievingInfo.paper_count !== 1 ? "s" : ""}…`
-              : "Retrieving…")}
-            {/* A paper the user NAMED that returned nothing. Kept visible
-                through streaming, not just the retrieval phase: the answer is
-                being written from fewer papers than were asked for, and that
-                is exactly when the reader needs to know. The durable record is
-                the answer itself — the model is instructed to say so — since
-                this flag is not persisted with the message. */}
-            {(status === "retrieving" || status === "streaming") &&
-              !!retrievingInfo?.empty_mentions?.length && (
-                <span className="ml-2 text-xs text-amber-600 dark:text-amber-500">
-                  no excerpts from {retrievingInfo.empty_mentions.join(", ")}
-                </span>
-              )}
-            {/* Mention scope only. A RESOLVED scope gets its own banner
-                above, which survives into streaming — this indicator does
-                not. */}
-            {status === "retrieving" &&
-              retrievingInfo?.scoped &&
-              retrievingInfo.scope_source !== "resolved" && (
-                <span className="ml-2 text-xs text-muted-foreground">
-                  {retrievingInfo.scoped_count === 0
-                    ? // Papers were mentioned but none could be scoped to (all
-                      // deleted, or retrieval could not run). The backend reports
-                      // this widened; "scoped to 0 papers" would claim a scope
-                      // that was never applied.
-                      "mentions unavailable — searching the library"
-                    : `scoped to ${retrievingInfo.scoped_count} paper${
-                        retrievingInfo.scoped_count === 1 ? "" : "s"
-                      }${retrievingInfo.widened ? " + library" : ""}`}
-                </span>
-              )}
-          </div>
-        </div>
-      )}
-
-      {error && (
-        <p className="text-center text-xs text-destructive">{error}</p>
-      )}
+      {error && <p className="rx-cherror">{error}</p>}
 
       <div ref={bottomRef} />
     </div>

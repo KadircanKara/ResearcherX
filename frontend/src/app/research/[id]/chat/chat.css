@@ -1,0 +1,600 @@
+/* ── Chat layout ──────────────────────────────────────────────────────────
+ *
+ * Ported from the approved "Reading Room" concept, Chat screen, in its
+ * READING-COLUMN turn treatment: the question stays a filled bubble on the
+ * right, the answer sits on the page surface at the plain measure. (The
+ * concept's frame offers a "bubbles" alternative; the reading column is the
+ * one that was chosen.)
+ *
+ * The Institution/Console palette and every primitive the ported screens share
+ * (`.rx-head`, `.rx-btn`, `.rx-eyebrow`, `.rx-backlink`, `.rx-shell`) live in
+ * `rx-theme.css` on `.rx-theme`, which this screen's wrapper also carries.
+ * There is exactly one copy of that token block and this file is not it. Every
+ * rule below is scoped to `.rx-ch`, the same convention as `.rx-pp`/`.rx-tex`.
+ *
+ * WHAT THE CONCEPT HAS THAT THIS PORT DOES NOT, and why:
+ *
+ *   The two flanks. Both are per-turn provenance — which papers were searched,
+ *   which were held back and at what distance, which chunks were read, how many
+ *   each paper contributed. None of it is persisted with a message and none of
+ *   it is in the `retrieving` event, which carries counts and nothing per
+ *   paper. Inventing a flank would be inventing evidence, on the one screen
+ *   whose whole argument is that evidence is shown.
+ *
+ *   The `working` steps reveal (Plan / Search / Synthesize / Critique). That is
+ *   the RESEARCH RUN pipeline, which the chat endpoint does not run — a chat
+ *   turn is retrieve-then-answer, and it emits no step events. What it does
+ *   emit — the phase and the paper count — is the one `.rx-working` line here.
+ *
+ *   The critic note under an answer. Chat has no critic.
+ *
+ * Consequence for layout: the concept's three-column `chat-grid` collapses to
+ * exactly what it collapses to at its own ≤1080px breakpoint — a single column
+ * at the measure, left-aligned. The project layout caps this tab at max-w-5xl
+ * (1024px, so 976px of content), which is inside that breakpoint anyway, so a
+ * wider shell would buy nothing but white space. The concept is explicit that a
+ * wide viewport is fixed by adding information to the flanks and never by
+ * widening the column.
+ * ───────────────────────────────────────────────────────────────────────── */
+
+.rx-ch {
+  /* The reading column never grows, so the cap only bounds the conversation
+     table on the list screen — the concept's own figure for that is 1440px. */
+  --rx-shell: 1440px;
+
+  padding: 10px 28px 40px;
+  border: 1px solid oklch(var(--border));
+  border-radius: calc(var(--radius) * 2);
+}
+/* The concept's 44px assumes the top of a page; this screen sits under the
+   project header and the tab strip. Same adjustment as Papers and LaTeX. */
+.rx-ch .rx-head {
+  padding-top: 26px;
+}
+
+/* ── The reading column ───────────────────────────────────────────────── */
+.rx-ch .rx-chcol {
+  max-width: var(--rx-measure);
+}
+
+.rx-ch .rx-turn {
+  padding-bottom: 38px;
+}
+.rx-ch .rx-turn + .rx-turn {
+  border-top: 1px solid oklch(var(--rx-hair));
+  padding-top: 26px;
+}
+
+.rx-ch .rx-user-row {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 20px;
+}
+.rx-ch .rx-bub-user {
+  max-width: 80%;
+  padding: 12px 16px;
+  border-radius: 16px;
+  background: oklch(var(--primary));
+  color: oklch(var(--primary-foreground));
+  font-size: 15px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+/* The mention chip must survive ON the filled bubble, so it is mixed from the
+   bubble's OWN foreground. The app already learned this the hard way: the
+   accent tint is blue-on-blue here and renders invisible. */
+.rx-ch .rx-bub-user .rx-mention {
+  background: color-mix(in srgb, oklch(var(--primary-foreground)) 24%, transparent);
+  color: oklch(var(--primary-foreground));
+  border-radius: 5px;
+  padding: 1px 6px;
+  font-size: 14px;
+}
+
+/* ── The scope line ───────────────────────────────────────────────────────
+ * One line per in-flight turn, saying what the backend actually reported.
+ * It is NOT inside the status indicator: the reader picked nothing on a
+ * resolved turn, so this is the only place they learn the answer was written
+ * from part of the library, and it has to outlive retrieval to be read at all.
+ * `lib/chat-scope.ts` owns every word of it. */
+.rx-ch .rx-scope {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 12px 0 14px;
+  color: oklch(var(--muted-foreground));
+  font-size: 14px;
+  line-height: 1.6;
+  border-top: 1px solid oklch(var(--rx-hair));
+  border-bottom: 1px solid oklch(var(--rx-hair));
+}
+.rx-ch .rx-scope svg {
+  flex: none;
+  margin-top: 2px;
+  color: oklch(var(--accent-foreground));
+}
+.rx-ch .rx-scope em {
+  font-style: normal;
+  color: oklch(var(--foreground));
+}
+.rx-ch .rx-scope-warn {
+  display: block;
+  margin-top: 4px;
+  color: oklch(var(--accent-foreground));
+}
+
+/* ── The working line ─────────────────────────────────────────────────── */
+.rx-ch .rx-working {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 13px 0;
+  font-size: 13px;
+  color: oklch(var(--muted-foreground));
+}
+.rx-ch .rx-curdot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: oklch(var(--accent-foreground));
+  display: inline-block;
+}
+
+/* ── The answer ───────────────────────────────────────────────────────────
+ * Deliberately NOT `@tailwindcss/typography`'s `prose`: that scale is tuned
+ * for a bubble at 14px sans, and the whole point of the reading treatment is
+ * the concept's own serif measure. Every block element markdown can emit is
+ * given a rule here, because an element with no rule renders at the browser
+ * default and there is nothing to catch it. */
+.rx-ch .rx-answer {
+  font-family: var(--font-serif);
+  color: oklch(var(--foreground));
+  overflow-wrap: anywhere;
+}
+.rx-ch .rx-answer > :first-child {
+  margin-top: 0;
+}
+.rx-ch .rx-answer > :last-child {
+  margin-bottom: 0;
+}
+.rx-ch .rx-answer p,
+.rx-ch .rx-answer li {
+  font-size: 17.5px;
+  line-height: 1.78;
+  font-weight: 400;
+}
+.rx-ch .rx-answer p {
+  margin: 0 0 22px;
+}
+.rx-ch .rx-answer ul,
+.rx-ch .rx-answer ol {
+  margin: 0 0 22px;
+  padding-left: 24px;
+}
+.rx-ch .rx-answer li {
+  margin: 0 0 6px;
+}
+.rx-ch .rx-answer h1,
+.rx-ch .rx-answer h2,
+.rx-ch .rx-answer h3,
+.rx-ch .rx-answer h4,
+.rx-ch .rx-answer h5,
+.rx-ch .rx-answer h6 {
+  font-family: var(--rx-sans);
+  font-size: 12px;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: oklch(var(--muted-foreground));
+  font-weight: 600;
+  margin: 32px 0 14px;
+}
+.rx-ch .rx-answer strong {
+  font-weight: 600;
+}
+.rx-ch .rx-answer a {
+  color: oklch(var(--accent-foreground));
+  text-decoration: none;
+  border-bottom: 1px solid oklch(var(--rx-accent-line));
+}
+.rx-ch .rx-answer a:hover {
+  border-bottom-color: oklch(var(--accent-foreground));
+}
+.rx-ch .rx-answer blockquote {
+  margin: 0 0 22px;
+  padding-left: 14px;
+  border-left: 2px solid oklch(var(--rx-accent-line));
+  color: oklch(var(--muted-foreground));
+}
+.rx-ch .rx-answer code {
+  font-family: var(--font-mono);
+  font-size: 14px;
+  background: oklch(var(--muted));
+  border-radius: 3px;
+  padding: 1px 5px;
+}
+.rx-ch .rx-answer pre {
+  margin: 0 0 22px;
+  padding: 13px 15px;
+  background: oklch(var(--muted));
+  border: 1px solid oklch(var(--rx-hair));
+  border-radius: var(--radius);
+  overflow-x: auto;
+}
+.rx-ch .rx-answer pre code {
+  background: none;
+  padding: 0;
+  font-size: 13px;
+  line-height: 1.6;
+}
+/* A wide table must scroll inside itself, never widen the reading column.
+   `display: block` is what gives the element its own scroll container; the
+   rows inside still lay out as a table. Same trick as the citation card. */
+.rx-ch .rx-answer table {
+  display: block;
+  overflow-x: auto;
+  max-width: 100%;
+  margin: 0 0 22px;
+  border-collapse: collapse;
+  font-family: var(--rx-sans);
+  font-size: 13.5px;
+}
+.rx-ch .rx-answer th,
+.rx-ch .rx-answer td {
+  border: 1px solid oklch(var(--rx-hair));
+  padding: 6px 10px;
+  text-align: left;
+}
+.rx-ch .rx-answer th {
+  font-weight: 600;
+  background: oklch(var(--muted));
+}
+.rx-ch .rx-answer hr {
+  border: 0;
+  border-top: 1px solid oklch(var(--rx-hair));
+  margin: 26px 0;
+}
+
+/* The caret that says the answer is still being written.
+   Drawn from CSS onto the last block of the streaming answer rather than
+   appended to the markup: an element after the markdown would sit on a line of
+   its own, and injecting one INTO the markdown source would mean handing the
+   parser text the model did not write. */
+.rx-ch .rx-live > .rx-answer > :last-child::after {
+  content: "";
+  display: inline-block;
+  width: 7px;
+  height: 17px;
+  margin-left: 3px;
+  background: oklch(var(--accent-foreground));
+  vertical-align: -2px;
+  opacity: 0.55;
+}
+
+/* ── Citations ────────────────────────────────────────────────────────────
+ * `CitationHoverCard` is shared with nothing else, but it is a component, not
+ * this screen's markup — so it exposes `data-rx-citation` and the palette
+ * decisions are made here, rather than forking the component.
+ *
+ * `.rx-ch.rx-theme` is a COMPOUND on one element (both classes are on the
+ * wrapper `RxTheme` renders), giving (0,3,0). That is deliberate and is the
+ * minimum that wins outright: the component's `text-blue-600` is (0,1,0), but
+ * its `dark:text-blue-400` compiles to `.dark .text-blue-400` at (0,2,0),
+ * which a plain `.rx-ch [data-…]` would only TIE — leaving the colour to
+ * stylesheet order, i.e. to the bundler. */
+.rx-ch.rx-theme [data-rx-citation="inline"] {
+  font-family: var(--rx-sans);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  vertical-align: super;
+  padding: 2px 3px;
+  margin: 0 1px;
+  color: oklch(var(--accent-foreground));
+  border-radius: 3px;
+  transition: background var(--rx-t) var(--rx-ease);
+}
+.rx-ch.rx-theme [data-rx-citation="inline"]:hover {
+  background: oklch(var(--accent));
+}
+.rx-ch .rx-srcs {
+  margin: 6px 0 0;
+  padding: 14px 0 0;
+  border-top: 1px solid oklch(var(--rx-hair));
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px 8px;
+  align-items: center;
+}
+.rx-ch .rx-srcs-h {
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: oklch(var(--muted-foreground));
+  font-weight: 600;
+  margin-right: 4px;
+}
+.rx-ch.rx-theme [data-rx-citation="chip"] {
+  font-family: var(--rx-sans);
+  font-size: 11.5px;
+  padding: 2px 9px;
+  border-radius: 20px;
+  background: oklch(var(--card));
+  border: 1px solid oklch(var(--rx-hair));
+  color: oklch(var(--muted-foreground));
+}
+.rx-ch.rx-theme [data-rx-citation="chip"]:hover {
+  border-color: oklch(var(--rx-accent-line));
+  color: oklch(var(--accent-foreground));
+  background: oklch(var(--accent));
+}
+
+.rx-ch .rx-cherror {
+  margin: 18px 0 0;
+  padding: 11px 14px;
+  background: oklch(var(--rx-danger-wash));
+  border-left: 2px solid oklch(var(--destructive));
+  border-radius: 0 var(--radius) var(--radius) 0;
+  font-size: 13.5px;
+  line-height: 1.6;
+  color: oklch(var(--foreground));
+}
+
+/* ── The composer ─────────────────────────────────────────────────────────
+ * The box is this screen's; the textarea inside it is `MentionTextarea`,
+ * unchanged. Two class selectors beat its utilities, so it gives up its own
+ * border and background and the composer box carries them instead. */
+.rx-ch .rx-composer {
+  margin-top: 40px;
+  border: 1px solid oklch(var(--border));
+  border-radius: var(--radius);
+  background: oklch(var(--card));
+  padding: 14px 16px 11px;
+  transition: border-color var(--rx-t) var(--rx-ease);
+}
+.rx-ch .rx-composer:focus-within {
+  border-color: oklch(var(--rx-accent-line));
+}
+.rx-ch .rx-composer textarea {
+  width: 100%;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  padding: 0;
+  font-family: var(--font-serif);
+  font-size: 16px;
+  line-height: 1.6;
+  color: oklch(var(--foreground));
+  resize: none;
+  /* No `outline: none` here on purpose. `MentionTextarea` carries Tailwind's
+     `outline-none` at (0,1,0); `.rx-theme :focus-visible` in rx-theme.css is
+     (0,1,1) and therefore restores a real focus ring inside this subtree. The
+     composer's own `:focus-within` border is a nice-to-have on top of it, not
+     a substitute — a border-colour shift is not a focus indicator. */
+}
+.rx-ch .rx-composer textarea::placeholder {
+  color: oklch(var(--muted-foreground));
+}
+/* The `@` picker. `bottom: 100%` on the textarea's own wrapper puts it above
+   the composer, which is where it belongs — the composer is the last thing on
+   the page and a dropdown below it would open off-screen. */
+.rx-ch .rx-composer ul[role="listbox"] {
+  border-radius: var(--radius);
+  border: 1px solid oklch(var(--border));
+  background: oklch(var(--popover));
+  box-shadow: 0 10px 30px oklch(var(--foreground) / 0.12);
+}
+.rx-ch .rx-composer ul[role="listbox"] button {
+  border-radius: 3px;
+  font-family: var(--rx-sans);
+  font-size: 13.5px;
+  color: oklch(var(--foreground));
+}
+.rx-ch .rx-composer ul[role="listbox"] button[aria-selected="true"],
+.rx-ch .rx-composer ul[role="listbox"] button:hover {
+  background: oklch(var(--foreground) / 0.05);
+}
+.rx-ch .rx-composer .rx-bar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid oklch(var(--rx-hair));
+  font-size: 12px;
+  color: oklch(var(--muted-foreground));
+  flex-wrap: wrap;
+}
+.rx-ch .rx-composer .rx-bar b {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  font-weight: 500;
+  color: oklch(var(--foreground));
+}
+.rx-ch .rx-composer .rx-bar .rx-cherr {
+  color: oklch(var(--destructive));
+}
+
+/* ── The conversation list ────────────────────────────────────────────────
+ * The concept's row carries Conversation / last question asked / Scope /
+ * Length / Last activity. `GET /projects/{id}/conversations` returns id,
+ * project_id, title, created_by, created_at, updated_at and nothing else — no
+ * messages, no counts, no scope — so three of those five columns have no
+ * source. They are NOT faked: the port shows Conversation, Started and Last
+ * activity, and `src/lib/conversations.ts` owns the wording.
+ *
+ * THE ROUND TRIP IS DELIBERATE, straight from the concept: a permanent
+ * conversation rail would tax every paragraph of every answer for an act that
+ * happens once a session. */
+.rx-ch .rx-newq {
+  max-width: 82ch;
+}
+.rx-ch .rx-newq .rx-composer {
+  margin-top: 0;
+}
+
+.rx-ch {
+  --rx-cgrid: minmax(0, 1fr) 158px 158px 34px;
+}
+.rx-ch .rx-clist {
+  margin-top: 38px;
+}
+.rx-ch .rx-ccols {
+  display: grid;
+  grid-template-columns: var(--rx-cgrid);
+  gap: 8px 28px;
+  padding: 0 6px 9px 0;
+  border-bottom: 1px solid oklch(var(--border));
+}
+.rx-ch .rx-ccols span {
+  font-size: 11px;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: oklch(var(--muted-foreground));
+  font-weight: 600;
+}
+.rx-ch .rx-crow {
+  position: relative;
+  display: grid;
+  grid-template-columns: var(--rx-cgrid);
+  gap: 6px 28px;
+  align-items: baseline;
+  border-bottom: 1px solid oklch(var(--rx-hair));
+  transition: background var(--rx-t) var(--rx-ease);
+}
+.rx-ch .rx-crow:hover {
+  background: oklch(var(--foreground) / 0.05);
+}
+/* The row is a grid and its two cells are one <button> and one wrapper; the
+   wrapper dissolves so the dates sit in the row's own tracks. */
+.rx-ch .rx-cmeta {
+  display: contents;
+}
+.rx-ch .rx-copen {
+  text-align: left;
+  padding: 18px 0;
+}
+/* The whole row is the hit area, but only the title button is in the tab
+   order — an overlay pseudo-element, so the delete button (z-index 1) still
+   takes its own clicks. */
+.rx-ch .rx-copen::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 3px;
+}
+.rx-ch .rx-copen:focus-visible {
+  outline: 0;
+}
+.rx-ch .rx-copen:focus-visible::after {
+  outline: 2px solid oklch(var(--accent-foreground));
+  outline-offset: -3px;
+}
+.rx-ch .rx-ct {
+  display: block;
+  font-family: var(--font-serif);
+  font-size: 17px;
+  line-height: 1.4;
+  color: oklch(var(--foreground));
+  max-width: 50ch;
+}
+.rx-ch .rx-cd {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  color: oklch(var(--muted-foreground));
+}
+.rx-ch .rx-cdel {
+  position: relative;
+  z-index: 1;
+  justify-self: end;
+  align-self: center;
+  padding: 6px;
+  border-radius: 3px;
+  color: oklch(var(--muted-foreground));
+  opacity: 0;
+  transition:
+    opacity var(--rx-t) var(--rx-ease),
+    color var(--rx-t) var(--rx-ease),
+    background var(--rx-t) var(--rx-ease);
+}
+.rx-ch .rx-crow:hover .rx-cdel,
+.rx-ch .rx-cdel:focus-visible {
+  opacity: 1;
+}
+.rx-ch .rx-cdel:hover {
+  color: oklch(var(--destructive));
+  background: oklch(var(--rx-danger-wash));
+}
+/* Four classes, and declared after the hover rule, so a delete already in
+   flight stays dimmed even under the pointer that started it. */
+.rx-ch .rx-crow .rx-cdel:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.rx-ch .rx-empty {
+  max-width: 66ch;
+  padding: 26px 0 0;
+}
+.rx-ch .rx-empty h2 {
+  font-family: var(--font-serif);
+  font-weight: 500;
+  font-size: 23px;
+  line-height: 1.35;
+  margin: 0 0 12px;
+  color: oklch(var(--foreground));
+}
+.rx-ch .rx-empty p {
+  margin: 0 0 22px;
+  color: oklch(var(--muted-foreground));
+  font-size: 14px;
+  line-height: 1.65;
+}
+
+.rx-ch .rx-chskel {
+  height: 58px;
+  border-bottom: 1px solid oklch(var(--rx-hair));
+  background: linear-gradient(
+    90deg,
+    oklch(var(--foreground) / 0.04),
+    oklch(var(--foreground) / 0.07),
+    oklch(var(--foreground) / 0.04)
+  );
+}
+
+/* The concept folds this table at 980px. The tab's content box is 976px at the
+   layout's own cap, so on a full-width desktop the row is one track short of
+   the fold — measured, not assumed: max-w-5xl is 1024px and the layout adds
+   px-6 (24px) either side. */
+@media (max-width: 980px) {
+  .rx-ch .rx-ccols {
+    display: none;
+  }
+  .rx-ch {
+    --rx-cgrid: minmax(0, 1fr) 34px;
+  }
+  .rx-ch .rx-cmeta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 16px;
+    grid-column: 1;
+    padding-bottom: 16px;
+  }
+  .rx-ch .rx-copen {
+    padding-bottom: 8px;
+  }
+  .rx-ch .rx-cdel {
+    opacity: 1;
+  }
+}
+
+@media (max-width: 768px) {
+  .rx-ch {
+    padding: 6px 16px 32px;
+  }
+  .rx-ch .rx-answer p,
+  .rx-ch .rx-answer li {
+    font-size: 16.5px;
+  }
+}
