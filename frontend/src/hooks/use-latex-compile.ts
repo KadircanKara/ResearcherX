@@ -36,6 +36,15 @@ export interface UseLatexCompile {
    * ever issuing a request -- e.g. a forward query for a file outside the
    * main file's own directory, which has no representable SyncTeX path.
    * Subject to the same staleness gate as every other write to this state.
+   *
+   * A note set this way is SCOPED to whichever file is active at the moment
+   * it is set, and is dropped when the user moves to another one. Every such
+   * note is a statement about that one file ("sync only covers files beside
+   * or below the main file", "couldn't tell which file that error is in"),
+   * and left unscoped it sat in the Preview header indefinitely, with
+   * nothing on screen saying which file it had ever been about. Notes the
+   * hook sets itself are about the JUMP, not about a file, and stay
+   * unscoped.
    */
   setSyncNote: (note: string | null) => void;
   stale: boolean;
@@ -53,6 +62,11 @@ export function useLatexCompile(args: {
   flushAll: () => Promise<void>;
   /** Called with the file a reverse-sync hit names, before the line jump. */
   onOpenFile: (path: string) => Promise<void>;
+  /**
+   * The file on screen. Read only to scope `setSyncNote`'s notes -- see its
+   * own comment. This hook owns no notion of tabs otherwise.
+   */
+  activePath: string | null;
   /**
    * Awaited right before the compile request is issued, after `flushAll`.
    * Both the Compile button and this hook's own Cmd/Ctrl+S handler funnel
@@ -72,6 +86,7 @@ export function useLatexCompile(args: {
     isDirty,
     flushAll,
     onOpenFile,
+    activePath,
     beforeCompile,
   } = args;
 
@@ -84,10 +99,40 @@ export function useLatexCompile(args: {
   const [gotoLine, setGotoLine] = useState<{ line: number; nonce: number } | null>(
     null
   );
-  const [syncNote, setSyncNote] = useState<string | null>(null);
+  // `path` is the file the note is ABOUT, or null for a note about the jump
+  // itself (which is not tied to any one file).
+  const [syncNote, setSyncNoteState] = useState<{ text: string; path: string | null } | null>(
+    null
+  );
 
   // Monotonic, so jumping twice to the same line still scrolls the editor.
   const nonce = useRef(0);
+
+  // Mirrors `activePath` in the RENDER BODY, so `setSyncNote` below can stamp
+  // a note with the file it is about at the moment the caller sets it. An
+  // effect would land one render late, which is precisely when a
+  // just-declined jump would get stamped with the wrong file.
+  const activePathRef = useRef(activePath);
+  activePathRef.current = activePath;
+
+  /** A note about the JUMP, not about a file: shown until something replaces it. */
+  const setNote = useCallback((text: string | null) => {
+    setSyncNoteState(text === null ? null : { text, path: null });
+  }, []);
+
+  /** The exported setter: a note about the file that is active right now. */
+  const setSyncNote = useCallback((note: string | null) => {
+    setSyncNoteState(note === null ? null : { text: note, path: activePathRef.current });
+  }, []);
+
+  // A file-scoped note is DROPPED once the user moves to another file. It was
+  // never true of the new one, and nothing on screen said which file it had
+  // been about -- so it read as a permanent complaint about the file now in
+  // view. Unscoped notes (`path: null`) are untouched here; they are cleared
+  // by the next compile or the next jump.
+  useEffect(() => {
+    setSyncNoteState((prev) => (prev && prev.path !== null && prev.path !== activePath ? null : prev));
+  }, [activePath]);
 
   // Mirrors `documentId`, updated right here in the render body (not from an
   // effect, which would land one render late) so it is always exactly as
@@ -182,7 +227,7 @@ export function useLatexCompile(args: {
       // consumer shows it, for the same invariant, but clearing here means
       // it does not linger even for the one render before that recomputes.
       setHighlight(null);
-      setSyncNote(null);
+      setNote(null);
     } catch {
       if (documentIdRef.current === docId) {
         setLog("The LaTeX compiler is unavailable. Please try again.");
@@ -190,7 +235,7 @@ export function useLatexCompile(args: {
     } finally {
       setCompiling(false);
     }
-  }, [beforeCompile, canEdit, compiling, documentId, flushAll, projectId]);
+  }, [beforeCompile, canEdit, compiling, documentId, flushAll, projectId, setNote]);
 
   // The previous document's build is cleared the INSTANT the selection
   // changes, not once a new compile lands -- otherwise switching to document
@@ -208,8 +253,8 @@ export function useLatexCompile(args: {
     setHighlight(null);
     setScrollToPage(null);
     setGotoLine(null);
-    setSyncNote(null);
-  }, [documentId]);
+    setNote(null);
+  }, [documentId, setNote]);
 
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
@@ -244,7 +289,7 @@ export function useLatexCompile(args: {
         const res = await synctexForward(projectId, docId, line, file);
         if (documentIdRef.current !== docId) return; // user moved on; discard
         if (!res.found || res.page === null || res.x === null || res.y === null) {
-          setSyncNote("No place in the PDF matches that line.");
+          setNote("No place in the PDF matches that line.");
           return;
         }
         setHighlight({
@@ -255,16 +300,16 @@ export function useLatexCompile(args: {
           height: res.height ?? 0,
         });
         setScrollToPage(res.page);
-        setSyncNote(stale ? SYNC_STALE_NOTE : null);
+        setNote(stale ? SYNC_STALE_NOTE : null);
       } catch {
         // Navigation is an enhancement. A failed query leaves a working
         // editor and a working viewer.
         if (documentIdRef.current === docId) {
-          setSyncNote("Sync is unavailable right now.");
+          setNote("Sync is unavailable right now.");
         }
       }
     },
-    [compiled, documentId, projectId, stale]
+    [compiled, documentId, projectId, setNote, stale]
   );
 
   const jumpToSource = useCallback(
@@ -279,7 +324,7 @@ export function useLatexCompile(args: {
         // tree -- so both are handled by the one branch below rather than
         // treating a present line with no file as a partial success.
         if (!res.found || res.line === null || res.file === null) {
-          setSyncNote("No source line matches that spot.");
+          setNote("No source line matches that spot.");
           return;
         }
         // Opens the file BEFORE jumping. Without awaiting this first, the
@@ -289,14 +334,14 @@ export function useLatexCompile(args: {
         await onOpenFile(res.file);
         if (documentIdRef.current !== docId) return; // user moved on; discard
         setGotoLine({ line: res.line, nonce: ++nonce.current });
-        setSyncNote(stale ? SYNC_STALE_NOTE : null);
+        setNote(stale ? SYNC_STALE_NOTE : null);
       } catch {
         if (documentIdRef.current === docId) {
-          setSyncNote("Sync is unavailable right now.");
+          setNote("Sync is unavailable right now.");
         }
       }
     },
-    [compiled, documentId, onOpenFile, projectId, stale]
+    [compiled, documentId, onOpenFile, projectId, setNote, stale]
   );
 
   // A synchronous jump with no network round trip -- e.g. LogPanel's
@@ -305,7 +350,11 @@ export function useLatexCompile(args: {
   // the editor cursor to a line number the caller already has.
   const jumpToLine = useCallback((line: number) => {
     setGotoLine({ line, nonce: ++nonce.current });
-  }, []);
+    // A jump that actually happened clears whatever the last declined one
+    // complained about -- otherwise a "couldn't tell which file" note sits
+    // beside a jump that plainly worked.
+    setNote(null);
+  }, [setNote]);
 
   // The staleness message is withheld HERE, structurally, rather than left
   // to whatever JSX eventually renders `syncNote` -- the "PDF is out of
@@ -319,7 +368,11 @@ export function useLatexCompile(args: {
   // place in the PDF matches...", "Sync is unavailable...") is not a
   // staleness claim and passes through unconditionally.
   const visibleSyncNote =
-    syncNote && (syncNote !== SYNC_STALE_NOTE || stale) ? syncNote : null;
+    syncNote &&
+    (syncNote.path === null || syncNote.path === activePath) &&
+    (syncNote.text !== SYNC_STALE_NOTE || stale)
+      ? syncNote.text
+      : null;
 
   return {
     compiling,

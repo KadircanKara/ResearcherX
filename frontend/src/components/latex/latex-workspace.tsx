@@ -91,6 +91,7 @@ export function LatexWorkspace({ projectId, role }: LatexWorkspaceProps) {
     isDirty: doc.isDirty,
     flushAll: doc.flushAll,
     onOpenFile: doc.openFile,
+    activePath: doc.activePath,
     beforeCompile,
   });
 
