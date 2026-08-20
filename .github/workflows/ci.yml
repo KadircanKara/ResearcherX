@@ -28,6 +28,25 @@ jobs:
       # services, no network, no secrets needed here.
       - run: pytest -q
 
+  latex-compiler:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: latex-compiler
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # Same pin as the backend job so format rules can't disagree between them.
+      - run: pip install "ruff~=0.12.0"
+      - run: ruff check .
+      - run: ruff format --check .
+      # Stdlib-only unit test for _tree_path -- no service to boot, no install
+      # step. The compiler image itself runs Python 3.14; this is stdlib and
+      # version-agnostic, so 3.12 here proves nothing version-specific.
+      - run: python3 test_tree_path.py
+
   frontend:
     runs-on: ubuntu-latest
     defaults:
