@@ -462,10 +462,14 @@ async def test_exporting_a_document_with_a_non_ascii_name_sets_an_rfc6266_filena
 async def test_a_viewer_can_export(
     client: AsyncClient, db_session: AsyncSession, project: Project, you: User
 ):
+    # Project membership is binary (owner/member) -- a project "member" who
+    # did not import this document and holds no grant on it resolves to
+    # document-level "viewer" (services/latex_access.py), and export is a
+    # read.
     viewer = (
         await db_session.execute(select(User).where(User.email == "amelia@lab.io"))
     ).scalar_one()
-    db_session.add(ProjectMember(project_id=project.id, user_id=viewer.id, role="viewer"))
+    db_session.add(ProjectMember(project_id=project.id, user_id=viewer.id, role="member"))
     await db_session.commit()
 
     created = await client.post(

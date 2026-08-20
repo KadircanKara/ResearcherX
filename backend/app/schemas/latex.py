@@ -41,6 +41,17 @@ class LatexDocumentOut(BaseModel):
     engine: str
     created_at: datetime
     updated_at: datetime
+    # Reported by the server so nothing downstream re-derives it. A client
+    # that computed access from the project role would be a second copy of
+    # `services/latex_access.py` that drifts. Not a column on the ORM row --
+    # defaulted so `model_validate(row)` doesn't choke on its absence, then
+    # always overwritten via `.model_copy(update=...)` in `_document_out`
+    # before the response leaves the route.
+    my_access: str = ""
+    # Exposed because the share dialog must render the creator with no control
+    # -- a grant naming them is refused (422), so offering one would present an
+    # action that always fails. NULL for documents predating the column.
+    created_by: str | None
     model_config = {"from_attributes": True}
 
 

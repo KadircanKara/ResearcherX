@@ -232,10 +232,15 @@ async def test_a_viewer_cannot_write_but_can_read(
     # Named explicitly rather than "any user that is not you": seed_users
     # creates three, and `.first()` without an ORDER BY is whichever row the
     # database hands back.
+    #
+    # Project membership is binary now (owner/member) -- the editor/viewer
+    # distinction lives per-document (`services/latex_access.py`). A project
+    # "member" with no grant on this document, and who did not create it,
+    # resolves to document-level "viewer".
     viewer = (
         await db_session.execute(select(User).where(User.email == "amelia@lab.io"))
     ).scalar_one()
-    db_session.add(ProjectMember(project_id=project.id, user_id=viewer.id, role="viewer"))
+    db_session.add(ProjectMember(project_id=project.id, user_id=viewer.id, role="member"))
     await db_session.commit()
 
     base = f"/v1/projects/{project.id}/latex/{document.id}"
@@ -427,11 +432,16 @@ async def test_a_viewer_gets_403_only_on_routes_that_require_editor(
 ):
     """Pins the REQUIRED LEVEL of each route, not merely that some check ran:
     a viewer must be refused on every editor route and let through
-    (not-403) on every viewer route."""
+    (not-403) on every viewer route.
+
+    "Viewer" here means document-level access: a project "member" who did
+    not create the document and holds no grant on it resolves to "viewer"
+    per `services/latex_access.py`. Project membership itself is binary
+    (owner/member)."""
     viewer = (
         await db_session.execute(select(User).where(User.email == "amelia@lab.io"))
     ).scalar_one()
-    db_session.add(ProjectMember(project_id=project.id, user_id=viewer.id, role="viewer"))
+    db_session.add(ProjectMember(project_id=project.id, user_id=viewer.id, role="member"))
     await db_session.commit()
 
     base = f"/v1/projects/{project.id}/latex/{document.id}"

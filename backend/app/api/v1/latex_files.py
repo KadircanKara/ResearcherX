@@ -36,6 +36,7 @@ from app.schemas.latex import (
     LatexMutationOut,
     LatexTreeOut,
 )
+from app.services import latex_access
 from app.services import latex_files_service as files
 from app.services import latex_import_service
 from app.services import project_service
@@ -118,7 +119,7 @@ async def import_archive_route(
     request.body()`: a client can lie in Content-Length, or send chunked with
     no Content-Length at all, and the counter is the only real bound.
     """
-    await project_service.require_member(db, project_id, user.id, "editor")
+    await project_service.require_member(db, project_id, user.id, "member")
 
     cap = settings.latex_project_max_bytes
     chunks: list[bytes] = []
@@ -199,7 +200,10 @@ async def export_archive_route(
     ZIP_DEFLATED rather than stored: a LaTeX project is mostly text, and the
     response is built in memory bounded by the same 25MB the tree is.
     """
-    await project_service.require_member(db, project_id, user.id, "viewer")
+    # Export is a READ of the whole tree, so a viewer may take a copy. The
+    # grant governs changing the document, not whether a member who can
+    # already open every file may download them together.
+    await latex_access.require(db, project_id, document_id, user.id)
     document = await _document_or_404(db, project_id, document_id)
 
     rows = await files.list_files(db, document_id)
@@ -274,7 +278,7 @@ async def list_tree(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_session),
 ) -> LatexTreeOut:
-    await project_service.require_member(db, project_id, user.id, "viewer")
+    await latex_access.require(db, project_id, document_id, user.id)
     await _document_or_404(db, project_id, document_id)
     rows = await files.list_files(db, document_id)
     return LatexTreeOut(
@@ -292,7 +296,7 @@ async def read_file(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_session),
 ) -> Response:
-    await project_service.require_member(db, project_id, user.id, "viewer")
+    await latex_access.require(db, project_id, document_id, user.id)
     await _document_or_404(db, project_id, document_id)
     try:
         row = await files.read_file(db, document_id, path)
@@ -327,7 +331,7 @@ async def write_file(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_session),
 ) -> LatexMutationOut:
-    await project_service.require_member(db, project_id, user.id, "editor")
+    await latex_access.require(db, project_id, document_id, user.id, need="editor")
     await _document_or_404(db, project_id, document_id)
     try:
         row = await files.write_text(db, document_id, path, payload.content)
@@ -348,7 +352,7 @@ async def write_binary_file(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_session),
 ) -> LatexMutationOut:
-    await project_service.require_member(db, project_id, user.id, "editor")
+    await latex_access.require(db, project_id, document_id, user.id, need="editor")
     document = await _document_or_404(db, project_id, document_id)
 
     try:
@@ -411,7 +415,7 @@ async def delete_file(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_session),
 ) -> LatexMutationOut:
-    await project_service.require_member(db, project_id, user.id, "editor")
+    await latex_access.require(db, project_id, document_id, user.id, need="editor")
     document = await _document_or_404(db, project_id, document_id)
     try:
         normalized = normalize_path(path)
@@ -442,7 +446,7 @@ async def rename_file(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_session),
 ) -> LatexMutationOut:
-    await project_service.require_member(db, project_id, user.id, "editor")
+    await latex_access.require(db, project_id, document_id, user.id, need="editor")
     document = await _document_or_404(db, project_id, document_id)
     # Normalized once, up front, and compared/passed as the normalized value:
     # `main_path` is always stored normalized, so comparing it against the

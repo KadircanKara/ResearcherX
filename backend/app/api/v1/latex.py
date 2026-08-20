@@ -25,6 +25,7 @@ from app.schemas.latex import (
     SynctexReverseIn,
     SynctexReverseOut,
 )
+from app.services import latex_access
 from app.services import latex_files_service as files
 from app.services import project_service
 from app.services.latex_cache import CachedBuild, cache
@@ -32,6 +33,12 @@ from app.services.latex_compiler import compile_tree, synctex_forward, synctex_r
 from app.services.latex_paths import InvalidPath, normalize_path
 
 router = APIRouter(tags=["latex"])
+
+
+def _document_out(row: LatexDocument, access: str) -> LatexDocumentOut:
+    # `model_validate` takes no `update=` in pydantic v2 -- that keyword is on
+    # `model_copy`, which operates on an already-built model.
+    return LatexDocumentOut.model_validate(row).model_copy(update={"my_access": access})
 
 
 async def _get_document_or_404(
@@ -56,7 +63,7 @@ async def list_documents(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_session),
 ) -> list[LatexDocumentOut]:
-    await project_service.require_member(db, project_id, user.id, "viewer")
+    await project_service.require_member(db, project_id, user.id, "member")
     rows = (
         (
             await db.execute(
@@ -68,7 +75,10 @@ async def list_documents(
         .scalars()
         .all()
     )
-    return [LatexDocumentOut.model_validate(row) for row in rows]
+    return [
+        _document_out(row, await latex_access.resolve(db, project_id, row.id, user.id))
+        for row in rows
+    ]
 
 
 @router.post("/projects/{project_id}/latex", response_model=LatexDocumentOut, status_code=201)
@@ -78,7 +88,7 @@ async def create_document(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_session),
 ) -> LatexDocumentOut:
-    await project_service.require_member(db, project_id, user.id, "editor")
+    await project_service.require_member(db, project_id, user.id, "member")
     document = LatexDocument(
         project_id=project_id,
         name=payload.name,
@@ -102,7 +112,7 @@ async def create_document(
         raise _translate(exc) from exc
     await db.commit()
     await db.refresh(document)
-    return LatexDocumentOut.model_validate(document)
+    return _document_out(document, latex_access.EDITOR)
 
 
 @router.get("/projects/{project_id}/latex/{document_id}", response_model=LatexDocumentOut)
@@ -112,9 +122,9 @@ async def get_document(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_session),
 ) -> LatexDocumentOut:
-    await project_service.require_member(db, project_id, user.id, "viewer")
+    access = await latex_access.require(db, project_id, document_id, user.id)
     document = await _get_document_or_404(db, project_id, document_id)
-    return LatexDocumentOut.model_validate(document)
+    return _document_out(document, access)
 
 
 @router.patch("/projects/{project_id}/latex/{document_id}", response_model=LatexDocumentOut)
@@ -125,7 +135,7 @@ async def update_document(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_session),
 ) -> LatexDocumentOut:
-    await project_service.require_member(db, project_id, user.id, "editor")
+    access = await latex_access.require(db, project_id, document_id, user.id, need="editor")
     document = await _get_document_or_404(db, project_id, document_id)
     if payload.name is not None:
         document.name = payload.name
@@ -156,7 +166,7 @@ async def update_document(
         await files.bump_revision(db, document.id)
     await db.commit()
     await db.refresh(document)
-    return LatexDocumentOut.model_validate(document)
+    return _document_out(document, access)
 
 
 @router.delete("/projects/{project_id}/latex/{document_id}", status_code=204)
@@ -166,7 +176,7 @@ async def delete_document(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_session),
 ) -> Response:
-    await project_service.require_member(db, project_id, user.id, "editor")
+    await latex_access.require(db, project_id, document_id, user.id, need="editor")
     document = await _get_document_or_404(db, project_id, document_id)
     await db.delete(document)
     await db.commit()
@@ -180,7 +190,7 @@ async def compile_document(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_session),
 ) -> CompileOut:
-    await project_service.require_member(db, project_id, user.id, "editor")
+    await latex_access.require(db, project_id, document_id, user.id)
     document = await _get_document_or_404(db, project_id, document_id)
     # Read what the compile needs into plain values, then END THE TRANSACTION
     # before the external call. A compile is bounded by
@@ -288,7 +298,7 @@ async def get_document_pdf(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_session),
 ) -> Response:
-    await project_service.require_member(db, project_id, user.id, "viewer")
+    await latex_access.require(db, project_id, document_id, user.id)
     await _get_document_or_404(db, project_id, document_id)
     build = cache.get(hash)
     if build is None:
@@ -310,7 +320,7 @@ async def synctex_forward_route(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_session),
 ) -> SynctexForwardOut:
-    await project_service.require_member(db, project_id, user.id, "viewer")
+    await latex_access.require(db, project_id, document_id, user.id)
     document = await _get_document_or_404(db, project_id, document_id)
 
     # The map answers for the LAST COMPILED source, not what is on screen now.
@@ -371,7 +381,7 @@ async def synctex_reverse_route(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_session),
 ) -> SynctexReverseOut:
-    await project_service.require_member(db, project_id, user.id, "viewer")
+    await latex_access.require(db, project_id, document_id, user.id)
     document = await _get_document_or_404(db, project_id, document_id)
 
     doc_id = document.id

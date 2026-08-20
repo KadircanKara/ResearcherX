@@ -1,5 +1,7 @@
 """The rank table after the collapse to owner + member."""
 
+import pytest
+
 from app.core.permissions import ROLE_RANK, can
 
 
@@ -26,3 +28,16 @@ def test_a_retired_role_satisfies_nothing():
 
 def test_the_table_holds_exactly_two_roles():
     assert ROLE_RANK == {"member": 0, "owner": 1}
+
+
+def test_an_unknown_need_raises():
+    """`need` is developer-supplied -- a value outside the table is our bug
+    and must crash loudly rather than silently rank as `member`."""
+    with pytest.raises(ValueError):
+        can("member", "editor")
+
+
+def test_an_unknown_role_returns_false_rather_than_raising():
+    """`role` is data read back from the database -- a stale or retired value
+    must never crash a request."""
+    assert can("editor", "member") is False
