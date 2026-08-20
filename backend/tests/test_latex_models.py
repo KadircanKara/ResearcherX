@@ -9,7 +9,7 @@ from sqlalchemy import column, delete, insert, select, table
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import LatexDocument, LatexFile, Project, User
+from app.db.models import LatexDocument, LatexDocumentMember, LatexFile, Project, User
 from app.db.seed import seed_users
 
 
@@ -234,3 +234,52 @@ async def test_deleting_a_document_deletes_its_files(db_session: AsyncSession):
     await db_session.commit()
 
     assert (await db_session.execute(select(LatexFile))).scalars().all() == []
+
+
+async def test_a_document_records_its_creator(db_session: AsyncSession):
+    user = User(name="Ada", email="ada@lab.io")
+    db_session.add(user)
+    await db_session.flush()
+    project = Project(owner_id=user.id, title="P", topic_keywords=[])
+    db_session.add(project)
+    await db_session.flush()
+
+    doc = LatexDocument(project_id=project.id, name="paper", created_by=user.id)
+    db_session.add(doc)
+    await db_session.flush()
+
+    assert doc.created_by == user.id
+
+
+async def test_a_document_may_have_no_creator(db_session: AsyncSession):
+    """Documents that predate the column are not attributed to a guess."""
+    user = User(name="Ada", email="ada2@lab.io")
+    db_session.add(user)
+    await db_session.flush()
+    project = Project(owner_id=user.id, title="P", topic_keywords=[])
+    db_session.add(project)
+    await db_session.flush()
+
+    doc = LatexDocument(project_id=project.id, name="legacy")
+    db_session.add(doc)
+    await db_session.flush()
+
+    assert doc.created_by is None
+
+
+async def test_one_grant_per_user_per_document(db_session: AsyncSession):
+    user = User(name="Ada", email="ada3@lab.io")
+    db_session.add(user)
+    await db_session.flush()
+    project = Project(owner_id=user.id, title="P", topic_keywords=[])
+    db_session.add(project)
+    await db_session.flush()
+    doc = LatexDocument(project_id=project.id, name="paper")
+    db_session.add(doc)
+    await db_session.flush()
+
+    db_session.add(LatexDocumentMember(document_id=doc.id, user_id=user.id, role="editor"))
+    await db_session.flush()
+    db_session.add(LatexDocumentMember(document_id=doc.id, user_id=user.id, role="viewer"))
+    with pytest.raises(IntegrityError):
+        await db_session.flush()

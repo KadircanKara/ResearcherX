@@ -97,6 +97,11 @@ class Role(StrEnum):
     MEMBER = "member"
 
 
+class LatexAccess(StrEnum):
+    EDITOR = "editor"
+    VIEWER = "viewer"
+
+
 class PaperSource(StrEnum):
     UPLOAD = "upload"
     LINK = "link"
@@ -219,6 +224,37 @@ class LatexDocument(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now, onupdate=_now
     )
+
+
+class LatexDocumentMember(Base):
+    """An explicit editor/viewer grant on ONE LaTeX document.
+
+    Project membership answers whether someone may see a project at all; this
+    table answers whether they may change a particular document in it. There
+    is no row here for the project owner or the document creator: both
+    short-circuit ahead of this lookup in `services/latex_access.py`, so such
+    a row could never take effect, and the grant routes refuse to create one.
+    """
+
+    __tablename__ = "latex_document_members"
+    __table_args__ = (UniqueConstraint("document_id", "user_id"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    document_id: Mapped[str] = mapped_column(
+        ForeignKey(
+            "latex_documents.id",
+            ondelete="CASCADE",
+            name="fk_latex_document_members_document_id",
+        ),
+        index=True,
+    )
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE", name="fk_latex_document_members_user_id"),
+    )
+    # String(16) over a Python-side StrEnum, like StepKind and RunStatus:
+    # adding a level later needs no migration.
+    role: Mapped[str] = mapped_column(String(16))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 
 class LatexFile(Base):
