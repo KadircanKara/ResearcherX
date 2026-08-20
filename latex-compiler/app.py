@@ -54,6 +54,13 @@ MAX_CONTENT_LENGTH = 16 * 1024 * 1024
 
 # A tar of a 25MB tree plus headers. The JSON limit above still governs
 # /synctex, which carries base64 and is bounded by the PDF, not the tree.
+#
+# Measured, not assumed: the worst LEGAL tree the backend can produce --
+# 2000 files (`latex_archive`'s own cap) at 400-char non-ASCII paths, which
+# forces a PAX extended header per member -- tars to 29.71MB. Against this
+# 32MB cap that is a 2.3MB margin, not the "ample" headroom the comment
+# below (`MAX_TAR_MEMBERS`/`MAX_EXTRACTED_BYTES`) describes for the
+# EXTRACTION-side limits; this wire-side margin is comfortable but not wide.
 MAX_TAR_LENGTH = 32 * 1024 * 1024
 
 # Drain at most this much of an over-declared/over-long body. The bound
@@ -280,6 +287,20 @@ def compile_tree(bounded: "_Bounded", engine: str, main_path: str) -> dict:
                 "root": None,
             }
 
+        stem = main.stem
+        # The staged tree is the USER'S. `<stem>.pdf`, `.log` and
+        # `.synctex.gz` beside the main file are legitimate uploads -- an
+        # imported Overleaf or arXiv archive routinely ships its own compiled
+        # PDF, and `latex_archive` deliberately does not skip `.pdf` members
+        # (it cannot: `\includegraphics{fig.pdf}` is a legitimate input) --
+        # so "the file exists" cannot mean "latexmk produced it" the way it
+        # could when the tree held exactly one file. Remove them first, and
+        # existence after this point becomes proof of THIS run: a failed
+        # compile that leaves none of the three behind now correctly reports
+        # `ok: False` instead of serving back the user's own stale upload.
+        for suffix in (".pdf", ".log", ".synctex.gz"):
+            (main.parent / f"{stem}{suffix}").unlink(missing_ok=True)
+
         proc = subprocess.Popen(
             [
                 "latexmk",
@@ -311,7 +332,6 @@ def compile_tree(bounded: "_Bounded", engine: str, main_path: str) -> dict:
                 "root": None,
             }
 
-        stem = main.stem
         log_file = main.parent / f"{stem}.log"
         if log_file.exists():
             log_text = log_file.read_text(encoding="utf-8", errors="replace")
@@ -400,7 +420,7 @@ def query_synctex(body: dict) -> dict:
     file_param = raw_file if isinstance(raw_file, str) else None
 
     main_dir = posixpath.dirname(main_path)
-    stem = posixpath.splitext(posixpath.basename(main_path))[0] or "master"
+    stem = posixpath.splitext(posixpath.basename(main_path))[0]
 
     with tempfile.TemporaryDirectory(prefix="rx-synctex-") as tmp:
         directory = Path(tmp)

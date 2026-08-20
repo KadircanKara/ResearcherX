@@ -9,9 +9,11 @@ service up and a real TeX Live. Run it explicitly:
 import base64
 import io
 import json
+import re
 import socket
 import tarfile
 import time
+import zlib
 from urllib.parse import quote, urlparse
 
 import httpx
@@ -221,6 +223,35 @@ def _tar(entries: dict[str, bytes]) -> bytes:
     return buf.getvalue()
 
 
+def _pdf_text(pdf: bytes) -> str:
+    """Decompress a PDF's FlateDecode content streams and concatenate them.
+
+    `ok: True` alone does not prove the tree actually compiled -- Finding C1
+    proved a PDF can be served without any compilation happening at all
+    (`main.pdf` beside `main.tex` in the staged tree). This decompresses
+    every `stream ... endstream` block it can and returns their text, so a
+    test can assert the CONTENT it expected actually reached the page,
+    not just that some PDF bytes came back. Blocks that fail to decompress
+    (not FlateDecode, e.g. an image XObject) are skipped rather than
+    failing the whole extraction.
+
+    A plain `pdf.split(b"stream")` is WRONG here and was tried first: every
+    `endstream` keyword itself contains the substring `stream`, so a naive
+    split also breaks on every closing keyword, shearing each real block in
+    half and merging it with the next object's bytes -- reproduced live,
+    it decoded page 1's text fine but silently corrupted page 2's onward.
+    The non-greedy regex below matches `stream<newline> ... endstream` pairs
+    directly and does not have that failure mode.
+    """
+    out = []
+    for match in re.finditer(rb"stream\r?\n(.*?)endstream", pdf, re.DOTALL):
+        try:
+            out.append(zlib.decompress(match.group(1)).decode("latin-1"))
+        except Exception:
+            continue
+    return "".join(out)
+
+
 ROOT_DOC = b"""\\documentclass{article}
 \\begin{document}
 \\section{Root}
@@ -252,9 +283,19 @@ def test_a_multi_file_tree_compiles_with_its_input_resolved():
     )
     payload = resp.json()
     assert payload["ok"] is True, payload["log"]
-    assert base64.b64decode(payload["pdf_b64"]).startswith(b"%PDF-")
+    pdf = base64.b64decode(payload["pdf_b64"])
+    assert pdf.startswith(b"%PDF-")
     assert payload["synctex_b64"]
     assert payload["root"]
+    # `ok: True` and a `%PDF-` header are satisfiable with NO compilation of
+    # the tree at all (Finding C1: serving back a stale uploaded PDF). Assert
+    # on content so this test proves what its name claims -- that the
+    # chapter file was actually \input and reached the page. "Beta" (not the
+    # full sentence): PDF text-showing operators kern between glyph runs --
+    # measured live, "lives" renders as two separate parenthesized groups,
+    # `(liv)27(es)` -- so only a whole, unbroken word is a safe substring
+    # check against the raw content stream.
+    assert "Beta" in _pdf_text(pdf)
 
 
 @pytest.mark.container
@@ -274,7 +315,42 @@ def test_a_main_file_in_a_subdirectory_compiles_and_its_artifacts_are_found():
     )
     payload = resp.json()
     assert payload["ok"] is True, payload["log"]
-    assert base64.b64decode(payload["pdf_b64"]).startswith(b"%PDF-")
+    pdf = base64.b64decode(payload["pdf_b64"])
+    assert pdf.startswith(b"%PDF-")
+    # Brought up to its flat-case sibling: assert synctex/root are present
+    # too, and assert content, not just that some PDF came back. See the
+    # sibling test's comment for why this checks a single word, not the
+    # full sentence.
+    assert payload["synctex_b64"]
+    assert payload["root"]
+    assert "Beta" in _pdf_text(pdf)
+
+
+@pytest.mark.container
+def test_a_failed_compile_does_not_serve_the_users_own_uploaded_pdf():
+    """Finding C1: `<stem>.pdf` beside `main.tex` is a legitimate upload under
+    multi-file (Overleaf/arXiv archives routinely ship their own compiled
+    PDF), so "the file exists" cannot mean "latexmk produced it" the way it
+    could when the tree held exactly one file. A broken document with a
+    stale `main.pdf` already in the tree must still report `ok: False` --
+    the compiler must remove the would-be outputs before compiling, not
+    trust that a failed run leaves none behind."""
+    broken = b"\\documentclass{article}\\begin{document}\\undefinedmacro\\end{document}"
+    stale_pdf = b"%PDF-1.4\nSTALE-IMPORTED-PDF"
+    body = _tar({"main.tex": broken, "main.pdf": stale_pdf})
+    resp = httpx.post(
+        f"{COMPILER_URL}/compile",
+        content=body,
+        headers={
+            "Content-Type": "application/x-tar",
+            "X-Engine": "pdflatex",
+            "X-Main-Path": "main.tex",
+        },
+        timeout=120,
+    )
+    payload = resp.json()
+    assert payload["ok"] is False
+    assert payload["pdf_b64"] is None
 
 
 @pytest.mark.container

@@ -10,8 +10,8 @@ dependency to the image.
 
 Run: `docker compose exec -T latex-compiler python3 -m unittest test_tree_path -v`
 (or `python3 test_tree_path.py` directly -- unittest.main() below makes both
-work). Not wired into any CI job today; nothing currently invokes it
-automatically.
+work). Wired into the `latex-compiler` CI job (`.github/workflows/ci.yml`),
+which runs `python3 test_tree_path.py` on every push/PR.
 """
 
 import unittest

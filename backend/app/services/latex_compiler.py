@@ -115,6 +115,15 @@ def _build_tar(entries: Sequence[tuple[str, bytes]]) -> tempfile.SpooledTemporar
     exception raised inside `tf.addfile` (e.g. a pathological entry) would
     otherwise leak the spool from this scope -- reclaimed only by
     refcounting, not deterministically.
+
+    Synchronous and CPU/IO-bound (`tarfile`'s own writes, plus `spool`'s
+    disk fallback past 8MB), so `compile_tree` runs it via
+    `asyncio.to_thread` rather than calling it inline: measured on the worst
+    legal tree (2000 files, 25MB), running this on the event loop directly
+    produced a max event-loop tick gap of 0.102s against a ~0.005s baseline.
+    That gap sits BEFORE `_compile_semaphore` is acquired, so it is not
+    bounded by the compile concurrency gate at all -- every request being
+    served by this process stalls behind it, not just other compiles.
     """
     spool = tempfile.SpooledTemporaryFile(max_size=8 * 1024 * 1024)
     try:
@@ -141,9 +150,15 @@ async def _aiter_spooled(
     `httpx.AsyncClient` cannot send -- measured against the real compiler:
     "Attempted to send a sync request with an AsyncClient instance." This
     still reads one chunk at a time rather than materialising the tar.
+
+    Each `read()` runs in a thread (`asyncio.to_thread`): a `SpooledTemporaryFile`
+    still under its 8MB in-memory threshold is a synchronous `read()` call
+    that blocks the event loop for however long that chunk takes, same as
+    `_build_tar` below -- see that function's docstring for the measured
+    gap this closes.
     """
     while True:
-        chunk = spool.read(chunk_size)
+        chunk = await asyncio.to_thread(spool.read, chunk_size)
         if not chunk:
             break
         yield chunk
@@ -155,12 +170,23 @@ async def compile_tree(
     """Compile a whole project tree. `main_path` is tree-relative.
 
     Posts `application/x-tar` with `X-Engine`/`X-Main-Path` headers, per the
-    wire protocol `latex-compiler/app.py::compile_tree` implements. The tar
-    is built into a spooled file and streamed to httpx chunk by chunk (see
-    `_aiter_spooled`) so the process never holds the tree bytes and the tar
-    bytes in memory at once for anything past the spool's 8MB threshold.
+    wire protocol `latex-compiler/app.py::compile_tree` implements.
+
+    CORRECTED, this docstring used to claim the process never holds the
+    tree bytes and the tar bytes at once. It does: `entries` (the whole
+    tree, already read into memory by the caller so `tree_hash` in
+    `api/v1/latex.py` can hash it) stays alive across `_build_tar` and the
+    POST below, alongside the tar it produces. Measured worst case is
+    ~25MB (tree) + 8MB (spool's in-memory threshold before it falls back to
+    disk) per compile, times `latex_max_concurrent_compiles` (8) ≈ 264MB --
+    acceptable, and the reason it's acceptable is `tree_hash` needing the
+    full set of entries, not that this function avoids holding both. What
+    the spooled-file/`_aiter_spooled` combination DOES guarantee is that the
+    TAR is streamed to httpx chunk by chunk rather than materialised as one
+    `bytes` object, and that `_build_tar` itself runs off the event loop
+    (see its own docstring for the measured stall it closes).
     """
-    spool = _build_tar(entries)
+    spool = await asyncio.to_thread(_build_tar, entries)
     try:
         # httpx cannot peek an async iterator's length, so without this it
         # sends `Transfer-Encoding: chunked` -- which the compiler's stdlib

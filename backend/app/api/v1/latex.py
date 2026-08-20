@@ -236,8 +236,16 @@ async def compile_document(
         full = await files.read_file(db, doc_id, row.path)
         if full is None:
             continue
+        # `full.blob or b""` guards a NULL blob on a row the DB CHECK
+        # constraint makes unreachable in practice (`is_binary` implies a
+        # non-null `blob`) -- but `len(data)` in `_build_tar` would raise
+        # TypeError on None and turn one such row into a 500 for the whole
+        # compile instead of just that file. The guard costs nothing.
         entries.append(
-            (full.path, full.blob if full.is_binary else (full.content or "").encode("utf-8"))
+            (
+                full.path,
+                (full.blob or b"") if full.is_binary else (full.content or "").encode("utf-8"),
+            )
         )
     await db.commit()
 

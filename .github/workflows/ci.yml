@@ -47,6 +47,59 @@ jobs:
       # version-agnostic, so 3.12 here proves nothing version-specific.
       - run: python3 test_tree_path.py
 
+  # Finding I1 (2026-08-20 whole-plan review): the `latex-compiler` job above
+  # is lint + one stdlib unit test -- it never boots a real TeX Live, so it
+  # cannot catch a pdftex.map / TEXMFSYSVAR-style container defect (see
+  # CLAUDE.md's own record of one such bug surviving four task reviews), and
+  # it cannot catch a compiler-response bug like Finding C1 (a failed
+  # compile reporting `ok: true`) either -- those only show up against the
+  # real service. `backend/pyproject.toml`'s `addopts = "-m 'not container'"`
+  # means the `backend` job above deselects all of them too. This job is the
+  # only one in CI that runs `pytest -m container` against the actual
+  # `latex-compiler` image over the actual docker network.
+  latex-compiler-container:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # `docker-compose.yml`'s backend service declares `env_file: .env`
+      # unconditionally -- compose refuses to start it at all if that file
+      # is missing. `.env.example`'s placeholder LLM/embedding values are
+      # sufficient: ENVIRONMENT is not "prod" here, so
+      # `Settings.validate_for_environment` never runs, and none of the
+      # container-marked tests make an LLM or embedding call -- they only
+      # exercise LaTeX compilation and SyncTeX.
+      - run: cp .env.example .env
+      - run: docker compose build backend latex-compiler
+      # `backend` depends_on `db` and `ollama` being service_healthy, and
+      # ollama's own healthcheck requires the embedding model to already be
+      # present -- which only `ollama-pull` (a one-shot container nothing
+      # else depends_on) provides. None of that is needed by the container
+      # tests themselves, but the compose graph requires it to bring
+      # `backend` up at all, so all of it is started here rather than routed
+      # around.
+      - run: docker compose up -d db ollama ollama-pull backend latex-compiler
+      # `backend` has no dedicated health endpoint; `GET /` answering 200 is
+      # proof the app finished its startup lifespan (migrations run there)
+      # and is ready to be exec'd into. `ollama-pull`'s model download is the
+      # long pole here, comfortably inside this budget on GitHub's network.
+      - name: Wait for the backend to finish startup
+        run: |
+          for i in $(seq 1 60); do
+            if curl -sf http://localhost:8000/ > /dev/null; then
+              echo "backend is up"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "backend did not become ready in time" >&2
+          docker compose logs --no-color
+          exit 1
+      - name: Run the container-marked LaTeX suite against the real compiler
+        run: docker compose exec -T backend pytest -m container -q
+      - name: Service logs (always, for post-mortem)
+        if: always()
+        run: docker compose logs --no-color
+
   frontend:
     runs-on: ubuntu-latest
     defaults:
