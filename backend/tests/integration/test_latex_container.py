@@ -111,7 +111,52 @@ async def test_a_broken_document_fails_with_a_log_and_no_pdf():
 
     assert not result.ok
     assert result.pdf is None
-    assert "!" in result.log
+    # `-file-line-error` is on, so a LOCATED error is written
+    # `./master.tex:1: Undefined control sequence.` and does NOT start with
+    # "!" -- not even the `==> Fatal error occurred` line does. Asserting on
+    # "!" alone (what this test did before the flag) would have been
+    # satisfied by `_first_error` silently falling through to the last 40
+    # lines of memory statistics.
+    assert "./master.tex:1: Undefined control sequence." in result.log
+
+
+@pytest.mark.parametrize("engine", ["pdflatex", "xelatex"])
+async def test_the_log_names_the_file_an_error_is_actually_in(engine: str):
+    r"""The compile log must attribute an error to the CHAPTER, not the main
+    file, even when the chapter contains parentheses TeX will echo back.
+
+    This is the container-side half of the frontend's `latex-log.ts` rewrite.
+    The editor used to infer the file by counting `(` and `)` in the log, and
+    TeX echoes the offending typeset text inside `Overfull \hbox` warnings --
+    so one literal `)` in the user's own prose popped a real file frame and
+    the editor opened `main.tex` and jumped to a line number belonging to
+    `chapters/intro.tex`. `-file-line-error` replaces that guess with a fact.
+
+    Parametrised over BOTH engines because the flag is passed through
+    latexmk, not by us, and "verified on one engine" has already shipped a
+    container bug in this project once (the pdftex.map/TEXMFSYSVAR font
+    defect, which xelatex does not touch).
+    """
+    intro = ("a" * 180 + ") " + "b" * 180 + "\n\n" + r"\bogusmacro" + "\n").encode()
+    result = await compile_tree(
+        [
+            (
+                "main.tex",
+                rb"\documentclass{article}"
+                rb"\begin{document}\input{chapters/intro}\end{document}",
+            ),
+            ("chapters/intro.tex", intro),
+        ],
+        engine,
+        "main.tex",
+    )
+
+    assert not result.ok
+    # The line number is the chapter's own, and the path names the chapter.
+    assert "./chapters/intro.tex:3: Undefined control sequence." in result.log
+    # And the excerpt starts AT the error -- the parenthesised Overfull echo
+    # sits above it and must not be what the client is handed instead.
+    assert result.log.splitlines()[0].startswith("./chapters/intro.tex:3:")
 
 
 async def test_the_compiler_has_no_secrets_to_leak():

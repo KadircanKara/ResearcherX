@@ -28,6 +28,7 @@ import base64
 import json
 import os
 import posixpath
+import re
 import signal
 import subprocess
 import tarfile
@@ -115,17 +116,37 @@ _ENGINE_FLAG = {
 }
 
 
+# An error line as `-file-line-error` writes it: `./chapters/intro.tex:3: msg`.
+#
+# Kept deliberately loose here -- this function only has to find WHERE the
+# interesting 12 lines start, and it is the frontend's `latex-log.ts` that
+# extracts the file and the line and must be strict about it. The one thing
+# that matters is that it not match ordinary log chatter, which is what
+# requiring a trailing extension before the colon and digits after it buys.
+_FILE_LINE_ERROR = re.compile(r"^[^\\:]*\.[A-Za-z0-9_-]+:\d+: ")
+
+
 def _first_error(log_text: str) -> str:
     """The first real TeX error, or the tail of the log.
 
-    A TeX log is thousands of lines of font loading; the line starting with
-    "!" is the part a human needs. Returning the tail rather than nothing
-    when there is no "!" keeps a timeout or a driver failure diagnosable.
+    A TeX log is thousands of lines of font loading; the error is the part a
+    human needs. Returning the tail rather than nothing when there is no
+    error line keeps a timeout or a driver failure diagnosable.
+
+    BOTH error shapes are recognised, and both are load-bearing. `latexmk`
+    runs with `-file-line-error` (see `compile_tree`), under which a located
+    error is written `./chapters/intro.tex:3: Undefined control sequence.`
+    and does NOT start with "!" -- when this scanned for "!" alone it found
+    nothing in such a log and returned the last 40 lines of memory
+    statistics instead of the error. TeX still writes the bare `! ...` form
+    for errors it raises with no file position to report (a missing package
+    is the common one), so the "!" branch is not dead.
     """
-    for i, line in enumerate(log_text.splitlines()):
-        if line.startswith("!"):
-            return "\n".join(log_text.splitlines()[i : i + 12])
-    return "\n".join(log_text.splitlines()[-40:])
+    lines = log_text.splitlines()
+    for i, line in enumerate(lines):
+        if line.startswith("!") or _FILE_LINE_ERROR.match(line):
+            return "\n".join(lines[i : i + 12])
+    return "\n".join(lines[-40:])
 
 
 class _Bounded:
@@ -308,6 +329,36 @@ def compile_tree(bounded: "_Bounded", engine: str, main_path: str) -> dict:
                 "-cd",
                 "-synctex=1",
                 "-interaction=nonstopmode",
+                # Makes every TeX error self-describing:
+                # `./chapters/intro.tex:3: Undefined control sequence.`
+                # instead of a bare `! Undefined control sequence.` whose
+                # file the reader has to INFER.
+                #
+                # This is a diagnostic flag, nothing more -- it grants the
+                # document no capability, reads no new path and opens no
+                # socket, so it changes nothing about this container's
+                # containment story.
+                #
+                # It exists because the frontend previously inferred the file
+                # by tracking TeX's `(`/`)` file stack, and that was
+                # disproved against THIS container: TeX echoes the offending
+                # typeset text inside `Overfull \hbox` warnings, and a
+                # literal `)` in the user's own source pops a real file
+                # frame. The parser then attributed an error in
+                # `chapters/intro.tex` to `main.tex` and the editor opened
+                # the wrong file and jumped. There is no way to parse that
+                # reliably -- a TeX log interleaves structure with arbitrary
+                # user text -- so the fix is to make the compiler state the
+                # fact instead. Verified in-container for BOTH engines:
+                # latexmk passes the flag through to pdflatex and to
+                # xelatex, and both write the `path:line:` form.
+                #
+                # `_first_error` below had to learn this form at the same
+                # time: with the flag on, the error line no longer starts
+                # with `!` (not even `==> Fatal error occurred`), so the old
+                # `startswith("!")` scan found nothing and fell through to
+                # the tail of the log.
+                "-file-line-error",
                 "-no-shell-escape",
                 "-halt-on-error",
                 str(main),

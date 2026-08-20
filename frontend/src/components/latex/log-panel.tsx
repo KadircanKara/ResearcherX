@@ -7,10 +7,15 @@ interface LogPanelProps {
   log: string;
   onClose: () => void;
   /**
-   * `file` is the tree-relative file the error's `l.<n>` is relative to, or
-   * null when the log did not make that unambiguous. It is passed on rather
-   * than resolved here: this panel knows nothing about which files exist,
-   * and the decision to decline a jump belongs with whoever does.
+   * `file` is the tree-relative file the compiler NAMED on the error line
+   * (`-file-line-error` makes every located error self-describing), or null
+   * when the error was one TeX raised with no file position to report. It
+   * is passed on rather than resolved here: this panel knows nothing about
+   * which files exist, and the decision to decline a jump belongs with
+   * whoever does.
+   *
+   * `line` and `file` arrive together or not at all, so the button below is
+   * never offered with half an address.
    */
   onJumpToError: (line: number, file: string | null) => void;
 }
@@ -33,7 +38,10 @@ export function LogPanel({ log, onClose, onJumpToError }: LogPanelProps) {
                 >
                   {/* Naming the file is not decoration: in a multi-file
                       project the blamed line is usually in a chapter, not in
-                      whatever happens to be on screen. */}
+                      whatever happens to be on screen. The path is printed
+                      HERE and nowhere else -- `error.message` is the text
+                      AFTER the `path:line:` prefix, so this never doubles
+                      it. */}
                   {error.file ? `${error.file}:${error.line}` : `line ${error.line}`}
                 </button>
               )}

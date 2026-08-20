@@ -1,45 +1,155 @@
 import { describe, expect, it } from "vitest";
 import { firstError } from "./latex-log";
 
-const UNDEFINED_CS = `
-This is pdfTeX, Version 3.141592653-2.6-1.40.26
-(./p.tex
-LaTeX2e <2024-11-01>
-! Undefined control sequence.
-l.7 \\bogus
+// EVERY fixture below is REAL text, captured from this project's own
+// `latex-compiler` container (TeX Live 2026, latexmk 4.88) by running the
+// exact argv `compile_tree` uses. The previous round's fixtures were
+// hand-written and did not resemble real output in the two respects that
+// mattered -- the parenthesis noise TeX puts in an `Overfull \hbox` echo,
+// and the shape of a located error line -- which is why a confidently wrong
+// file attribution shipped. Do not "tidy" these into synthetic prose.
 
-?
-! Emergency stop.
+// Project: `main.tex` with `\input{chapters/intro}`; `chapters/intro.tex`
+// line 1 is a deliberately overfull paragraph whose text contains a literal
+// `)`, and line 3 is `\bogusmacro`. Stock `article`, no packages.
+//
+// This is the exact log that disproved the `(`/`)` file-stack parser: the
+// single unmatched `)` at the end of the first echoed line popped the
+// `(./chapters/intro.tex` frame, and the parser then named `main.tex` --
+// which exists in the tree, so the shell did not decline; it opened the
+// wrong file and jumped.
+const OVERFULL_PARENS = `LaTeX Font Info:    ... okay on input line 2.
+ (./chapters/intro.tex
+Overfull \\hbox (573.89165pt too wide) in paragraph at lines 1--2
+[]\\OT1/cmr/m/n/10 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa)
+ []
+
+
+Overfull \\hbox (655.00305pt too wide) in paragraph at lines 1--2
+\\OT1/cmr/m/n/10 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+ []
+
+./chapters/intro.tex:3: Undefined control sequence.
+l.3 \\bogusmacro
+
+The control sequence at the end of the top line
+of your error message was never \\def'ed. If you have
+misspelled it (e.g., \`\\hobx'), type \`I' and the correct
+`;
+
+// The SAME project compiled WITHOUT `-file-line-error`, i.e. what this
+// parser is fed if the flag is ever dropped from `latex-compiler/app.py`.
+const OVERFULL_PARENS_NO_FLAG = `LaTeX Font Info:    ... okay on input line 2.
+ (./chapters/intro.tex
+Overfull \\hbox (573.89165pt too wide) in paragraph at lines 1--2
+[]\\OT1/cmr/m/n/10 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa)
+ []
+
+! Undefined control sequence.
+l.3 \\bogusmacro
+
+`;
+
+// `\\usepackage{nopesuchpkg}` in `main.tex`. Note the ORDER: the useful
+// message has no path prefix, and the only located line is the FALLOUT.
+const MISSING_PACKAGE = `)
+
+! LaTeX Error: File \`nopesuchpkg.sty' not found.
+
+Type X to quit or <RETURN> to proceed,
+or enter new name. (Default extension: sty)
+
+Enter file name:
+./main.tex:3: Emergency stop.
+<read *>
+
+l.3 \\begin
+          {document}^^M
+*** (cannot \\read from terminal in nonstop modes)
+`;
+
+// `\\input{my chapter/deep}` -- TeX prints a path containing a space
+// UNQUOTED in this form, so a space cannot terminate the path.
+const SPACE_IN_PATH = ` (./my chapter/deep.tex
+./my chapter/deep.tex:2: Undefined control sequence.
+l.2 \\bogusmacro
+
+`;
+
+// The tail of a SUCCESSFUL compile of a document containing "(with parens)".
+const CLEAN = `></usr/local/texlive/2026/texmf-dist/fonts/type1/public/amsfonts/cm/cmr10.pfb>
+Output written on main.pdf (1 page, 23111 bytes).
+PDF statistics:
+ 28 PDF objects out of 1000 (max. 8388607)
+ 20 compressed objects within 1 object stream
+ 3 named destinations out of 1000 (max. 500000)
+ 9 words of extra memory for PDF output out of 10000 (max. 10000000)
 `;
 
 describe("firstError", () => {
-  it("returns the first error and the line it points at", () => {
-    expect(firstError(UNDEFINED_CS)).toEqual({
+  it("reads the file and line straight out of a -file-line-error line", () => {
+    expect(firstError(SPACE_IN_PATH)).toEqual({
       message: "Undefined control sequence.",
-      line: 7,
-      file: "p.tex",
+      line: 2,
+      file: "my chapter/deep.tex",
     });
   });
 
-  it("returns the FIRST error, not the last, because later ones are usually fallout", () => {
-    const log = "! Missing $ inserted.\nl.3 x\n! Emergency stop.\nl.99 y\n";
-    expect(firstError(log)).toEqual({
-      message: "Missing $ inserted.",
+  it("attributes the error to the chapter even though an Overfull echo carries a stray ')'", () => {
+    // THE regression this whole rewrite exists for. The old file-stack
+    // parser answered `main.tex` here -- a real file in the tree, so the
+    // shell opened it and jumped to line 3 of the wrong document.
+    expect(firstError(OVERFULL_PARENS)).toEqual({
+      message: "Undefined control sequence.",
       line: 3,
-      file: null,
+      file: "chapters/intro.tex",
     });
   });
 
-  it("returns a null line when no l.<n> follows, rather than inventing one", () => {
-    expect(firstError("! LaTeX Error: File `nope.sty' not found.\n")).toEqual({
-      message: "LaTeX Error: File `nope.sty' not found.",
+  it("names NO file when the compiler was not asked for one, rather than guessing", () => {
+    // If `-file-line-error` is ever dropped, this degrades to "no jump",
+    // never to "a jump into whichever file the parens happened to leave on
+    // top of a stack".
+    expect(firstError(OVERFULL_PARENS_NO_FLAG)).toEqual({
+      message: "Undefined control sequence.",
       line: null,
       file: null,
     });
   });
 
+  it("keeps the useful message for an error TeX raises with no file position", () => {
+    // The missing-package message comes FIRST and carries no path; the only
+    // located line in this log is `./main.tex:3: Emergency stop.`, which is
+    // the fallout, not the cause. Reporting the cause with no jump beats
+    // reporting the fallout with one.
+    expect(firstError(MISSING_PACKAGE)).toEqual({
+      message: "LaTeX Error: File `nopesuchpkg.sty' not found.",
+      line: null,
+      file: null,
+    });
+  });
+
+  it("returns the FIRST error, not the last, because later ones are usually fallout", () => {
+    // Both `==> Fatal error occurred` and any follow-on error carry a path
+    // prefix too under `-file-line-error`, so the log holds several
+    // matching lines.
+    const log =
+      "./chapters/intro.tex:3: Undefined control sequence.\n" +
+      "./chapters/intro.tex:3:  ==> Fatal error occurred, no output PDF file produced!\n";
+    expect(firstError(log)).toEqual({
+      message: "Undefined control sequence.",
+      line: 3,
+      file: "chapters/intro.tex",
+    });
+  });
+
   it("finds nothing in a clean log, so a successful compile shows no error banner", () => {
-    expect(firstError("Output written on p.pdf (1 page, 9135 bytes).\n")).toBeNull();
+    expect(firstError(CLEAN)).toBeNull();
   });
 
   it("finds nothing in a timeout message, which is not a TeX error and is shown verbatim", () => {
@@ -49,68 +159,16 @@ describe("firstError", () => {
   it("ignores a '!' that is not at the start of a line, so prose in the log is not mistaken for an error", () => {
     expect(firstError("Package foo warning: watch out! really\n")).toBeNull();
   });
-});
 
-// `l.<n>` is relative to whichever file TeX was reading, which in a
-// multi-file project is usually a chapter and often one that is not even
-// open. Every case where the stack cannot be read with certainty answers
-// `file: null`, and the shell then declines to jump.
-describe("firstError file attribution", () => {
-  it("blames the INNERMOST open file, not the main file", () => {
-    const log = "(./main.tex\n(./chapters/intro.tex\n! Undefined control sequence.\nl.4 \\x\n";
-    expect(firstError(log)?.file).toBe("chapters/intro.tex");
-  });
-
-  it("returns to the enclosing file once the inner one is closed", () => {
-    const log = "(./main.tex (./chapters/intro.tex)\n! Missing $ inserted.\nl.9 x\n";
-    expect(firstError(log)?.file).toBe("main.tex");
-  });
-
-  it("handles an open and close on the same line as the error's predecessor", () => {
-    const log = "(./main.tex\n(./a.tex) (./b.tex)\n! Bad.\nl.1 x\n";
-    expect(firstError(log)?.file).toBe("main.tex");
-  });
-
-  it("reads a quoted path, so a filename with spaces is not cut at the space", () => {
-    const log = '(./main.tex\n("./my chapter.tex"\n! Bad.\nl.2 x\n';
-    expect(firstError(log)?.file).toBe("my chapter.tex");
-  });
-
-  it("names no file for an unterminated quoted path rather than a truncated one", () => {
-    const log = '(./main.tex\n("./my chapter\n! Bad.\nl.2 x\n';
-    expect(firstError(log)?.file).toBeNull();
-  });
-
-  it("names no file when a ')' closes something that was never opened", () => {
-    // The stack has lost its place; every frame below is suspect, so nothing
-    // is reported rather than the wrong thing.
-    const log = "(./main.tex\n(./a.tex)))\n(./b.tex\n! Bad.\nl.3 x\n";
-    expect(firstError(log)?.file).toBeNull();
-  });
-
-  it("names no file for an error raised before any file was entered", () => {
-    expect(firstError("! I can't find file `x'.\nl.1 x\n")?.file).toBeNull();
-  });
-
-  it("names no file when the innermost frame is not a file at all", () => {
-    // `(\end occurred inside a group` opens a frame that is not a path. The
-    // enclosing main.tex is NOT reached past to -- "probably main.tex" is
-    // exactly the guess that produces a confident wrong jump.
-    const log = "(./main.tex\n(\\end occurred inside a group\n! Bad.\nl.5 x\n";
-    expect(firstError(log)?.file).toBeNull();
-  });
-
-  it("does not mistake page markers and font groups for files", () => {
-    const log = "(./main.tex\n[1] [2] (Font) \\OT1/cmr/m/n/10\n! Bad.\nl.6 x\n";
-    expect(firstError(log)?.file).toBe("main.tex");
-  });
-
-  it("does not let parens inside the error's own message change the answer", () => {
-    const log = "(./main.tex\n! Package foo Error: unbalanced ) here.\nl.6 x\n";
-    expect(firstError(log)).toEqual({
-      message: "Package foo Error: unbalanced ) here.",
-      line: 6,
-      file: "main.tex",
+  it("does not mine a path out of a '! ' message that merely mentions one", () => {
+    // A `!` line names no file BY DEFINITION here -- TeX only writes that
+    // form when it has no position to report. Letting a `foo.tex:12:`
+    // inside the message text stand in for one would reintroduce exactly
+    // the class of guess this module dropped.
+    expect(firstError("! Package foo Error: see bar.tex:12: for details.\n")).toEqual({
+      message: "Package foo Error: see bar.tex:12: for details.",
+      line: null,
+      file: null,
     });
   });
 });
