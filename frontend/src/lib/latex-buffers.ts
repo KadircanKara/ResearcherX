@@ -46,8 +46,17 @@ export class SaveEngine {
    * `flushPath`), so this is exactly what the server will hold once
    * everything outstanding for the path has landed -- and re-queueing only
    * the latest is right, because anything earlier is superseded by it.
+   *
+   * Boxed in an object so the entry has an IDENTITY. Ownership of this slot
+   * decides two things -- whether a chained send has been superseded, and
+   * whether a settling send may clear it -- and both were previously
+   * decided by comparing the TEXT. Two edits carrying byte-identical text
+   * (type "x", undo, retype "x") compare equal, so the earlier send's
+   * `finally` deleted the entry belonging to the later one while that was
+   * still on the wire; a `rename` in that window then found nothing to
+   * re-queue and the user's text reached neither name.
    */
-  private inFlightText = new Map<string, string>();
+  private inFlightText = new Map<string, { text: string }>();
   private disposed = false;
 
   constructor(opts: SaveEngineOptions) {
@@ -85,7 +94,7 @@ export class SaveEngine {
   }
 
   rename(from: string, to: string): void {
-    const flying = this.inFlightText.get(from);
+    const flying = this.inFlightText.get(from)?.text;
     this.invalidate(from);
     const timer = this.timers.get(from);
     if (timer) clearTimeout(timer);
@@ -196,7 +205,8 @@ export class SaveEngine {
     // has landed -- true precisely because sends are serialised. `rename`
     // reads it to re-queue an edit that is already (or still) on the wire
     // under the old name.
-    this.inFlightText.set(path, text);
+    const queued = { text };
+    this.inFlightText.set(path, queued);
     const send = (async () => {
       if (prev) {
         // `prev` never rejects -- the catch below is inside it -- so this
@@ -207,6 +217,21 @@ export class SaveEngine {
         // re-queued under the new name by `rename`; sending it here would
         // PUT to a path the server no longer has.
         if (this.obsolete(path, epoch) || this.disposed) return;
+        // SUPERSEDED. While this send waited its turn, a later flush queued
+        // newer text for the same path and chained behind it. Sending this
+        // one first would put text the user has already replaced on the
+        // wire, and every waiter -- `flushAll`, and therefore `compile()` --
+        // would sit through its whole round trip for a result that is
+        // overwritten by the next one. Skipping bounds the chain at two: the
+        // send that is landing, and the latest.
+        //
+        // Identity, not text equality: `inFlightText` holds the newest
+        // queued box for the path and is replaced synchronously by each
+        // flush, so this is exact even when two edits carry byte-identical
+        // text. Checked only inside this `if (prev)` branch: an UNCHAINED
+        // send is the newest by construction and has nothing to be
+        // superseded by yet.
+        if (this.inFlightText.get(path) !== queued) return;
       }
       // Nothing is on the wire for this path now, so `baseline` really is
       // what the server holds and is the correct comparand again. Skipping
@@ -245,8 +270,14 @@ export class SaveEngine {
       // Only clear if this call's own send is still the one on record -- a
       // newer flush may already have replaced it with a later edit's send,
       // and clearing that would make a still-in-flight save look finished.
+      //
+      // BOTH tests are identity now. Clearing `inFlightText` by comparing
+      // its TEXT was wrong for the reason recorded on the field itself: two
+      // chained sends carrying byte-identical text compare equal, so the
+      // first to settle deleted the second's entry while it was still on
+      // the wire, and a `rename` in that window re-queued nothing.
       if (this.inFlight.get(path) === send) this.inFlight.delete(path);
-      if (this.inFlightText.get(path) === text) this.inFlightText.delete(path);
+      if (this.inFlightText.get(path) === queued) this.inFlightText.delete(path);
     }
   }
 

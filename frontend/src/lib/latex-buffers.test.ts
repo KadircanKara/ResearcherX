@@ -409,3 +409,96 @@ describe("revert while a save is in flight", () => {
     expect(send.mock.calls.length).toBe(before);
   });
 });
+
+describe("chained sends", () => {
+  /** A send whose promise the test releases by hand. */
+  function held() {
+    const calls: Array<{ path: string; text: string; release: () => void; done: boolean }> = [];
+    const send = vi.fn(
+      (path: string, text: string) =>
+        new Promise<void>((resolve, reject) => {
+          const entry = {
+            path,
+            text,
+            done: false,
+            release: () => {
+              entry.done = true;
+              resolve();
+            },
+            fail: () => {
+              entry.done = true;
+              reject(new Error("nope"));
+            },
+          };
+          calls.push(entry as (typeof calls)[number]);
+        })
+    );
+    return { send, calls };
+  }
+
+  /** Bounded microtask settle -- an unbounded loop hangs the suite under
+   * fake timers instead of reporting a regression. */
+  async function settle() {
+    for (let i = 0; i < 50; i += 1) await Promise.resolve();
+  }
+
+  it("re-queues an in-flight edit on rename even when a FAILED earlier send carried the same text", async () => {
+    // The window: two chained sends for one path carrying byte-identical
+    // text. The first FAILS. Clearing the in-flight record by comparing
+    // TEXT let the first send's `finally` delete the second's entry while
+    // that one was still on the wire -- so `rename` found nothing to
+    // re-queue and the user's text reached neither name.
+    const { send, calls } = held();
+    const { e } = engine(send);
+    e.setBaseline("a.tex", "");
+
+    e.schedule("a.tex", "x");
+    await vi.advanceTimersByTimeAsync(800); // first send on the wire, holding
+    e.schedule("a.tex", "x"); // identical text, chained behind it
+    await vi.advanceTimersByTimeAsync(800);
+
+    // Fail the FIRST send. Its `finally` runs while the second is queued.
+    (calls[0] as unknown as { fail: () => void }).fail();
+    await settle();
+
+    e.rename("a.tex", "b.tex");
+    await vi.advanceTimersByTimeAsync(800);
+    await settle();
+
+    // The text must be on its way to the NEW name. Without the fix the
+    // rename carried nothing and "x" was never written anywhere.
+    expect(send.mock.calls.some(([p, t]) => p === "b.tex" && t === "x")).toBe(true);
+  });
+
+  it("skips a queued send whose text is no longer the latest, so flushAll waits on at most two", async () => {
+    // Without the skip, flushAll drains the whole backlog one round trip at
+    // a time: N edits typed while the wire is busy cost N x RTT before a
+    // compile can start, every one of them writing text the next
+    // immediately replaces.
+    const { send, calls } = held();
+    const { e } = engine(send);
+    e.setBaseline("a.tex", "");
+
+    e.schedule("a.tex", "1");
+    await vi.advanceTimersByTimeAsync(800); // "1" on the wire, held open
+    for (const text of ["2", "3", "4", "5"]) {
+      e.schedule("a.tex", text);
+      await vi.advanceTimersByTimeAsync(800);
+    }
+
+    const flushed = e.flushAll();
+    // Release everything, bounded, oldest first -- the order the chain runs.
+    for (let pass = 0; pass < 10; pass += 1) {
+      const outstanding = calls.filter((c) => !c.done);
+      if (outstanding.length === 0) break;
+      outstanding[0].release();
+      await vi.advanceTimersByTimeAsync(0);
+      await settle();
+    }
+    await flushed;
+
+    // Two round trips: the one that was already landing, and the latest.
+    expect(send.mock.calls.map(([, t]) => t)).toEqual(["1", "5"]);
+    expect(e.isDirty()).toBe(false);
+  });
+});
