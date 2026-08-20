@@ -1,5 +1,3 @@
-import type { LatexEngine } from "./latex";
-
 export interface TexPoint {
   x: number;
   y: number;
@@ -7,8 +5,8 @@ export interface TexPoint {
 
 /** What was actually compiled, as opposed to what is in the editor now. */
 export interface CompiledState {
-  source: string;
-  engine: LatexEngine;
+  /** The document revision the backend reported for this build. */
+  revision: number;
   hash: string;
 }
 
@@ -25,20 +23,30 @@ export function canvasToTex(p: TexPoint, scale: number): TexPoint {
 }
 
 /**
- * Does the editor's buffer still match the PDF on screen?
+ * Does the PDF on screen still match the project?
  *
- * Deliberately compares the SOURCE TEXT rather than recomputing the backend's
- * sha256. The backend hashes `engine + NUL + source`; duplicating that here
- * would be a second implementation of someone else's contract, free to drift
- * on any change to it, in exchange for nothing -- we already hold the exact
- * string we sent. The engine counts too: the same source laid out by xelatex
- * puts different content on different pages, so the map is just as stale.
+ * Two terms, and both are needed:
+ *
+ * - `dirty` is true from the KEYSTROKE, before the 800ms autosave has told
+ *   the server anything. Without it the badge would appear 800ms late.
+ * - `revision` is the backend's own counter, bumped by every file write,
+ *   delete, rename, engine change and main_path change. It is a number the
+ *   backend HANDED US, never a hash recomputed here: the backend's cache key
+ *   is `tree_hash` over every file in the tree, and a second implementation
+ *   of that in the browser would be free to drift on any change to it and
+ *   buys nothing.
+ *
+ * The old rule compared the main file's source TEXT, which is now wrong for
+ * a reason no comparison of one buffer can fix: editing a chapter changes
+ * what compiles while leaving the main file's bytes identical.
  */
 export function isStale(
-  source: string,
-  engine: LatexEngine,
+  dirty: boolean,
+  revision: number | null,
   compiled: CompiledState | null
 ): boolean {
   if (compiled === null) return true;
-  return source !== compiled.source || engine !== compiled.engine;
+  if (dirty) return true;
+  if (revision === null) return true;
+  return revision !== compiled.revision;
 }
