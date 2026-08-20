@@ -195,8 +195,23 @@ export class SaveEngine {
    * existed when the caller asked.
    */
   async flushAll(): Promise<void> {
-    const paths = new Set([...this.pending.keys(), ...this.inFlight.keys()]);
-    await Promise.all([...paths].map((p) => this.flushPath(p)));
+    // Loop rather than snapshot once. `rename` can requeue a carried
+    // in-flight edit under a NEW path AFTER this call took its snapshot,
+    // on a fresh debounce timer this call never saw. `compile()` awaits
+    // this and then asks the backend to build immediately, so a
+    // single-snapshot flushAll lets a rename racing a compile build the
+    // pre-edit text -- precisely the hazard this method exists to close.
+    //
+    // Terminates: a send that fails does NOT return its text to `pending`
+    // (it goes to `failed`), so no pass can re-add work by itself. Only a
+    // concurrent rename adds a pass, and renames are user-driven and
+    // finite. The bound is a safety valve against a caller looping renames
+    // faster than sends settle, not an expected exit.
+    for (let pass = 0; pass < 10; pass += 1) {
+      const paths = new Set([...this.pending.keys(), ...this.inFlight.keys()]);
+      if (paths.size === 0) return;
+      await Promise.all([...paths].map((p) => this.flushPath(p)));
+    }
   }
 
   dispose(): void {

@@ -118,19 +118,69 @@ describe("forget and rename", () => {
     expect(send).toHaveBeenNthCalledWith(2, "b.tex", "x");
   });
 
-  it("forget while a send is in flight does not resurrect a baseline on success", async () => {
+  it("forget while a send is in flight leaves no baseline behind for the path", async () => {
+    // NOTE: only the FIRST send is held open on a manually-released promise;
+    // later calls auto-resolve. Holding every call open (as a single shared
+    // `release` closure would) deadlocks `await e.flushAll()` below on the
+    // fixed module -- the fix correctly leaves baseline unresurrected, so
+    // the second `schedule` genuinely triggers a second network call, and
+    // that call has to be able to settle for this test to reach its
+    // assertion at all.
     let release: () => void = () => {};
-    const send = vi.fn(() => new Promise<void>((r) => { release = r; }));
+    let calls = 0;
+    const send = vi.fn(() => {
+      calls += 1;
+      if (calls === 1) return new Promise<void>((r) => { release = r; });
+      return Promise.resolve();
+    });
     const { e } = engine(send);
     e.setBaseline("a.tex", "");
     e.schedule("a.tex", "x");
-    await vi.advanceTimersByTimeAsync(800); // send starts, does not settle
+    await vi.advanceTimersByTimeAsync(800);   // send in flight carrying "x"
     e.forget("a.tex");
     release();
-    await Promise.resolve();
-    await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(0);
+
+    // Deliberately NO setBaseline here -- calling it would overwrite the
+    // resurrected entry and destroy the discriminator. A file re-created at
+    // the same path and typed into again must still SEND: if the stale
+    // send put a baseline back, the engine would believe the server already
+    // holds "x" and skip the write, losing the edit silently.
+    e.schedule("a.tex", "x");
+    await e.flushAll();
+    expect(send).toHaveBeenCalledTimes(2);
+  });
+
+  it("flushAll waits out an edit a rename requeued after its snapshot", async () => {
+    // Residual of the rename fix: flushAll snapshots pending+inFlight once,
+    // synchronously, before its first await. If a rename lands AFTER that
+    // snapshot and requeues the carried in-flight text under a NEW path on a
+    // fresh timer, a single-snapshot flushAll would resolve without ever
+    // waiting on it -- and compile() calls flushAll() then immediately asks
+    // the backend to build, so it would build the pre-edit text.
+    const releases: Array<() => void> = [];
+    const send = vi.fn(() => new Promise<void>((r) => { releases.push(r); }));
+    const { e } = engine(send);
+    e.setBaseline("a.tex", "");
+    e.schedule("a.tex", "x");
+    await vi.advanceTimersByTimeAsync(800); // first send in flight under "a.tex"
+
+    const flushing = e.flushAll();
+    e.rename("a.tex", "b.tex"); // requeues "x" under "b.tex" on a fresh timer
+    releases[0](); // release the original send
+
+    // The requeued send under "b.tex" is dispatched by flushAll's own next
+    // pass, not by a timer -- wait for it to actually be called before
+    // releasing it, rather than assuming a fixed number of microtask ticks.
+    while (send.mock.calls.length < 2) {
+      await Promise.resolve();
+    }
+    releases[1]();
+    await flushing;
+
+    expect(send).toHaveBeenCalledTimes(2);
+    expect(send).toHaveBeenNthCalledWith(2, "b.tex", "x");
     expect(e.isDirty()).toBe(false);
-    expect(e.dirtyPaths()).toEqual([]);
   });
 
   it("dispose while a send is in flight fires no further state change", async () => {
