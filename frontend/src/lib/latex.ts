@@ -1,4 +1,4 @@
-import { API_BASE, apiGet, apiSend, getDevUserId } from "./api";
+import { API_BASE, getDevUserId } from "./api";
 
 export type LatexEngine = "pdflatex" | "xelatex";
 
@@ -47,51 +47,73 @@ export interface ReverseResult {
   file: string | null;
 }
 
+// Every call below goes through this module's own `send`/`sendVoid`, NOT
+// `apiSend` from `lib/api.ts`. `apiSend` throws a bare
+// `Error("PATCH ... -> 422")`, which carries no server detail at all -- so
+// `errorText` in `use-latex-document.ts` fell through to the generic line
+// and DISCARDED the backend's own 4xx message on exactly the controls that
+// have no other feedback path: "The main file must be a .tex file", "... is
+// not a text file in this document", and every 403 behind Set-as-main and
+// the engine picker. `apiSend` itself is deliberately untouched -- chat,
+// papers and runs all depend on its current behaviour.
+//
+// The rule these share with the file-tree routes below is unchanged: a 4xx
+// is the USER's error and shows the backend's own detail; a 5xx is OURS and
+// is replaced with a generic line. See `LatexRequestError`.
+
 export function listDocuments(projectId: string): Promise<LatexDocument[]> {
-  return apiGet<LatexDocument[]>(`/projects/${projectId}/latex`);
+  return send<LatexDocument[]>(`${API_BASE}/v1/projects/${projectId}/latex`, {
+    headers: headers(),
+  });
 }
 
-export async function createDocument(
+export function createDocument(
   projectId: string,
   body: { name: string; source?: string; engine?: LatexEngine }
 ): Promise<LatexDocument> {
-  const doc = await apiSend<LatexDocument>("POST", `/projects/${projectId}/latex`, body);
-  if (!doc) throw new Error("create failed: no body");
-  return doc;
+  return send<LatexDocument>(`${API_BASE}/v1/projects/${projectId}/latex`, {
+    method: "POST",
+    headers: headers({ "Content-Type": "application/json" }),
+    body: JSON.stringify(body),
+  });
 }
 
 export function getDocument(projectId: string, documentId: string): Promise<LatexDocument> {
-  return apiGet<LatexDocument>(`/projects/${projectId}/latex/${documentId}`);
+  return send<LatexDocument>(`${API_BASE}/v1/projects/${projectId}/latex/${documentId}`, {
+    headers: headers(),
+  });
 }
 
-export async function patchDocument(
+export function patchDocument(
   projectId: string,
   documentId: string,
   body: { name?: string; main_path?: string; engine?: LatexEngine }
 ): Promise<LatexDocument> {
-  const doc = await apiSend<LatexDocument>(
-    "PATCH",
-    `/projects/${projectId}/latex/${documentId}`,
-    body
-  );
-  if (!doc) throw new Error("patch failed: no body");
-  return doc;
+  return send<LatexDocument>(`${API_BASE}/v1/projects/${projectId}/latex/${documentId}`, {
+    method: "PATCH",
+    headers: headers({ "Content-Type": "application/json" }),
+    body: JSON.stringify(body),
+  });
 }
 
-export async function deleteDocument(projectId: string, documentId: string): Promise<void> {
-  await apiSend<void>("DELETE", `/projects/${projectId}/latex/${documentId}`);
+export function deleteDocument(projectId: string, documentId: string): Promise<void> {
+  // `sendVoid`, not `send`: this route answers 204 with no body at all, and
+  // `response.json()` on an empty body throws a SyntaxError that would reach
+  // the caller looking exactly like a network failure.
+  return sendVoid(`${API_BASE}/v1/projects/${projectId}/latex/${documentId}`, {
+    method: "DELETE",
+    headers: headers(),
+  });
 }
 
-export async function compileDocument(
+export function compileDocument(
   projectId: string,
   documentId: string
 ): Promise<CompileResult> {
-  const res = await apiSend<CompileResult>(
-    "POST",
-    `/projects/${projectId}/latex/${documentId}/compile`
+  return send<CompileResult>(
+    `${API_BASE}/v1/projects/${projectId}/latex/${documentId}/compile`,
+    { method: "POST", headers: headers() }
   );
-  if (!res) throw new Error("compile failed: no body");
-  return res;
 }
 
 /**
@@ -136,35 +158,37 @@ export async function fetchPdfBytes(
   return new Uint8Array(await r.arrayBuffer());
 }
 
-export async function synctexForward(
+export function synctexForward(
   projectId: string,
   documentId: string,
   line: number,
   file: string
 ): Promise<ForwardResult> {
-  const res = await apiSend<ForwardResult>(
-    "POST",
-    `/projects/${projectId}/latex/${documentId}/synctex/forward`,
-    { line, file }
+  return send<ForwardResult>(
+    `${API_BASE}/v1/projects/${projectId}/latex/${documentId}/synctex/forward`,
+    {
+      method: "POST",
+      headers: headers({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ line, file }),
+    }
   );
-  if (!res) throw new Error("forward failed: no body");
-  return res;
 }
 
-export async function synctexReverse(
+export function synctexReverse(
   projectId: string,
   documentId: string,
   page: number,
   x: number,
   y: number
 ): Promise<ReverseResult> {
-  const res = await apiSend<ReverseResult>(
-    "POST",
-    `/projects/${projectId}/latex/${documentId}/synctex/reverse`,
-    { page, x, y }
+  return send<ReverseResult>(
+    `${API_BASE}/v1/projects/${projectId}/latex/${documentId}/synctex/reverse`,
+    {
+      method: "POST",
+      headers: headers({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ page, x, y }),
+    }
   );
-  if (!res) throw new Error("reverse failed: no body");
-  return res;
 }
 
 // ---------------------------------------------------------------------------
@@ -274,6 +298,12 @@ async function send<T>(url: string, init: RequestInit): Promise<T> {
   const r = await fetch(url, { ...init, cache: "no-store" });
   if (!r.ok) await raise(r);
   return (await r.json()) as T;
+}
+
+/** For the one route that answers 204: no body to parse, same error rule. */
+async function sendVoid(url: string, init: RequestInit): Promise<void> {
+  const r = await fetch(url, { ...init, cache: "no-store" });
+  if (!r.ok) await raise(r);
 }
 
 export async function listFiles(projectId: string, documentId: string): Promise<LatexTree> {
