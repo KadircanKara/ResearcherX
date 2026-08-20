@@ -152,7 +152,30 @@ export class SaveEngine {
       await this.inFlight.get(path);
       return;
     }
-    if (text === this.baseline.get(path)) return;
+    // Skip the send only when the text already matches WHAT THE SERVER IS
+    // ABOUT TO HOLD -- which is `baseline` only while nothing is on the wire
+    // for this path.
+    //
+    // The naive `text === baseline` check was written when `baseline` really
+    // was the server's state; the in-flight bookkeeping added later
+    // (`inFlight`/`inFlightText`/`epoch`) made it a LAGGING record for the
+    // duration of a send. The failure it caused: baseline "A", the user
+    // types "B", the debounce sends "B", and inside that round trip the user
+    // undoes back to "A". The next flush compared "A" against a baseline
+    // still reading "A" -- because "B" had not resolved yet -- and returned
+    // without sending. Then "B" resolved and set baseline to "B". End state:
+    // the editor showed "A", the server held "B", `pending`/`inFlight`/
+    // `failed` were all empty, `isDirty()` was false, and the next compile
+    // built "B" and reported itself up to date. The user's undo was
+    // discarded and the version they explicitly reverted is what compiled
+    // and exported.
+    //
+    // While a send IS in flight, `inFlightText` is what the server will hold
+    // once it lands, so that is the only correct comparand. If that send
+    // ultimately FAILS the extra write is redundant rather than wrong -- and
+    // it is what clears the `failed` flag.
+    const flying = this.inFlightText.get(path);
+    if (text === (flying !== undefined ? flying : this.baseline.get(path))) return;
 
     if (this.disposed) return;
     this.opts.onStateChange?.("saving");

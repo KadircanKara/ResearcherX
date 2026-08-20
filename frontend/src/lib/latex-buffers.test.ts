@@ -281,3 +281,55 @@ describe("dispose", () => {
     expect(send).not.toHaveBeenCalled();
   });
 });
+
+describe("revert while a save is in flight", () => {
+  it("sends the revert rather than trusting a baseline that has not caught up", async () => {
+    // The exact sequence this closes: baseline "A", the user types "B", the
+    // debounce puts "B" on the wire, and inside that round trip the user
+    // undoes back to "A". Against the naive `text === baseline` skip the
+    // revert was never sent -- baseline still read "A" because "B" had not
+    // resolved -- and "B" then landed as the server's state with the engine
+    // reporting perfectly clean. The next compile built "B".
+    const releases: Array<() => void> = [];
+    const send = vi.fn(() => new Promise<void>((r) => { releases.push(r); }));
+    const { e } = engine(send);
+    e.setBaseline("a.tex", "A");
+
+    e.schedule("a.tex", "B");
+    await vi.advanceTimersByTimeAsync(800); // "B" on the wire, held open
+    expect(send).toHaveBeenNthCalledWith(1, "a.tex", "B");
+
+    e.schedule("a.tex", "A"); // the undo, inside "B"'s round trip
+    await vi.advanceTimersByTimeAsync(800);
+    // BOUNDED on purpose -- an unbounded spin does not fail against a broken
+    // module, it hangs the suite, because fake timers starve vitest's own
+    // testTimeout. See `flushAll waits out an edit a rename requeued` above.
+    for (let i = 0; i < 100 && send.mock.calls.length < 2; i += 1) {
+      await Promise.resolve();
+    }
+    expect(send).toHaveBeenNthCalledWith(2, "a.tex", "A");
+
+    for (const release of releases) release();
+    for (let i = 0; i < 100 && e.isDirty(); i += 1) {
+      await Promise.resolve();
+    }
+    // The LAST thing the server was told is the text the editor shows.
+    expect(send.mock.calls.at(-1)).toEqual(["a.tex", "A"]);
+    expect(e.isDirty()).toBe(false);
+  });
+
+  it("still skips a send whose text is already the one on the wire", async () => {
+    // The don't-resend optimisation is kept, just re-pointed: the comparand
+    // while a send is outstanding is what THAT send will make the server
+    // hold, not the stale baseline.
+    const send = vi.fn(() => new Promise<void>(() => {}));
+    const { e } = engine(send);
+    e.setBaseline("a.tex", "A");
+    e.schedule("a.tex", "B");
+    await vi.advanceTimersByTimeAsync(800);
+    e.schedule("a.tex", "B"); // same text again, still in flight
+    await vi.advanceTimersByTimeAsync(800);
+    for (let i = 0; i < 20; i += 1) await Promise.resolve();
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+});
