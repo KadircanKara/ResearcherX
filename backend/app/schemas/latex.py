@@ -66,6 +66,11 @@ class CompileOut(BaseModel):
 
 class SynctexForwardIn(BaseModel):
     line: int = Field(ge=1)
+    # Tree-relative. None (the existing single-file frontend's shape) means
+    # "the document's main file" -- the route resolves that default, not this
+    # schema, because the right default is the LAST COMPILED build's
+    # main_path, which this schema has no access to.
+    file: str | None = None
 
 
 class SynctexForwardOut(BaseModel):
@@ -86,6 +91,10 @@ class SynctexReverseIn(BaseModel):
 class SynctexReverseOut(BaseModel):
     found: bool
     line: int | None = None
+    # Tree-relative. Present only alongside `line`: a reverse hit whose file
+    # is no longer in the document's tree is reported as not found (see
+    # synctex_reverse_route), never as a `line` with no `file` to open it in.
+    file: str | None = None
 
 
 class LatexFileOut(BaseModel):

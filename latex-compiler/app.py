@@ -107,8 +107,6 @@ _ENGINE_FLAG = {
     "xelatex": "-pdfxe",
 }
 
-_MASTER = "master.tex"
-
 
 def _first_error(log_text: str) -> str:
     """The first real TeX error, or the tail of the log.
@@ -121,86 +119,6 @@ def _first_error(log_text: str) -> str:
         if line.startswith("!"):
             return "\n".join(log_text.splitlines()[i : i + 12])
     return "\n".join(log_text.splitlines()[-40:])
-
-
-def compile_tex(body: dict) -> dict:
-    """`body`: {"source": str, "engine": str}. Unknown engines fall back to
-    pdflatex rather than erroring: an engine string is a stored column, not
-    user prose, and a failed compile is a worse answer than the default."""
-    flag = _ENGINE_FLAG.get(body.get("engine", "pdflatex"), "-pdf")
-    with tempfile.TemporaryDirectory(prefix="rx-latex-") as tmp:
-        directory = Path(tmp)
-        (directory / _MASTER).write_text(body.get("source", ""), encoding="utf-8")
-        # subprocess.run(..., timeout=) -- and Popen.communicate(timeout=) on
-        # its own -- only kills the DIRECT child (latexmk). latexmk in turn
-        # runs the real engine (pdflatex/xelatex) as a further child process,
-        # so a plain timeout leaves that engine running. Reproduced live:
-        # after a 30s timeout returned the "stopped" response below, the
-        # engine was still running at 99.9% CPU, orphaned to PID 1, TIME
-        # still climbing. With a fixed `cpus` budget, a couple of runaway
-        # documents -- the common case per this module's docstring, not the
-        # rare one -- permanently pin the container's entire CPU allowance
-        # and starve every later compile into timing out too, each leaking
-        # another orphan, until something restarts the container: a
-        # self-inflicted DoS from ordinary use of the timeout this code
-        # exists to enforce. `start_new_session=True` puts latexmk and
-        # everything IT spawns into a new process group, so killing that
-        # GROUP (not just latexmk's own PID) is what actually stops the
-        # compute rather than just stopping our view of it.
-        proc = subprocess.Popen(
-            [
-                "latexmk",
-                flag,
-                "-synctex=1",
-                "-interaction=nonstopmode",
-                "-no-shell-escape",
-                "-halt-on-error",
-                _MASTER,
-            ],
-            cwd=directory,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            start_new_session=True,
-        )
-        try:
-            stdout, stderr = proc.communicate(timeout=COMPILE_TIMEOUT)
-            log_text = stdout + stderr
-        except subprocess.TimeoutExpired:
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            proc.communicate()  # reap, do not leave a zombie
-            return {
-                "ok": False,
-                "log": f"Compilation exceeded {COMPILE_TIMEOUT}s and was stopped.",
-                "pdf_b64": None,
-                "synctex_b64": None,
-            }
-
-        log_file = directory / "master.log"
-        if log_file.exists():
-            log_text = log_file.read_text(encoding="utf-8", errors="replace")
-
-        pdf = directory / "master.pdf"
-        synctex = directory / "master.synctex.gz"
-        if not pdf.exists():
-            return {
-                "ok": False,
-                "log": _first_error(log_text),
-                "pdf_b64": None,
-                "synctex_b64": None,
-            }
-        return {
-            "ok": True,
-            "log": _first_error(log_text) if proc.returncode else "",
-            "pdf_b64": base64.b64encode(pdf.read_bytes()).decode(),
-            # A compile can succeed without a map (an engine that ignored
-            # -synctex=1). Navigation is an enhancement; the PDF still ships.
-            "synctex_b64": (
-                base64.b64encode(synctex.read_bytes()).decode()
-                if synctex.exists()
-                else None
-            ),
-        }
 
 
 class _Bounded:
@@ -483,17 +401,6 @@ def query_synctex(body: dict) -> dict:
 
     main_dir = posixpath.dirname(main_path)
     stem = posixpath.splitext(posixpath.basename(main_path))[0] or "master"
-    # BACKWARD COMPATIBILITY, until the backend client is switched over
-    # (Task 3) -- deleted in Task 4 along with this fallback and its pinning
-    # test. The pre-existing client still calls /synctex with no `main_path`
-    # at all. What this preserves is the DEFAULT `file` a forward query gets
-    # when the caller sends none: "master.tex", the pre-existing client's
-    # only document. The stem used to stage the pdf/map below ("master" in
-    # that case) is NOT itself part of the contract -- synctex only needs
-    # the pdf and map to share *a* stem, whatever it is called -- so this
-    # fallback exists solely to give `tree_file` the right default, not to
-    # preserve "master" as a name.
-    legacy_default_file = "master.tex" if not main_path else main_path
 
     with tempfile.TemporaryDirectory(prefix="rx-synctex-") as tmp:
         directory = Path(tmp)
@@ -509,7 +416,7 @@ def query_synctex(body: dict) -> dict:
         # both view and edit answer correctly from a directory the document
         # was never compiled in.
         if direction == "forward":
-            tree_file = file_param or legacy_default_file
+            tree_file = file_param or main_path
             # tree-relative -> main-dir-relative
             rel = posixpath.relpath(tree_file, main_dir) if main_dir else tree_file
             args = [
@@ -531,7 +438,7 @@ def query_synctex(body: dict) -> dict:
                 "-d",
                 str(directory),
             ]
-        # Same process-group treatment as compile_tex's subprocess call, for
+        # Same process-group treatment as compile_tree's subprocess call, for
         # consistency: synctex is much less likely to fork a runaway child,
         # but the next person reading this file should not have to work out
         # why one of the two subprocess calls here is guarded against
@@ -570,19 +477,6 @@ def query_synctex(body: dict) -> dict:
         record = lines[0]
         resolved = _tree_path(record.get("Input", ""), root)
         if resolved is None:
-            # BACKWARD COMPATIBILITY, same lifetime as legacy_default_file
-            # above. The legacy single-file client never sends `root`, so
-            # `_tree_path` correctly refuses to resolve (it cannot verify
-            # containment without one) -- but that mode has exactly one
-            # document, so report it directly instead of losing reverse
-            # navigation entirely. Tree mode (root present) is unaffected:
-            # this only fires when main_path/root were never sent at all.
-            if not main_path:
-                return {
-                    "found": True,
-                    "file": legacy_default_file,
-                    "line": int(record["Line"]),
-                }
             return {"found": False}
         return {"found": True, "file": resolved, "line": int(record["Line"])}
 
@@ -698,17 +592,18 @@ class Handler(BaseHTTPRequestHandler):
         if length < 0:
             self._send(400, {"error": "invalid content-length"})
             return
-        # A tar body gets its own, larger cap (MAX_TAR_LENGTH, 32MB) --
-        # the generic MAX_CONTENT_LENGTH (16MB) below still governs JSON
-        # /compile and /synctex bodies. The content-type check has to run
-        # BEFORE the size check that applies it, or a 20MB tar would be
-        # rejected against the 16MB JSON cap before ever being recognised
-        # as a tar.
+        # /compile speaks only the tar transport now, so it always gets the
+        # larger cap (MAX_TAR_LENGTH, 32MB) regardless of what Content-Type
+        # the client claims -- a mislabelled or missing header must not let
+        # a 20MB tar sneak in under the smaller limit. MAX_CONTENT_LENGTH
+        # (16MB) governs everything else, which today is only /synctex's
+        # base64 JSON body.
         is_tar = (
             self.path == "/compile"
             and self.headers.get("Content-Type") == "application/x-tar"
         )
-        if length > (MAX_TAR_LENGTH if is_tar else MAX_CONTENT_LENGTH):
+        limit = MAX_TAR_LENGTH if self.path == "/compile" else MAX_CONTENT_LENGTH
+        if length > limit:
             # Drain the body before answering. By the time we know it is too
             # large, the client has typically already written most or all of
             # it into the socket. Responding and closing without reading
@@ -797,6 +692,18 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self._send(200, result)
             return
+        if self.path == "/compile":
+            # /compile no longer speaks JSON at all -- the tar transport
+            # (handled above) is the only form. Drain for the same reason
+            # the 413 branch does: the body is still sitting unread in the
+            # kernel receive buffer, and answering without draining it risks
+            # the same RST-swallows-the-response failure.
+            try:
+                self._drain(min(length, MAX_DRAIN_BYTES))
+            except Exception:
+                pass
+            self._send(400, {"error": "expected application/x-tar"})
+            return
         try:
             body = json.loads(self.rfile.read(length) or b"{}")
         except json.JSONDecodeError:
@@ -807,9 +714,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         try:
-            if self.path == "/compile":
-                self._send(200, compile_tex(body))
-            elif self.path == "/synctex":
+            if self.path == "/synctex":
                 self._send(200, query_synctex(body))
             else:
                 self._send(404, {"error": "not found"})

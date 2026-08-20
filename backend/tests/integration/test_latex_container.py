@@ -18,17 +18,12 @@ import httpx
 import pytest
 
 from app.core.config import settings
-from app.services.latex_compiler import (
-    compile_source,
-    compile_tree,
-    synctex_forward,
-    synctex_reverse,
-)
+from app.services.latex_compiler import compile_tree, synctex_forward, synctex_reverse
 
 pytestmark = pytest.mark.container
 
 # No COMPILER_URL constant exists in this file (the other tests reach the
-# service through compile_source/synctex_forward/synctex_reverse, not raw
+# service through compile_tree/synctex_forward/synctex_reverse, not raw
 # HTTP) -- the tar tests below post directly, so they need the container's
 # address themselves. settings.latex_compiler_url is the same value those
 # helpers use.
@@ -98,7 +93,7 @@ async def test_the_same_template_also_compiles_under_xelatex():
     (pdflatex could not build an IEEEtran conference paper) was precisely
     engine-specific breakage that nobody tested for the other engine this
     service offers."""
-    result = await compile_source(_PAPER, "xelatex")
+    result = await compile_tree([("master.tex", _PAPER.encode())], "xelatex", "master.tex")
 
     assert result.ok, result.log
     assert result.pdf and result.pdf.startswith(b"%PDF")
@@ -106,8 +101,10 @@ async def test_the_same_template_also_compiles_under_xelatex():
 
 
 async def test_a_broken_document_fails_with_a_log_and_no_pdf():
-    result = await compile_source(
-        r"\documentclass{article}\begin{document}\bogus\end{document}", "pdflatex"
+    result = await compile_tree(
+        [("master.tex", rb"\documentclass{article}\begin{document}\bogus\end{document}")],
+        "pdflatex",
+        "master.tex",
     )
 
     assert not result.ok
@@ -153,7 +150,7 @@ async def test_the_compiler_has_no_secrets_to_leak():
 \endgroup
 \end{document}
 """
-    result = await compile_source(probe, "pdflatex")
+    result = await compile_tree([("master.tex", probe.encode())], "pdflatex", "master.tex")
 
     assert result.ok, result.log
     pdf = result.pdf or b""
@@ -201,7 +198,7 @@ async def test_a_broken_environ_read_would_be_caught_not_pass_tautologically():
 \endgroup
 \end{document}
 """
-    result = await compile_source(probe, "pdflatex")
+    result = await compile_tree([("master.tex", probe.encode())], "pdflatex", "master.tex")
 
     # A stream that never opened makes \read fall through to terminal
     # input, which -halt-on-error turns into a failed, PDF-less compile --
@@ -391,21 +388,6 @@ def test_a_main_path_outside_the_tar_is_refused():
         payload = resp.json()
         assert payload["ok"] is False
         assert "main file is not in the project" in payload["log"]
-
-
-@pytest.mark.container
-def test_the_json_compile_form_still_works():
-    """Task 4 removes it; until then the backend still speaks JSON and every
-    commit must leave the app working."""
-    resp = httpx.post(
-        f"{COMPILER_URL}/compile",
-        json={
-            "source": "\\documentclass{article}\\begin{document}x\\end{document}",
-            "engine": "pdflatex",
-        },
-        timeout=120,
-    )
-    assert resp.json()["ok"] is True
 
 
 def _raw_post(path: str, headers: dict[str, str], body: bytes, timeout: float = 40) -> bytes:
@@ -856,37 +838,6 @@ def test_sync_needs_no_source_files_at_all():
     }
     answer = httpx.post(f"{COMPILER_URL}/synctex", json=poisoned, timeout=60).json()
     assert answer == baseline
-
-
-@pytest.mark.container
-def test_the_legacy_single_file_synctex_contract_still_works():
-    """Compatibility shim, scoped to last exactly as long as the pre-tree
-    backend client does: Task 3 switches that client to main_path/file/root,
-    and Task 4 deletes this test along with the fallback in query_synctex.
-
-    The pre-existing client (`app/services/latex_compiler.py`) posts `source`
-    and no `main_path`/`file`/`root` at all -- the single-file contract that
-    predates the tree. `main_path` absent must still resolve against the
-    compiled `master.tex`/`master.pdf`/`master.synctex.gz` triple, exactly as
-    it did before this task's rewrite."""
-    compiled = httpx.post(
-        f"{COMPILER_URL}/compile",
-        json={"source": SELF_CONTAINED.decode(), "engine": "pdflatex"},
-        timeout=120,
-    ).json()
-    assert compiled["ok"] is True, compiled["log"]
-
-    payload = {
-        "source": SELF_CONTAINED.decode(),
-        "pdf_b64": compiled["pdf_b64"],
-        "synctex_b64": compiled["synctex_b64"],
-        "direction": "forward",
-        "line": 3,
-    }
-    assert "main_path" not in payload
-    assert "file" not in payload
-    fwd = httpx.post(f"{COMPILER_URL}/synctex", json=payload, timeout=60).json()
-    assert fwd["found"] is True
 
 
 @pytest.mark.container

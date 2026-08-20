@@ -27,8 +27,8 @@ from app.schemas.latex import (
 )
 from app.services import latex_files_service as files
 from app.services import project_service
-from app.services.latex_cache import CachedBuild, cache, source_hash
-from app.services.latex_compiler import compile_source, synctex_forward, synctex_reverse
+from app.services.latex_cache import CachedBuild, cache
+from app.services.latex_compiler import compile_tree, synctex_forward, synctex_reverse
 from app.services.latex_paths import InvalidPath, normalize_path
 
 router = APIRouter(tags=["latex"])
@@ -226,11 +226,25 @@ async def compile_document(
     # out.
     doc_id, engine, main_path = document.id, document.engine, document.main_path
     revision = document.revision
-    row = await files.read_file(db, doc_id, main_path)
-    source = (row.content or "") if row is not None and not row.is_binary else ""
+    # `list_files` DEFERS `content`/`blob` -- touching either on a row it
+    # returned raises MissingGreenlet under async SQLAlchemy. `read_file` per
+    # path is the only correct way to get bytes, which is why this loop looks
+    # redundant and is not.
+    rows = await files.list_files(db, doc_id)
+    entries: list[tuple[str, bytes]] = []
+    for row in rows:
+        full = await files.read_file(db, doc_id, row.path)
+        if full is None:
+            continue
+        entries.append(
+            (full.path, full.blob if full.is_binary else (full.content or "").encode("utf-8"))
+        )
     await db.commit()
 
-    key = source_hash(source, engine)
+    # tree_hash, not source_hash: a chapter edit must invalidate the cached
+    # build. source_hash over the main file alone would return a stale PDF
+    # forever after editing anything but the main file.
+    key = files.tree_hash(entries, engine, main_path)
     cached = cache.get(key)
     if cached is not None:
         # Identical source and engine cannot produce a different PDF, so a
@@ -249,7 +263,7 @@ async def compile_document(
         cache.put(key, cached, document_id=doc_id)
         return CompileOut(ok=True, log=cached.log, pdf_hash=key, revision=revision)
 
-    result = await compile_source(source, engine)
+    result = await compile_tree(entries, engine, main_path)
     if not result.ok or result.pdf is None:
         # No hash on failure: the client keeps the PDF it already has, so a
         # broken edit never blanks the preview.
@@ -257,18 +271,12 @@ async def compile_document(
 
     cache.put(
         key,
-        # TRANSITIONAL (Task 3 of the compile-transport plan): root=None and
-        # main_path="" deliberately keep the compiler in its LEGACY
-        # single-file mode -- main_path="" is falsy, so query_synctex takes
-        # its `not main_path` branch (falls back to master.tex, skips the
-        # tree-relative conversion) exactly as before this client's
-        # signature changed. Passing the document's REAL main_path here with
-        # root=None would push the compiler into its NEW tree mode with no
-        # root to resolve against, and reverse sync would silently start
-        # answering `found: false`. Task 4 replaces this with a real tree
-        # compile (root=result.root, main_path=main_path).
         CachedBuild(
-            pdf=result.pdf, synctex_gz=result.synctex_gz, log=result.log, root=None, main_path=""
+            pdf=result.pdf,
+            synctex_gz=result.synctex_gz,
+            log=result.log,
+            root=result.root,
+            main_path=main_path,
         ),
         document_id=doc_id,
     )
@@ -318,17 +326,18 @@ async def synctex_forward_route(
     if build is None or build.synctex_gz is None:
         return SynctexForwardOut(found=False)
 
-    # TRANSITIONAL (Task 3): root/main_path=None/"" keep the compiler in its
-    # legacy single-file mode, matching CachedBuild's construction above --
-    # see that comment for why. `file=""` is likewise falsy, so a forward
-    # query falls back to "master.tex" exactly as the old client's implicit
-    # default did. Task 4 threads the document's real file/root through.
+    # `file` defaults to the LAST COMPILED build's main_path, not the
+    # document's current one: the map answers for what was actually built,
+    # and a repointed main_path since then would name a file this build
+    # never compiled. This is also what keeps the existing single-file
+    # frontend (which sends no `file` at all) working unchanged.
+    file = payload.file if payload.file is not None else build.main_path
     position = await synctex_forward(
         build.pdf,
         build.synctex_gz,
         root=build.root,
         main_path=build.main_path,
-        file="",
+        file=file,
         line=payload.line,
     )
     if position is None:
@@ -366,10 +375,6 @@ async def synctex_reverse_route(
     if build is None or build.synctex_gz is None:
         return SynctexReverseOut(found=False)
 
-    # TRANSITIONAL (Task 3): same legacy-mode reasoning as the forward route
-    # above. synctex_reverse now returns a SourcePoint (file + line); only
-    # `.line` is used here because SynctexReverseOut has no `file` field yet
-    # -- Task 4 adds it alongside the real tree wiring.
     point = await synctex_reverse(
         build.pdf,
         build.synctex_gz,
@@ -381,4 +386,19 @@ async def synctex_reverse_route(
     )
     if point is None:
         return SynctexReverseOut(found=False)
-    return SynctexReverseOut(found=True, line=point.line)
+    # The compiler cannot know the current tree -- it answers from the PDF
+    # and the map alone -- but it can hand back a build artifact (main.toc,
+    # main.aux) as if it were a source file, or a source file the editor has
+    # since deleted. A file the editor cannot open is worse than no answer,
+    # so the backend is where this gets filtered: only report a hit for a
+    # path that actually exists in the document's tree right now.
+    try:
+        existing = await files.read_file(db, doc_id, point.file)
+    except InvalidPath:
+        # point.file is untyped input from a separately deployed image; a
+        # shape read_file's own normalize_path rejects is the same "cannot
+        # open it" case as a file that is simply gone.
+        return SynctexReverseOut(found=False)
+    if existing is None:
+        return SynctexReverseOut(found=False)
+    return SynctexReverseOut(found=True, line=point.line, file=point.file)
