@@ -1,0 +1,717 @@
+/* ── Explorer theme + layout ──────────────────────────────────────────────
+ *
+ * Ported from the approved "Reading Room" concept, Explorer screen, in its
+ * Institution palette with Console as the dark counterpart. Both palettes come
+ * from the concept file verbatim; nothing here invents a colour.
+ *
+ * SCOPING IS THE WHOLE POINT. The shadcn token names are redeclared on
+ * `.rx-ex`, so every shadcn/Tailwind utility used inside the Explorer subtree
+ * (`bg-card`, `text-muted-foreground`, `border-border`, …) resolves to
+ * Institution/Console, and NOTHING outside `/explorer` changes. Do not move
+ * these declarations into `globals.css` `:root`/`.dark` — that would restyle
+ * Chat, Papers, Graph and LaTeX at the same time.
+ *
+ * Values are the OKLCH triples Tailwind wraps as `oklch(var(--token) / α)`,
+ * with the source hex in a trailing comment, matching globals.css. They were
+ * computed from the concept's hexes with the sRGB → OKLab → OKLCH transform.
+ * ───────────────────────────────────────────────────────────────────────── */
+
+.rx-ex {
+  color-scheme: light;
+
+  /* Institution — concept palette "a" */
+  --background: 0.9842 0.0034 247.86;           /* #F8FAFC bg */
+  --foreground: 0.2077 0.0398 265.75;           /* #0F172A ink */
+  --card: 1 0 89.88;                            /* #FFFFFF surface */
+  --card-foreground: 0.2077 0.0398 265.75;      /* #0F172A */
+  --popover: 1 0 89.88;                         /* #FFFFFF */
+  --popover-foreground: 0.2077 0.0398 265.75;   /* #0F172A */
+  --primary: 0.3462 0.0736 256.04;              /* #1E3A5F */
+  --primary-foreground: 1 0 89.88;              /* #FFFFFF on-primary */
+  --secondary: 0.9575 0.0046 258.32;            /* #EFF1F4 = ink 4% over bg */
+  --secondary-foreground: 0.2077 0.0398 265.75; /* #0F172A */
+  --muted: 0.9575 0.0046 258.32;                /* #EFF1F4 */
+  --muted-foreground: 0.4455 0.0374 257.28;     /* #475569 muted-ink */
+  --accent: 0.9738 0.0086 84.57;                /* #F9F6F0 = accent 6% over surface */
+  --accent-foreground: 0.5538 0.1207 66.44;     /* #A16207 accent */
+  --destructive: 0.5771 0.2152 27.33;           /* #DC2626 danger */
+  --border: 0.869 0.0198 252.89;                /* #CBD5E1 */
+  --input: 0.869 0.0198 252.89;                 /* #CBD5E1 */
+  --ring: 0.5538 0.1207 66.44;                  /* #A16207 */
+  --radius: 5px;                                /* concept --r */
+
+  /* derived, still palette-sourced */
+  --rx-hair: 0.9194 0.0115 252.09;              /* #DFE5EC = border 62% over surface */
+  --rx-accent-line: 0.731 0.0499 79.43;         /* #B9A585 = accent 42% over border */
+  --rx-danger-wash: 0.9601 0.0152 17.42;        /* #FCEEEE = danger 8% over surface */
+
+  /* Fonts are variables set by next/font on this same element. Serif is the
+     reading column, sans is chrome, mono is paths and numbers — Explorer only.
+     `--font-serif` / `--font-mono` are the names Tailwind's `font-serif` /
+     `font-mono` utilities read, so redefining them here re-points those
+     utilities inside the subtree and nowhere else. */
+  --rx-sans: var(--font-plex-sans), system-ui, sans-serif;
+  --font-serif: var(--font-spectral), Georgia, serif;
+  --font-mono: var(--font-plex-mono), ui-monospace, monospace;
+
+  /* PROSE IS BOUNDED, TOOLS EXPAND. 63ch is a correctness constraint, not a
+     default — it must never grow to fill a wide display. The 1760px shell is
+     the eye-span argument from the concept: at the cap the far edge of the
+     rail sits inside the ~30° cone the eye crosses without a head turn. */
+  --rx-measure: 63ch;
+  --rx-shell: 1760px;
+  --rx-t: 210ms;
+  --rx-ease: cubic-bezier(0.2, 0.6, 0.2, 1);
+
+  background: oklch(var(--background));
+  color: oklch(var(--foreground));
+  font-family: var(--rx-sans);
+  font-size: 15px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  padding: 0 24px 96px;
+  /* The Institution background has to reach the bottom of the viewport, or the
+     app's own (differently themed) body colour shows under a short page. 3rem
+     is the app shell's `h-12` topbar; a percentage height cannot be used here
+     because the flex parent has no definite height. */
+  min-height: calc(100vh - 3rem);
+}
+
+.dark .rx-ex {
+  color-scheme: dark;
+
+  /* Console — concept palette "b" */
+  --background: 0.2077 0.0398 265.75;           /* #0F172A */
+  --foreground: 0.9842 0.0034 247.86;           /* #F8FAFC */
+  --card: 0.2581 0.0378 266.31;                 /* #1B2336 */
+  --card-foreground: 0.9842 0.0034 247.86;      /* #F8FAFC */
+  --popover: 0.2581 0.0378 266.31;              /* #1B2336 */
+  --popover-foreground: 0.9842 0.0034 247.86;   /* #F8FAFC */
+  --primary: 0.2795 0.0368 260.03;              /* #1E293B */
+  --primary-foreground: 0.9842 0.0034 247.86;   /* #F8FAFC on-primary */
+  --secondary: 0.245 0.0365 265.46;             /* #182032 */
+  --secondary-foreground: 0.9842 0.0034 247.86; /* #F8FAFC */
+  --muted: 0.245 0.0365 265.46;                 /* #182032 */
+  --muted-foreground: 0.7107 0.0351 256.79;     /* #94A3B8 */
+  --accent: 0.2867 0.0311 236.19;               /* #1B2D38 = accent 6% over surface */
+  --accent-foreground: 0.7227 0.192 149.58;     /* #22C55E */
+  --destructive: 0.6368 0.2078 25.33;           /* #EF4444 */
+  --border: 0.3717 0.0392 257.29;               /* #334155 */
+  --input: 0.3717 0.0392 257.29;                /* #334155 */
+  --ring: 0.7227 0.192 149.58;                  /* #22C55E */
+
+  --rx-hair: 0.3307 0.0375 259.43;              /* #2A3649 */
+  --rx-accent-line: 0.5166 0.0901 163.15;       /* #2C7859 */
+  --rx-danger-wash: 0.2828 0.0317 300.56;       /* #2C2637 */
+}
+
+/* The concept mixes its accent wash at 9%. Measured on the ported values, the
+ * 11.5px accent-on-wash chip text lands at 4.39:1 in Institution — under the
+ * concept's own 4.5:1 floor. At 6% it is 4.56:1 (Console 6.23:1) and the wash
+ * is visually indistinguishable, so the derived mix moved and no palette token
+ * did. If you raise it back to 9%, the chips fail the floor again. */
+
+.rx-ex *,
+.rx-ex *::before,
+.rx-ex *::after {
+  box-sizing: border-box;
+}
+
+.rx-ex :focus-visible {
+  outline: 2px solid oklch(var(--accent-foreground));
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+
+/* ── Shell + screen header ─────────────────────────────────────────────── */
+.rx-shell {
+  max-width: var(--rx-shell);
+  margin: 0 auto;
+}
+
+.rx-head {
+  padding: 44px 0 26px;
+  display: flex;
+  gap: 28px;
+  align-items: flex-end;
+  flex-wrap: wrap;
+}
+.rx-head h1 {
+  font-family: var(--font-serif);
+  font-weight: 500;
+  font-size: 29px;
+  line-height: 1.25;
+  letter-spacing: -0.005em;
+  margin: 6px 0 0;
+  max-width: 24ch;
+}
+.rx-head .rx-meta {
+  margin-left: auto;
+  text-align: right;
+  color: oklch(var(--muted-foreground));
+  font-size: 12.5px;
+}
+.rx-eyebrow {
+  font-size: 11px;
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
+  color: oklch(var(--muted-foreground));
+  font-weight: 500;
+}
+.rx-lede {
+  margin: 0 0 20px;
+  color: oklch(var(--muted-foreground));
+  font-size: 14px;
+  max-width: 62ch;
+}
+
+.rx-backlink {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12.5px;
+  color: oklch(var(--muted-foreground));
+  border-bottom: 1px solid transparent;
+  padding-bottom: 1px;
+  transition:
+    color var(--rx-t) var(--rx-ease),
+    border-color var(--rx-t) var(--rx-ease);
+}
+.rx-backlink:hover {
+  color: oklch(var(--accent-foreground));
+  border-bottom-color: oklch(var(--rx-accent-line));
+}
+
+/* ── Composer ─────────────────────────────────────────────────────────── */
+.rx-newq {
+  max-width: 82ch;
+}
+.rx-composer {
+  border: 1px solid oklch(var(--border));
+  border-radius: var(--radius);
+  background: oklch(var(--card));
+  padding: 14px 16px 11px;
+  transition: border-color var(--rx-t) var(--rx-ease);
+}
+.rx-composer:focus-within {
+  border-color: oklch(var(--rx-accent-line));
+}
+.rx-composer textarea {
+  display: block;
+  width: 100%;
+  resize: none;
+  border: 0;
+  outline: 0;
+  background: none;
+  color: oklch(var(--foreground));
+  font-family: var(--font-serif);
+  font-size: 16px;
+  line-height: 1.6;
+  field-sizing: content;
+  min-height: calc(1.6em * 2);
+}
+.rx-composer textarea::placeholder {
+  color: oklch(var(--muted-foreground));
+}
+.rx-composer .rx-bar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid oklch(var(--rx-hair));
+  font-size: 12px;
+  color: oklch(var(--muted-foreground));
+}
+
+.rx-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 14px;
+  border-radius: var(--radius);
+  font-size: 13px;
+  font-weight: 500;
+  background: oklch(var(--primary));
+  color: oklch(var(--primary-foreground));
+  border: 1px solid color-mix(in srgb, oklch(var(--primary-foreground)) 26%, oklch(var(--primary)));
+  transition: opacity var(--rx-t) var(--rx-ease);
+}
+.rx-btn:hover:not(:disabled) {
+  opacity: 0.88;
+}
+.rx-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.rx-btn-ghost {
+  background: transparent;
+  color: oklch(var(--foreground));
+  border: 1px solid oklch(var(--border));
+}
+.rx-btn-ghost:hover:not(:disabled) {
+  background: oklch(var(--foreground) / 0.05);
+  opacity: 1;
+}
+.rx-push {
+  margin-left: auto;
+}
+
+/* ── Exploration list ─────────────────────────────────────────────────── */
+.rx-clist {
+  margin-top: 38px;
+}
+.rx-cgrid {
+  --rx-cols: minmax(0, 1fr) 196px 122px 158px 34px;
+}
+.rx-ccols {
+  display: grid;
+  grid-template-columns: var(--rx-cols);
+  gap: 8px 28px;
+  padding: 0 6px 9px 0;
+  border-bottom: 1px solid oklch(var(--border));
+}
+.rx-ccols span {
+  font-size: 11px;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: oklch(var(--muted-foreground));
+  font-weight: 600;
+}
+.rx-crow {
+  position: relative;
+  display: grid;
+  grid-template-columns: var(--rx-cols);
+  gap: 6px 28px;
+  align-items: baseline;
+  border-bottom: 1px solid oklch(var(--rx-hair));
+  transition: background var(--rx-t) var(--rx-ease);
+}
+.rx-crow:hover {
+  background: oklch(var(--foreground) / 0.05);
+}
+.rx-crow .rx-cmeta {
+  display: contents;
+}
+.rx-copen {
+  text-align: left;
+  padding: 18px 0;
+  display: block;
+}
+/* The whole row is the hit area, but the delete control is a real button and
+   must stay above it — an anchor wrapping a button is invalid HTML. */
+.rx-copen::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 3px;
+}
+.rx-copen:focus-visible {
+  outline: 0;
+}
+.rx-copen:focus-visible::after {
+  outline: 2px solid oklch(var(--accent-foreground));
+  outline-offset: -3px;
+}
+.rx-ct {
+  display: block;
+  font-family: var(--font-serif);
+  font-size: 17px;
+  line-height: 1.4;
+  color: oklch(var(--foreground));
+  max-width: 50ch;
+}
+.rx-cq {
+  display: block;
+  font-size: 13px;
+  color: oklch(var(--muted-foreground));
+  margin-top: 5px;
+  max-width: 64ch;
+}
+.rx-cscope,
+.rx-cn,
+.rx-cd {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  color: oklch(var(--muted-foreground));
+}
+.rx-cdel {
+  position: relative;
+  z-index: 1;
+  justify-self: end;
+  align-self: center;
+  padding: 6px;
+  border-radius: 3px;
+  color: oklch(var(--muted-foreground));
+  opacity: 0;
+  transition:
+    opacity var(--rx-t) var(--rx-ease),
+    color var(--rx-t) var(--rx-ease),
+    background var(--rx-t) var(--rx-ease);
+}
+.rx-crow:hover .rx-cdel,
+.rx-cdel:focus-visible {
+  opacity: 1;
+}
+.rx-cdel:hover {
+  color: oklch(var(--destructive));
+  background: oklch(var(--rx-danger-wash));
+}
+
+/* ── Empty state ──────────────────────────────────────────────────────── */
+.rx-empty {
+  max-width: 66ch;
+  padding: 26px 0 0;
+}
+.rx-empty h2 {
+  font-family: var(--font-serif);
+  font-weight: 500;
+  font-size: 23px;
+  line-height: 1.35;
+  margin: 0 0 12px;
+  color: oklch(var(--foreground));
+}
+.rx-empty p {
+  margin: 0 0 22px;
+  color: oklch(var(--muted-foreground));
+  font-size: 14px;
+  line-height: 1.65;
+}
+.rx-empty .rx-newq {
+  margin-bottom: 16px;
+}
+.rx-sugg {
+  list-style: none;
+  margin: 26px 0 0;
+  padding: 0;
+  max-width: 78ch;
+}
+.rx-sugg li {
+  border-top: 1px solid oklch(var(--rx-hair));
+  padding: 14px 0;
+}
+.rx-sugg a {
+  display: block;
+  text-align: left;
+  font-family: var(--font-serif);
+  font-size: 16.5px;
+  color: oklch(var(--foreground));
+  line-height: 1.45;
+  text-decoration: none;
+}
+.rx-sugg a:hover {
+  color: oklch(var(--accent-foreground));
+}
+.rx-sugg .rx-why {
+  display: block;
+  font-family: var(--rx-sans);
+  font-size: 13px;
+  color: oklch(var(--muted-foreground));
+  margin-top: 5px;
+  line-height: 1.55;
+}
+
+/* ── Thread ───────────────────────────────────────────────────────────── */
+/* Prose argues; candidates hang under the paragraph that introduces them.
+   The rail folds before the prose ever does, and the measure never grows. */
+.rx-exgrid {
+  display: grid;
+  align-items: start;
+  justify-content: center;
+  grid-template-columns: minmax(0, var(--rx-measure)) minmax(250px, 340px);
+  gap: 0 clamp(44px, 3.6vw, 92px);
+}
+.rx-exgrid > .rx-head {
+  grid-column: 1 / -1;
+  padding-bottom: 20px;
+}
+.rx-column {
+  max-width: var(--rx-measure);
+  min-width: 0;
+}
+
+.rx-turn {
+  padding-bottom: 38px;
+}
+.rx-turn + .rx-turn {
+  border-top: 1px solid oklch(var(--rx-hair));
+  padding-top: 26px;
+}
+.rx-user-row {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 20px;
+}
+.rx-bub-user {
+  max-width: 80%;
+  padding: 12px 16px;
+  border-radius: 16px;
+  background: oklch(var(--primary));
+  color: oklch(var(--primary-foreground));
+  font-size: 15px;
+  line-height: 1.6;
+}
+/* The chip must survive ON the filled bubble, so it is mixed from the
+   bubble's own foreground, never from the accent or the page surface. */
+.rx-bub-user .rx-mention {
+  background: color-mix(in srgb, oklch(var(--primary-foreground)) 24%, transparent);
+  color: oklch(var(--primary-foreground));
+  border-radius: 5px;
+  padding: 1px 6px;
+  font-family: var(--rx-sans);
+  font-size: 14px;
+}
+
+/* Reading column: the answer sits on the page surface at the plain measure,
+   with no bubble of its own. */
+.rx-answer p {
+  font-family: var(--font-serif);
+  font-size: 17.5px;
+  line-height: 1.78;
+  margin: 0 0 22px;
+  color: oklch(var(--foreground));
+  font-weight: 400;
+}
+
+/* ── Candidates ───────────────────────────────────────────────────────── */
+/* Deliberately NOT cards — a hairline row at footnote weight, subordinate to
+   the sentence above it, expanding in place for the evidence. */
+.rx-cand {
+  border-top: 1px solid oklch(var(--rx-hair));
+  margin: 4px 0 26px;
+}
+.rx-cand-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 92px auto;
+  gap: 8px 20px;
+  align-items: baseline;
+  padding: 13px 0 11px;
+}
+.rx-cand-head {
+  text-align: left;
+}
+.rx-cand-head:hover .rx-cand-t {
+  color: oklch(var(--accent-foreground));
+}
+.rx-cand-t {
+  display: block;
+  font-family: var(--font-serif);
+  font-size: 16px;
+  line-height: 1.4;
+  color: oklch(var(--foreground));
+  max-width: 46ch;
+  transition: color var(--rx-t) var(--rx-ease);
+}
+.rx-cand-by {
+  display: block;
+  font-size: 12.5px;
+  color: oklch(var(--muted-foreground));
+  margin-top: 4px;
+}
+.rx-cand-d {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: oklch(var(--muted-foreground));
+  line-height: 1.35;
+}
+.rx-cand-d b {
+  display: block;
+  font-size: 14px;
+  font-weight: 500;
+  color: oklch(var(--foreground));
+  margin-bottom: 2px;
+}
+.rx-cand-have .rx-cand-t {
+  color: oklch(var(--muted-foreground));
+}
+.rx-have-note {
+  font-size: 12.5px;
+  color: oklch(var(--muted-foreground));
+  white-space: nowrap;
+}
+
+/* The one animated thing in the whole design: an in-place expansion. */
+.rx-reveal {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows var(--rx-t) var(--rx-ease);
+}
+.rx-reveal > div {
+  overflow: hidden;
+}
+.rx-reveal-open {
+  grid-template-rows: 1fr;
+}
+.rx-reveal-body {
+  margin: 14px 0 18px;
+  padding: 16px 18px;
+  background: oklch(var(--accent));
+  border-left: 2px solid oklch(var(--rx-accent-line));
+  border-radius: 0 var(--radius) var(--radius) 0;
+  font-family: var(--rx-sans);
+  font-size: 14px;
+  line-height: 1.65;
+  color: oklch(var(--muted-foreground));
+}
+.rx-reveal-body b {
+  font-weight: 600;
+  color: oklch(var(--foreground));
+}
+.rx-terms {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px 8px;
+  margin-top: 12px;
+}
+.rx-chip {
+  font-size: 11.5px;
+  padding: 2px 9px;
+  border-radius: 20px;
+  background: oklch(var(--card));
+  border: 1px solid oklch(var(--rx-hair));
+  color: oklch(var(--muted-foreground));
+}
+.rx-chip-hit {
+  border-color: oklch(var(--rx-accent-line));
+  color: oklch(var(--accent-foreground));
+  background: oklch(var(--accent));
+}
+.rx-chip-miss {
+  border-style: dashed;
+}
+
+/* ── Rail ─────────────────────────────────────────────────────────────── */
+.rx-rail {
+  position: sticky;
+  top: 78px;
+  align-self: start;
+  font-size: 13px;
+  line-height: 1.55;
+  color: oklch(var(--muted-foreground));
+}
+.rx-flank-h {
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: oklch(var(--muted-foreground));
+  font-weight: 600;
+  margin: 0 0 14px;
+}
+.rx-tot {
+  font-family: var(--font-serif);
+  font-size: 20px;
+  color: oklch(var(--foreground));
+  line-height: 1.3;
+}
+.rx-fl-list {
+  list-style: none;
+  margin: 14px 0 0;
+  padding: 0;
+}
+.rx-fl-list li {
+  padding: 8px 0;
+  border-top: 1px solid oklch(var(--rx-hair));
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 4px 12px;
+}
+.rx-fl-list li:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+.rx-fl-list .rx-ttl {
+  color: oklch(var(--foreground));
+  font-size: 13px;
+  line-height: 1.45;
+}
+.rx-fl-list .rx-d {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  white-space: nowrap;
+  padding-top: 1px;
+}
+.rx-fl-list .rx-why {
+  grid-column: 1 / -1;
+  font-size: 12px;
+}
+.rx-flank-note {
+  font-size: 12.5px;
+  margin: 10px 0 0;
+}
+
+/* ── Responsive. The rail folds before the prose ever does, and the reading
+   measure is never sacrificed at any width. ───────────────────────────── */
+@media (max-width: 1080px) {
+  .rx-exgrid {
+    grid-template-columns: minmax(0, var(--rx-measure));
+    justify-content: start;
+  }
+  .rx-rail {
+    grid-column: 1 / -1;
+    position: static;
+    padding-top: 26px;
+    margin-top: 30px;
+    border-top: 1px solid oklch(var(--rx-hair));
+  }
+}
+@media (max-width: 980px) {
+  .rx-ccols {
+    display: none;
+  }
+  .rx-cgrid {
+    --rx-cols: minmax(0, 1fr) 34px;
+  }
+  .rx-crow .rx-cmeta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 16px;
+    grid-column: 1;
+    padding-bottom: 16px;
+  }
+  .rx-copen {
+    padding-bottom: 8px;
+  }
+  .rx-cdel {
+    opacity: 1;
+  }
+}
+@media (max-width: 700px) {
+  .rx-cand-row {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 10px;
+  }
+}
+@media (max-width: 768px) {
+  .rx-ex {
+    padding: 0 18px 72px;
+  }
+  .rx-head {
+    padding: 30px 0 20px;
+  }
+  .rx-head h1 {
+    font-size: 24px;
+  }
+  .rx-head .rx-meta {
+    margin-left: 0;
+    text-align: left;
+  }
+  .rx-answer p {
+    font-size: 16.5px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rx-ex *,
+  .rx-ex *::before,
+  .rx-ex *::after {
+    transition-duration: 1ms !important;
+    animation: none !important;
+  }
+}
+
+.rx-thread-composer {
+  margin-top: 40px;
+}
+.rx-flank-h-next {
+  margin-top: 26px;
+}
