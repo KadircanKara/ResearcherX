@@ -52,7 +52,26 @@ async def test_create_and_list_documents(client: AsyncClient, you: User, project
     assert [d["name"] for d in listed.json()] == ["main.tex"]
 
 
-async def test_patch_saves_the_source(client: AsyncClient, you: User, project: Project):
+async def test_listing_documents_never_carries_file_contents(
+    client: AsyncClient, you: User, project: Project
+):
+    """A list response resolving every document's main file would be a full
+    file read per row -- the shim this pins the removal of."""
+    await client.post(
+        f"/v1/projects/{project.id}/latex",
+        json={"name": "main.tex", "source": "\\documentclass{article}"},
+        headers={"X-Dev-User-Id": you.id},
+    )
+
+    listed = await client.get(f"/v1/projects/{project.id}/latex", headers={"X-Dev-User-Id": you.id})
+    body = listed.json()
+    assert body, "fixture should have created a document"
+    assert "source" not in body[0]
+
+
+async def test_writing_the_main_file_saves_its_content(
+    client: AsyncClient, you: User, project: Project
+):
     created = await client.post(
         f"/v1/projects/{project.id}/latex",
         json={"name": "main.tex", "source": "old"},
@@ -60,14 +79,20 @@ async def test_patch_saves_the_source(client: AsyncClient, you: User, project: P
     )
     doc_id = created.json()["id"]
 
-    resp = await client.patch(
-        f"/v1/projects/{project.id}/latex/{doc_id}",
-        json={"source": "new"},
+    resp = await client.put(
+        f"/v1/projects/{project.id}/latex/{doc_id}/file",
+        params={"path": "main.tex"},
+        json={"content": "new"},
         headers={"X-Dev-User-Id": you.id},
     )
-
     assert resp.status_code == 200
-    assert resp.json()["source"] == "new"
+
+    file_read = await client.get(
+        f"/v1/projects/{project.id}/latex/{doc_id}/file",
+        params={"path": "main.tex"},
+        headers={"X-Dev-User-Id": you.id},
+    )
+    assert file_read.json()["content"] == "new"
 
 
 async def test_a_document_from_another_project_404s(
@@ -585,9 +610,10 @@ async def test_a_cache_hit_after_an_edit_and_undo_syncs_the_reverted_build_not_t
                 headers={"X-Dev-User-Id": you.id},
             )
 
-        await client.patch(
-            f"/v1/projects/{project.id}/latex/{doc_id}",
-            json={"source": "S2"},
+        await client.put(
+            f"/v1/projects/{project.id}/latex/{doc_id}/file",
+            params={"path": "main.tex"},
+            json={"content": "S2"},
             headers={"X-Dev-User-Id": you.id},
         )
         with patch("app.api.v1.latex.compile_tree", AsyncMock(return_value=s2)):
@@ -596,9 +622,10 @@ async def test_a_cache_hit_after_an_edit_and_undo_syncs_the_reverted_build_not_t
                 headers={"X-Dev-User-Id": you.id},
             )
 
-        await client.patch(
-            f"/v1/projects/{project.id}/latex/{doc_id}",
-            json={"source": "S1"},
+        await client.put(
+            f"/v1/projects/{project.id}/latex/{doc_id}/file",
+            params={"path": "main.tex"},
+            json={"content": "S1"},
             headers={"X-Dev-User-Id": you.id},
         )
         with (
@@ -644,21 +671,24 @@ async def test_an_oversized_source_is_rejected_with_a_422_not_silently_stored(
     assert any(err["type"] == "string_too_long" for err in resp.json()["detail"])
 
 
-async def test_an_oversized_source_is_also_rejected_on_update(
+async def test_an_oversized_file_write_is_also_rejected_on_update(
     client: AsyncClient, you: User, project: Project, db_session: AsyncSession
 ):
-    """The same bound applies to an edit growing a document past the limit,
-    not just to creation -- an editor pasting a huge block must get the same
-    real-cause 422, not a generic compiler-unavailable message five steps
-    later."""
+    """The same kind of bound applies to an edit growing a file past the
+    limit, not just to creation -- an editor pasting a huge block must get
+    the same real-cause 422, not a generic compiler-unavailable message five
+    steps later. Writes now go through `PUT /file` exclusively, so this pins
+    `LatexFileWrite`'s own character bound rather than the deleted
+    `LatexDocumentUpdate.source` one."""
     doc = LatexDocument(project_id=project.id, name="main.tex")
     db_session.add(doc)
     await db_session.commit()
     await db_session.refresh(doc)
 
-    resp = await client.patch(
-        f"/v1/projects/{project.id}/latex/{doc.id}",
-        json={"source": "x" * 2_000_001},
+    resp = await client.put(
+        f"/v1/projects/{project.id}/latex/{doc.id}/file",
+        params={"path": "main.tex"},
+        json={"content": "x" * 10_000_001},
         headers={"X-Dev-User-Id": you.id},
     )
 
@@ -669,8 +699,8 @@ async def test_an_oversized_source_is_also_rejected_on_update(
 async def test_creating_a_document_puts_its_source_in_the_tree_as_main_tex(
     client: AsyncClient, you: User, project: Project
 ):
-    """The `source` field is a compatibility shim over the tree. Creating with
-    it must produce a real file, or the editor and the compiler disagree."""
+    """`LatexDocumentCreate.source` turns into a real file, or the editor
+    and the compiler disagree about what a new document contains."""
     created = await client.post(
         f"/v1/projects/{project.id}/latex",
         json={"name": "paper", "source": "\\documentclass{article}"},
@@ -686,23 +716,33 @@ async def test_creating_a_document_puts_its_source_in_the_tree_as_main_tex(
     assert [f["path"] for f in tree.json()["files"]] == ["main.tex"]
 
 
-async def test_reading_a_document_returns_the_main_file_as_source(
+async def test_reading_a_document_no_longer_carries_source(
     client: AsyncClient, you: User, project: Project
 ):
+    """`LatexDocumentOut` has no `source` field any more -- the content lives
+    at `GET /file?path=main.tex`, the one remaining way to read it."""
     created = await client.post(
         f"/v1/projects/{project.id}/latex",
         json={"name": "paper", "source": "BODY"},
         headers={"X-Dev-User-Id": you.id},
     )
     doc_id = created.json()["id"]
+    assert "source" not in created.json()
 
     got = await client.get(
         f"/v1/projects/{project.id}/latex/{doc_id}", headers={"X-Dev-User-Id": you.id}
     )
-    assert got.json()["source"] == "BODY"
+    assert "source" not in got.json()
+
+    file_read = await client.get(
+        f"/v1/projects/{project.id}/latex/{doc_id}/file",
+        params={"path": "main.tex"},
+        headers={"X-Dev-User-Id": you.id},
+    )
+    assert file_read.json()["content"] == "BODY"
 
 
-async def test_patching_source_writes_the_main_file_and_bumps_the_revision(
+async def test_writing_the_main_file_bumps_the_revision(
     client: AsyncClient, you: User, project: Project
 ):
     created = await client.post(
@@ -713,13 +753,13 @@ async def test_patching_source_writes_the_main_file_and_bumps_the_revision(
     doc_id = created.json()["id"]
     before = created.json()["revision"]
 
-    patched = await client.patch(
-        f"/v1/projects/{project.id}/latex/{doc_id}",
-        json={"source": "new"},
+    written = await client.put(
+        f"/v1/projects/{project.id}/latex/{doc_id}/file",
+        params={"path": "main.tex"},
+        json={"content": "new"},
         headers={"X-Dev-User-Id": you.id},
     )
-    assert patched.json()["source"] == "new"
-    assert patched.json()["revision"] > before
+    assert written.json()["revision"] > before
 
     file_read = await client.get(
         f"/v1/projects/{project.id}/latex/{doc_id}/file",
@@ -752,7 +792,13 @@ async def test_main_path_can_be_repointed_at_another_tex_file(
     )
     assert resp.status_code == 200
     assert resp.json()["main_path"] == "other.tex"
-    assert resp.json()["source"] == "b"
+
+    file_read = await client.get(
+        f"/v1/projects/{project.id}/latex/{doc_id}/file",
+        params={"path": "other.tex"},
+        headers={"X-Dev-User-Id": you.id},
+    )
+    assert file_read.json()["content"] == "b"
 
 
 async def test_repointing_main_path_bumps_the_revision(
@@ -1094,47 +1140,6 @@ async def test_repointing_main_path_by_a_denormalized_path_stores_the_normalized
         headers={"X-Dev-User-Id": you.id},
     )
     assert guarded.status_code == 409
-
-
-async def test_a_patch_carrying_both_main_path_and_source_writes_the_new_main_file(
-    client: AsyncClient, you: User, project: Project
-):
-    """Order matters: `main_path` is applied BEFORE `source`. Reversed, the
-    content silently lands in the OLD main file with no error -- this test
-    is what fails if that order regresses."""
-    created = await client.post(
-        f"/v1/projects/{project.id}/latex",
-        json={"name": "paper", "source": "ORIGINAL"},
-        headers={"X-Dev-User-Id": you.id},
-    )
-    doc_id = created.json()["id"]
-    await client.put(
-        f"/v1/projects/{project.id}/latex/{doc_id}/file",
-        params={"path": "other.tex"},
-        json={"content": "stub"},
-        headers={"X-Dev-User-Id": you.id},
-    )
-
-    resp = await client.patch(
-        f"/v1/projects/{project.id}/latex/{doc_id}",
-        json={"main_path": "other.tex", "source": "Z"},
-        headers={"X-Dev-User-Id": you.id},
-    )
-    assert resp.status_code == 200
-
-    other = await client.get(
-        f"/v1/projects/{project.id}/latex/{doc_id}/file",
-        params={"path": "other.tex"},
-        headers={"X-Dev-User-Id": you.id},
-    )
-    assert other.json()["content"] == "Z"
-
-    main = await client.get(
-        f"/v1/projects/{project.id}/latex/{doc_id}/file",
-        params={"path": "main.tex"},
-        headers={"X-Dev-User-Id": you.id},
-    )
-    assert main.json()["content"] == "ORIGINAL"
 
 
 async def test_creating_a_document_that_would_exceed_the_project_quota_is_a_413_and_creates_nothing(

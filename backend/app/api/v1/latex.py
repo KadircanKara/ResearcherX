@@ -50,29 +50,6 @@ async def _get_document_or_404(
     return document
 
 
-async def _as_out(db: AsyncSession, document: LatexDocument) -> LatexDocumentOut:
-    """Assemble the response, resolving the `source` shim from the tree.
-
-    `source` is not a column any more. Reading the main file here keeps the
-    single-file editor working unchanged while the tree lands; plan 4 deletes
-    the field and this helper with it. A document whose main file is missing
-    reports an empty source rather than failing -- the editor shows an empty
-    buffer, which is recoverable, where a 500 is not.
-    """
-    row = await files.read_file(db, document.id, document.main_path)
-    return LatexDocumentOut(
-        id=document.id,
-        project_id=document.project_id,
-        name=document.name,
-        source=(row.content or "") if row is not None and not row.is_binary else "",
-        main_path=document.main_path,
-        revision=document.revision,
-        engine=document.engine,
-        created_at=document.created_at,
-        updated_at=document.updated_at,
-    )
-
-
 @router.get("/projects/{project_id}/latex", response_model=list[LatexDocumentOut])
 async def list_documents(
     project_id: str,
@@ -91,10 +68,7 @@ async def list_documents(
         .scalars()
         .all()
     )
-    out = []
-    for row in rows:
-        out.append(await _as_out(db, row))
-    return out
+    return [LatexDocumentOut.model_validate(row) for row in rows]
 
 
 @router.post("/projects/{project_id}/latex", response_model=LatexDocumentOut, status_code=201)
@@ -118,9 +92,9 @@ async def create_document(
     # earlier version of this route did -- leaves an orphan document with an
     # empty tree if the write fails its quota/collision checks.
     await db.flush()
-    # The `source` field is a shim: turn it into the real file the compiler
-    # will read, so create and compile cannot disagree about what the
-    # document contains.
+    # `LatexDocumentCreate.source` turns into the real main file the
+    # compiler will read, so create and compile cannot disagree about what
+    # the document contains.
     try:
         await files.write_text(db, document.id, document.main_path, payload.source)
     except Exception as exc:
@@ -128,7 +102,7 @@ async def create_document(
         raise _translate(exc) from exc
     await db.commit()
     await db.refresh(document)
-    return await _as_out(db, document)
+    return LatexDocumentOut.model_validate(document)
 
 
 @router.get("/projects/{project_id}/latex/{document_id}", response_model=LatexDocumentOut)
@@ -139,7 +113,8 @@ async def get_document(
     db: AsyncSession = Depends(get_session),
 ) -> LatexDocumentOut:
     await project_service.require_member(db, project_id, user.id, "viewer")
-    return await _as_out(db, await _get_document_or_404(db, project_id, document_id))
+    document = await _get_document_or_404(db, project_id, document_id)
+    return LatexDocumentOut.model_validate(document)
 
 
 @router.patch("/projects/{project_id}/latex/{document_id}", response_model=LatexDocumentOut)
@@ -154,8 +129,6 @@ async def update_document(
     document = await _get_document_or_404(db, project_id, document_id)
     if payload.name is not None:
         document.name = payload.name
-    # Order matters: main_path is applied BEFORE source, so a single PATCH
-    # carrying both writes the NEW main file rather than the old one.
     if payload.main_path is not None:
         # Normalized ONCE, then that one value is what gets looked up AND
         # stored. `read_file` normalizes only for its own lookup; storing
@@ -178,18 +151,12 @@ async def update_document(
         if document.main_path != normalized_main:
             document.main_path = normalized_main
             await files.bump_revision(db, document.id)
-    if payload.source is not None:
-        try:
-            await files.write_text(db, document.id, document.main_path, payload.source)
-        except Exception as exc:
-            await db.rollback()
-            raise _translate(exc) from exc
     if payload.engine is not None and payload.engine != document.engine:
         document.engine = payload.engine
         await files.bump_revision(db, document.id)
     await db.commit()
     await db.refresh(document)
-    return await _as_out(db, document)
+    return LatexDocumentOut.model_validate(document)
 
 
 @router.delete("/projects/{project_id}/latex/{document_id}", status_code=204)

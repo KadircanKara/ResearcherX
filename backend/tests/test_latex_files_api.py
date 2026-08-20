@@ -491,8 +491,8 @@ async def test_uploading_a_binary_over_the_main_file_is_a_409_and_leaves_the_sou
     )
     assert resp.status_code == 409
 
-    got = await client.get(base, headers=_h(you))
-    assert got.json()["source"] == "\\documentclass{article}"
+    file_read = await client.get(f"{base}/file", params={"path": "main.tex"}, headers=_h(you))
+    assert file_read.json()["content"] == "\\documentclass{article}"
 
 
 async def test_a_binary_upload_over_the_cap_is_a_413(

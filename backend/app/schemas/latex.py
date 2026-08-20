@@ -28,7 +28,6 @@ class LatexDocumentCreate(BaseModel):
 
 class LatexDocumentUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=200)
-    source: str | None = Field(default=None, max_length=_MAX_SOURCE_LENGTH)
     main_path: str | None = Field(default=None, min_length=1, max_length=400)
     engine: Engine | None = None
 
@@ -37,18 +36,12 @@ class LatexDocumentOut(BaseModel):
     id: str
     project_id: str
     name: str
-    # COMPATIBILITY SHIM. There is no `source` column any more -- this is the
-    # content of the file named by `main_path`, resolved on read. It exists so
-    # the single-file editor keeps working while the tree lands, and it is
-    # removed in plan 4 once the frontend reads the tree directly.
-    source: str
     main_path: str
     revision: int
     engine: str
     created_at: datetime
     updated_at: datetime
-    # NOT from_attributes: `source` is assembled by the route, not read off
-    # the ORM instance.
+    model_config = {"from_attributes": True}
 
 
 class CompileOut(BaseModel):

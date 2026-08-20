@@ -72,18 +72,22 @@ async def test_importing_a_project_creates_a_document_with_its_tree(
     assert [f["is_binary"] for f in tree.json()["files"] if f["path"] == "f.png"] == [True]
 
 
-async def test_an_imported_project_reports_its_source_through_the_shim(
+async def test_an_imported_projects_main_file_content_is_readable(
     client: AsyncClient, you: User, project: Project
 ):
     blob = _zip({"main.tex": DOC})
     created = await client.post(
         f"/v1/projects/{project.id}/latex/import", content=blob, headers=_h(you)
     )
-    got = await client.get(
-        f"/v1/projects/{project.id}/latex/{created.json()['id']}",
+    doc_id = created.json()["id"]
+    assert "source" not in created.json()
+
+    file_read = await client.get(
+        f"/v1/projects/{project.id}/latex/{doc_id}/file",
+        params={"path": "main.tex"},
         headers={"X-Dev-User-Id": you.id},
     )
-    assert got.json()["source"] == DOC.decode()
+    assert file_read.json()["content"] == DOC.decode()
 
 
 async def test_a_fontspec_project_is_created_as_xelatex(

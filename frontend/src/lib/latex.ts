@@ -6,10 +6,7 @@ export interface LatexDocument {
   id: string;
   project_id: string;
   name: string;
-  source: string;
-  // Both of these are on the backend's LatexDocumentOut and always present in
-  // the response body -- this type was simply never updated when the tree
-  // landed. `main_path` names the file that gets compiled (deleting it, or
+  // `main_path` names the file that gets compiled (deleting it, or
   // overwriting it with binary, is refused: the backend answers 409).
   // `revision` is the server's own mutation counter; nothing on the client
   // increments it, every mutation response just reports the new value.
@@ -70,7 +67,7 @@ export function getDocument(projectId: string, documentId: string): Promise<Late
 export async function patchDocument(
   projectId: string,
   documentId: string,
-  body: { name?: string; source?: string; main_path?: string; engine?: LatexEngine }
+  body: { name?: string; main_path?: string; engine?: LatexEngine }
 ): Promise<LatexDocument> {
   const doc = await apiSend<LatexDocument>(
     "PATCH",
