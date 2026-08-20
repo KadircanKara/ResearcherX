@@ -25,7 +25,7 @@ from starlette.concurrency import run_in_threadpool
 
 from app.core.config import settings
 from app.core.identity import get_current_user
-from app.db.models import LatexDocument, User
+from app.db.models import LatexDocument, LatexFile, User
 from app.db.session import get_session
 from app.schemas.latex import (
     LatexFileContentOut,
@@ -33,6 +33,7 @@ from app.schemas.latex import (
     LatexFileRename,
     LatexFileWrite,
     LatexImportOut,
+    LatexMutationOut,
     LatexTreeOut,
 )
 from app.services import latex_files_service as files
@@ -245,6 +246,27 @@ async def export_archive_route(
     )
 
 
+async def _mutation_out(
+    db: AsyncSession, document_id: str, row: LatexFile | None
+) -> LatexMutationOut:
+    """Read back the revision the mutation just produced.
+
+    `bump_revision` is a core UPDATE, so the new value is not on any loaded
+    ORM instance -- it has to be re-SELECTed. Called BEFORE `db.commit()` in
+    every route, inside the same transaction that did the mutation, so the
+    number returned is the one that mutation produced and not a later
+    writer's.
+    """
+    revision = (
+        await db.execute(select(LatexDocument.revision).where(LatexDocument.id == document_id))
+    ).scalar_one()
+    return LatexMutationOut(
+        file=LatexFileOut.model_validate(row) if row is not None else None,
+        revision=int(revision),
+        used_bytes=await files.used_bytes(db, document_id),
+    )
+
+
 @router.get(f"{_BASE}/files", response_model=LatexTreeOut)
 async def list_tree(
     project_id: str,
@@ -296,7 +318,7 @@ async def read_file(
     )
 
 
-@router.put(f"{_BASE}/file", response_model=LatexFileOut)
+@router.put(f"{_BASE}/file", response_model=LatexMutationOut)
 async def write_file(
     project_id: str,
     document_id: str,
@@ -304,7 +326,7 @@ async def write_file(
     payload: LatexFileWrite,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_session),
-) -> LatexFileOut:
+) -> LatexMutationOut:
     await project_service.require_member(db, project_id, user.id, "editor")
     await _document_or_404(db, project_id, document_id)
     try:
@@ -312,12 +334,12 @@ async def write_file(
     except Exception as exc:
         await db.rollback()
         raise _translate(exc) from exc
+    out = await _mutation_out(db, document_id, row)
     await db.commit()
-    await db.refresh(row)
-    return LatexFileOut.model_validate(row)
+    return out
 
 
-@router.post(f"{_BASE}/file/binary", response_model=LatexFileOut)
+@router.post(f"{_BASE}/file/binary", response_model=LatexMutationOut)
 async def write_binary_file(
     project_id: str,
     document_id: str,
@@ -325,7 +347,7 @@ async def write_binary_file(
     request: Request,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_session),
-) -> LatexFileOut:
+) -> LatexMutationOut:
     await project_service.require_member(db, project_id, user.id, "editor")
     document = await _document_or_404(db, project_id, document_id)
 
@@ -370,23 +392,25 @@ async def write_binary_file(
     except Exception as exc:
         await db.rollback()
         raise _translate(exc) from exc
-    await db.commit()
     # No `db.refresh` here (unlike the text routes): `SessionLocal` sets
     # `expire_on_commit=False`, so attributes are not expired by the commit,
     # and a refresh would re-SELECT up to 10MB of `blob` just to serialize
     # four scalar fields -- doubling peak memory on exactly the path the
-    # streaming byte counter exists to bound.
-    return LatexFileOut.model_validate(row)
+    # streaming byte counter exists to bound. `_mutation_out` deliberately
+    # does not refresh either, for the same reason.
+    out = await _mutation_out(db, document_id, row)
+    await db.commit()
+    return out
 
 
-@router.delete(f"{_BASE}/file", status_code=204)
+@router.delete(f"{_BASE}/file", status_code=200, response_model=LatexMutationOut)
 async def delete_file(
     project_id: str,
     document_id: str,
     path: str,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_session),
-) -> Response:
+) -> LatexMutationOut:
     await project_service.require_member(db, project_id, user.id, "editor")
     document = await _document_or_404(db, project_id, document_id)
     try:
@@ -405,18 +429,19 @@ async def delete_file(
         )
     if not await files.delete_file(db, document_id, normalized):
         raise HTTPException(status_code=404, detail=f"{path} is not in this document")
+    out = await _mutation_out(db, document_id, None)
     await db.commit()
-    return Response(status_code=204)
+    return out
 
 
-@router.post(f"{_BASE}/file/rename", response_model=LatexFileOut)
+@router.post(f"{_BASE}/file/rename", response_model=LatexMutationOut)
 async def rename_file(
     project_id: str,
     document_id: str,
     payload: LatexFileRename,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_session),
-) -> LatexFileOut:
+) -> LatexMutationOut:
     await project_service.require_member(db, project_id, user.id, "editor")
     document = await _document_or_404(db, project_id, document_id)
     # Normalized once, up front, and compared/passed as the normalized value:
@@ -442,6 +467,6 @@ async def rename_file(
     except Exception as exc:
         await db.rollback()
         raise _translate(exc) from exc
+    out = await _mutation_out(db, document_id, row)
     await db.commit()
-    await db.refresh(row)
-    return LatexFileOut.model_validate(row)
+    return out

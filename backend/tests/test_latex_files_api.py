@@ -89,7 +89,7 @@ async def test_a_binary_upload_round_trips_its_bytes(
         f"{base}/file/binary", params={"path": "figures/f.png"}, content=png, headers=_h(you)
     )
     assert up.status_code == 200
-    assert up.json()["is_binary"] is True
+    assert up.json()["file"]["is_binary"] is True
 
     got = await client.get(f"{base}/file", params={"path": "figures/f.png"}, headers=_h(you))
     assert got.status_code == 200
@@ -130,7 +130,8 @@ async def test_deleting_a_file_removes_it_from_the_tree(
     )
 
     gone = await client.delete(f"{base}/file", params={"path": "a.tex"}, headers=_h(you))
-    assert gone.status_code == 204
+    assert gone.status_code == 200
+    assert gone.json()["file"] is None
 
     tree = await client.get(f"{base}/files", headers=_h(you))
     assert tree.json()["files"] == []
@@ -187,7 +188,7 @@ async def test_renaming_moves_a_file(
         f"{base}/file/rename", json={"from": "a.tex", "to": "chapters/b.tex"}, headers=_h(you)
     )
     assert resp.status_code == 200
-    assert resp.json()["path"] == "chapters/b.tex"
+    assert resp.json()["file"]["path"] == "chapters/b.tex"
 
 
 async def test_renaming_onto_an_occupied_path_is_a_409(
@@ -310,7 +311,7 @@ async def test_renaming_the_main_file_by_a_denormalized_path_still_moves_main_pa
         f"{base}/file/rename", json={"from": "./main.tex", "to": "paper.tex"}, headers=_h(you)
     )
     assert resp.status_code == 200
-    assert resp.json()["path"] == "paper.tex"
+    assert resp.json()["file"]["path"] == "paper.tex"
 
     # LatexDocumentOut does not expose main_path, so prove it followed the
     # rename indirectly: if it did, "paper.tex" is now the main file and the
@@ -512,6 +513,66 @@ async def test_a_binary_upload_over_the_cap_is_a_413(
 
     tree = await client.get(f"{base}/files", headers=_h(you))
     assert tree.json()["files"] == []
+
+
+# ── Mutation responses report the revision and quota they produced ────────
+#
+# The brief for this task (`.superpowers/sdd/...task-1-brief.md`) writes
+# these against a `DOC` base-url constant and a `client` fixture that
+# already carries auth -- neither exists in this module. This module's own
+# convention is used instead: `you`/`project`/`document` fixtures, a
+# per-call `_h(you)` header, and `base` built the same way every other test
+# here builds it.
+
+
+async def test_a_text_write_reports_the_revision_it_produced(
+    client: AsyncClient, you: User, project: Project, document: LatexDocument
+):
+    base = f"/v1/projects/{project.id}/latex/{document.id}"
+    before = (await client.get(base, headers=_h(you))).json()["revision"]
+
+    r = await client.put(
+        f"{base}/file",
+        params={"path": "chapters/intro.tex"},
+        json={"content": "hello"},
+        headers=_h(you),
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["revision"] == before + 1
+    assert body["file"]["path"] == "chapters/intro.tex"
+
+    # The number in the write response is the number the document now has --
+    # a client that trusts it is not one revision behind the server.
+    after = (await client.get(base, headers=_h(you))).json()["revision"]
+    assert body["revision"] == after
+
+
+async def test_a_delete_reports_a_revision_and_no_file(
+    client: AsyncClient, you: User, project: Project, document: LatexDocument
+):
+    base = f"/v1/projects/{project.id}/latex/{document.id}"
+    await client.put(
+        f"{base}/file", params={"path": "extra.tex"}, json={"content": "x"}, headers=_h(you)
+    )
+
+    r = await client.delete(f"{base}/file", params={"path": "extra.tex"}, headers=_h(you))
+    assert r.status_code == 200
+    body = r.json()
+    assert body["file"] is None
+    after = (await client.get(base, headers=_h(you))).json()["revision"]
+    assert body["revision"] == after
+
+
+async def test_used_bytes_in_a_write_response_matches_the_tree_listing(
+    client: AsyncClient, you: User, project: Project, document: LatexDocument
+):
+    base = f"/v1/projects/{project.id}/latex/{document.id}"
+    r = await client.put(
+        f"{base}/file", params={"path": "a.tex"}, json={"content": "abcde"}, headers=_h(you)
+    )
+    listing = (await client.get(f"{base}/files", headers=_h(you))).json()
+    assert r.json()["used_bytes"] == listing["used_bytes"]
 
 
 async def test_a_chunked_binary_upload_with_no_content_length_is_still_capped(

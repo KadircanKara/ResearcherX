@@ -118,6 +118,27 @@ class LatexTreeOut(BaseModel):
     max_bytes: int
 
 
+class LatexMutationOut(BaseModel):
+    """What every file mutation returns.
+
+    `revision` is here because the client's staleness rule is
+    `hasUnsavedEdits || document.revision != compiled.revision`, and the
+    moment an autosave lands `hasUnsavedEdits` goes false. Without the new
+    revision in this response the client is one bump behind the server and a
+    stale PDF reports itself fresh -- the browser-side twin of the
+    `tree_hash` bug. The server owns the counter; it reports it, rather than
+    the browser keeping a second implementation of the bump rule.
+
+    `used_bytes` rides along so the sidebar's used-of-25MB footer stays
+    correct after a write without a second round trip. `file` is None for a
+    delete, which has no file left to describe.
+    """
+
+    file: LatexFileOut | None = None
+    revision: int
+    used_bytes: int
+
+
 class LatexFileContentOut(BaseModel):
     path: str
     content: str
