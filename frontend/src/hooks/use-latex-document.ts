@@ -199,26 +199,38 @@ export function useLatexDocument(projectId: string, canEdit: boolean): UseLatexD
     // A fresh engine for whichever document this effect run is about to
     // load -- buffers, baselines and pending edits are per-document and
     // must not survive a switch (rule: "switching documents must flush,
-    // never just clear"). `docId` is read from `selectedIdRef` at SEND
-    // TIME, not captured in this closure: by the time an autosave actually
-    // fires, `selectedIdRef.current` is still this same value for as long
-    // as this engine is the active one (the cleanup below flushes and
-    // disposes it before the ref can move on), but reading through the ref
-    // rather than the closed-over `docId` keeps this callback identical in
-    // shape to every other guarded async path in this hook.
+    // never just clear").
     const saveEngine = new SaveEngine({
       delayMs: AUTOSAVE_MS,
       send: async (path, text) => {
-        const sendDocId = selectedIdRef.current;
-        if (!sendDocId) return;
-        const m = await writeTextFile(projectId, sendDocId, path, text);
+        // The document THIS engine was built for -- never resolved from
+        // `selectedIdRef`. This callback is invoked from the effect CLEANUP
+        // on a document switch, and React updates refs in the RENDER BODY
+        // that precedes the cleanup, so by then the ref already names the
+        // NEXT document. Reading it here wrote this document's text into a
+        // different document's file and lost the edit with no error shown.
+        // The ref decides whether to APPLY a result to what is on screen;
+        // it never decides where to WRITE. `docId` is null only in the
+        // branch where this engine is never given anything to save (no
+        // document selected) -- the check is for the type checker, not a
+        // runtime case that matters.
+        if (docId === null) return;
+        const m = await writeTextFile(projectId, docId, path, text);
         // `SaveEngine` catches this rejection itself and turns it into the
         // "error" save state and a lasting dirty flag -- no try/catch here,
         // that would make a failed save look clean.
-        if (selectedIdRef.current !== sendDocId) return; // user moved on; discard
-        applyMutation(m, sendDocId);
+        if (selectedIdRef.current !== docId) return; // no longer on screen
+        applyMutation(m, docId);
       },
-      onStateChange: setSaveState,
+      onStateChange: (state) => {
+        // `saveState` is ONE shared indicator, not one per document, and
+        // this is the only write path in the hook that had no identity
+        // guard at all. Without it a stale engine's flush drives the
+        // "Saving..."/"Could not save" badge for whatever document the user
+        // is now looking at.
+        if (selectedIdRef.current !== docId) return;
+        setSaveState(state);
+      },
     });
     engineRef.current = saveEngine;
 
@@ -317,9 +329,9 @@ export function useLatexDocument(projectId: string, canEdit: boolean): UseLatexD
         return;
       }
       // A binary path is never fetched as text here -- `binary-preview.tsx`
-      // fetches it on demand. Defensive: the caller is expected to route on
-      // `isTexPath`/`is_binary` before calling this, but a stale click
-      // reaching here must not corrupt a blob into a JS string.
+      // fetches it on demand. Guards on the server's own `is_binary` flag
+      // (not an extension heuristic): a stale click reaching here must not
+      // corrupt a blob into a JS string.
       const meta = filesRef.current.find((f) => f.path === path);
       if (meta?.is_binary) return;
       let text: string;
