@@ -172,10 +172,16 @@ describe("forget and rename", () => {
     // The requeued send under "b.tex" is dispatched by flushAll's own next
     // pass, not by a timer -- wait for it to actually be called before
     // releasing it, rather than assuming a fixed number of microtask ticks.
-    while (send.mock.calls.length < 2) {
+    //
+    // BOUNDED on purpose. An unbounded `while (...) await Promise.resolve()`
+    // does not fail against a broken module -- it hangs, and under
+    // `vi.useFakeTimers()` vitest's own testTimeout is starved too, so the
+    // run wedges instead of going red. Bound it so a regression REPORTS
+    // itself.
+    for (let i = 0; i < 100 && send.mock.calls.length < 2; i += 1) {
       await Promise.resolve();
     }
-    releases[1]();
+    if (releases[1]) releases[1]();
     await flushing;
 
     expect(send).toHaveBeenCalledTimes(2);

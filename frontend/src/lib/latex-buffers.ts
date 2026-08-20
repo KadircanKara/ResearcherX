@@ -207,6 +207,15 @@ export class SaveEngine {
     // concurrent rename adds a pass, and renames are user-driven and
     // finite. The bound is a safety valve against a caller looping renames
     // faster than sends settle, not an expected exit.
+    //
+    // At the bound this resolves with work still pending, silently to a
+    // caller inspecting only the promise. That is survivable rather than
+    // correct: `isDirty()` keeps reporting the path dirty, its own debounce
+    // still sends it, and a compile that races it is marked stale by the
+    // revision rule instead of presented as fresh -- so the cost is a wasted
+    // compile, never a wrong PDF. Reaching it needs ten renames of the same
+    // in-flight path inside one flush, which is an adversarial burst rather
+    // than a user's editing session.
     for (let pass = 0; pass < 10; pass += 1) {
       const paths = new Set([...this.pending.keys(), ...this.inFlight.keys()]);
       if (paths.size === 0) return;
