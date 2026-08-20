@@ -210,6 +210,70 @@ _COMPILE_ENV = {**os.environ, "max_print_line": "10000"}
 # document can only ever misdirect its own author's editor within their own
 # project.
 
+# --- The gate: did the run actually DIE AT AN ERROR? -------------------
+#
+# Everything below this line about candidates and corroboration rests on
+# one assumption that was NOT checked, and shipped past review because of
+# it: that a real error exists. "A forgery can never be the only candidate,
+# because a real error always is one" is true only on a run that errored.
+#
+# A document can fail WITHOUT raising an error -- `\begin{document}` with
+# nothing in it produces "No pages of output.", no PDF, and no error of any
+# kind. The candidate scan then finds the document's own forged line
+# standing ALONE, every honest check passes (the path is staged, `l.<n>`
+# corroborates, the line exists, and there is no fatal line to contradict
+# it because neither engine writes one here), and the editor jumps into a
+# file the error is not in. Reproduced on both engines with four lines of
+# LaTeX.
+#
+# So attribution is gated on a witness that says the ENGINE ITSELF exited
+# nonzero. Measured across both engines and five run shapes (see
+# `fixtures/driver/`), latexmk's own post-run summary distinguishes them
+# exactly:
+#
+#   run                     both engines
+#   ----------------------  -----------------------------------------------
+#   error in main           `<eng>: Command for '<eng>' gave return code 1`
+#   error in an \input      same
+#   missing package         same
+#   "No pages of output."   `<eng>: failed to create output file` -- no code
+#   success                 no summary block at all
+#
+# Why this is not one more forgeable string: latexmk writes that block
+# AFTER the engine process has exited, so nothing the document printed can
+# appear below it -- and only the text after the LAST marker is read. It is
+# the same end-of-stream argument `analyse_log` uses inside the log,
+# applied to the driver's stream, where the document's writes strictly
+# precede the driver's verdict.
+#
+# The cost is stated plainly: if a future latexmk reworded this line, the
+# gate would close permanently and the feature would silently become
+# "never jump". That is the safe direction, and it is not silent --
+# `test_a_genuine_error_still_attributes_and_still_jumps` in the container
+# suite fails the moment it stops matching.
+# TeX's own words for "this document typeset nothing", written on a run
+# that produced no output and raised no error. Matched EXACTLY and as a
+# whole line, and read only when the gate is already closed, so the worst a
+# document can do by printing it itself is relabel its own failed compile.
+_NO_PAGES = "No pages of output."
+
+_SUMMARY_MARKER = "Collected error summary"
+_ENGINE_RETURN_CODE = re.compile(r"Command for '[^']*' gave return code ([1-9]\d*)")
+
+
+def engine_errored(driver_output: str) -> bool:
+    """Did the TeX engine exit nonzero, per latexmk's own summary?
+
+    `driver_output` is latexmk's stdout+stderr, NOT the `.log` file. The
+    two are different streams and only this one carries the driver's
+    verdict on the engine's exit status.
+    """
+    marker = driver_output.rfind(_SUMMARY_MARKER)
+    if marker < 0:
+        return False
+    return bool(_ENGINE_RETURN_CODE.search(driver_output[marker:]))
+
+
 # A `path:line: message` split of one log line. Every candidate split is
 # enumerated rather than assuming a path holds no colon: `chapters/a:b.tex`
 # is a legal path here (`latex_paths.normalize_path` accepts it), it is
@@ -373,12 +437,19 @@ def analyse_log(
     main_dir: str,
     line_count,
     exists=lambda path: False,
+    errored: bool = False,
 ) -> tuple[str, str | None, int | None]:
     """`(excerpt, file, line)` for a compile log. `file` is tree-relative.
 
     `line_count(path)` returns how many lines a staged file has, or None --
     the one fact this needs from the filesystem, injected so the rest of the
     function stays pure and unit-testable without a container.
+
+    `errored` is the gate: unless the ENGINE ITSELF exited nonzero, nothing
+    is attributed however clean the log looks. See `engine_errored` above --
+    a run can fail with no error at all ("No pages of output."), and on such
+    a run a single forged line is the only candidate there is. It defaults
+    to False so a caller that forgets it declines rather than guesses.
 
     `file` and `line` are set or null TOGETHER. A line number with no file
     is worse than nothing in a multi-file project: the caller would jump
@@ -466,6 +537,27 @@ def analyse_log(
     excerpt = "\n".join(lines[start : start + 12])
 
     if error_index is None:
+        return excerpt, None, None
+
+    if not errored:
+        # THE GATE. No error happened, so there is nothing to attribute --
+        # whatever the candidate scan found is the document talking to
+        # itself. See `engine_errored` above for the witness and its cost.
+        #
+        # The jump goes; the explanation must not. The common shape here is
+        # a document that typeset nothing, and TeX says so in as many words
+        # -- so say that, rather than headlining whatever error-shaped line
+        # the scan happened to land on, which on this path is unverified
+        # text by definition. Any OTHER reason the gate is closed keeps the
+        # excerpt it would have shown, so a latexmk rewording costs the jump
+        # and not the message.
+        if _NO_PAGES in lines:
+            return (
+                "The document produced no pages, and TeX reported no error.\n\n"
+                + "\n".join(lines[-_EXCERPT_SPAN:]),
+                None,
+                None,
+            )
         return excerpt, None, None
 
     located = _located_at(lines[error_index], main_dir, staged)
@@ -806,7 +898,14 @@ def compile_tree(bounded: "_Bounded", engine: str, main_path: str) -> dict:
         )
         try:
             stdout, stderr = proc.communicate(timeout=COMPILE_TIMEOUT)
-            log_text = stdout + stderr
+            # TWO DIFFERENT STREAMS, and the distinction is load-bearing.
+            # `driver_output` is latexmk's own, and carries its post-run
+            # verdict on whether the ENGINE exited nonzero -- the gate
+            # `analyse_log` gets as `errored`. `log_text` is replaced by the
+            # `.log` file below when there is one, because that is what the
+            # user needs to read.
+            driver_output = stdout + stderr
+            log_text = driver_output
         except subprocess.TimeoutExpired:
             os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
             proc.communicate()
@@ -851,7 +950,12 @@ def compile_tree(bounded: "_Bounded", engine: str, main_path: str) -> dict:
                 return False
 
         excerpt, error_file, error_line = analyse_log(
-            log_text, staged, main_dir, _line_count, _exists
+            log_text,
+            staged,
+            main_dir,
+            _line_count,
+            _exists,
+            errored=engine_errored(driver_output),
         )
 
         pdf = main.parent / f"{stem}.pdf"

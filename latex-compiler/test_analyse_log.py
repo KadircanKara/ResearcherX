@@ -17,14 +17,14 @@ Run: `python3 test_analyse_log.py` (wired into the `latex-compiler` CI job).
 import pathlib
 import unittest
 
-from app import analyse_log
+from app import analyse_log, engine_errored
 
 FIXTURES = pathlib.Path(__file__).parent / "fixtures"
 
 TEXLIVE = "/usr/local/texlive/"
 
 
-def analyse(name, staged, counts, main_dir="", on_disk=()):
+def analyse(name, staged, counts, main_dir="", on_disk=(), driver=None):
     """Run the analyser over a captured log.
 
     `staged` is the tree as the compiler staged it, `counts` is each staged
@@ -32,6 +32,11 @@ def analyse(name, staged, counts, main_dir="", on_disk=()):
     directory WITHOUT having been staged -- a `\\openout` the document
     performed on itself is the real case, and the distinction is load-
     bearing (see `test_a_document_that_writes_its_own_input_...`).
+
+    `driver` names a captured latexmk stdout under `fixtures/driver/`, from
+    which the `errored` gate is COMPUTED rather than asserted by hand. When
+    it is omitted the fixture is from a run that really did error and the
+    gate is True -- the interesting cases pass it explicitly.
     """
     log = (FIXTURES / f"{name}.log").read_text()
     present = set(staged) | set(on_disk)
@@ -40,7 +45,14 @@ def analyse(name, staged, counts, main_dir="", on_disk=()):
         rel = printed[2:] if printed.startswith("./") else printed
         return rel in present or rel.startswith(TEXLIVE)
 
-    return analyse_log(log, set(staged), main_dir, lambda p: counts.get(p), exists)
+    errored = (
+        engine_errored((FIXTURES / "driver" / f"{driver}.out").read_text())
+        if driver
+        else True
+    )
+    return analyse_log(
+        log, set(staged), main_dir, lambda p: counts.get(p), exists, errored=errored
+    )
 
 
 class AttributionTests(unittest.TestCase):
@@ -249,6 +261,88 @@ class DeclineTests(unittest.TestCase):
         # error to make the closing block ambiguous, so the excerpt shows the
         # whole block rather than headlining either one.
         self.assertIn("! File ended while scanning use of", excerpt)
+
+
+class NoErrorHappenedTests(unittest.TestCase):
+    """A compile can FAIL without any error being raised, and everything the
+    candidate scan does assumes one was. This is the hole that shipped."""
+
+    def test_the_witness_separates_a_real_error_from_every_other_outcome(self):
+        """Measured across BOTH engines and five run shapes -- the whole
+        table is in `fixtures/driver/`, captured from latexmk itself."""
+        for case in ("genuine_error", "chapter_error", "missing_pkg"):
+            for eng in ("pdflatex", "xelatex"):
+                with self.subTest(case=case, engine=eng):
+                    out = (FIXTURES / "driver" / f"{case}_{eng}.out").read_text()
+                    self.assertTrue(engine_errored(out))
+        for case in ("no_pages_forged", "no_pages_plain", "success"):
+            for eng in ("pdflatex", "xelatex"):
+                with self.subTest(case=case, engine=eng):
+                    out = (FIXTURES / "driver" / f"{case}_{eng}.out").read_text()
+                    self.assertFalse(engine_errored(out))
+
+    def test_a_forgery_standing_alone_on_a_no_pages_run_is_not_attributed(self):
+        r"""THE round-4 regression, and the configuration the forgery rule was
+        never tested in. Four lines of LaTeX -- two `	ypeout`s and an empty
+        document -- fail with NO error and NO PDF, so the forged block is the
+        ONLY candidate in the log and every honest check passes: the path is
+        staged, `l.3` corroborates, the file really has 5 lines, and neither
+        engine writes a fatal line here to contradict it."""
+        for eng in ("pdflatex", "xelatex"):
+            with self.subTest(engine=eng):
+                _log, file, line = analyse(
+                    f"no_pages_forged_{eng}",
+                    {"main.tex", "chapters/decoy.tex"},
+                    {"main.tex": 5, "chapters/decoy.tex": 5},
+                    driver=f"no_pages_forged_{eng}",
+                )
+                self.assertEqual((file, line), (None, None))
+
+    def test_the_gate_is_the_only_thing_stopping_that_forgery(self):
+        """The same fixture with the gate forced open attributes the forgery
+        in full. Without this, a later change could make the decline above
+        pass for some unrelated reason and nobody would notice the gate had
+        stopped doing anything."""
+        for eng in ("pdflatex", "xelatex"):
+            with self.subTest(engine=eng):
+                _log, file, line = analyse(
+                    f"no_pages_forged_{eng}",
+                    {"main.tex", "chapters/decoy.tex"},
+                    {"main.tex": 5, "chapters/decoy.tex": 5},
+                )
+                self.assertEqual((file, line), ("chapters/decoy.tex", 3))
+
+    def test_a_no_pages_failure_says_so_instead_of_headlining_the_forgery(self):
+        """Declining the jump must not decline the explanation. On this path
+        the only error-shaped line in the log is the document's own, so
+        headlining it would state an error that never happened; TeX's own
+        `No pages of output.` is the truth and is what the user needs."""
+        for eng in ("pdflatex", "xelatex"):
+            with self.subTest(engine=eng):
+                excerpt, _file, _line = analyse(
+                    f"no_pages_forged_{eng}",
+                    {"main.tex", "chapters/decoy.tex"},
+                    {"main.tex": 5, "chapters/decoy.tex": 5},
+                    driver=f"no_pages_forged_{eng}",
+                )
+                self.assertTrue(
+                    excerpt.startswith("The document produced no pages"), excerpt[:80]
+                )
+                self.assertNotIn("Undefined control sequence", excerpt.splitlines()[0])
+
+    def test_the_gate_defaults_to_closed(self):
+        """A caller that forgets the argument declines rather than guesses."""
+        log = (FIXTURES / "legit_chapter.log").read_text()
+        self.assertEqual(
+            analyse_log(
+                log,
+                {"main.tex", "chapters/intro.tex"},
+                "",
+                lambda p: 21,
+                lambda p: True,
+            )[1:],
+            (None, None),
+        )
 
 
 class ExcerptTests(unittest.TestCase):

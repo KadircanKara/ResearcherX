@@ -207,6 +207,67 @@ async def test_a_forged_error_line_in_the_source_is_not_offered_as_a_jump(engine
 
 
 @pytest.mark.parametrize("engine", ["pdflatex", "xelatex"])
+async def test_a_forgery_alone_on_a_run_that_raised_no_error_is_not_attributed(engine: str):
+    r"""The forgery rule was only ever tested WITH a real error present, and
+    that is exactly the configuration where it holds: a forgery cannot be the
+    only candidate while a real error exists, because a real error is always
+    a candidate.
+
+    A compile can fail with NO error at all. This document typesets nothing,
+    so it produces "No pages of output.", no PDF, and no error -- and the
+    forged block is then the only candidate in the log. Every honest check
+    passes: `chapters/decoy.tex` is staged, `l.3` corroborates, the file
+    really has five lines, and neither engine writes a fatal line here to
+    contradict it (pdflatex writes none on a no-error run, xelatex never
+    writes one at all). Only the engine's own exit status separates this
+    from a genuine error.
+    """
+    result = await compile_tree(
+        [
+            (
+                "main.tex",
+                b"\\documentclass{article}\n"
+                b"\\typeout{./chapters/decoy.tex:3: Undefined control sequence.}\n"
+                b"\\typeout{l.3 zz}\n"
+                b"\\begin{document}\n\\end{document}\n",
+            ),
+            ("chapters/decoy.tex", b"one\ntwo\nthree\nfour\nfive\n"),
+        ],
+        engine,
+        "main.tex",
+    )
+
+    assert not result.ok
+    assert result.pdf is None
+    assert (result.error_file, result.error_line) == (None, None)
+    # And it still explains itself -- declining the jump must not decline the
+    # message.
+    assert result.log.startswith("The document produced no pages")
+
+
+@pytest.mark.parametrize("engine", ["pdflatex", "xelatex"])
+async def test_a_genuine_error_still_attributes_and_still_jumps(engine: str):
+    """The other half of the gate, and the test that fails LOUDLY if a future
+    latexmk rewords the summary line the witness reads. A mechanism that only
+    ever declines is useless; this pins that the ordinary path still works."""
+    result = await compile_tree(
+        [
+            (
+                "main.tex",
+                rb"\documentclass{article}\begin{document}"
+                rb"\input{chapters/intro}\end{document}",
+            ),
+            ("chapters/intro.tex", b"fine\n\n\\bogusmacro\n"),
+        ],
+        engine,
+        "main.tex",
+    )
+
+    assert not result.ok
+    assert (result.error_file, result.error_line) == ("chapters/intro.tex", 3)
+
+
+@pytest.mark.parametrize("engine", ["pdflatex", "xelatex"])
 async def test_a_colon_in_a_filename_is_attributed_instead_of_dumping_memory_statistics(
     engine: str,
 ):
