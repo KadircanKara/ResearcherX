@@ -1,8 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Loader2, Play, X } from "lucide-react";
-import { Button } from "@/components/ui/button";
+import { Clock, Loader2, Play, X } from "lucide-react";
 import { BinaryPreview } from "@/components/latex/binary-preview";
 import { EditorPane } from "@/components/latex/editor-pane";
 import { FileTree } from "@/components/latex/file-tree";
@@ -19,6 +18,7 @@ import {
   fetchExport,
   type LatexEngine,
 } from "@/lib/latex";
+import { compileMeta } from "@/lib/latex-status";
 import { buildTree, isBeneath, isTexPath, parentDir } from "@/lib/latex-tree";
 import type { Role } from "@/lib/types";
 
@@ -94,6 +94,18 @@ export function LatexWorkspace({ projectId, role }: LatexWorkspaceProps) {
     activePath: doc.activePath,
     beforeCompile,
   });
+
+  // When a compile last LANDED IN THIS BROWSER. Nothing in the API carries a
+  // built-at time -- `CompiledState` is a revision and a hash -- so this is
+  // the only honest source for the header's "compiled 14:32", and it is
+  // deliberately derived from `compile.compiled`'s identity rather than set
+  // beside the compile call: the hook clears that state to null the instant
+  // the selected document changes, and a timestamp kept anywhere else would
+  // go on describing the previous document's build.
+  const [compiledAt, setCompiledAt] = useState<number | null>(null);
+  useEffect(() => {
+    setCompiledAt(compile.compiled ? Date.now() : null);
+  }, [compile.compiled]);
 
   // Drag handle. Clamped so neither pane can be dragged out of existence.
   const [splitPercent, setSplitPercent] = useState(60);
@@ -289,13 +301,38 @@ export function LatexWorkspace({ projectId, role }: LatexWorkspaceProps) {
   );
 
   if (doc.loading) {
-    return <div className="h-[70vh] animate-pulse rounded-xl bg-muted" />;
+    return <div className="rx-tex-skel" />;
   }
 
   const activeMeta = activePath ? doc.files.find((f) => f.path === activePath) : undefined;
+  const meta = compileMeta({
+    engine: doc.engine,
+    compiledAt,
+    stale: compile.stale,
+    compiling: compile.compiling,
+  });
+  const docName = doc.documents.find((d) => d.id === doc.selectedId)?.name ?? null;
 
   return (
-    <div className="flex h-[calc(100vh-14rem)] min-h-[32rem] flex-col gap-2">
+    <div>
+      <header className="rx-head">
+        <div>
+          <div className="rx-eyebrow">Manuscript</div>
+          <h1>{docName ?? "No document yet"}</h1>
+        </div>
+        {doc.selectedId && (
+          <div className="rx-meta">
+            {meta.primary}
+            {meta.secondary && (
+              <>
+                <br />
+                {meta.secondary}
+              </>
+            )}
+          </div>
+        )}
+      </header>
+
       {/*
         A save failure is a fact about the user's TEXT, not about which
         document happens to be on screen -- it must survive a switch away
@@ -313,7 +350,7 @@ export function LatexWorkspace({ projectId, role }: LatexWorkspaceProps) {
               // the same document can be failing at once, and an id-only key
               // collides between them.
               key={`${f.id}\u0000${f.path}`}
-              className="flex items-center justify-between rounded-md border border-destructive/40 bg-destructive/10 px-3 py-1.5 text-xs text-destructive"
+              className="rx-tex-fail"
             >
               {/* Names the FILE as well as the document: a document-level
                   message could not tell the user which of several open
@@ -323,7 +360,7 @@ export function LatexWorkspace({ projectId, role }: LatexWorkspaceProps) {
               </span>
               <button
                 onClick={() => doc.dismissSaveFailure(f.id, f.path)}
-                className="text-destructive/70 hover:text-destructive"
+                className="rx-icon-btn"
               >
                 <X className="size-3.5" />
               </button>
@@ -332,12 +369,11 @@ export function LatexWorkspace({ projectId, role }: LatexWorkspaceProps) {
         </div>
       )}
 
-      <div className="flex items-center justify-between gap-2 rounded-xl border border-border px-3 py-2">
-        <div className="flex items-center gap-2">
+      <div className="rx-tex-bar">
           <select
             value={doc.selectedId ?? ""}
             onChange={(e) => doc.select(e.target.value || null)}
-            className="rounded-md border border-input bg-background px-2 py-1 text-sm"
+            aria-label="Document"
           >
             {doc.documents.length === 0 && <option value="">No documents yet</option>}
             {doc.documents.map((d) => (
@@ -361,68 +397,48 @@ export function LatexWorkspace({ projectId, role }: LatexWorkspaceProps) {
               }}
               onBlur={submitCreateDoc}
               placeholder="paper.tex"
-              className="rounded-md border border-input bg-background px-2 py-1 text-sm"
             />
           ) : (
-            <Button
-              size="sm"
-              variant="outline"
+            <button
+              className="rx-btn rx-btn-ghost"
               disabled={!canEdit}
               title={canEdit ? "New document" : "You need editor access to add a document"}
               onClick={() => setCreatingDoc(true)}
             >
               New
-            </Button>
+            </button>
           )}
 
-          <Button
-            size="sm"
-            variant="outline"
+          <button
+            className="rx-btn rx-btn-ghost"
             disabled={!canEdit || !doc.selectedId}
             title={canEdit ? "Delete document" : "You need editor access to delete a document"}
             onClick={() => doc.selectedId && void doc.removeDoc(doc.selectedId)}
           >
             Delete
-          </Button>
+          </button>
 
-          {doc.error && <span className="text-xs text-destructive">{doc.error}</span>}
-        </div>
-
-        {doc.selectedId && (
-          <div className="flex items-center gap-2">
+          {doc.selectedId && (
             <select
               value={doc.engine}
               disabled={!canEdit}
+              aria-label="Compile engine"
               onChange={(e) => void doc.setEngine(e.target.value as LatexEngine)}
-              className="rounded-md border border-input bg-background px-1.5 py-0.5 text-[11px]"
             >
               <option value="pdflatex">pdflatex</option>
               <option value="xelatex">xelatex</option>
             </select>
-            <Button
-              size="sm"
-              className="h-7 gap-1 px-2 text-[11px]"
-              disabled={!canEdit || compile.compiling}
-              title={canEdit ? "Compile (Cmd/Ctrl+S)" : "You need editor access to compile"}
-              onClick={() => void compile.compile()}
-            >
-              {compile.compiling ? (
-                <Loader2 className="size-3 animate-spin" />
-              ) : (
-                <Play className="size-3" />
-              )}
-              Compile
-            </Button>
-          </div>
-        )}
+          )}
+
+          {doc.error && <span className="rx-tex-err">{doc.error}</span>}
       </div>
 
       {doc.selectedId === null ? (
-        <div className="flex flex-1 flex-col items-center justify-center gap-2 text-sm text-muted-foreground">
+        <div className="rx-tex-empty">
           <p>Select a document, or create one to start writing.</p>
         </div>
       ) : (
-        <div className="relative flex flex-1 overflow-hidden rounded-xl border border-border">
+        <div className="rx-tex-grid">
           <FileTree
             nodes={buildTree(doc.files)}
             activePath={doc.activePath}
@@ -444,7 +460,7 @@ export function LatexWorkspace({ projectId, role }: LatexWorkspaceProps) {
             onExport={() => void handleExport()}
           />
 
-          <div style={{ width: `${splitPercent}%` }} className="flex flex-col overflow-hidden">
+          <div style={{ width: `${splitPercent}%` }} className="rx-pane">
             <OpenTabs
               paths={doc.openPaths}
               activePath={doc.activePath}
@@ -452,17 +468,15 @@ export function LatexWorkspace({ projectId, role }: LatexWorkspaceProps) {
               onSelect={(path) => void doc.openFile(path)}
               onClose={doc.closeFile}
             />
-            <div className="flex items-center justify-end border-b border-border px-3 py-1 text-[11px] text-muted-foreground">
+            <div className="rx-save-state">
               {doc.saveState === "saving" && "Saving…"}
               {doc.saveState === "error" && (
-                <span className="text-destructive">Could not save</span>
+                <span style={{ color: "oklch(var(--destructive))" }}>Could not save</span>
               )}
             </div>
-            <div className="flex-1 overflow-hidden">
+            <div className="rx-editor-host">
               {activePath === null ? (
-                <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
-                  Select or create a file to start writing.
-                </div>
+                <div className="rx-pane-empty">Select or create a file to start writing.</div>
               ) : /*
                   BOTH signals, never `isTexPath` alone. The two answer
                   DIFFERENT questions (see `isTexPath`'s own comment in
@@ -502,31 +516,46 @@ export function LatexWorkspace({ projectId, role }: LatexWorkspaceProps) {
 
           <div
             onPointerDown={startDrag}
-            className="w-1.5 shrink-0 cursor-col-resize bg-border transition-colors hover:bg-primary/40"
+            className="rx-split"
             role="separator"
             aria-orientation="vertical"
           />
 
-          <div className="flex flex-1 flex-col overflow-hidden">
-            <div className="flex items-center justify-between border-b border-border px-3 py-1.5 text-xs">
-              <div className="flex items-center gap-2">
-                <span className="text-muted-foreground">Preview</span>
-                {compile.pdfBytes && compile.stale && (
-                  <span className="rounded-full bg-amber-500/15 px-2 py-0.5 text-[11px] font-medium text-amber-700 dark:text-amber-400">
-                    {STALE_NOTE}
-                  </span>
+          <div className="rx-tex-preview">
+            {/* The compile control lives HERE, in the preview's own bar, not
+                in the document toolbar above: it is the control that changes
+                what this pane shows, and the staleness badge beside it is a
+                statement about this pane's contents. Nothing about what it
+                does moved with it -- the same `compile.compile()`, which
+                still flushes every pending save first. */}
+            <div className="rx-tex-preview-bar">
+              <button
+                className="rx-btn"
+                disabled={!canEdit || compile.compiling}
+                title={canEdit ? "Compile (Cmd/Ctrl+S)" : "You need editor access to compile"}
+                onClick={() => void compile.compile()}
+              >
+                {compile.compiling ? (
+                  <Loader2 className="size-3 animate-spin" />
+                ) : (
+                  <Play className="size-3" />
                 )}
-                {/* `compile.syncNote` is already gated inside the hook: the
-                    "PDF is out of date" message can never render while the
-                    PDF is not, in fact, out of date. Every OTHER message
-                    (declined-sync, "no place matches", "unavailable") passes
-                    through unconditionally. */}
-                {compile.syncNote && (
-                  <span className="text-[11px] text-muted-foreground">{compile.syncNote}</span>
-                )}
-              </div>
+                Compile
+              </button>
+              {compile.pdfBytes && compile.stale && (
+                <span className="rx-stale">
+                  <Clock className="size-2.5" />
+                  {STALE_NOTE}
+                </span>
+              )}
+              {/* `compile.syncNote` is already gated inside the hook: the
+                  "PDF is out of date" message can never render while the
+                  PDF is not, in fact, out of date. Every OTHER message
+                  (declined-sync, "no place matches", "unavailable") passes
+                  through unconditionally. */}
+              {compile.syncNote && <span className="rx-sync-note">{compile.syncNote}</span>}
             </div>
-            <div className="flex-1 overflow-hidden">
+            <div className="rx-tex-preview-body">
               <PdfViewer
                 bytes={compile.pdfBytes}
                 scale={1.25}

@@ -26,36 +26,27 @@ export function OpenTabs({ paths, activePath, dirtyPaths, onSelect, onClose }: O
 
   const dirty = new Set(dirtyPaths);
 
+  // Deliberately NOT role="tablist"/"tab": each tab is a wrapper holding a
+  // select button, a dirty dot and a close button, and a tablist whose
+  // children are not tabs is a worse answer for a screen reader than no roles
+  // at all. `aria-current` is valid on any element and says the one thing
+  // that matters here.
   return (
-    <div className="flex h-8 shrink-0 items-center gap-0.5 overflow-x-auto border-b border-border px-1">
+    <div className="rx-tabs">
       {paths.map((path) => {
         const label = (counts.get(basename(path)) ?? 0) > 1 ? path : basename(path);
         const isActive = path === activePath;
         return (
-          <div
-            key={path}
-            title={path}
-            className={cn(
-              "group flex shrink-0 items-center gap-1.5 rounded-t-md border-b-2 px-2.5 py-1 text-sm",
-              isActive
-                ? "border-primary bg-muted font-medium text-foreground"
-                : "border-transparent text-muted-foreground hover:bg-muted/60 hover:text-foreground"
-            )}
-          >
-            <button className="max-w-40 truncate" onClick={() => onSelect(path)}>
+          <div key={path} title={path} className={cn("rx-tab", isActive && "rx-tab-on")}>
+            <button
+              aria-current={isActive ? "true" : undefined}
+              className="rx-tab-label"
+              onClick={() => onSelect(path)}
+            >
               {label}
             </button>
-            {dirty.has(path) && (
-              <span
-                className="size-1.5 shrink-0 rounded-full bg-foreground/60"
-                title="Unsaved changes"
-              />
-            )}
-            <button
-              title="Close"
-              className="shrink-0 text-muted-foreground/70 hover:text-foreground"
-              onClick={() => onClose(path)}
-            >
+            {dirty.has(path) && <span className="rx-unsaved" title="Unsaved changes" />}
+            <button title="Close" className="rx-tab-x" onClick={() => onClose(path)}>
               <X className="size-3" />
             </button>
           </div>

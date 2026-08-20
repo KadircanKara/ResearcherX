@@ -1,0 +1,513 @@
+/* ── LaTeX layout ─────────────────────────────────────────────────────────
+ *
+ * Ported from the approved "Reading Room" concept, LaTeX screen. The
+ * Institution/Console palette and the shared primitives live in
+ * `rx-theme.css` on `.rx-theme`, which this screen's wrapper also carries.
+ * There is exactly one copy of that token block and this file is not it.
+ *
+ * Every selector below is a descendant of `.rx-tex`, and the four components
+ * that carry these classes (`file-tree`, `open-tabs`, `log-panel` and the
+ * workspace itself) have no other consumer in the app.
+ * ───────────────────────────────────────────────────────────────────────── */
+
+.rx-tex {
+  /* 1760px, the concept's own shell. Wider than this and the preview pane
+     grows past the width a page of A4 is legible at, which buys nothing. */
+  --rx-shell: 1760px;
+  padding: 0 0 32px;
+}
+/* The concept's 44px is measured from the top of a page. This screen is a TAB
+   and already sits under the project header and the tab strip, so the same
+   air above the eyebrow reads as a gap. */
+.rx-tex .rx-head {
+  padding-top: 22px;
+}
+
+/* ── Header row: the document, its engine, and the document-level actions ── */
+.rx-tex-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 0 0 14px;
+}
+.rx-tex-bar select {
+  border: 1px solid oklch(var(--border));
+  border-radius: var(--radius);
+  background: oklch(var(--card));
+  color: oklch(var(--foreground));
+  font-family: var(--rx-sans);
+  font-size: 13px;
+  padding: 5px 8px;
+}
+.rx-tex-bar input {
+  border: 1px solid oklch(var(--border));
+  border-radius: var(--radius);
+  background: oklch(var(--card));
+  color: oklch(var(--foreground));
+  font-size: 13px;
+  padding: 5px 8px;
+}
+.rx-tex-err {
+  font-size: 12.5px;
+  color: oklch(var(--destructive));
+}
+
+/* A save failure is about the user's TEXT and outlives the document that
+   produced it, so it sits above the panel rather than inside a pane. */
+.rx-tex-fail {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+  padding: 8px 12px;
+  border-radius: var(--radius);
+  background: oklch(var(--rx-danger-wash));
+  border-left: 2px solid oklch(var(--destructive));
+  font-size: 12.5px;
+  color: oklch(var(--destructive));
+}
+
+/* ── The three panes ──────────────────────────────────────────────────── */
+.rx-tex-grid {
+  display: flex;
+  border: 1px solid oklch(var(--border));
+  border-radius: var(--radius);
+  background: oklch(var(--card));
+  overflow: hidden;
+  height: min(80vh, 1120px);
+  min-height: 620px;
+}
+.rx-tex-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: min(60vh, 620px);
+  border: 1px solid oklch(var(--border));
+  border-radius: var(--radius);
+  background: oklch(var(--card));
+  color: oklch(var(--muted-foreground));
+  font-size: 14px;
+}
+.rx-tex-skel {
+  height: min(70vh, 900px);
+  border: 1px solid oklch(var(--border));
+  border-radius: var(--radius);
+  background: oklch(var(--foreground) / 0.04);
+}
+
+/* ── File tree ────────────────────────────────────────────────────────── */
+.rx-tex .rx-tree {
+  display: flex;
+  flex-direction: column;
+  width: clamp(230px, 13vw, 330px);
+  flex: none;
+  min-height: 0;
+  border-right: 1px solid oklch(var(--rx-hair));
+  padding-top: 14px;
+}
+.rx-tex .rx-tree-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 0 12px 10px;
+}
+.rx-tex .rx-tree-tools {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+.rx-tex .rx-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 3px;
+  color: oklch(var(--muted-foreground));
+  transition:
+    background var(--rx-t) var(--rx-ease),
+    color var(--rx-t) var(--rx-ease);
+}
+.rx-tex .rx-icon-btn:hover:not(:disabled) {
+  background: oklch(var(--foreground) / 0.05);
+  color: oklch(var(--foreground));
+}
+.rx-tex .rx-icon-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.rx-tex .rx-tree-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 0 8px 8px;
+}
+.rx-tex .rx-tree-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  border-radius: 3px;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  color: oklch(var(--muted-foreground));
+  transition:
+    background var(--rx-t) var(--rx-ease),
+    color var(--rx-t) var(--rx-ease);
+}
+.rx-tex .rx-tree-row:hover {
+  background: oklch(var(--foreground) / 0.05);
+  color: oklch(var(--foreground));
+}
+.rx-tex .rx-tree-row-on {
+  background: oklch(var(--accent));
+  color: oklch(var(--accent-foreground));
+}
+.rx-tex .rx-tree-row svg {
+  flex: none;
+  opacity: 0.75;
+}
+.rx-tex .rx-tree-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 1;
+  text-align: left;
+}
+.rx-tex .rx-main-flag {
+  margin-left: auto;
+  font-family: var(--rx-sans);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: oklch(var(--muted-foreground));
+  flex: none;
+}
+.rx-tex .rx-tree-input {
+  width: calc(100% - 16px);
+  margin: 0 8px 6px;
+  border: 1px solid oklch(var(--input));
+  border-radius: 3px;
+  background: oklch(var(--card));
+  color: oklch(var(--foreground));
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  padding: 4px 6px;
+}
+ /* Faded rather than `visibility: hidden`, which takes an element OUT of the
+    tab order entirely -- these three controls (set-main, rename, delete) are
+    the only way to do those things, and hidden that way a keyboard could
+    never reach them. Opacity leaves them focusable, and `:focus-within`
+    brings them into view when focus lands on one. */
+.rx-tex .rx-row-tools {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: none;
+  opacity: 0;
+  transition: opacity var(--rx-t) var(--rx-ease);
+}
+.rx-tex .rx-tree-row:hover .rx-row-tools,
+.rx-tex .rx-tree-row:focus-within .rx-row-tools,
+.rx-tex .rx-row-tools:focus-within {
+  opacity: 1;
+}
+
+/* The quota footer. Always visible: a cap the user cannot see is a cap they
+   meet as an unexplained failure. */
+.rx-tex .rx-quota {
+  margin-top: auto;
+  padding: 12px 16px;
+  border-top: 1px solid oklch(var(--rx-hair));
+  font-size: 12px;
+  color: oklch(var(--muted-foreground));
+}
+.rx-tex .rx-quota-full {
+  color: oklch(var(--destructive));
+  font-weight: 500;
+}
+.rx-tex .rx-prog {
+  display: block;
+  width: 100%;
+  height: 3px;
+  margin-top: 6px;
+  background: oklch(var(--foreground) / 0.05);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.rx-tex .rx-prog i {
+  display: block;
+  height: 100%;
+  background: oklch(var(--accent-foreground));
+}
+.rx-tex .rx-prog-full i {
+  background: oklch(var(--destructive));
+}
+
+/* ── Editor pane ──────────────────────────────────────────────────────── */
+.rx-tex .rx-pane {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+.rx-tex .rx-tabs {
+  display: flex;
+  align-items: center;
+  border-bottom: 1px solid oklch(var(--rx-hair));
+  overflow-x: auto;
+  flex: none;
+}
+.rx-tex .rx-tab {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 10px 14px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: oklch(var(--muted-foreground));
+  white-space: nowrap;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  flex: none;
+  transition:
+    color var(--rx-t) var(--rx-ease),
+    border-color var(--rx-t) var(--rx-ease);
+}
+.rx-tex .rx-tab:hover {
+  color: oklch(var(--foreground));
+}
+.rx-tex .rx-tab-on {
+  color: oklch(var(--foreground));
+  border-bottom-color: oklch(var(--accent-foreground));
+}
+.rx-tex .rx-tab-label {
+  max-width: 16rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.rx-tex .rx-unsaved {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: oklch(var(--accent-foreground));
+  flex: none;
+}
+.rx-tex .rx-tab-x {
+  color: oklch(var(--muted-foreground) / 0.7);
+  flex: none;
+}
+.rx-tex .rx-tab-x:hover {
+  color: oklch(var(--foreground));
+}
+.rx-tex .rx-save-state {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  height: 22px;
+  padding: 0 12px;
+  border-bottom: 1px solid oklch(var(--rx-hair));
+  font-size: 11px;
+  color: oklch(var(--muted-foreground));
+  flex: none;
+}
+.rx-tex .rx-editor-host {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+.rx-tex .rx-pane-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: oklch(var(--muted-foreground));
+  font-size: 13px;
+}
+
+/* CodeMirror ships no theme of its own here, so it renders in browser
+   defaults — white behind black on a Console page. These rules only re-point
+   it at the palette already in scope; nothing about the editor's behaviour is
+   touched, and they cannot reach any CodeMirror outside `.rx-tex`. */
+.rx-tex .cm-editor {
+  height: 100%;
+  background: oklch(var(--card));
+  color: oklch(var(--foreground));
+  font-family: var(--font-mono);
+  font-size: 13px;
+}
+.rx-tex .cm-scroller {
+  line-height: 1.75;
+  font-family: inherit;
+}
+.rx-tex .cm-gutters {
+  background: oklch(var(--card));
+  border-right: 0;
+  color: oklch(var(--muted-foreground) / 0.65);
+  font-size: 11px;
+}
+.rx-tex .cm-activeLine,
+.rx-tex .cm-activeLineGutter {
+  background: oklch(var(--foreground) / 0.04);
+}
+.rx-tex .cm-editor.cm-focused {
+  outline: none;
+}
+.rx-tex .cm-selectionBackground,
+.rx-tex .cm-editor.cm-focused .cm-selectionBackground,
+.rx-tex .cm-content ::selection {
+  background: oklch(var(--accent-foreground) / 0.22);
+}
+.rx-tex .cm-cursor {
+  border-left-color: oklch(var(--foreground));
+}
+.rx-tex .cm-matchingBracket {
+  background: oklch(var(--accent));
+  outline: 1px solid oklch(var(--rx-accent-line));
+}
+
+/* ── Split handle ─────────────────────────────────────────────────────── */
+.rx-tex .rx-split {
+  width: 5px;
+  flex: none;
+  cursor: col-resize;
+  background: oklch(var(--rx-hair));
+  transition: background var(--rx-t) var(--rx-ease);
+}
+.rx-tex .rx-split:hover {
+  background: oklch(var(--rx-accent-line));
+}
+
+/* ── Preview ──────────────────────────────────────────────────────────── */
+.rx-tex .rx-tex-preview {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  border-left: 1px solid oklch(var(--rx-hair));
+}
+.rx-tex .rx-tex-preview-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 8px 12px;
+  border-bottom: 1px solid oklch(var(--rx-hair));
+  background: oklch(var(--card));
+  font-size: 12px;
+  color: oklch(var(--muted-foreground));
+  flex: none;
+}
+/* The concept's compile control is smaller than the shared button: it sits in
+   a 12px bar, not on a page. */
+.rx-tex .rx-tex-preview-bar .rx-btn {
+  padding: 4px 11px;
+  font-size: 12px;
+}
+.rx-tex .rx-stale {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  padding: 2px 8px;
+  border-radius: 20px;
+  background: oklch(var(--accent));
+  color: oklch(var(--accent-foreground));
+  border: 1px solid oklch(var(--rx-accent-line));
+}
+.rx-tex .rx-sync-note {
+  font-size: 11.5px;
+  color: oklch(var(--muted-foreground));
+}
+.rx-tex .rx-tex-preview-body {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* ── The compile log ──────────────────────────────────────────────────── */
+.rx-tex .rx-log {
+  display: flex;
+  flex-direction: column;
+  max-height: 15rem;
+  flex: none;
+  margin: 0;
+  padding: 12px 14px;
+  background: oklch(var(--rx-danger-wash));
+  border-top: 1px solid oklch(var(--rx-hair));
+  border-left: 2px solid oklch(var(--destructive));
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.7;
+  color: oklch(var(--muted-foreground));
+}
+.rx-tex .rx-log-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+.rx-tex .rx-log-msg {
+  color: oklch(var(--destructive));
+  font-weight: 500;
+}
+.rx-tex .rx-jump {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 10px;
+  font-family: var(--rx-sans);
+  font-size: 12.5px;
+  color: oklch(var(--foreground));
+  border-bottom: 1px solid oklch(var(--border));
+  padding-bottom: 1px;
+  transition:
+    color var(--rx-t) var(--rx-ease),
+    border-color var(--rx-t) var(--rx-ease);
+}
+.rx-tex .rx-jump:hover {
+  color: oklch(var(--accent-foreground));
+  border-color: oklch(var(--rx-accent-line));
+}
+.rx-tex .rx-log pre {
+  margin: 8px 0 0;
+  overflow: auto;
+  font-family: inherit;
+  font-size: 11px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+}
+
+/* The three panes stack before any of them is squeezed out of usefulness. */
+@media (max-width: 1100px) {
+  .rx-tex-grid {
+    flex-direction: column;
+    height: auto;
+    min-height: 0;
+  }
+  .rx-tex .rx-tree {
+    width: 100%;
+    border-right: 0;
+    border-bottom: 1px solid oklch(var(--rx-hair));
+  }
+  .rx-tex .rx-tree-body {
+    max-height: 220px;
+  }
+  .rx-tex .rx-pane,
+  .rx-tex .rx-tex-preview {
+    width: 100% !important;
+    height: 70vh;
+  }
+  .rx-tex .rx-tex-preview {
+    border-left: 0;
+    border-top: 1px solid oklch(var(--rx-hair));
+  }
+  .rx-tex .rx-split {
+    display: none;
+  }
+}

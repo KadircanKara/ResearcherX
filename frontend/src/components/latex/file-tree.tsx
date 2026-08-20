@@ -13,7 +13,6 @@ import {
   Trash2,
   Upload,
 } from "lucide-react";
-import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { formatBytes, joinPath, type TreeNode } from "@/lib/latex-tree";
 
@@ -92,36 +91,28 @@ export function FileTree({
   const pctUsed = maxBytes > 0 ? (usedBytes / maxBytes) * 100 : 0;
 
   return (
-    <div className="flex w-64 shrink-0 flex-col border-r border-border">
-      <div className="flex items-center justify-between px-3 pb-1 pt-2">
-        <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-          Files
-        </span>
-        <div className="flex items-center gap-0.5">
-          <Button
-            size="icon-sm"
-            variant="ghost"
-            title="Import .zip"
-            onClick={onImportClick}
-          >
+    <div className="rx-tree">
+      <div className="rx-tree-head">
+        <span className="rx-eyebrow">Files</span>
+        <div className="rx-tree-tools">
+          <button className="rx-icon-btn" title="Import .zip" onClick={onImportClick}>
             <Upload className="size-3.5" />
-          </Button>
-          <Button size="icon-sm" variant="ghost" title="Export .zip" onClick={onExport}>
+          </button>
+          <button className="rx-icon-btn" title="Export .zip" onClick={onExport}>
             <Download className="size-3.5" />
-          </Button>
-          <Button
-            size="icon-sm"
-            variant="ghost"
+          </button>
+          <button
+            className="rx-icon-btn"
             disabled={!canEdit}
             title={canEdit ? "New file" : "You need editor access to add a file"}
             onClick={() => setCreating(true)}
           >
             <Plus className="size-3.5" />
-          </Button>
+          </button>
         </div>
       </div>
 
-      {error && <p className="px-3 pb-1 text-xs text-destructive">{error}</p>}
+      {error && <p className="rx-tex-err px-3 pb-1">{error}</p>}
 
       {creating && (
         <input
@@ -137,13 +128,15 @@ export function FileTree({
           }}
           onBlur={submitCreate}
           placeholder="chapters/intro.tex"
-          className="mx-3 mb-1 rounded-md border border-input bg-background px-2 py-1 text-sm"
+          className="rx-tree-input"
         />
       )}
 
-      <div className="flex-1 overflow-auto px-1.5 pb-2">
+      <div className="rx-tree-body">
         {nodes.length === 0 && !creating && (
-          <p className="px-1.5 py-2 text-sm text-muted-foreground">No files yet.</p>
+          <p className="rx-pane-empty" style={{ height: "auto", padding: "10px 6px" }}>
+            No files yet.
+          </p>
         )}
         {nodes.map((node) => (
           <TreeRow
@@ -177,24 +170,11 @@ export function FileTree({
         see is a cap they hit as an unexplained failure -- this footer is
         the reason the tree endpoint returns these two numbers at all.
       */}
-      <div className="border-t border-border px-3 py-2">
-        <div className="mb-1 h-1.5 w-full overflow-hidden rounded-full bg-muted">
-          <div
-            className={cn(
-              "h-full rounded-full",
-              pctUsed >= 90 ? "bg-destructive" : "bg-primary"
-            )}
-            style={{ width: `${Math.min(pctUsed, 100)}%` }}
-          />
-        </div>
-        <p
-          className={cn(
-            "text-xs",
-            pctUsed >= 90 ? "font-medium text-destructive" : "text-muted-foreground"
-          )}
-        >
-          {formatBytes(usedBytes)} of {formatBytes(maxBytes)}
-        </p>
+      <div className={cn("rx-quota", pctUsed >= 90 && "rx-quota-full")}>
+        {formatBytes(usedBytes)} of {formatBytes(maxBytes)}
+        <span className={cn("rx-prog", pctUsed >= 90 && "rx-prog-full")}>
+          <i style={{ width: `${Math.min(pctUsed, 100)}%` }} />
+        </span>
       </div>
     </div>
   );
@@ -239,20 +219,14 @@ function TreeRow({
   onSubmitRename,
   onCancelRename,
 }: TreeRowProps) {
-  const indent = { paddingLeft: `${depth * 14 + 6}px` };
+  const indent = { paddingLeft: `${depth * 14 + 8}px` };
 
   if (node.kind === "dir") {
     const isCollapsed = collapsed.has(node.path);
     return (
       <div>
-        <div
-          className="group flex items-center gap-1 rounded-md py-1 pr-1.5 text-sm text-muted-foreground hover:bg-muted/60"
-          style={indent}
-        >
-          <button
-            className="flex min-w-0 flex-1 items-center gap-1 text-left"
-            onClick={() => onToggle(node.path)}
-          >
+        <div className="rx-tree-row" style={indent}>
+          <button className="rx-tree-name" onClick={() => onToggle(node.path)}>
             {isCollapsed ? (
               <ChevronRight className="size-3.5 shrink-0" />
             ) : (
@@ -262,10 +236,7 @@ function TreeRow({
             <span className="truncate">{node.name}</span>
           </button>
           {canEdit && (
-            <label
-              className="invisible shrink-0 cursor-pointer text-muted-foreground hover:text-foreground group-hover:visible"
-              title="Upload file into this directory"
-            >
+            <label className="rx-icon-btn rx-row-tools" title="Upload file into this directory">
               <Upload className="size-3.5" />
               <input
                 type="file"
@@ -310,7 +281,7 @@ function TreeRow({
 
   if (renaming === node.path) {
     return (
-      <div style={indent} className="py-0.5 pr-1.5">
+      <div style={indent} className="py-0.5 pr-2">
         <input
           autoFocus
           value={renameValue}
@@ -320,7 +291,8 @@ function TreeRow({
             if (e.key === "Escape") onCancelRename();
           }}
           onBlur={() => onSubmitRename(node.path)}
-          className="w-full rounded-md border border-input bg-background px-1.5 py-0.5 text-sm"
+          className="rx-tree-input"
+          style={{ width: "100%", margin: 0 }}
         />
       </div>
     );
@@ -328,32 +300,20 @@ function TreeRow({
 
   return (
     <div
-      className={cn(
-        "group flex items-center gap-1 rounded-md py-1 pr-1.5 text-sm",
-        node.path === activePath
-          ? "bg-muted font-medium text-foreground"
-          : "text-muted-foreground hover:bg-muted/60 hover:text-foreground"
-      )}
+      className={cn("rx-tree-row", node.path === activePath && "rx-tree-row-on")}
       style={indent}
     >
-      <button
-        className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
-        onClick={() => onOpen(node.path)}
-      >
+      <button className="rx-tree-name" onClick={() => onOpen(node.path)}>
         <FileCode className="size-3.5 shrink-0" />
         <span className="truncate">{node.name}</span>
-        {isMain && (
-          <span className="shrink-0 rounded-full bg-primary/10 px-1.5 py-px text-[10px] font-medium text-primary">
-            main
-          </span>
-        )}
+        {isMain && <span className="rx-main-flag">main</span>}
       </button>
       {canEdit && (
-        <div className="invisible flex shrink-0 items-center gap-0.5 group-hover:visible">
+        <div className="rx-row-tools">
           {!isMain && (
             <button
               title="Set as main"
-              className="text-muted-foreground hover:text-foreground"
+              className="rx-icon-btn"
               onClick={() => onSetMain(node.path)}
             >
               <Star className="size-3.5" />
@@ -361,14 +321,14 @@ function TreeRow({
           )}
           <button
             title="Rename"
-            className="text-muted-foreground hover:text-foreground"
+            className="rx-icon-btn"
             onClick={() => onStartRename(node.path)}
           >
             <Pencil className="size-3.5" />
           </button>
           <button
             title="Delete"
-            className="text-muted-foreground hover:text-destructive"
+            className="rx-icon-btn"
             onClick={() => onDelete(node.path)}
           >
             <Trash2 className="size-3.5" />

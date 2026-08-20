@@ -30,15 +30,15 @@ export function LogPanel({ log, errorFile, errorLine, onClose, onJumpToError }: 
   const canJump = errorFile !== null && errorLine !== null;
 
   return (
-    <div className="flex max-h-56 flex-col border-t border-border bg-muted/40">
-      <div className="flex items-center justify-between px-3 py-1.5">
-        <div className="flex items-center gap-2 text-xs">
-          <AlertTriangle className="size-3.5 text-destructive" />
-          <span className="font-medium text-foreground">
+    <div className="rx-log">
+      <div className="rx-log-head">
+        <div className="flex items-start gap-2">
+          <AlertTriangle className="size-3.5 shrink-0 text-destructive" style={{ marginTop: 3 }} />
+          <span className="rx-log-msg">
             {message ?? "Compilation failed"}
             {canJump && (
               <button
-                className="ml-2 underline underline-offset-2 hover:text-primary"
+                className="rx-jump"
                 onClick={() => onJumpToError(errorLine, errorFile)}
               >
                 {/* Naming the file is not decoration: in a multi-file
@@ -51,7 +51,7 @@ export function LogPanel({ log, errorFile, errorLine, onClose, onJumpToError }: 
             )}
           </span>
         </div>
-        <button onClick={onClose} className="text-muted-foreground hover:text-foreground">
+        <button onClick={onClose} className="rx-icon-btn" title="Close the log">
           <X className="size-3.5" />
         </button>
       </div>
@@ -61,9 +61,7 @@ export function LogPanel({ log, errorFile, errorLine, onClose, onJumpToError }: 
         server internals out of responses; it has nothing to say about the
         user's own "Undefined control sequence".
       */}
-      <pre className="overflow-auto px-3 pb-3 font-mono text-[11px] leading-relaxed text-muted-foreground">
-        {log}
-      </pre>
+      <pre>{log}</pre>
     </div>
   );
 }

@@ -3,8 +3,10 @@
 import { useEffect, useState } from "react";
 import { useParams } from "next/navigation";
 import { LatexWorkspace } from "@/components/latex/latex-workspace";
+import { RxTheme } from "@/components/rx-theme";
 import { getProject } from "@/lib/projects";
 import type { Role } from "@/lib/types";
+import "./latex.css";
 
 export default function LaTeXPage() {
   const { id: projectId } = useParams<{ id: string }>();
@@ -31,17 +33,23 @@ export default function LaTeXPage() {
     };
   }, [projectId]);
 
-  if (error) {
-    return (
-      <div className="flex h-[70vh] items-center justify-center text-sm text-destructive">
-        {error}
+  // `RxTheme` scopes the Institution/Console palette and the concept's three
+  // typefaces to this subtree and nothing else -- Chat and every other tab
+  // keep the app's own tokens and keep rendering in Inter. `rx-tex` carries
+  // what is this screen's alone, the 1760px shell cap above all.
+  return (
+    <RxTheme className="rx-tex">
+      <div className="rx-shell">
+        {error ? (
+          <div className="rx-tex-empty" style={{ color: "oklch(var(--destructive))" }}>
+            {error}
+          </div>
+        ) : role === null ? (
+          <div className="rx-tex-skel" />
+        ) : (
+          <LatexWorkspace projectId={projectId} role={role} />
+        )}
       </div>
-    );
-  }
-
-  if (role === null) {
-    return <div className="h-[70vh] animate-pulse rounded-xl bg-muted" />;
-  }
-
-  return <LatexWorkspace projectId={projectId} role={role} />;
+    </RxTheme>
+  );
 }
