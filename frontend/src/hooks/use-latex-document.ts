@@ -544,6 +544,17 @@ export function useLatexDocument(projectId: string, canEdit: boolean): UseLatexD
       // surfacing as a stray "Could not save" under whatever file is open
       // by then.
       engineRef.current?.forget(path);
+      // The banner is the OTHER half of the same fact, and it has to move
+      // with the engine's `failed` flag or it strands. `forget` clears the
+      // engine's flag for this path; a path-keyed `saveFailures` entry left
+      // behind can never be cleared again -- nothing will ever save this
+      // path successfully, because it is about to stop existing -- so the
+      // banner would sit there for the rest of the session. Before the
+      // failure record was keyed by path, ANY successful save cleared it,
+      // so leaving this out is strictly worse than the behaviour it
+      // replaced. Done unconditionally of what is on screen, exactly like
+      // the recording in `onStateChange`.
+      setSaveFailures((prev) => prev.filter((f) => !(f.id === docId && f.path === path)));
       try {
         const m = await deleteFile(projectId, docId, path);
         applyMutation(m, docId);
@@ -605,6 +616,16 @@ export function useLatexDocument(projectId: string, canEdit: boolean): UseLatexD
         // this resolves the ref may already name the next document's engine,
         // and renaming a path inside that one is a different file entirely.
         saveEngine?.rename(from, to);
+        // Mirrors `SaveEngine.rename`'s own migration of its `failed` flag.
+        // These two stores are two views of ONE truth -- "this file holds
+        // text the server does not" -- and they drifted the moment only one
+        // of them learned about paths. Without this the engine tracks the
+        // NEW path while the banner still names the OLD one, so a later
+        // successful save clears the engine's flag and can never clear the
+        // banner: it is permanent for the session.
+        setSaveFailures((prev) =>
+          prev.map((f) => (f.id === docId && f.path === from ? { ...f, path: to } : f))
+        );
         applyMutation(m, docId);
         if (selectedIdRef.current !== docId) return;
         setOpenPaths((prev) => prev.map((p) => (p === from ? to : p)));
