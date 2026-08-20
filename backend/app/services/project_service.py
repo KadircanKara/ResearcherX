@@ -31,7 +31,7 @@ async def _get_membership(db: AsyncSession, project_id: str, user_id: str) -> Pr
 
 
 async def _require_member(
-    db: AsyncSession, project_id: str, user_id: str, need: str = "viewer"
+    db: AsyncSession, project_id: str, user_id: str, need: str = "member"
 ) -> ProjectMember:
     """Return the membership or raise 404 (not-a-member) / 403 (under-ranked)."""
     membership = await _get_membership(db, project_id, user_id)
@@ -43,7 +43,7 @@ async def _require_member(
 
 
 async def require_member(
-    db: AsyncSession, project_id: str, user_id: str, need: str = "viewer"
+    db: AsyncSession, project_id: str, user_id: str, need: str = "member"
 ) -> ProjectMember:
     """Public wrapper around _require_member for use outside this module."""
     return await _require_member(db, project_id, user_id, need)
@@ -118,7 +118,7 @@ async def get_project(
     db: AsyncSession, user: User, project_id: str
 ) -> tuple[Project, list[ProjectMember], str]:
     """Return (project, members, my_role) for any member, else 404."""
-    membership = await _require_member(db, project_id, user.id, "viewer")
+    membership = await _require_member(db, project_id, user.id, "member")
     project = await _get_project_or_404(db, project_id)
     members = await _get_members(db, project_id)
     return project, members, membership.role
@@ -127,8 +127,8 @@ async def get_project(
 async def update_project(
     db: AsyncSession, user: User, project_id: str, data: ProjectUpdate
 ) -> Project:
-    """Update project fields — requires editor or above."""
-    await _require_member(db, project_id, user.id, "editor")
+    """Update project fields — requires membership."""
+    await _require_member(db, project_id, user.id, "member")
     project = await _get_project_or_404(db, project_id)
 
     if data.title is not None:
@@ -163,7 +163,7 @@ async def add_member(
     target_user_id: str,
     role: str,
 ) -> ProjectMember:
-    """Add a member (editor/commenter/viewer) — requires owner."""
+    """Add a member — requires owner."""
     await _require_member(db, project_id, user.id, "owner")
     if role not in ASSIGNABLE_ROLES:
         raise HTTPException(status_code=422, detail="Invalid role")

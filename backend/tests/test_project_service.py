@@ -76,55 +76,72 @@ async def test_get_project_non_member_raises_404(db_session):
 
 
 async def test_get_project_returns_correct_role(db_session):
-    """get_project returns the caller's role."""
+    """get_project returns the caller's role. Was `editor`; the finer roles
+    collapsed to a single `member`."""
     owner = await _seed_user(db_session, "owner@x.io")
-    editor = await _seed_user(db_session, "editor@x.io")
+    member = await _seed_user(db_session, "member@x.io")
 
     project = await create_project(db_session, owner, ProjectCreate(title="P"))
-    await add_member(db_session, owner, project.id, editor.id, "editor")
+    await add_member(db_session, owner, project.id, member.id, "member")
 
-    proj, members, my_role = await get_project(db_session, editor, project.id)
-    assert my_role == "editor"
-    assert len(members) == 2  # owner + editor
+    proj, members, my_role = await get_project(db_session, member, project.id)
+    assert my_role == "member"
+    assert len(members) == 2  # owner + member
 
 
-async def test_commenter_cannot_update_project(db_session):
-    """Member with commenter role cannot update — 403."""
+async def test_non_member_cannot_update_project(db_session):
+    """Was test_commenter_cannot_update_project: the commenter role no longer
+    exists (add_member rejects it — see test_role_string_is_validated). The
+    guard it was protecting still exists, just at project membership rather
+    than at a sub-rank: a non-member cannot update — 404, not 403, so
+    existence isn't leaked."""
     owner = await _seed_user(db_session, "owner@x.io")
-    commenter = await _seed_user(db_session, "commenter@x.io")
+    stranger = await _seed_user(db_session, "stranger@x.io")
 
     project = await create_project(db_session, owner, ProjectCreate(title="P"))
-    await add_member(db_session, owner, project.id, commenter.id, "commenter")
 
     with pytest.raises(HTTPException) as exc_info:
-        await update_project(db_session, commenter, project.id, ProjectUpdate(title="Hacked"))
-    assert exc_info.value.status_code == 403
+        await update_project(db_session, stranger, project.id, ProjectUpdate(title="Hacked"))
+    assert exc_info.value.status_code == 404
 
 
-async def test_editor_can_update_project(db_session):
-    """Member with editor role can update."""
+async def test_member_can_update_project(db_session):
+    """Was test_editor_can_update_project: any member can update now."""
     owner = await _seed_user(db_session, "owner@x.io")
-    editor = await _seed_user(db_session, "editor@x.io")
+    member = await _seed_user(db_session, "member@x.io")
 
     project = await create_project(db_session, owner, ProjectCreate(title="P"))
-    await add_member(db_session, owner, project.id, editor.id, "editor")
+    await add_member(db_session, owner, project.id, member.id, "member")
 
-    updated = await update_project(db_session, editor, project.id, ProjectUpdate(title="Updated"))
+    updated = await update_project(db_session, member, project.id, ProjectUpdate(title="Updated"))
     assert updated.title == "Updated"
 
 
 async def test_only_owner_can_add_member(db_session):
-    """Editor cannot add members — 403."""
+    """A plain member cannot add members — 403."""
     owner = await _seed_user(db_session, "owner@x.io")
-    editor = await _seed_user(db_session, "editor@x.io")
+    member = await _seed_user(db_session, "member@x.io")
     newcomer = await _seed_user(db_session, "newcomer@x.io")
 
     project = await create_project(db_session, owner, ProjectCreate(title="P"))
-    await add_member(db_session, owner, project.id, editor.id, "editor")
+    await add_member(db_session, owner, project.id, member.id, "member")
 
     with pytest.raises(HTTPException) as exc_info:
-        await add_member(db_session, editor, project.id, newcomer.id, "viewer")
+        await add_member(db_session, member, project.id, newcomer.id, "member")
     assert exc_info.value.status_code == 403
+
+
+async def test_role_string_is_validated(db_session):
+    """A retired role (editor/commenter/viewer) is refused on add — 422, not
+    silently accepted or silently downgraded."""
+    owner = await _seed_user(db_session, "owner@x.io")
+    newcomer = await _seed_user(db_session, "newcomer@x.io")
+
+    project = await create_project(db_session, owner, ProjectCreate(title="P"))
+
+    with pytest.raises(HTTPException) as exc_info:
+        await add_member(db_session, owner, project.id, newcomer.id, "commenter")
+    assert exc_info.value.status_code == 422
 
 
 async def test_cannot_remove_last_owner(db_session):
@@ -141,10 +158,10 @@ async def test_cannot_remove_last_owner(db_session):
 async def test_counts_members_correct(db_session):
     """list_projects reports the real member count."""
     owner = await _seed_user(db_session, "owner@x.io")
-    viewer = await _seed_user(db_session, "viewer@x.io")
+    member = await _seed_user(db_session, "member@x.io")
 
     project = await create_project(db_session, owner, ProjectCreate(title="P"))
-    await add_member(db_session, owner, project.id, viewer.id, "viewer")
+    await add_member(db_session, owner, project.id, member.id, "member")
 
     listing = await list_projects(db_session, owner)
     assert listing[0]["counts"]["members"] == 2

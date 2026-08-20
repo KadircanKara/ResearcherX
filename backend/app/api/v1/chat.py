@@ -33,7 +33,7 @@ async def create_conversation(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_session),
 ) -> ConversationOut:
-    await project_service.require_member(db, project_id, user.id, "viewer")
+    await project_service.require_member(db, project_id, user.id, "member")
     conv = await _conv_svc.create_conversation(db, project_id, user.id, payload.content)
     return ConversationOut.model_validate(conv)
 
@@ -44,7 +44,7 @@ async def list_conversations(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_session),
 ) -> list[ConversationOut]:
-    await project_service.require_member(db, project_id, user.id, "viewer")
+    await project_service.require_member(db, project_id, user.id, "member")
     convs = await _conv_svc.list_conversations(db, project_id)
     return [ConversationOut.model_validate(c) for c in convs]
 
@@ -59,7 +59,7 @@ async def get_conversation(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_session),
 ) -> ConversationDetailOut:
-    await project_service.require_member(db, project_id, user.id, "viewer")
+    await project_service.require_member(db, project_id, user.id, "member")
     conv = await _conv_svc.get_conversation(db, conversation_id)
     if conv is None or conv.project_id != project_id:
         raise HTTPException(status_code=404, detail="Conversation not found")
@@ -83,7 +83,7 @@ async def delete_conversation(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_session),
 ) -> Response:
-    await project_service.require_member(db, project_id, user.id, "editor")
+    await project_service.require_member(db, project_id, user.id, "member")
     conv = await _conv_svc.get_conversation(db, conversation_id)
     if conv is None or conv.project_id != project_id:
         raise HTTPException(status_code=404, detail="Conversation not found")
@@ -100,7 +100,7 @@ async def send_message(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_session),
 ) -> EventSourceResponse:
-    await project_service.require_member(db, project_id, user.id, "viewer")
+    await project_service.require_member(db, project_id, user.id, "member")
 
     # Verify conversation exists and belongs to this project before streaming.
     conv = await _conv_svc.get_conversation(db, conversation_id)

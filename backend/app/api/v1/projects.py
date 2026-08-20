@@ -129,7 +129,10 @@ async def list_project_runs(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_session),
 ) -> list[RunOut]:
-    await project_service.require_member(db, project_id, user.id, "viewer")
+    # "member", not "editor": project sharing is binary. The finer
+    # editor/viewer distinction lives on LaTeX documents -- see
+    # services/latex_access.py -- because that is the thing users share.
+    await project_service.require_member(db, project_id, user.id, "member")
     result = await db.execute(
         sa_select(ResearchRun)
         .where(ResearchRun.project_id == project_id)
@@ -163,7 +166,7 @@ async def create_paper(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_session),
 ) -> PaperOut:
-    await project_service.require_member(db, project_id, user.id, "editor")
+    await project_service.require_member(db, project_id, user.id, "member")
     paper = Paper(
         project_id=project_id,
         title=data.title,
@@ -198,7 +201,7 @@ async def update_paper(
     db: AsyncSession = Depends(get_session),
 ) -> PaperOut:
     """Update a paper. Extracted content is immutable for upload/link papers."""
-    await project_service.require_member(db, project_id, user.id, "editor")
+    await project_service.require_member(db, project_id, user.id, "member")
     paper = await db.get(Paper, paper_id)
     if paper is None or paper.project_id != project_id:
         raise HTTPException(status_code=404, detail="Paper not found")
@@ -239,7 +242,7 @@ async def delete_paper(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_session),
 ) -> Response:
-    await project_service.require_member(db, project_id, user.id, "editor")
+    await project_service.require_member(db, project_id, user.id, "member")
     paper = await db.get(Paper, paper_id)
     if paper is None or paper.project_id != project_id:
         raise HTTPException(status_code=404, detail="Paper not found")
@@ -254,7 +257,7 @@ async def list_papers(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_session),
 ) -> list[PaperOut]:
-    await project_service.require_member(db, project_id, user.id, "viewer")
+    await project_service.require_member(db, project_id, user.id, "member")
     result = await db.execute(
         sa_select(Paper).where(Paper.project_id == project_id).order_by(Paper.created_at)
     )
@@ -278,7 +281,7 @@ async def get_paper_chunk(
     meaningful within one model's chunking, so a stale row from a previous
     model must not be served under the same index.
     """
-    await project_service.require_member(db, project_id, user.id, "viewer")
+    await project_service.require_member(db, project_id, user.id, "member")
     paper = await db.get(Paper, paper_id)
     if paper is None or paper.project_id != project_id:
         raise HTTPException(status_code=404, detail="Paper not found")
@@ -309,7 +312,7 @@ async def suggest_paper_title(
     db: AsyncSession = Depends(get_session),
 ) -> SuggestMetaResponse:
     """Extract title, abstract, and body from PDF bytes via LLM. Fails open."""
-    await project_service.require_member(db, project_id, user.id, "viewer")
+    await project_service.require_member(db, project_id, user.id, "member")
     pdf_bytes = await request.body()
     if not pdf_bytes:
         return SuggestMetaResponse(title=None, abstract=None, body=None)
@@ -330,7 +333,7 @@ async def suggest_paper_title_from_url(
     db: AsyncSession = Depends(get_session),
 ) -> SuggestTitleFromUrlResponse:
     """Extract title + abstract via DOI→Crossref → HTML meta tags."""
-    await project_service.require_member(db, project_id, user.id, "viewer")
+    await project_service.require_member(db, project_id, user.id, "member")
     from app.services.title_extraction_service import (
         extract_doi,
         extract_meta_from_page,
@@ -359,7 +362,7 @@ async def ingest_paper(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_session),
 ) -> dict:
-    await project_service.require_member(db, project_id, user.id, "editor")
+    await project_service.require_member(db, project_id, user.id, "member")
     paper = await db.get(Paper, paper_id)
     if paper is None or paper.project_id != project_id:
         raise HTTPException(status_code=404, detail="Paper not found")
@@ -378,7 +381,7 @@ async def ingest_paper_from_url(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_session),
 ) -> dict:
-    await project_service.require_member(db, project_id, user.id, "editor")
+    await project_service.require_member(db, project_id, user.id, "member")
     paper = await db.get(Paper, paper_id)
     if paper is None or paper.project_id != project_id:
         raise HTTPException(status_code=404, detail="Paper not found")
