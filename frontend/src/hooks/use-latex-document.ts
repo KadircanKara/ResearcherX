@@ -15,7 +15,7 @@ import {
   writeBinaryFile,
   writeTextFile,
   AmbiguousMainError,
-  LatexRequestError,
+  errorText,
   type LatexDocument,
   type LatexEngine,
   type LatexFileMeta,
@@ -24,19 +24,6 @@ import {
 import { SaveEngine, type SaveState } from "@/lib/latex-buffers";
 
 const AUTOSAVE_MS = 800;
-
-/**
- * Turned into user-facing text the same way everywhere in this hook: a 4xx
- * carries the server's own message (the user's archive, their quota, their
- * path), a 5xx or a network failure gets the generic line. Never
- * `err.message`, never a status code -- see `LatexRequestError`'s own
- * comment in `lib/latex.ts`.
- */
-function errorText(err: unknown): string {
-  return err instanceof LatexRequestError
-    ? err.userMessage
-    : "Something went wrong. Please try again.";
-}
 
 export interface UseLatexDocument {
   documents: LatexDocument[];
@@ -97,7 +84,17 @@ export interface UseLatexDocument {
   importZip: (zip: Blob, name: string, mainPath?: string) => Promise<void>;
 }
 
-export function useLatexDocument(projectId: string, canEdit: boolean): UseLatexDocument {
+/**
+ * @param documentId When given, the ROUTE owns which document is open and this
+ * hook stops choosing one: it neither defaults to the first document nor keeps
+ * a selection the URL has moved away from. Omit it (or pass `undefined`) for
+ * the older behaviour where the hook selects the first document itself.
+ */
+export function useLatexDocument(
+  projectId: string,
+  canEdit: boolean,
+  documentId?: string | null
+): UseLatexDocument {
   const [documents, setDocuments] = useState<LatexDocument[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   // Named `documentState` internally purely to avoid shadowing the DOM
@@ -115,6 +112,11 @@ export function useLatexDocument(projectId: string, canEdit: boolean): UseLatexD
   const [buffers, setBuffers] = useState<Record<string, string>>({});
   const [saveState, setSaveState] = useState<SaveState>("idle");
   const [documentsLoading, setDocumentsLoading] = useState(true);
+  // Read inside the list effect, which must NOT re-run when the route
+  // changes document -- re-listing on every navigation would flash the
+  // whole workspace through its loading state for data it already has.
+  const documentIdRef = useRef(documentId);
+  documentIdRef.current = documentId;
   const [docLoading, setDocLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   /**
@@ -236,7 +238,12 @@ export function useLatexDocument(projectId: string, canEdit: boolean): UseLatexD
       .then((docs) => {
         if (cancelled) return;
         setDocuments(docs);
-        setSelectedId((current) => current ?? docs[0]?.id ?? null);
+        // Only when nothing else owns the selection. With a `documentId`
+        // the URL is the authority, and defaulting to `docs[0]` here
+        // would briefly open a document the user did not navigate to.
+        if (documentIdRef.current === undefined) {
+          setSelectedId((current) => current ?? docs[0]?.id ?? null);
+        }
       })
       .catch(() => {
         // Without this, a failed list left `documents` at its initial `[]`,
@@ -251,6 +258,15 @@ export function useLatexDocument(projectId: string, canEdit: boolean): UseLatexD
       cancelled = true;
     };
   }, [projectId]);
+
+  // The route's document, mirrored into the selection the rest of this hook
+  // already keys off. Doing it this way rather than replacing `selectedId`
+  // wholesale keeps every `selectedIdRef.current !== docId` guard below
+  // working unchanged -- those guards are what stop a late response from
+  // one document writing into another.
+  useEffect(() => {
+    if (documentId !== undefined) setSelectedId(documentId);
+  }, [documentId]);
 
   // ---------------------------------------------------------------------
   // Selected document: metadata, tree, and the per-document SaveEngine

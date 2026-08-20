@@ -1,7 +1,18 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Loader2, Play, X } from "lucide-react";
+import { useRouter } from "next/navigation";
+import Link from "next/link";
+import {
+  ArrowLeft,
+  Download,
+  FileDown,
+  Loader2,
+  Play,
+  Settings2,
+  Trash2,
+  X,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { BinaryPreview } from "@/components/latex/binary-preview";
 import { EditorPane } from "@/components/latex/editor-pane";
@@ -12,11 +23,10 @@ import { OpenTabs } from "@/components/latex/open-tabs";
 import { PdfViewer } from "@/components/latex/pdf-viewer";
 import { useLatexDocument } from "@/hooks/use-latex-document";
 import { useLatexCompile } from "@/hooks/use-latex-compile";
-import { getDevUserId } from "@/lib/api";
 import {
   AmbiguousMainError,
-  exportUrl,
-  fetchExport,
+  downloadExport,
+  saveBlob,
   type LatexEngine,
 } from "@/lib/latex";
 import { buildTree, isBeneath, isTexPath, parentDir } from "@/lib/latex-tree";
@@ -35,32 +45,17 @@ const OUTSIDE_MAIN_NOTE = "Sync only covers files beside or below the main file.
 // happens to be active: a confident wrong jump is worse than no jump.
 const LOG_FILE_UNKNOWN_NOTE = "Couldn't tell which file that error is in, so the editor didn't jump.";
 
-// The backend itself defaults a new document's main file to EMPTY -- a
-// starter template is a client-side choice, not a server default, so it is
-// seeded here and passed explicitly to `createDoc`. Declared at MODULE
-// level, not inside the component: a value created during render is a new
-// binding every render, which would sit oddly beside every other constant
-// here that already isn't.
-const STARTER = `\\documentclass[conference]{IEEEtran}
-\\begin{document}
-\\title{Untitled}
-\\author{}
-\\maketitle
-
-\\section{Introduction}
-
-\\end{document}
-`;
-
 interface LatexWorkspaceProps {
   projectId: string;
+  documentId: string;
   role: Role;
 }
 
-export function LatexWorkspace({ projectId, role }: LatexWorkspaceProps) {
+export function LatexWorkspace({ projectId, documentId, role }: LatexWorkspaceProps) {
   const canEdit = CAN_EDIT.includes(role);
+  const router = useRouter();
 
-  const doc = useLatexDocument(projectId, canEdit);
+  const doc = useLatexDocument(projectId, canEdit, documentId);
 
   // Scoped to the document `compile()` is about to build, exactly like the
   // in-flight patch it awaits -- an engine change for some OTHER document
@@ -160,15 +155,7 @@ export function LatexWorkspace({ projectId, role }: LatexWorkspaceProps) {
   const docErrorRef = useRef(doc.error);
   docErrorRef.current = doc.error;
 
-  const [creatingDoc, setCreatingDoc] = useState(false);
-  const [newDocName, setNewDocName] = useState("");
-
-  function submitCreateDoc() {
-    const trimmed = newDocName.trim();
-    setCreatingDoc(false);
-    setNewDocName("");
-    if (trimmed) void doc.createDoc(trimmed, STARTER);
-  }
+  const [engineOpen, setEngineOpen] = useState(false);
 
   function handleImport(zip: File, name: string, mainPath?: string) {
     setImportBusy(true);
@@ -200,26 +187,8 @@ export function LatexWorkspace({ projectId, role }: LatexWorkspaceProps) {
   async function handleExport() {
     const docId = doc.selectedId;
     if (!docId) return;
-    // In dev the identity travels in an `X-Dev-User-Id` HEADER, which a
-    // plain link cannot send -- so a real fetch is needed there. In prod
-    // (cookie-based) a direct navigation lets the browser honour the
-    // response's own `Content-Disposition` filename instead of buffering
-    // 25MB into JS for nothing.
-    if (!getDevUserId()) {
-      window.location.href = exportUrl(projectId, docId);
-      return;
-    }
     try {
-      const blob = await fetchExport(projectId, docId);
-      const url = URL.createObjectURL(blob);
-      const a = window.document.createElement("a");
-      a.href = url;
-      a.download = `${doc.document?.name ?? "export"}.zip`;
-      a.click();
-      // Deferred rather than revoked immediately -- see `binary-preview.tsx`
-      // for why: Safari can cancel a download still being handed to the OS
-      // if its blob: URL is revoked synchronously after `click()`.
-      setTimeout(() => URL.revokeObjectURL(url), 0);
+      await downloadExport(projectId, docId, doc.document?.name ?? "export");
     } catch (err) {
       // Routed to the SAME surface every other failure in this shell uses.
       // An empty catch here left a failed export (a 413 over the size cap, a
@@ -230,6 +199,30 @@ export function LatexWorkspace({ projectId, role }: LatexWorkspaceProps) {
       // user and a server fault's text never does.
       doc.reportError(err);
     }
+  }
+
+  function handleDownloadPdf() {
+    // From the bytes already in memory, never from the backend's PDF route:
+    // that route is keyed on a compile hash in an IN-PROCESS cache, so a
+    // link to it 404s for any build this browser did not just make. If
+    // there is no `pdfBytes` there is nothing to download, which is why the
+    // button is disabled rather than triggering a compile.
+    if (!compile.pdfBytes) return;
+    const name = doc.document?.name ?? "document";
+    saveBlob(new Blob([compile.pdfBytes.slice()], { type: "application/pdf" }), `${name}.pdf`);
+  }
+
+  async function handleDeleteDocument() {
+    const docId = doc.selectedId;
+    if (!docId) return;
+    const name = doc.document?.name ?? "this project";
+    // The only irreversible control on this screen. Everything else here is
+    // a save, a compile or a download.
+    if (!window.confirm(`Delete "${name}" and all of its files? This cannot be undone.`)) {
+      return;
+    }
+    await doc.removeDoc(docId);
+    router.push(`/research/${projectId}/latex`);
   }
 
   const activePath = doc.activePath;
@@ -332,95 +325,123 @@ export function LatexWorkspace({ projectId, role }: LatexWorkspaceProps) {
         </div>
       )}
 
-      <div className="flex items-center justify-between gap-2 rounded-xl border border-border px-3 py-2">
-        <div className="flex items-center gap-2">
-          <select
-            value={doc.selectedId ?? ""}
-            onChange={(e) => doc.select(e.target.value || null)}
-            className="rounded-md border border-input bg-background px-2 py-1 text-sm"
+      <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-2 rounded-xl border border-border px-3 py-2">
+        <div className="flex min-w-0 items-center gap-2">
+          <Link
+            href={`/research/${projectId}/latex`}
+            title="All LaTeX projects"
+            aria-label="All LaTeX projects"
+            className="shrink-0 rounded-md p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
           >
-            {doc.documents.length === 0 && <option value="">No documents yet</option>}
-            {doc.documents.map((d) => (
-              <option key={d.id} value={d.id}>
-                {d.name}
-              </option>
-            ))}
-          </select>
-
-          {creatingDoc ? (
-            <input
-              autoFocus
-              value={newDocName}
-              onChange={(e) => setNewDocName(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") submitCreateDoc();
-                if (e.key === "Escape") {
-                  setCreatingDoc(false);
-                  setNewDocName("");
-                }
-              }}
-              onBlur={submitCreateDoc}
-              placeholder="paper.tex"
-              className="rounded-md border border-input bg-background px-2 py-1 text-sm"
-            />
-          ) : (
-            <Button
-              size="sm"
-              variant="outline"
-              disabled={!canEdit}
-              title={canEdit ? "New document" : "You need editor access to add a document"}
-              onClick={() => setCreatingDoc(true)}
-            >
-              New
-            </Button>
+            <ArrowLeft className="size-4" />
+          </Link>
+          {/* Truncated, never sized to its content: a project name is
+              user-supplied and unbounded, and this row's width is the one
+              thing that used to push the whole page into horizontal scroll. */}
+          <span className="truncate text-sm font-medium" title={doc.document?.name}>
+            {doc.document?.name ?? "…"}
+          </span>
+          {doc.error && (
+            <span className="truncate text-xs text-destructive" title={doc.error}>
+              {doc.error}
+            </span>
           )}
+        </div>
+
+        <div className="flex shrink-0 items-center gap-1">
+          <button
+            onClick={handleDownloadPdf}
+            disabled={!compile.pdfBytes}
+            title={compile.pdfBytes ? "Download PDF" : "Compile first to download a PDF"}
+            aria-label="Download PDF"
+            className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:opacity-40 disabled:hover:bg-transparent"
+          >
+            <FileDown className="size-4" />
+          </button>
+
+          <button
+            onClick={() => void handleExport()}
+            title="Export .zip"
+            aria-label="Export .zip"
+            className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+          >
+            <Download className="size-4" />
+          </button>
+
+          {canEdit && (
+            <button
+              onClick={() => void handleDeleteDocument()}
+              title="Delete project"
+              aria-label="Delete project"
+              className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive"
+            >
+              <Trash2 className="size-4" />
+            </button>
+          )}
+
+          {/*
+            The engine lives behind this popover rather than on the rail
+            because it is ALREADY decided for the user: import picks xelatex
+            when the source loads fontspec/unicode-math/polyglossia, which
+            hard-fail under pdflatex. Someone who has to change it needs the
+            explanation more than they need the control.
+          */}
+          <div className="relative">
+            <button
+              onClick={() => setEngineOpen((prev) => !prev)}
+              title="Compiler settings"
+              aria-label="Compiler settings"
+              aria-expanded={engineOpen}
+              className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+            >
+              <Settings2 className="size-4" />
+            </button>
+            {engineOpen && (
+              <div className="absolute right-0 z-20 mt-1 w-72 rounded-lg border border-border bg-popover p-3 text-left shadow-md">
+                <label className="text-xs font-medium text-foreground">Engine</label>
+                <select
+                  value={doc.engine}
+                  disabled={!canEdit}
+                  onChange={(e) => void doc.setEngine(e.target.value as LatexEngine)}
+                  className="mt-1 w-full rounded-md border border-input bg-background px-2 py-1 text-sm"
+                >
+                  <option value="pdflatex">pdflatex</option>
+                  <option value="xelatex">xelatex</option>
+                </select>
+                <p className="mt-2 text-[11px] leading-snug text-muted-foreground">
+                  pdflatex is faster and is what most publisher templates
+                  assume. Switch to xelatex if the document loads{" "}
+                  <code className="font-mono">fontspec</code>,{" "}
+                  <code className="font-mono">unicode-math</code> or{" "}
+                  <code className="font-mono">polyglossia</code>, or needs a
+                  system font or a non-Latin script.
+                </p>
+              </div>
+            )}
+          </div>
 
           <Button
             size="sm"
-            variant="outline"
-            disabled={!canEdit || !doc.selectedId}
-            title={canEdit ? "Delete document" : "You need editor access to delete a document"}
-            onClick={() => doc.selectedId && void doc.removeDoc(doc.selectedId)}
+            className="h-7 gap-1 px-2 text-[11px]"
+            disabled={!canEdit || compile.compiling}
+            title={canEdit ? "Compile (Cmd/Ctrl+S)" : "You need editor access to compile"}
+            onClick={() => void compile.compile()}
           >
-            Delete
+            {compile.compiling ? (
+              <Loader2 className="size-3 animate-spin" />
+            ) : (
+              <Play className="size-3" />
+            )}
+            Compile
           </Button>
-
-          {doc.error && <span className="text-xs text-destructive">{doc.error}</span>}
         </div>
-
-        {doc.selectedId && (
-          <div className="flex items-center gap-2">
-            <select
-              value={doc.engine}
-              disabled={!canEdit}
-              onChange={(e) => void doc.setEngine(e.target.value as LatexEngine)}
-              className="rounded-md border border-input bg-background px-1.5 py-0.5 text-[11px]"
-            >
-              <option value="pdflatex">pdflatex</option>
-              <option value="xelatex">xelatex</option>
-            </select>
-            <Button
-              size="sm"
-              className="h-7 gap-1 px-2 text-[11px]"
-              disabled={!canEdit || compile.compiling}
-              title={canEdit ? "Compile (Cmd/Ctrl+S)" : "You need editor access to compile"}
-              onClick={() => void compile.compile()}
-            >
-              {compile.compiling ? (
-                <Loader2 className="size-3 animate-spin" />
-              ) : (
-                <Play className="size-3" />
-              )}
-              Compile
-            </Button>
-          </div>
-        )}
       </div>
 
+      {/* `selectedId` trails the route by one render (the hook mirrors the
+          prop in an effect), so this is a transient state, not the "no
+          document" case the list page owns. */}
       {doc.selectedId === null ? (
-        <div className="flex flex-1 flex-col items-center justify-center gap-2 text-sm text-muted-foreground">
-          <p>Select a document, or create one to start writing.</p>
-        </div>
+        <div className="flex-1 animate-pulse rounded-xl bg-muted" />
       ) : (
         <div className="relative flex flex-1 overflow-hidden rounded-xl border border-border">
           <FileTree

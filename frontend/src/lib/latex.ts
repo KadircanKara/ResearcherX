@@ -452,3 +452,61 @@ export async function fetchExport(projectId: string, documentId: string): Promis
   if (!r.ok) await raise(r);
   return await r.blob();
 }
+
+/**
+ * Save a document's `.zip` to disk.
+ *
+ * Lives here, not in a component, because BOTH the project list and the
+ * workspace rail offer this and the dev/prod branch below is the sort of
+ * detail that silently diverges once it is written twice: in dev the identity
+ * travels in an `X-Dev-User-Id` HEADER, which a plain navigation cannot send,
+ * so a real fetch is required; in prod (cookie-based) a direct navigation lets
+ * the browser honour the response's own `Content-Disposition` filename instead
+ * of buffering 25MB through JS for nothing.
+ *
+ * Throws on failure so the caller can route the error to its own surface.
+ */
+export async function downloadExport(
+  projectId: string,
+  documentId: string,
+  name: string
+): Promise<void> {
+  if (!getDevUserId()) {
+    window.location.href = exportUrl(projectId, documentId);
+    return;
+  }
+  const blob = await fetchExport(projectId, documentId);
+  saveBlob(blob, `${name}.zip`);
+}
+
+/**
+ * Hand a blob to the browser as a download.
+ *
+ * The `revokeObjectURL` is DEFERRED, never synchronous after `click()`:
+ * Safari can cancel a download that is still being handed to the OS if its
+ * `blob:` URL is revoked in the same tick. See `binary-preview.tsx`, which
+ * hit exactly this.
+ */
+export function saveBlob(blob: Blob, filename: string): void {
+  const url = URL.createObjectURL(blob);
+  const a = window.document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
+/**
+ * Turn a failed request into user-facing text, the same way everywhere: a 4xx
+ * carries the server's own message (the user's archive, their quota, their
+ * path), a 5xx or a network failure gets the generic line. Never
+ * `err.message`, never a status code -- see `LatexRequestError` above.
+ *
+ * Lives here rather than in `use-latex-document.ts` because the document list
+ * page has no hook and must not invent a second rule for the same errors.
+ */
+export function errorText(err: unknown): string {
+  return err instanceof LatexRequestError
+    ? err.userMessage
+    : "Something went wrong. Please try again.";
+}
