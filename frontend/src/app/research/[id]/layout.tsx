@@ -56,15 +56,18 @@ export default function ProjectLayout({ children }: { children: React.ReactNode 
     )
   }
 
-  // Most tabs are a reading column and stay at 5xl. Two are not, and each
-  // states its own cap for its own reason: the LaTeX tab is a two-pane editor
-  // and 5xl is roughly one pane wide; the Graph tab is a canvas beside a rail
-  // that have to sit within one eye span, which the concept puts at 2080px
-  // (130rem) -- past that an edge label and its two nodes stop reading as one
-  // picture.
+  // Only Chat is a reading column and stays at 5xl. The other three are not,
+  // and each states its own cap for its own reason: the LaTeX tab is a
+  // three-pane editor and 5xl is roughly one pane wide; the Graph tab is a
+  // canvas beside a rail, and the Papers tab a table beside a rail, that have
+  // to sit within one eye span, which the concept puts at 2080px (130rem) --
+  // past that a row's State cell is a head turn away from the title it
+  // belongs to. Papers' own rail column only appears at all above 1240px, so
+  // at 5xl (1024px) it could never have rendered.
   const tabWidth = pathname.startsWith(`/research/${id}/latex`)
     ? "max-w-[110rem]"
-    : pathname.startsWith(`/research/${id}/graph`)
+    : pathname.startsWith(`/research/${id}/graph`) ||
+        pathname.startsWith(`/research/${id}/papers`)
       ? "max-w-[130rem]"
       : "max-w-5xl"
 

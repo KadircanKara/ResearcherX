@@ -19,11 +19,19 @@ export function PaperUploadScreen({
   onSaved,
   onClose,
   onBusyChange,
+  initialFiles,
 }: {
   projectId: string;
   onSaved: () => void;
   onClose: () => void;
   onBusyChange?: (busy: boolean) => void;
+  /**
+   * Files the caller already collected — the Papers screen's own dropzone
+   * drops onto the library rail, not onto this screen. Consumed on ARRAY
+   * IDENTITY, so the caller must hand over a fresh array per drop; a reused
+   * one reads as "the same files again" and is ignored.
+   */
+  initialFiles?: File[];
 }) {
   const [items, setItemsState] = useState<BatchItem[]>([]);
   const [saving, setSaving] = useState(false);
@@ -42,6 +50,15 @@ export function PaperUploadScreen({
 
   const update = (id: string, patch: Partial<BatchItem>) =>
     setItems((prev) => prev.map((it) => (it.id === id ? { ...it, ...patch } : it)));
+
+  // Runs on mount too, which is when the dialog opens carrying a drop.
+  useEffect(() => {
+    if (initialFiles && initialFiles.length) void addFiles(initialFiles);
+    // `addFiles` is redeclared every render and is not memoisable without
+    // moving `itemsRef`/`setNotice` handling out of it; `initialFiles` alone
+    // is the intended trigger.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialFiles]);
 
   async function addFiles(files: File[]) {
     const pdfs = files.filter((f) => f.name.toLowerCase().endsWith(".pdf"));

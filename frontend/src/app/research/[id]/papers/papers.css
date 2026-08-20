@@ -1,0 +1,284 @@
+/* ── Papers layout ────────────────────────────────────────────────────────
+ *
+ * Ported from the approved "Reading Room" concept, Papers screen. The
+ * Institution/Console palette and every primitive the ported screens share
+ * (`.rx-head`, `.rx-rail`, `.rx-btn`, `.rx-reveal`, `.rx-fl-list`) live in
+ * `rx-theme.css` on `.rx-theme`, which this screen's wrapper also carries.
+ * There is exactly one copy of that token block and this file is not it.
+ *
+ * Like Graph, Papers is a tab inside the project page rather than a route of
+ * its own, so it renders as a bounded panel: the palette has to stop at an
+ * edge the reader can see, or an Institution rectangle butted against the
+ * app's own background reads as a rendering fault.
+ *
+ * The concept's five columns are Paper / Authors / Year / Chunks / State.
+ * Authors and Year are NOT in `PaperOut` — they exist on the `papers` table
+ * and the serializer does not carry them — so this port has four: Paper,
+ * Added, Retriever, State. The grid is otherwise the concept's, including the
+ * two-stage collapse at 1240px and 760px.
+ * ───────────────────────────────────────────────────────────────────────── */
+
+.rx-pp {
+  /* Cap 2080px, the same figure and the same reason as Graph: the table and
+     its rail have to sit within one eye span, or a row's State cell is a head
+     turn away from the title it belongs to. */
+  --rx-shell: 2080px;
+
+  padding: 10px 28px 40px;
+  border: 1px solid oklch(var(--border));
+  border-radius: calc(var(--radius) * 2);
+}
+
+/* Four columns, so four tracks. The title column takes the slack. */
+.rx-pp {
+  --rx-pgrid: minmax(0, 1fr) 118px 140px;
+}
+@media (min-width: 1240px) {
+  .rx-pp {
+    --rx-pgrid: minmax(0, 1fr) 118px 118px 140px;
+  }
+}
+
+.rx-pgrid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0;
+}
+@media (min-width: 1240px) {
+  .rx-pgrid {
+    grid-template-columns: minmax(0, 1fr) minmax(300px, 400px);
+    gap: 0 clamp(44px, 3.4vw, 88px);
+  }
+}
+
+.rx-pintro {
+  margin: 0 0 14px;
+  color: oklch(var(--muted-foreground));
+  font-size: 14px;
+  max-width: 62ch;
+}
+
+.rx-pcols {
+  display: grid;
+  grid-template-columns: var(--rx-pgrid);
+  gap: 8px 28px;
+  padding: 0 6px 9px 0;
+  border-bottom: 1px solid oklch(var(--border));
+}
+.rx-pcols span {
+  font-size: 11px;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: oklch(var(--muted-foreground));
+  font-weight: 600;
+}
+/* The Added column is the first to go when the table narrows — a date is the
+   least load-bearing thing on the row. */
+@media (max-width: 1239px) {
+  .rx-pcols span:nth-child(2) {
+    display: none;
+  }
+}
+
+.rx-paper {
+  border-bottom: 1px solid oklch(var(--rx-hair));
+}
+.rx-prow {
+  width: 100%;
+  display: grid;
+  grid-template-columns: var(--rx-pgrid);
+  gap: 6px 28px;
+  align-items: baseline;
+  text-align: left;
+  padding: 20px 6px 20px 0;
+  transition: background var(--rx-t) var(--rx-ease);
+}
+.rx-prow:hover {
+  background: oklch(var(--foreground) / 0.05);
+}
+.rx-pttl {
+  font-family: var(--font-serif);
+  font-size: 17px;
+  font-weight: 500;
+  line-height: 1.4;
+  letter-spacing: -0.003em;
+  display: block;
+  max-width: 56ch;
+  color: oklch(var(--foreground));
+}
+@media (min-width: 1240px) {
+  .rx-pttl {
+    max-width: 62ch;
+  }
+}
+.rx-pby {
+  display: block;
+  font-size: 13px;
+  color: oklch(var(--muted-foreground));
+  margin-top: 4px;
+}
+.rx-padd,
+.rx-pnum {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  color: oklch(var(--muted-foreground));
+}
+/* Added goes; Retriever stays. A date is the least load-bearing cell on the
+   row, and dropping it is what keeps the three remaining cells matched to the
+   three remaining tracks — hiding a cell without dropping a track leaves the
+   grid one short and shifts every value one column left. */
+@media (max-width: 1239px) {
+  .rx-padd {
+    display: none;
+  }
+}
+.rx-pst {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  color: oklch(var(--muted-foreground));
+  font-family: var(--font-mono);
+  white-space: nowrap;
+}
+.rx-pst-bad {
+  color: oklch(var(--destructive));
+  font-family: var(--rx-sans);
+}
+.rx-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: oklch(var(--accent-foreground));
+  flex: none;
+}
+.rx-dot-idle {
+  background: oklch(var(--border));
+}
+.rx-dot-bad {
+  background: oklch(var(--destructive));
+}
+
+/* The opened row. `.rx-reveal`/`.rx-reveal-body` are the shared primitives. */
+.rx-paper .rx-reveal-body {
+  max-width: 92ch;
+}
+.rx-paper .rx-reveal-body.rx-bad {
+  background: oklch(var(--rx-danger-wash));
+  border-left-color: oklch(var(--destructive));
+}
+.rx-psrc {
+  margin-bottom: 6px;
+}
+.rx-psrc .rx-mono {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+}
+.rx-pfoot {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 18px;
+  margin-top: 14px;
+}
+.rx-pfoot button {
+  font-size: 12.5px;
+  color: oklch(var(--foreground));
+  border-bottom: 1px solid oklch(var(--border));
+  padding-bottom: 1px;
+  transition:
+    color var(--rx-t) var(--rx-ease),
+    border-color var(--rx-t) var(--rx-ease);
+}
+.rx-pfoot button:hover:not(:disabled) {
+  color: oklch(var(--accent-foreground));
+  border-bottom-color: oklch(var(--rx-accent-line));
+}
+.rx-pfoot button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.rx-pfoot .rx-danger:hover:not(:disabled) {
+  color: oklch(var(--destructive));
+  border-bottom-color: oklch(var(--destructive));
+}
+
+/* ── The rail ─────────────────────────────────────────────────────────── */
+.rx-prail {
+  padding-top: 34px;
+}
+@media (min-width: 1240px) {
+  .rx-prail {
+    padding-top: 0;
+  }
+}
+.rx-prail .rx-fl-list {
+  margin-top: 14px;
+}
+
+.rx-drop {
+  margin-top: 24px;
+  padding: 30px 24px;
+  text-align: center;
+  width: 100%;
+  border: 1px dashed oklch(var(--border));
+  border-radius: var(--radius);
+  background: oklch(var(--card));
+  transition:
+    border-color var(--rx-t) var(--rx-ease),
+    background var(--rx-t) var(--rx-ease);
+}
+.rx-drop:hover:not(:disabled),
+.rx-drop-over {
+  border-color: oklch(var(--rx-accent-line));
+  background: oklch(var(--accent));
+}
+.rx-drop:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+/* A <span>, not a heading — this whole block is one button, and a heading or
+   a paragraph inside a button is invalid content. */
+.rx-drop .rx-drop-h {
+  display: block;
+  margin: 10px 0 4px;
+  font-family: var(--font-serif);
+  font-size: 16px;
+  color: oklch(var(--foreground));
+}
+.rx-drop small {
+  display: block;
+  color: oklch(var(--muted-foreground));
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+/* ── Empty and loading ────────────────────────────────────────────────── */
+.rx-pempty {
+  padding: 64px 0;
+  text-align: center;
+  color: oklch(var(--muted-foreground));
+  font-size: 14px;
+}
+.rx-pskel {
+  height: 74px;
+  border-bottom: 1px solid oklch(var(--rx-hair));
+  background: linear-gradient(
+    90deg,
+    oklch(var(--foreground) / 0.04),
+    oklch(var(--foreground) / 0.07),
+    oklch(var(--foreground) / 0.04)
+  );
+}
+
+@media (max-width: 760px) {
+  .rx-pp {
+    padding: 8px 16px 32px;
+  }
+  .rx-pcols {
+    display: none;
+  }
+  .rx-prow {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 4px;
+  }
+}
