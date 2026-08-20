@@ -9,6 +9,10 @@ subsystem.
 
 import asyncio
 import base64
+import io
+import tarfile
+import tempfile
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import httpx
@@ -38,6 +42,12 @@ class CompileResult:
     log: str
     pdf: bytes | None
     synctex_gz: bytes | None
+    # None for a single-file compile (compile_source) and for any degraded
+    # result. Set by compile_tree from the tar-compile response -- the
+    # extraction directory the tree was built in, needed so a later
+    # reverse-sync query can resolve tree-relative paths (see _tree_path in
+    # latex-compiler/app.py).
+    root: str | None = None
 
 
 @dataclass(frozen=True)
@@ -47,6 +57,14 @@ class PdfPosition:
     y: float
     width: float
     height: float
+
+
+@dataclass(frozen=True)
+class SourcePoint:
+    """Where a reverse SyncTeX query landed. `file` is tree-relative."""
+
+    file: str
+    line: int
 
 
 _UNAVAILABLE = "The LaTeX compiler is unavailable. Please try again."
@@ -60,6 +78,26 @@ async def _post(path: str, payload: dict) -> dict | None:
             return response.json()
     except Exception as exc:
         # str(exc) stays in the server log and never reaches the client.
+        log.warning("latex_compiler_unavailable", path=path, error=str(exc)[:200])
+        return None
+
+
+async def _post_body(path: str, content, headers: dict) -> dict | None:
+    """Like `_post`, but for a raw streaming body rather than a JSON payload.
+
+    Kept as a twin of `_post` rather than a shared branch: the two bodies
+    (`json=` vs `content=`) are different httpx call shapes, and folding
+    them into one function would make the common case (`_post`, used by
+    every JSON route) harder to read for a body kind it never carries.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=settings.latex_compile_timeout) as client:
+            response = await client.post(
+                f"{settings.latex_compiler_url}{path}", content=content, headers=headers
+            )
+            response.raise_for_status()
+            return response.json()
+    except Exception as exc:
         log.warning("latex_compiler_unavailable", path=path, error=str(exc)[:200])
         return None
 
@@ -92,19 +130,131 @@ async def compile_source(source: str, engine: str) -> CompileResult:
         return CompileResult(ok=False, log=_UNAVAILABLE, pdf=None, synctex_gz=None)
 
 
-def _artifacts(source: str, pdf: bytes, synctex_gz: bytes) -> dict:
+def _build_tar(entries: Sequence[tuple[str, bytes]]) -> tempfile.SpooledTemporaryFile:
+    """Tar the tree into a spooled file.
+
+    Spooled rather than BytesIO: the tree is capped at 25MB and holding both
+    it and its tar in memory doubles that on a single-worker process. Small
+    projects -- the overwhelming majority -- never touch the disk.
+    """
+    spool = tempfile.SpooledTemporaryFile(max_size=8 * 1024 * 1024)
+    with tarfile.open(fileobj=spool, mode="w") as tf:
+        for path, data in entries:
+            info = tarfile.TarInfo(path)
+            info.size = len(data)
+            info.mode = 0o644
+            tf.addfile(info, io.BytesIO(data))
+    spool.seek(0)
+    return spool
+
+
+async def _aiter_spooled(spool, chunk_size: int = 64 * 1024):
+    """Wrap a sync `SpooledTemporaryFile` as an async byte iterator.
+
+    Handing the spool to httpx directly (`content=spool`) makes it build a
+    SyncByteStream (the file is Iterable, not AsyncIterable), which
+    `httpx.AsyncClient` cannot send -- measured against the real compiler:
+    "Attempted to send a sync request with an AsyncClient instance." This
+    still reads one chunk at a time rather than materialising the tar.
+    """
+    while True:
+        chunk = spool.read(chunk_size)
+        if not chunk:
+            break
+        yield chunk
+
+
+async def compile_tree(
+    entries: Sequence[tuple[str, bytes]], engine: str, main_path: str
+) -> CompileResult:
+    """Compile a whole project tree. `main_path` is tree-relative.
+
+    Posts `application/x-tar` with `X-Engine`/`X-Main-Path` headers, per the
+    wire protocol `latex-compiler/app.py::compile_tree` implements. The tar
+    is built into a spooled file and streamed to httpx chunk by chunk (see
+    `_aiter_spooled`) so the process never holds the tree bytes and the tar
+    bytes in memory at once for anything past the spool's 8MB threshold.
+    """
+    spool = _build_tar(entries)
+    try:
+        # httpx cannot peek an async iterator's length, so without this it
+        # sends `Transfer-Encoding: chunked` -- which the compiler's stdlib
+        # `BaseHTTPRequestHandler` does not decode (it reads exactly
+        # `Content-Length` bytes and nothing else), so a chunked body arrives
+        # as a truncated, unparsable tar. Measured against the real
+        # container: "The uploaded project could not be unpacked." An
+        # explicit Content-Length here makes httpx skip the auto
+        # Transfer-Encoding header entirely (see httpx.Request._prepare).
+        #
+        # LATENT CONSTRAINT ON THE SERVICE, not just on this client: the
+        # compiler never rejects a chunked body or errors on it -- it
+        # misparses the chunk-size line as tar bytes and silently truncates
+        # the archive, with no error surfaced anywhere. Any future caller of
+        # POST /compile (or /synctex) MUST send an explicit Content-Length;
+        # falling back to chunked encoding corrupts the upload silently.
+        spool.seek(0, io.SEEK_END)
+        size = spool.tell()
+        spool.seek(0)
+        headers = {
+            "Content-Type": "application/x-tar",
+            "Content-Length": str(size),
+            "X-Engine": engine,
+            "X-Main-Path": main_path,
+        }
+        # Same gate as compile_source, for the same reason: a compile is
+        # bounded CPU work in the sandboxed container, whole-tree or not.
+        async with _compile_semaphore:
+            payload = await _post_body("/compile", _aiter_spooled(spool), headers)
+    finally:
+        spool.close()
+    if payload is None:
+        return CompileResult(ok=False, log=_UNAVAILABLE, pdf=None, synctex_gz=None, root=None)
+    try:
+        pdf_b64 = payload.get("pdf_b64")
+        synctex_b64 = payload.get("synctex_b64")
+        return CompileResult(
+            ok=bool(payload.get("ok")),
+            log=payload.get("log") or "",
+            pdf=base64.b64decode(pdf_b64) if pdf_b64 else None,
+            synctex_gz=base64.b64decode(synctex_b64) if synctex_b64 else None,
+            root=payload.get("root"),
+        )
+    except Exception as exc:
+        # Same reasoning as compile_source's matching except: shaping the
+        # RESPONSE can fail independently of the request succeeding.
+        log.warning("latex_compiler_bad_payload", path="/compile", error=str(exc)[:200])
+        return CompileResult(ok=False, log=_UNAVAILABLE, pdf=None, synctex_gz=None, root=None)
+
+
+def _sync_artifacts(pdf: bytes, synctex_gz: bytes) -> dict:
+    # NO "source" key. Measured in plan 1: both sync directions answer from
+    # the PDF and the map alone, with no .tex staged in the compiler at all.
+    # Sending it would ship up to 25MB of project text to answer one
+    # double-click.
     return {
-        "source": source,
         "pdf_b64": base64.b64encode(pdf).decode(),
         "synctex_b64": base64.b64encode(synctex_gz).decode(),
     }
 
 
 async def synctex_forward(
-    source: str, pdf: bytes, synctex_gz: bytes, line: int
+    pdf: bytes,
+    synctex_gz: bytes,
+    root: str | None,
+    main_path: str,
+    file: str,
+    line: int,
 ) -> PdfPosition | None:
     payload = await _post(
-        "/synctex", {**_artifacts(source, pdf, synctex_gz), "direction": "forward", "line": line}
+        "/synctex",
+        {
+            **_sync_artifacts(pdf, synctex_gz),
+            "direction": "forward",
+            "root": root,
+            "main_path": main_path,
+            "file": file,
+            "line": line,
+        },
     )
     if not payload or not payload.get("found"):
         return None
@@ -126,13 +276,21 @@ async def synctex_forward(
 
 
 async def synctex_reverse(
-    source: str, pdf: bytes, synctex_gz: bytes, page: int, x: float, y: float
-) -> int | None:
+    pdf: bytes,
+    synctex_gz: bytes,
+    root: str | None,
+    main_path: str,
+    page: int,
+    x: float,
+    y: float,
+) -> SourcePoint | None:
     payload = await _post(
         "/synctex",
         {
-            **_artifacts(source, pdf, synctex_gz),
+            **_sync_artifacts(pdf, synctex_gz),
             "direction": "reverse",
+            "root": root,
+            "main_path": main_path,
             "page": page,
             "x": x,
             "y": y,
@@ -141,7 +299,10 @@ async def synctex_reverse(
     if not payload or not payload.get("found"):
         return None
     try:
-        return int(payload["line"])
+        # A `found: true` payload missing `file` is the same version-skew
+        # case as the forward direction above: KeyError here must degrade to
+        # no navigation, never raise.
+        return SourcePoint(file=str(payload["file"]), line=int(payload["line"]))
     except Exception as exc:
         log.warning("latex_synctex_bad_payload", direction="reverse", error=str(exc)[:200])
         return None

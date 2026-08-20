@@ -18,7 +18,12 @@ import httpx
 import pytest
 
 from app.core.config import settings
-from app.services.latex_compiler import compile_source, synctex_forward, synctex_reverse
+from app.services.latex_compiler import (
+    compile_source,
+    compile_tree,
+    synctex_forward,
+    synctex_reverse,
+)
 
 pytestmark = pytest.mark.container
 
@@ -42,31 +47,49 @@ This sentence exists so a line maps to a box.
 
 
 async def test_a_real_template_compiles_and_round_trips_a_line():
-    """Line -> page position -> line. The map survives being carried out of
-    the build directory, which is the whole reason `synctex -d` is used."""
-    result = await compile_source(_PAPER, "pdflatex")
+    """Line -> page position -> line, through the NEW client path
+    (compile_tree + the tree-relative synctex_forward/synctex_reverse) rather
+    than the legacy single-file compile_source. The map survives being
+    carried out of the build directory, which is the whole reason
+    `synctex -d` is used."""
+    result = await compile_tree([("master.tex", _PAPER.encode())], "pdflatex", "master.tex")
     assert result.ok, result.log
     assert result.pdf and result.pdf.startswith(b"%PDF")
     assert result.synctex_gz
+    assert result.root
 
     # NOTE: derived from the exact (unstripped) string passed to
-    # compile_source above -- _PAPER opens with a newline, so
+    # compile_tree above -- _PAPER opens with a newline, so
     # \section{Introduction} lands on line 7 of the compiled file, not line
     # 6. Stripping here before indexing would measure a line that was never
     # compiled.
     line = _PAPER.splitlines().index(r"\section{Introduction}") + 1
-    position = await synctex_forward(_PAPER, result.pdf, result.synctex_gz, line=line)
+    position = await synctex_forward(
+        result.pdf,
+        result.synctex_gz,
+        root=result.root,
+        main_path="master.tex",
+        file="master.tex",
+        line=line,
+    )
     assert position is not None
     assert position.page == 1
 
     back = await synctex_reverse(
-        _PAPER, result.pdf, result.synctex_gz, page=position.page, x=position.x, y=position.y
+        result.pdf,
+        result.synctex_gz,
+        root=result.root,
+        main_path="master.tex",
+        page=position.page,
+        x=position.x,
+        y=position.y,
     )
     assert back is not None
+    assert back.file == "master.tex"
     # Exact equality is too strict: the client answers with the line of the
     # nearest box, which can be the paragraph's first line rather than the
     # heading. Within a couple of lines proves the map is real.
-    assert abs(back - line) <= 3
+    assert abs(back.line - line) <= 3
 
 
 async def test_the_same_template_also_compiles_under_xelatex():

@@ -257,7 +257,19 @@ async def compile_document(
 
     cache.put(
         key,
-        CachedBuild(source=source, pdf=result.pdf, synctex_gz=result.synctex_gz, log=result.log),
+        # TRANSITIONAL (Task 3 of the compile-transport plan): root=None and
+        # main_path="" deliberately keep the compiler in its LEGACY
+        # single-file mode -- main_path="" is falsy, so query_synctex takes
+        # its `not main_path` branch (falls back to master.tex, skips the
+        # tree-relative conversion) exactly as before this client's
+        # signature changed. Passing the document's REAL main_path here with
+        # root=None would push the compiler into its NEW tree mode with no
+        # root to resolve against, and reverse sync would silently start
+        # answering `found: false`. Task 4 replaces this with a real tree
+        # compile (root=result.root, main_path=main_path).
+        CachedBuild(
+            pdf=result.pdf, synctex_gz=result.synctex_gz, log=result.log, root=None, main_path=""
+        ),
         document_id=doc_id,
     )
     return CompileOut(ok=True, log=result.log, pdf_hash=key, revision=revision)
@@ -306,7 +318,19 @@ async def synctex_forward_route(
     if build is None or build.synctex_gz is None:
         return SynctexForwardOut(found=False)
 
-    position = await synctex_forward(build.source, build.pdf, build.synctex_gz, payload.line)
+    # TRANSITIONAL (Task 3): root/main_path=None/"" keep the compiler in its
+    # legacy single-file mode, matching CachedBuild's construction above --
+    # see that comment for why. `file=""` is likewise falsy, so a forward
+    # query falls back to "master.tex" exactly as the old client's implicit
+    # default did. Task 4 threads the document's real file/root through.
+    position = await synctex_forward(
+        build.pdf,
+        build.synctex_gz,
+        root=build.root,
+        main_path=build.main_path,
+        file="",
+        line=payload.line,
+    )
     if position is None:
         return SynctexForwardOut(found=False)
     return SynctexForwardOut(
@@ -342,9 +366,19 @@ async def synctex_reverse_route(
     if build is None or build.synctex_gz is None:
         return SynctexReverseOut(found=False)
 
-    line = await synctex_reverse(
-        build.source, build.pdf, build.synctex_gz, payload.page, payload.x, payload.y
+    # TRANSITIONAL (Task 3): same legacy-mode reasoning as the forward route
+    # above. synctex_reverse now returns a SourcePoint (file + line); only
+    # `.line` is used here because SynctexReverseOut has no `file` field yet
+    # -- Task 4 adds it alongside the real tree wiring.
+    point = await synctex_reverse(
+        build.pdf,
+        build.synctex_gz,
+        root=build.root,
+        main_path=build.main_path,
+        page=payload.page,
+        x=payload.x,
+        y=payload.y,
     )
-    if line is None:
+    if point is None:
         return SynctexReverseOut(found=False)
-    return SynctexReverseOut(found=True, line=line)
+    return SynctexReverseOut(found=True, line=point.line)

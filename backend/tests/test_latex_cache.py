@@ -5,8 +5,10 @@ a single worker by design."""
 from app.services.latex_cache import CachedBuild, LatexCache, source_hash
 
 
-def _build(pdf: bytes = b"%PDF", source: str = "src") -> CachedBuild:
-    return CachedBuild(source=source, pdf=pdf, synctex_gz=b"gz", log="")
+def _build(
+    pdf: bytes = b"%PDF", root: str | None = "/tmp/rx-latex-abc", main_path: str = "master.tex"
+) -> CachedBuild:
+    return CachedBuild(pdf=pdf, synctex_gz=b"gz", log="", root=root, main_path=main_path)
 
 
 def test_the_hash_covers_the_engine_not_just_the_source():
@@ -94,3 +96,35 @@ def test_evicting_a_build_forgets_the_documents_pointing_at_it():
 
     assert cache.latest_for("doc1") is None
     assert cache._latest == {"doc2": "b"}
+
+
+def test_a_cached_build_no_longer_carries_a_source_field():
+    """`source` was dropped: both sync directions answer from the PDF and the
+    map alone (see latex_compiler.synctex_forward/reverse), so keeping the
+    source text here was dead weight against `size`'s eviction accounting.
+    Fails if `source` is ever reintroduced as a field -- `hasattr` would then
+    be True and the assertion would fail."""
+    build = _build()
+
+    assert not hasattr(build, "source")
+
+
+def test_a_build_round_trips_its_root_and_main_path():
+    """The fields a reverse-sync query now needs alongside the PDF and the
+    map. Fails if `put`/`get` ever stopped preserving them verbatim, or if
+    the constructor silently dropped/renamed either."""
+    cache = LatexCache(max_entries=4, max_bytes=10_000)
+    cache.put("k", _build(root="/tmp/rx-latex-xyz", main_path="src/paper.tex"))
+
+    build = cache.get("k")
+    assert build.root == "/tmp/rx-latex-xyz"
+    assert build.main_path == "src/paper.tex"
+
+
+def test_a_build_with_no_extraction_root_still_reports_its_size():
+    """A degraded/no-tree build (root=None) must still be evictable on byte
+    accounting -- `size` must not choke on root being absent. Fails if `size`
+    were ever wired to depend on `root` rather than staying pdf + synctex."""
+    build = _build(pdf=b"x" * 50, root=None)
+
+    assert build.size == 50 + len(b"gz")

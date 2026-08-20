@@ -10,9 +10,12 @@ Valid only because uvicorn runs a single worker -- the same invariant the
 event bus and the in-memory rate limiter already depend on. Under multiple
 workers each process would hold a different PDF for the same document.
 
-The source and the SyncTeX map are stored BESIDE the PDF because a sync query
-needs all three: evicting them separately would leave a PDF that cannot be
-navigated.
+The SyncTeX map, the extraction root and the main file's tree-relative path
+are stored BESIDE the PDF because a sync query needs all four: evicting them
+separately would leave a PDF that cannot be navigated. `source` is not one of
+them -- both sync directions answer from the PDF and the map alone (see
+`latex_compiler.synctex_forward`/`synctex_reverse`), so keeping the source
+text here would only be dead weight against `size`'s eviction accounting.
 """
 
 import hashlib
@@ -35,10 +38,16 @@ def source_hash(source: str, engine: str) -> str:
 
 @dataclass(frozen=True)
 class CachedBuild:
-    source: str
     pdf: bytes
     synctex_gz: bytes | None
     log: str
+    # The extraction directory the tree was compiled in (None for a
+    # degraded/no-tree build), and the tree-relative path of the main file --
+    # both are what a sync query needs alongside the PDF and the map, now
+    # that the wire protocol is tree-relative. `source` is gone: it is not
+    # read here and was never durable (see the module docstring).
+    root: str | None
+    main_path: str
 
     @property
     def size(self) -> int:

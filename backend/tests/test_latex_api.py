@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.models import LatexDocument, Project, ProjectMember, User
 from app.db.seed import seed_users
 from app.services.latex_cache import CachedBuild, LatexCache, source_hash
-from app.services.latex_compiler import CompileResult, PdfPosition
+from app.services.latex_compiler import CompileResult, PdfPosition, SourcePoint
 
 
 @pytest_asyncio.fixture
@@ -203,7 +203,7 @@ async def test_forward_sync_maps_a_line_to_a_page_position(
     prepared = LatexCache(max_entries=4, max_bytes=10_000)
     prepared.put(
         source_hash("src", "pdflatex"),
-        CachedBuild(source="src", pdf=b"%PDF", synctex_gz=b"gz", log=""),
+        CachedBuild(pdf=b"%PDF", synctex_gz=b"gz", log="", root=None, main_path=""),
         document_id=doc.id,
     )
     position = PdfPosition(page=1, x=36.0, y=122.0, width=100.0, height=12.0)
@@ -260,13 +260,16 @@ async def test_reverse_sync_maps_a_point_to_a_line(
     prepared = LatexCache(max_entries=4, max_bytes=10_000)
     prepared.put(
         source_hash("src", "pdflatex"),
-        CachedBuild(source="src", pdf=b"%PDF", synctex_gz=b"gz", log=""),
+        CachedBuild(pdf=b"%PDF", synctex_gz=b"gz", log="", root=None, main_path=""),
         document_id=doc.id,
     )
 
     with (
         patch("app.api.v1.latex.cache", prepared),
-        patch("app.api.v1.latex.synctex_reverse", AsyncMock(return_value=161)),
+        patch(
+            "app.api.v1.latex.synctex_reverse",
+            AsyncMock(return_value=SourcePoint(file="master.tex", line=161)),
+        ),
     ):
         resp = await client.post(
             f"/v1/projects/{project.id}/latex/{doc.id}/synctex/reverse",
@@ -386,7 +389,9 @@ async def test_a_cache_hit_after_an_edit_and_undo_syncs_the_reverted_build_not_t
     # The sync call must be handed S1's PDF/SyncTeX bytes, not S2's -- this
     # is the "confidently wrong" failure mode, not merely "not found".
     forward.assert_called_once()
-    called_source, called_pdf, called_synctex, called_line = forward.call_args.args
+    # synctex_forward's signature moved to (pdf, synctex_gz, *, root, main_path,
+    # file, line) -- pdf/synctex_gz are still positional, the rest are kwargs.
+    called_pdf, called_synctex = forward.call_args.args
     assert called_pdf == b"%PDF-S1"
     assert called_synctex == b"gz-s1"
 
