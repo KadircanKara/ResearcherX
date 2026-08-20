@@ -2,7 +2,18 @@ import uuid
 from datetime import datetime, timezone
 from enum import StrEnum
 
-from sqlalchemy import JSON, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Integer,
+    LargeBinary,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -162,6 +173,94 @@ class Paper(Base):
 
     chunks: Mapped[list["PaperChunkEmbedding"]] = relationship(
         back_populates="paper", cascade="all, delete-orphan"
+    )
+
+
+class LatexDocument(Base):
+    """One LaTeX document in a project.
+
+    The tree in `latex_files` is the ONLY durable artifact -- there is no
+    `source` column on this table any more. The PDF and the SyncTeX map are
+    derived, cached in memory, and regenerated on a miss -- see
+    services/latex_cache.py. The API's `source` field is a compatibility
+    shim resolved from and written to the main file at request time.
+    """
+
+    __tablename__ = "latex_documents"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE", name="fk_latex_documents_project_id"),
+        index=True,
+    )
+    name: Mapped[str] = mapped_column(String(200))
+    # String(16), not Enum(): adding an engine needs no migration, exactly as
+    # StepKind/RunStatus already work in this schema.
+    engine: Mapped[str] = mapped_column(String(16), default="pdflatex", server_default="pdflatex")
+    # The file compiled for this document. A relative path into `latex_files`,
+    # validated on write to exist in the tree and end in .tex.
+    main_path: Mapped[str] = mapped_column(
+        String(400), default="main.tex", server_default="main.tex"
+    )
+    # Bumped on EVERY file mutation -- write, create, delete, rename, binary
+    # upload. This is what tells the editor its PDF is stale, and it has to
+    # move for a delete and a binary upload as well as an edit; a content
+    # comparison over the open buffers would miss both. It is NOT optimistic
+    # concurrency: nothing checks it on write, so it does not prevent two
+    # members clobbering each other.
+    revision: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
+    created_by: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL", name="fk_latex_documents_created_by"),
+        default=None,
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, onupdate=_now
+    )
+
+
+class LatexFile(Base):
+    """One file inside a LaTeX document's tree.
+
+    Text and binary content live in SEPARATE columns so "is this text?" is
+    decided exactly once, at ingest, by the code that can look at the bytes
+    properly. A single BYTEA column would push that decision onto every
+    reader and put a UTF-8 decode on the editor's hot path -- the path that
+    was a plain Text column when a document was one `source` string, and
+    should stay one.
+
+    The CHECK constraint is what stops the pair drifting into a third state
+    (both set, or neither) that no reader handles.
+
+    `size_bytes` is STORED, not computed. Quota enforcement runs on every
+    write; SUM over an indexed integer is a lookup, while
+    SUM(length(content) + length(blob)) detoasts the whole project on every
+    autosave.
+    """
+
+    __tablename__ = "latex_files"
+    __table_args__ = (
+        UniqueConstraint("document_id", "path", name="uq_latex_files_document_path"),
+        CheckConstraint(
+            "(is_binary = true AND blob IS NOT NULL AND content IS NULL)"
+            " OR (is_binary = false AND content IS NOT NULL AND blob IS NULL)",
+            name="ck_latex_files_content_xor_blob",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    document_id: Mapped[str] = mapped_column(
+        ForeignKey("latex_documents.id", ondelete="CASCADE", name="fk_latex_files_document_id"),
+        index=True,
+    )
+    path: Mapped[str] = mapped_column(String(400))
+    is_binary: Mapped[bool] = mapped_column(Boolean, default=False)
+    content: Mapped[str | None] = mapped_column(Text, default=None)
+    blob: Mapped[bytes | None] = mapped_column(LargeBinary, default=None)
+    size_bytes: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, onupdate=_now
     )
 
 

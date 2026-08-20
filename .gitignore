@@ -32,3 +32,7 @@ docs/session.txt
 # MCP server config (contains API keys — keep local)
 .mcp.json
 backend/stub-papers/
+
+# Copied out of node_modules by frontend/scripts/copy-pdf-worker.mjs at
+# dev/build time, so it always matches the installed pdfjs-dist.
+frontend/public/pdf.worker.min.mjs

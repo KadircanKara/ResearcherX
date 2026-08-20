@@ -1,0 +1,73 @@
+Rc files read (in order):
+  NONE
+Latexmk: This is Latexmk, John Collins, 9 March 2026. Version 4.88.
+Latexmk: Changing directory to '/tmp/s_a2_bibtex_jobname_collision_xelatex_xelatex/'
+No existing .aux file, so I'll make a simple one, and require run of *latex.
+Latexmk: applying rule 'xelatex'...
+Rule 'xelatex':  Reasons for rerun
+Category 'other':
+  Rerun of 'xelatex' forced or previously required:
+    Reason or flag: 'Initial setup'
+
+------------
+Run number 1 of rule 'xelatex'
+------------
+------------
+Running 'xelatex -no-pdf -synctex=1 -interaction=nonstopmode -file-line-error -no-shell-escape -halt-on-error -recorder  "Command for 'pdflatex' gave return code 1.tex"'
+------------
+This is XeTeX, Version 3.141592653-2.6-0.999998 (TeX Live 2026) (preloaded format=xelatex)
+entering extended mode
+(./Command for 'pdflatex' gave return code 1.tex
+LaTeX2e <2026-06-01>
+L3 programming layer <2026-07-20>
+(/usr/local/texlive/2026/texmf-dist/tex/latex/base/article.cls
+Document Class: article 2025/01/22 v1.4n Standard LaTeX document class
+(/usr/local/texlive/2026/texmf-dist/tex/latex/base/size10.clo))
+./chapters/intro.tex:3: Undefined control sequence.
+l.3 zz
+(/usr/local/texlive/2026/texmf-dist/tex/latex/l3backend/l3backend-xetex.def) (./Command for 'pdflatex' gave return code 1.aux)
+No file "Command for 'pdflatex' gave return code 1".bbl.
+[1] (./Command for 'pdflatex' gave return code 1.aux) )
+Output written on Command for 'pdflatex' gave return code 1.xdv (1 page, 436 bytes).
+SyncTeX written on Command for 'pdflatex' gave return code 1.synctex.gz.
+Transcript written on Command for 'pdflatex' gave return code 1.log.
+Latexmk: Getting log file 'Command for 'pdflatex' gave return code 1.log'
+Latexmk: Examining 'Command for 'pdflatex' gave return code 1.fls'
+Latexmk: Examining 'Command for 'pdflatex' gave return code 1.log'
+Latexmk: Log file says output to 'Command for 'pdflatex' gave return code 1.xdv'
+  ===Source file 'Command for 'pdflatex' gave return code 1.bbl' for 'xelatex'
+Create bibtex Command for 'pdflatex' gave return code 1
+Latexmk: Found bibliography file(s):
+  ./refs.bib
+Latexmk: applying rule 'bibtex Command for 'pdflatex' gave return code 1'...
+Rule 'bibtex Command for 'pdflatex' gave return code 1':  Reasons for rerun
+Category 'other':
+  Rerun of 'bibtex Command for 'pdflatex' gave return code 1' forced or previously required:
+    Reason or flag: 'Initial set up of rule'
+
+------------
+Run number 1 of rule 'bibtex Command for 'pdflatex' gave return code 1'
+------------
+------------
+Running 'bibtex  "Command for 'pdflatex' gave return code 1.aux"'
+------------
+This is BibTeX, Version 0.99e (TeX Live 2026)
+The top-level auxiliary file: Command for 'pdflatex' gave return code 1.aux
+The style file: plain.bst
+Database file #1: refs.bib
+I was expecting an "="---line 1 of file refs.bib
+ : @article{broken, not 
+ :                      bibtex ]]]
+I'm skipping whatever remains of this entry
+Warning--to sort, need author or key in broken
+Warning--empty author in broken
+Warning--empty title in broken
+Warning--empty journal in broken
+Warning--empty year in broken
+(There was 1 error message)
+Latexmk: Errors, so I did not complete making targets
+Collected error summary (may duplicate other messages):
+  bibtex Command for 'pdflatex' gave return code 1: Bibtex errors: See file 'Command for 'pdflatex' gave return code 1.blg'
+Latexmk: Undoing directory change
+
+

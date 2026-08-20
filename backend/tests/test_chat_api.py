@@ -125,9 +125,6 @@ async def test_send_message_streams(
 async def test_send_message_requires_auth(
     client: AsyncClient, project: Project, db_session: AsyncSession
 ):
-    conv = ChatConversation(project_id=project.id, title="Auth test", created_by="x")
-    db_session.add(conv)
-    await db_session.commit()
     # No X-Dev-User-Id header → get_current_user falls back to default seed user
     # who IS a member, so this should succeed. Test non-member project instead:
     # Create a project owned by someone else

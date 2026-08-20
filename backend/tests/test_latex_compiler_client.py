@@ -1,0 +1,458 @@
+"""Client for the sandboxed compile service. The HTTP layer is mocked; the
+container is exercised in the integration task."""
+
+import asyncio
+import base64
+import tarfile
+from unittest.mock import AsyncMock, MagicMock, patch
+
+from app.services.latex_compiler import (
+    compile_tree,
+    synctex_forward,
+    synctex_reverse,
+)
+
+
+class _Response:
+    def __init__(self, payload):
+        self._payload = payload
+
+    def raise_for_status(self):
+        return None
+
+    def json(self):
+        return self._payload
+
+
+def _client_returning(payload):
+    """A stand-in for httpx.AsyncClient used as an async context manager.
+
+    MagicMock, not AsyncMock, and `__aenter__.return_value` rather than
+    assigning `__aenter__`: `async with obj` resolves the dunder on the TYPE,
+    so configuring the auto-created async magic is what actually takes effect.
+    __aenter__ must yield the SAME object whose .post is stubbed, or the code
+    under test calls a different mock than the test configured.
+    """
+    client = MagicMock()
+    client.post = AsyncMock(return_value=_Response(payload))
+    client.__aenter__.return_value = client
+    client.__aexit__.return_value = False
+    return client
+
+
+def _client_capturing(payload):
+    """Like `_client_returning`, but also records the exact args `.post` was
+    called with, so a test can assert on the body/headers actually sent
+    rather than on a payload the test built and handed straight back to
+    itself."""
+    calls = []
+    client = MagicMock()
+
+    async def fake_post(url, **kwargs):
+        # Read any streamed body NOW, while the caller's SpooledTemporaryFile
+        # is still open -- compile_tree closes it in a `finally` right after
+        # this call returns. compile_tree hands httpx an ASYNC byte iterator
+        # (see _aiter_spooled), so it is consumed with `async for`, not
+        # `.read()` -- a plain httpx.AsyncClient would do exactly this too.
+        content = kwargs.get("content")
+        if content is not None and hasattr(content, "__aiter__"):
+            chunks = [chunk async for chunk in content]
+            body_bytes = b"".join(chunks)
+        elif hasattr(content, "read"):
+            body_bytes = content.read()
+        else:
+            body_bytes = content
+        calls.append({"url": url, "body": body_bytes, "headers": kwargs.get("headers")})
+        return _Response(payload)
+
+    client.post = fake_post
+    client.__aenter__.return_value = client
+    client.__aexit__.return_value = False
+    return client, calls
+
+
+# --- compile_tree -----------------------------------------------------
+
+
+async def test_compile_tree_posts_a_tar_with_the_engine_and_main_path_headers():
+    """Fails if the headers are ever dropped, misnamed, or the request stops
+    going out as application/x-tar -- the compiler's do_POST dispatches on
+    exactly that Content-Type to route into the tar/tree branch instead of
+    the legacy JSON one."""
+    payload = {
+        "ok": True,
+        "log": "",
+        "pdf_b64": base64.b64encode(b"%PDF-1.5").decode(),
+        "synctex_b64": None,
+        "root": "/tmp/rx-latex-abc",
+    }
+    client, calls = _client_capturing(payload)
+    entries = [("master.tex", b"\\documentclass{article}"), ("chapters/intro.tex", b"hello")]
+
+    with patch("httpx.AsyncClient", return_value=client):
+        await compile_tree(entries, "pdflatex", "master.tex")
+
+    assert len(calls) == 1
+    assert calls[0]["headers"]["Content-Type"] == "application/x-tar"
+    assert calls[0]["headers"]["X-Engine"] == "pdflatex"
+    assert calls[0]["headers"]["X-Main-Path"] == "master.tex"
+
+
+async def test_compile_tree_sends_a_tar_that_round_trips_to_exactly_the_given_entries():
+    """Asserts on the bytes ACTUALLY POSTED (captured by the fake `.post`),
+    not on a tar the test built itself -- this is the test that would catch
+    compile_tree silently dropping an entry, corrupting a member's bytes, or
+    building the tar in a format tarfile itself cannot read back."""
+    payload = {"ok": True, "log": "", "pdf_b64": None, "synctex_b64": None, "root": None}
+    client, calls = _client_capturing(payload)
+    entries = [
+        ("master.tex", b"\\input{chapters/intro}"),
+        ("chapters/intro.tex", b"Hello, world."),
+        ("figure.png", b"\x89PNG\r\n\x1a\nbinarydata"),
+    ]
+
+    with patch("httpx.AsyncClient", return_value=client):
+        await compile_tree(entries, "pdflatex", "master.tex")
+
+    import io
+
+    tf = tarfile.open(fileobj=io.BytesIO(calls[0]["body"]), mode="r")
+    extracted = {member.name: tf.extractfile(member).read() for member in tf.getmembers()}
+    assert extracted == dict(entries)
+
+
+async def test_compile_tree_returns_the_root_from_the_payload():
+    payload = {
+        "ok": True,
+        "log": "",
+        "pdf_b64": base64.b64encode(b"%PDF-1.5").decode(),
+        "synctex_b64": None,
+        "root": "/tmp/rx-latex-xyz",
+    }
+    with patch("httpx.AsyncClient", return_value=_client_returning(payload)):
+        result = await compile_tree([("master.tex", b"x")], "pdflatex", "master.tex")
+
+    assert result.ok
+    assert result.root == "/tmp/rx-latex-xyz"
+
+
+async def test_compile_tree_ignores_a_non_string_root_instead_of_storing_it_untyped():
+    """`root` is untyped JSON from a separately deployed image and flows
+    into CachedBuild.root and back out onto a later /synctex payload --
+    same treatment as `file` in synctex_reverse. Fails if a non-string
+    `root` from the compiler is ever stored as-is instead of degrading to
+    None."""
+    payload = {
+        "ok": True,
+        "log": "",
+        "pdf_b64": base64.b64encode(b"%PDF-1.5").decode(),
+        "synctex_b64": None,
+        "root": 42,
+    }
+    with patch("httpx.AsyncClient", return_value=_client_returning(payload)):
+        result = await compile_tree([("master.tex", b"x")], "pdflatex", "master.tex")
+
+    assert result.ok
+    assert result.root is None
+
+
+async def test_compile_tree_percent_encodes_a_non_ascii_main_path_header():
+    """httpx encodes header values as ASCII, so a non-ASCII main file name
+    (plan 2's own round-trip tests cover such names) must be percent-encoded
+    before it reaches the header, or the request build raises
+    UnicodeEncodeError and the caller sees a misleading 'compiler
+    unavailable'. Fails if compile_tree ever stops encoding X-Main-Path, or
+    encodes it in a way that does not round-trip back to the original name
+    via urllib.parse.unquote (what the compiler does on the other end)."""
+    from urllib.parse import unquote
+
+    payload = {"ok": True, "log": "", "pdf_b64": None, "synctex_b64": None, "root": None}
+    client, calls = _client_capturing(payload)
+
+    with patch("httpx.AsyncClient", return_value=client):
+        await compile_tree([("résumé.tex", b"x")], "pdflatex", "résumé.tex")
+
+    sent_header = calls[0]["headers"]["X-Main-Path"]
+    assert sent_header.isascii()
+    assert unquote(sent_header) == "résumé.tex"
+
+
+async def test_compile_tree_fails_open_to_a_generic_message_when_the_compiler_is_unreachable():
+    import httpx
+
+    client = MagicMock()
+    client.post = AsyncMock(side_effect=httpx.ConnectError("nope"))
+    client.__aenter__.return_value = client
+    client.__aexit__.return_value = False
+
+    with patch("httpx.AsyncClient", return_value=client):
+        result = await compile_tree([("master.tex", b"x")], "pdflatex", "master.tex")
+
+    assert not result.ok
+    assert result.pdf is None
+    assert result.root is None
+    assert "nope" not in result.log
+
+
+async def test_compile_tree_malformed_base64_degrades_instead_of_raising():
+    payload = {
+        "ok": True,
+        "log": "",
+        "pdf_b64": "not-valid-base64!!",
+        "synctex_b64": None,
+        "root": "/tmp/rx-latex-abc",
+    }
+    with patch("httpx.AsyncClient", return_value=_client_returning(payload)):
+        result = await compile_tree([("master.tex", b"x")], "pdflatex", "master.tex")
+
+    assert not result.ok
+    assert result.pdf is None
+
+
+# --- synctex ------------------------------------------------------------
+
+
+async def test_synctex_forward_sends_the_file_and_main_path_and_no_source_key():
+    """`source` was measured unnecessary for either sync direction -- sending
+    it would ship up to 25MB to answer one double-click. Fails if a future
+    change ever puts source text back on this wire call, or drops `file`/
+    `main_path`, or if this stops asserting on the ACTUAL call args (a test
+    that only re-checked a payload it built itself would prove nothing)."""
+    captured = {}
+    payload = {"found": True, "page": 1, "x": 1.0, "y": 1.0, "width": 1.0, "height": 1.0}
+
+    client = MagicMock()
+
+    async def fake_post(url, json=None):
+        captured["payload"] = json
+        return _Response(payload)
+
+    client.post = fake_post
+    client.__aenter__.return_value = client
+    client.__aexit__.return_value = False
+
+    with patch("httpx.AsyncClient", return_value=client):
+        await synctex_forward(
+            b"pdf", b"gz", root="/tmp/rx-latex-abc", main_path="master.tex", file="foo.tex", line=5
+        )
+
+    sent = captured["payload"]
+    assert sent["file"] == "foo.tex"
+    assert sent["main_path"] == "master.tex"
+    assert sent["root"] == "/tmp/rx-latex-abc"
+    assert "source" not in sent
+
+
+async def test_forward_sync_returns_a_position():
+    payload = {"found": True, "page": 1, "x": 36.0, "y": 122.0, "width": 100.0, "height": 12.0}
+    with patch("httpx.AsyncClient", return_value=_client_returning(payload)):
+        position = await synctex_forward(
+            b"pdf",
+            b"gz",
+            root="/tmp/rx-latex-abc",
+            main_path="master.tex",
+            file="master.tex",
+            line=161,
+        )
+
+    assert position.page == 1
+    assert position.x == 36.0
+    assert position.y == 122.0
+
+
+async def test_forward_sync_returns_none_when_the_map_has_no_answer():
+    with patch("httpx.AsyncClient", return_value=_client_returning({"found": False})):
+        position = await synctex_forward(
+            b"pdf",
+            b"gz",
+            root="/tmp/rx-latex-abc",
+            main_path="master.tex",
+            file="master.tex",
+            line=1,
+        )
+
+    assert position is None
+
+
+async def test_reverse_sync_returns_a_source_point_with_the_file_from_the_payload():
+    payload = {"found": True, "file": "chapters/intro.tex", "line": 161}
+    with patch("httpx.AsyncClient", return_value=_client_returning(payload)):
+        point = await synctex_reverse(
+            b"pdf", b"gz", root="/tmp/rx-latex-abc", main_path="master.tex", page=1, x=36.0, y=122.0
+        )
+
+    assert point.file == "chapters/intro.tex"
+    assert point.line == 161
+
+
+async def test_reverse_sync_returns_none_when_unavailable():
+    with patch("httpx.AsyncClient", return_value=_client_returning({"found": False})):
+        point = await synctex_reverse(
+            b"pdf", b"gz", root="/tmp/rx-latex-abc", main_path="master.tex", page=1, x=0.0, y=0.0
+        )
+
+    assert point is None
+
+
+async def test_found_true_without_the_other_keys_degrades_to_no_navigation():
+    """The client and the service are separately deployed images; a version
+    skew must cost navigation, never raise."""
+    with patch("httpx.AsyncClient", return_value=_client_returning({"found": True})):
+        result = await synctex_forward(
+            b"pdf",
+            b"gz",
+            root="/tmp/rx-latex-abc",
+            main_path="master.tex",
+            file="master.tex",
+            line=1,
+        )
+        assert result is None
+    with patch("httpx.AsyncClient", return_value=_client_returning({"found": True})):
+        result = await synctex_reverse(
+            b"pdf", b"gz", root="/tmp/rx-latex-abc", main_path="master.tex", page=1, x=0.0, y=0.0
+        )
+        assert result is None
+
+
+async def test_reverse_sync_found_true_but_missing_file_degrades_to_no_navigation():
+    """The specific version-skew case this task's brief calls out: `found:
+    true` with `line` present but `file` missing must not raise KeyError out
+    of a chat/editor turn."""
+    payload = {"found": True, "line": 161}
+    with patch("httpx.AsyncClient", return_value=_client_returning(payload)):
+        point = await synctex_reverse(
+            b"pdf", b"gz", root="/tmp/rx-latex-abc", main_path="master.tex", page=1, x=0.0, y=0.0
+        )
+
+    assert point is None
+
+
+async def test_reverse_sync_with_a_null_file_degrades_instead_of_returning_the_string_none():
+    """`str(None) == "None"` would manufacture a confidently wrong path --
+    Task 4 hands `point.file` straight to the editor to open, and a wrong
+    file opens the wrong document with full confidence where `found: false`
+    renders cleanly. Fails if `synctex_reverse` ever goes back to coercing
+    `file` with `str(...)` instead of validating it."""
+    payload = {"found": True, "file": None, "line": 7}
+    with patch("httpx.AsyncClient", return_value=_client_returning(payload)):
+        point = await synctex_reverse(
+            b"pdf", b"gz", root="/tmp/rx-latex-abc", main_path="master.tex", page=1, x=0.0, y=0.0
+        )
+
+    assert point is None
+
+
+async def test_reverse_sync_with_an_int_file_degrades_instead_of_returning_the_string_123():
+    payload = {"found": True, "file": 123, "line": 7}
+    with patch("httpx.AsyncClient", return_value=_client_returning(payload)):
+        point = await synctex_reverse(
+            b"pdf", b"gz", root="/tmp/rx-latex-abc", main_path="master.tex", page=1, x=0.0, y=0.0
+        )
+
+    assert point is None
+
+
+async def test_reverse_sync_with_a_dict_file_degrades_instead_of_stringifying_it():
+    payload = {"found": True, "file": {"a": 1}, "line": 7}
+    with patch("httpx.AsyncClient", return_value=_client_returning(payload)):
+        point = await synctex_reverse(
+            b"pdf", b"gz", root="/tmp/rx-latex-abc", main_path="master.tex", page=1, x=0.0, y=0.0
+        )
+
+    assert point is None
+
+
+async def test_reverse_sync_with_an_empty_string_file_degrades_rather_than_opening_nothing():
+    """An empty string passes `isinstance(..., str)` but is not a real tree
+    path either -- the emptiness check is what this test pins."""
+    payload = {"found": True, "file": "", "line": 7}
+    with patch("httpx.AsyncClient", return_value=_client_returning(payload)):
+        point = await synctex_reverse(
+            b"pdf", b"gz", root="/tmp/rx-latex-abc", main_path="master.tex", page=1, x=0.0, y=0.0
+        )
+
+    assert point is None
+
+
+async def test_compile_tree_is_bounded_by_the_compile_semaphore():
+    """A fresh Semaphore(2) for the test -- the point under test is that a
+    third concurrent compile has to wait for one of the first two to finish,
+    not that the production default (8) is exactly right. `compile_tree`
+    keeps `_compile_semaphore` held around the call because a compile is
+    bounded CPU work in the sandboxed container whether it is one file or a
+    whole tree. Fails if compile_tree ever stopped acquiring the semaphore --
+    all four tasks would enter `_post_body` immediately and `entered` would
+    reach 4, not 2."""
+    limit = asyncio.Semaphore(2)
+    entered = 0
+    max_entered = 0
+    release = asyncio.Event()
+    entered_two = asyncio.Event()
+
+    async def fake_post_body(path, content, headers):
+        nonlocal entered, max_entered
+        entered += 1
+        max_entered = max(max_entered, entered)
+        if entered == 2:
+            entered_two.set()
+        await release.wait()
+        entered -= 1
+        return {"ok": True, "log": "", "pdf_b64": None, "synctex_b64": None, "root": None}
+
+    with (
+        patch("app.services.latex_compiler._compile_semaphore", limit),
+        patch("app.services.latex_compiler._post_body", fake_post_body),
+    ):
+        tasks = [
+            asyncio.create_task(compile_tree([("master.tex", b"x")], "pdflatex", "master.tex"))
+            for _ in range(4)
+        ]
+        await asyncio.wait_for(entered_two.wait(), timeout=2)
+        await asyncio.sleep(0)
+        assert entered == 2
+
+        release.set()
+        results = await asyncio.gather(*tasks)
+
+    assert max_entered == 2
+    assert all(r.ok for r in results)
+
+
+async def test_synctex_calls_are_not_gated_by_the_compile_semaphore():
+    """synctex is short and cheap and does not spawn latexmk -- it must stay
+    outside the compile gate, or a burst of navigation clicks would queue
+    behind unrelated compiles for no reason. The holder below occupies the
+    semaphore's only slot for far longer than synctex's own timeout below,
+    so if a future change wrongly wraps synctex_forward in the same
+    semaphore, this test TIMES OUT instead of passing by luck."""
+    limit = asyncio.Semaphore(1)
+    payload = {"found": True, "page": 1, "x": 1.0, "y": 1.0, "width": 1.0, "height": 1.0}
+
+    async def hold_compile_semaphore():
+        async with limit:
+            await asyncio.sleep(10)
+
+    with (
+        patch("app.services.latex_compiler._compile_semaphore", limit),
+        patch("httpx.AsyncClient", return_value=_client_returning(payload)),
+    ):
+        holder = asyncio.create_task(hold_compile_semaphore())
+        await asyncio.sleep(0)  # let it acquire the semaphore's only slot first
+        position = await asyncio.wait_for(
+            synctex_forward(
+                b"pdf",
+                b"gz",
+                root="/tmp/rx-latex-abc",
+                main_path="master.tex",
+                file="master.tex",
+                line=1,
+            ),
+            timeout=1,
+        )
+        holder.cancel()
+        try:
+            await holder
+        except asyncio.CancelledError:
+            pass
+
+    assert position is not None

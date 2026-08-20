@@ -316,6 +316,62 @@ class Settings(BaseSettings):
     # accepted and marked degraded. attempts = 1 initial + max_search_retries.
     max_search_retries: int = 2
 
+    # The sandboxed LaTeX compile service (see the latex-compiler/ image).
+    # A URL rather than a hardcoded host so the prod compose file can point
+    # at the same service under a different project name.
+    latex_compiler_url: str = "http://latex-compiler:8080"
+    # Client-side ceiling. Deliberately LONGER than the compiler's own 30s
+    # compile timeout: the service returns a clean "exceeded 30s" log, and a
+    # client that gave up first would replace that useful message with a
+    # generic connection error.
+    latex_compile_timeout: int = 60
+
+    # Compiled-artifact cache bounds. IN-PROCESS MEMORY, which is only valid
+    # because uvicorn runs a single worker (see security.py's docstring for
+    # the same dependency). Both bounds apply: a PDF is comfortably over a
+    # megabyte, so an entry count alone does not bound memory.
+    latex_cache_entries: int = 32
+    latex_cache_bytes: int = 256 * 1024 * 1024
+
+    # Ceiling on compiles running at once, enforced by a module-level
+    # asyncio.Semaphore in latex_compiler.py -- meaningful ONLY because
+    # uvicorn runs a single worker, the same invariant the event bus, the
+    # rate limiter and the cache above already depend on. Each compile
+    # spawns latexmk plus an engine (roughly 4 processes) inside a
+    # container whose `pids_limit` is 64; ~20 concurrent compiles exhausts
+    # that budget and every later compile fails to fork, for every user,
+    # not just whoever caused it. 8 concurrent * ~4 processes = ~32,
+    # leaving comfortable headroom under 64 for latexmk's own transient
+    # children and zombie reaping. Requests beyond the limit QUEUE rather
+    # than being rejected: compiles are normally sub-second, and pid
+    # exhaustion is neither self-limiting nor confined to the request that
+    # caused it, so queueing is the safer default over a 429.
+    latex_max_concurrent_compiles: int = 8
+
+    # Ceiling on archive PARSES running at once, enforced by a module-level
+    # asyncio.Semaphore in api/v1/latex_files.py -- same loop-bound-on-first-
+    # use caveat as `_compile_semaphore` above, same single-worker
+    # precondition. `zipfile.ZipFile(...).infolist()` materialises the WHOLE
+    # central directory into ZipInfo objects before the entry-count guard can
+    # reject an oversized archive: measured at 8.1s / 152MB peak RSS for a
+    # 24MB archive of 270,000 empty entries (under the 25MB body cap, so the
+    # streaming byte counter never fires either). The parse itself runs in a
+    # threadpool so it cannot block the event loop, but a threadpool alone
+    # still lets N parses each hold ~152MB at once -- this bounds how many
+    # run concurrently.
+    latex_max_concurrent_imports: int = 4
+
+    # Per-document tree bounds. Postgres holds the blobs (no object store in
+    # this stack), so the cap is a deliberate trade: 25MB covers a normal
+    # paper with a dozen figures and keeps every pg_dump a sane size. It is
+    # NOT a guess about what LaTeX needs -- raising it means re-measuring the
+    # compile container, whose /tmp is a tmpfs charged against mem_limit: 2g.
+    latex_project_max_bytes: int = 25 * 1024 * 1024
+    latex_file_max_bytes: int = 10 * 1024 * 1024
+    # A real project is tens of files. The bound exists so a hostile archive
+    # cannot make the tree endpoint or the editor sidebar the slow part.
+    latex_max_files: int = 2000
+
     @field_validator("cors_origins", mode="before")
     @classmethod
     def _split_cors(cls, v: object) -> object:

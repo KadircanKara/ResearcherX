@@ -74,6 +74,52 @@ services:
     volumes:
       - ./backend:/app
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    networks:
+      - default
+      - latex
+
+  latex-compiler:
+    build:
+      context: ./latex-compiler
+    # Docker's tini as PID 1, purely to REAP. A compile timeout kills the
+    # engine's process group, but the grandchildren (sh -> pdflatex) are
+    # re-parented to PID 1 as they die, and a plain python3 entrypoint never
+    # waits on them: they linger as zombies, each holding a slot against
+    # `pids_limit: 64`. Measured at 4/64 after a single timeout, so repeated
+    # runaway documents exhaust the limit on zombies alone and every later
+    # compile fails to fork.
+    init: true
+    read_only: true
+    tmpfs:
+      # Sized explicitly: an unbounded tmpfs mount reports the host's full
+      # RAM (measured: 3.9G) regardless of mem_limit, so filling /tmp does
+      # not fail one request -- it OOM-kills the container and every
+      # concurrent compile with it. 1g is NOT sized against
+      # MAX_EXTRACTED_BYTES (64MB in app.py) -- that cap is unreachable over
+      # HTTP in the first place (see its own comment in app.py) and would be
+      # the wrong number to size against even if it weren't, since inode
+      # amplification (a 4096-byte page per file regardless of declared
+      # size) is what actually drives tmpfs usage, not declared bytes. The
+      # real driver is the 32MB wire cap (MAX_TAR_LENGTH) times worst-case
+      # per-file page rounding, at up to 8 concurrent compiles, plus TeX
+      # Live's own caches under /tmp (see the Dockerfile's ENV block).
+      # Measured in-container at full 8-way concurrency: peak usage 250MB of
+      # the 1024MB budget -- so 1g is generous headroom against that
+      # measurement, not a computed minimum.
+      - /tmp:size=1g
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 64
+    mem_limit: 2g
+    cpus: 2
+    # NO env_file and NO environment: this container must never hold
+    # DATABASE_URL, LLM_API_KEY or OWNER_API_KEY. That is the control that
+    # makes `\input{/app/.env}` -- which survives every engine flag -- return
+    # nothing worth having.
+    networks:
+      - latex
 
   frontend:
     build:
@@ -94,3 +140,8 @@ services:
 volumes:
   db_data:
   ollama_models:
+
+networks:
+  default:
+  latex:
+    internal: true    # no egress: a compile cannot phone home with what it read

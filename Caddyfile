@@ -5,6 +5,17 @@
 	# Backend API + SSE. Caddy adds X-Forwarded-For — the backend rate
 	# limiter keys on its first hop.
 	handle /v1/* {
+		# Blanket DoS floor. Paper PDF ingest (`POST
+		# /v1/projects/{id}/papers/{pid}/ingest`) reads its body with
+		# `await request.body()` and carries no cap of its own, so this is
+		# now the only limit on it -- not merely a ceiling that stays out of
+		# its way. High enough for a normal paper, low enough that one
+		# connection cannot stream forever. The real per-route cap for other
+		# routes (e.g. LaTeX import/upload) lives in the backend, where it
+		# can return a 413 that says something useful.
+		request_body {
+			max_size 64MB
+		}
 		reverse_proxy backend:8000 {
 			# SSE must stream token-by-token: flush every write, never
 			# buffer. (Caddy also auto-detects text/event-stream; explicit
