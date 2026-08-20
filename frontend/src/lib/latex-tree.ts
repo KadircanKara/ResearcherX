@@ -109,6 +109,18 @@ export function formatBytes(bytes: number): string {
     value /= 1024;
     unit += 1;
   }
-  const rendered = value >= 10 || Number.isInteger(value) ? Math.round(value) : value.toFixed(1);
-  return `${rendered} ${units[unit]}`;
+  // Round BEFORE deciding the unit, not after. Testing the raw value for
+  // promotion and then rounding for display is how 1048575 bytes printed
+  // "1024 KB" instead of "1 MB": 1023.999... KB fails the `>= 1024` test
+  // above and is then rounded up past it anyway. Rounding first and
+  // re-checking is what keeps the promotion decision and the printed number
+  // talking about the same quantity.
+  let rounded = Math.round(value * 10) / 10;
+  if (rounded >= 1024 && unit < units.length - 1) {
+    rounded = Math.round((rounded / 1024) * 10) / 10;
+    unit += 1;
+  }
+  // The same "decide from the rounded value" rule applies to the decimal:
+  // 1025 bytes is 1.0009 KB, and a trailing ".0" on it is noise.
+  return `${Number.isInteger(rounded) ? rounded : rounded.toFixed(1)} ${units[unit]}`;
 }

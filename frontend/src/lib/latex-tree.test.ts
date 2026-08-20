@@ -73,4 +73,15 @@ describe("formatBytes", () => {
     expect(formatBytes(1536)).toBe("1.5 KB");
     expect(formatBytes(25 * 1024 * 1024)).toBe("25 MB");
   });
+
+  it("promotes to the next unit when rounding would otherwise print 1024 of the smaller one", () => {
+    expect(formatBytes(1048575)).toBe("1 MB");
+    expect(formatBytes(1048570)).toBe("1 MB");
+    expect(formatBytes(1073741823)).toBe("1 GB");
+  });
+
+  it("drops a trailing .0 that only rounding produced", () => {
+    expect(formatBytes(1025)).toBe("1 KB");
+    expect(formatBytes(10239)).toBe("10 KB");
+  });
 });
