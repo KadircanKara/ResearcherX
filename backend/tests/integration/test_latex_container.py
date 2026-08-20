@@ -12,7 +12,7 @@ import json
 import socket
 import tarfile
 import time
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import httpx
 import pytest
@@ -1042,3 +1042,78 @@ def test_a_non_string_main_path_root_or_file_is_treated_as_absent_not_a_500():
     )
     assert rev_response.status_code == 200, rev_response.text
     assert rev_response.json() == {"found": False}
+
+
+@pytest.mark.container
+def test_a_non_ascii_main_file_name_compiles():
+    """`X-Main-Path` is an HTTP header, and httpx encodes header values as
+    ASCII -- an un-encoded non-ASCII main file name used to make the request
+    build raise UnicodeEncodeError, which the client's fail-open except
+    turned into a permanent-looking "compiler unavailable" for what is an
+    ordinary filename. Plan 2's own zip-import round-trip tests cover
+    non-ASCII names (résumé/café.tex), so this must be a reachable input.
+    Posts the header pre-encoded exactly as `compile_tree` does, exercising
+    the compiler's decode side directly."""
+    main_name = "résumé.tex"
+    body = _tar({main_name: SELF_CONTAINED})
+    resp = httpx.post(
+        f"{COMPILER_URL}/compile",
+        content=body,
+        headers={
+            "Content-Type": "application/x-tar",
+            "X-Engine": "pdflatex",
+            "X-Main-Path": quote(main_name, safe="/"),
+        },
+        timeout=120,
+    )
+    payload = resp.json()
+    assert payload["ok"] is True, payload["log"]
+
+
+async def test_a_non_ascii_main_file_name_compiles_through_the_backend_client():
+    """Same case as above, but through `compile_tree` end to end (the
+    client's own `quote()` plus the compiler's `unquote()`), rather than a
+    raw request built to mirror it. Fails if either half of that round trip
+    ever breaks -- e.g. if the client stopped encoding, or if it encoded in
+    a way the compiler's `unquote` cannot reverse."""
+    result = await compile_tree([("résumé.tex", SELF_CONTAINED)], "pdflatex", "résumé.tex")
+
+    assert result.ok, result.log
+    assert result.pdf and result.pdf.startswith(b"%PDF")
+
+
+async def test_a_crlf_payload_in_main_path_is_percent_encoded_not_smuggled_into_a_header():
+    """`quote()` turns `\\r`/`\\n` into `%0D`/`%0A` before the string ever
+    reaches the header value, so a main_path containing what looks like a
+    second header is sent as an ordinary (if nonexistent) filename rather
+    than raising or smuggling anything. This is the production path
+    (compile_tree), not a raw request -- it must complete cleanly with a
+    "not in the project" degrade, never raise, and never surface the
+    injected-looking text as if it did anything."""
+    malicious = "m.tex\r\nX-Evil: 1"
+    result = await compile_tree([("main.tex", SELF_CONTAINED)], "pdflatex", malicious)
+
+    assert result.ok is False
+    assert "X-Evil" not in result.log
+    assert "not in the project" in result.log
+
+
+@pytest.mark.container
+def test_an_unencoded_crlf_header_value_is_still_refused_by_httpx_directly():
+    """Control for the test above: proves httpx's own header-injection guard
+    is still in effect independent of compile_tree's percent-encoding. If
+    this ever stopped raising, percent-encoding in compile_tree would be the
+    ONLY thing standing between a filename and real header injection, and
+    this test exists to catch that regression separately from the
+    percent-encoding test itself."""
+    with pytest.raises(Exception):
+        httpx.post(
+            f"{COMPILER_URL}/compile",
+            content=_tar({"main.tex": SELF_CONTAINED}),
+            headers={
+                "Content-Type": "application/x-tar",
+                "X-Engine": "pdflatex",
+                "X-Main-Path": "m.tex\r\nX-Evil: 1",
+            },
+            timeout=10,
+        )

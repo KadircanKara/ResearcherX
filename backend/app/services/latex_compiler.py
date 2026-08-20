@@ -12,8 +12,9 @@ import base64
 import io
 import tarfile
 import tempfile
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
+from urllib.parse import quote
 
 import httpx
 
@@ -82,7 +83,7 @@ async def _post(path: str, payload: dict) -> dict | None:
         return None
 
 
-async def _post_body(path: str, content, headers: dict) -> dict | None:
+async def _post_body(path: str, content: AsyncIterator[bytes], headers: dict) -> dict | None:
     """Like `_post`, but for a raw streaming body rather than a JSON payload.
 
     Kept as a twin of `_post` rather than a shared branch: the two bodies
@@ -136,19 +137,31 @@ def _build_tar(entries: Sequence[tuple[str, bytes]]) -> tempfile.SpooledTemporar
     Spooled rather than BytesIO: the tree is capped at 25MB and holding both
     it and its tar in memory doubles that on a single-worker process. Small
     projects -- the overwhelming majority -- never touch the disk.
+
+    Wrapped in its own try/finally: `compile_tree`'s try/finally that closes
+    the spool doesn't start until AFTER this function returns, so an
+    exception raised inside `tf.addfile` (e.g. a pathological entry) would
+    otherwise leak the spool from this scope -- reclaimed only by
+    refcounting, not deterministically.
     """
     spool = tempfile.SpooledTemporaryFile(max_size=8 * 1024 * 1024)
-    with tarfile.open(fileobj=spool, mode="w") as tf:
-        for path, data in entries:
-            info = tarfile.TarInfo(path)
-            info.size = len(data)
-            info.mode = 0o644
-            tf.addfile(info, io.BytesIO(data))
+    try:
+        with tarfile.open(fileobj=spool, mode="w") as tf:
+            for path, data in entries:
+                info = tarfile.TarInfo(path)
+                info.size = len(data)
+                info.mode = 0o644
+                tf.addfile(info, io.BytesIO(data))
+    except Exception:
+        spool.close()
+        raise
     spool.seek(0)
     return spool
 
 
-async def _aiter_spooled(spool, chunk_size: int = 64 * 1024):
+async def _aiter_spooled(
+    spool: tempfile.SpooledTemporaryFile, chunk_size: int = 64 * 1024
+) -> AsyncIterator[bytes]:
     """Wrap a sync `SpooledTemporaryFile` as an async byte iterator.
 
     Handing the spool to httpx directly (`content=spool`) makes it build a
@@ -199,7 +212,15 @@ async def compile_tree(
             "Content-Type": "application/x-tar",
             "Content-Length": str(size),
             "X-Engine": engine,
-            "X-Main-Path": main_path,
+            # Percent-encoded: httpx encodes header values as ASCII, and a
+            # non-ASCII main file name (plan 2 supports these -- its own
+            # round-trip tests cover resume/cafe.tex) would otherwise raise
+            # UnicodeEncodeError inside the request build, which _post_body's
+            # except turns into a permanent-looking "compiler unavailable"
+            # for what is actually an ordinary filename. The tar itself
+            # carries non-ASCII paths natively (PAX); only this header
+            # needs the round trip. The compiler unquotes it back.
+            "X-Main-Path": quote(main_path, safe="/"),
         }
         # Same gate as compile_source, for the same reason: a compile is
         # bounded CPU work in the sandboxed container, whole-tree or not.
@@ -212,12 +233,18 @@ async def compile_tree(
     try:
         pdf_b64 = payload.get("pdf_b64")
         synctex_b64 = payload.get("synctex_b64")
+        # Same treatment as `file` in synctex_reverse below: `root` is
+        # untyped JSON from a separately deployed image. An unguarded
+        # non-string value would flow straight into CachedBuild.root and
+        # back out onto a later /synctex payload.
+        raw_root = payload.get("root")
+        root = raw_root if isinstance(raw_root, str) else None
         return CompileResult(
             ok=bool(payload.get("ok")),
             log=payload.get("log") or "",
             pdf=base64.b64decode(pdf_b64) if pdf_b64 else None,
             synctex_gz=base64.b64decode(synctex_b64) if synctex_b64 else None,
-            root=payload.get("root"),
+            root=root,
         )
     except Exception as exc:
         # Same reasoning as compile_source's matching except: shaping the
@@ -298,11 +325,26 @@ async def synctex_reverse(
     )
     if not payload or not payload.get("found"):
         return None
+    # Validate `file` before constructing, rather than coercing with
+    # `str(...)`: `str(None) == "None"` and `str(123) == "123"` are
+    # confidently WRONG paths, not missing ones -- Task 4 hands `point.file`
+    # straight to the editor to open, and a wrong file opens the wrong
+    # document with full confidence where `found: false` renders cleanly.
+    # This is exactly what the compiler's own `_tree_path` docstring rejects
+    # for the same reason. A missing/wrong-typed `file` is the same
+    # version-skew case the `except` below already covers for `line`; this
+    # branch exists because `str()` would silently swallow it instead of
+    # raising into that except.
+    raw_file = payload.get("file")
+    if not isinstance(raw_file, str) or not raw_file:
+        log.warning(
+            "latex_synctex_bad_payload",
+            direction="reverse",
+            error="file missing or not a string",
+        )
+        return None
     try:
-        # A `found: true` payload missing `file` is the same version-skew
-        # case as the forward direction above: KeyError here must degrade to
-        # no navigation, never raise.
-        return SourcePoint(file=str(payload["file"]), line=int(payload["line"]))
+        return SourcePoint(file=raw_file, line=int(payload["line"]))
     except Exception as exc:
         log.warning("latex_synctex_bad_payload", direction="reverse", error=str(exc)[:200])
         return None

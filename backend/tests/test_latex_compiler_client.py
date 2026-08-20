@@ -255,6 +255,47 @@ async def test_compile_tree_returns_the_root_from_the_payload():
     assert result.root == "/tmp/rx-latex-xyz"
 
 
+async def test_compile_tree_ignores_a_non_string_root_instead_of_storing_it_untyped():
+    """`root` is untyped JSON from a separately deployed image and flows
+    into CachedBuild.root and back out onto a later /synctex payload --
+    same treatment as `file` in synctex_reverse. Fails if a non-string
+    `root` from the compiler is ever stored as-is instead of degrading to
+    None."""
+    payload = {
+        "ok": True,
+        "log": "",
+        "pdf_b64": base64.b64encode(b"%PDF-1.5").decode(),
+        "synctex_b64": None,
+        "root": 42,
+    }
+    with patch("httpx.AsyncClient", return_value=_client_returning(payload)):
+        result = await compile_tree([("master.tex", b"x")], "pdflatex", "master.tex")
+
+    assert result.ok
+    assert result.root is None
+
+
+async def test_compile_tree_percent_encodes_a_non_ascii_main_path_header():
+    """httpx encodes header values as ASCII, so a non-ASCII main file name
+    (plan 2's own round-trip tests cover such names) must be percent-encoded
+    before it reaches the header, or the request build raises
+    UnicodeEncodeError and the caller sees a misleading 'compiler
+    unavailable'. Fails if compile_tree ever stops encoding X-Main-Path, or
+    encodes it in a way that does not round-trip back to the original name
+    via urllib.parse.unquote (what the compiler does on the other end)."""
+    from urllib.parse import unquote
+
+    payload = {"ok": True, "log": "", "pdf_b64": None, "synctex_b64": None, "root": None}
+    client, calls = _client_capturing(payload)
+
+    with patch("httpx.AsyncClient", return_value=client):
+        await compile_tree([("résumé.tex", b"x")], "pdflatex", "résumé.tex")
+
+    sent_header = calls[0]["headers"]["X-Main-Path"]
+    assert sent_header.isascii()
+    assert unquote(sent_header) == "résumé.tex"
+
+
 async def test_compile_tree_fails_open_to_a_generic_message_when_the_compiler_is_unreachable():
     import httpx
 
@@ -397,6 +438,53 @@ async def test_reverse_sync_found_true_but_missing_file_degrades_to_no_navigatio
     true` with `line` present but `file` missing must not raise KeyError out
     of a chat/editor turn."""
     payload = {"found": True, "line": 161}
+    with patch("httpx.AsyncClient", return_value=_client_returning(payload)):
+        point = await synctex_reverse(
+            b"pdf", b"gz", root="/tmp/rx-latex-abc", main_path="master.tex", page=1, x=0.0, y=0.0
+        )
+
+    assert point is None
+
+
+async def test_reverse_sync_with_a_null_file_degrades_instead_of_returning_the_string_none():
+    """`str(None) == "None"` would manufacture a confidently wrong path --
+    Task 4 hands `point.file` straight to the editor to open, and a wrong
+    file opens the wrong document with full confidence where `found: false`
+    renders cleanly. Fails if `synctex_reverse` ever goes back to coercing
+    `file` with `str(...)` instead of validating it."""
+    payload = {"found": True, "file": None, "line": 7}
+    with patch("httpx.AsyncClient", return_value=_client_returning(payload)):
+        point = await synctex_reverse(
+            b"pdf", b"gz", root="/tmp/rx-latex-abc", main_path="master.tex", page=1, x=0.0, y=0.0
+        )
+
+    assert point is None
+
+
+async def test_reverse_sync_with_an_int_file_degrades_instead_of_returning_the_string_123():
+    payload = {"found": True, "file": 123, "line": 7}
+    with patch("httpx.AsyncClient", return_value=_client_returning(payload)):
+        point = await synctex_reverse(
+            b"pdf", b"gz", root="/tmp/rx-latex-abc", main_path="master.tex", page=1, x=0.0, y=0.0
+        )
+
+    assert point is None
+
+
+async def test_reverse_sync_with_a_dict_file_degrades_instead_of_stringifying_it():
+    payload = {"found": True, "file": {"a": 1}, "line": 7}
+    with patch("httpx.AsyncClient", return_value=_client_returning(payload)):
+        point = await synctex_reverse(
+            b"pdf", b"gz", root="/tmp/rx-latex-abc", main_path="master.tex", page=1, x=0.0, y=0.0
+        )
+
+    assert point is None
+
+
+async def test_reverse_sync_with_an_empty_string_file_degrades_rather_than_opening_nothing():
+    """An empty string passes `isinstance(..., str)` but is not a real tree
+    path either -- the emptiness check is what this test pins."""
+    payload = {"found": True, "file": "", "line": 7}
     with patch("httpx.AsyncClient", return_value=_client_returning(payload)):
         point = await synctex_reverse(
             b"pdf", b"gz", root="/tmp/rx-latex-abc", main_path="master.tex", page=1, x=0.0, y=0.0

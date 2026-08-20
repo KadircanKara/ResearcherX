@@ -210,7 +210,7 @@ async def test_forward_sync_maps_a_line_to_a_page_position(
 
     with (
         patch("app.api.v1.latex.cache", prepared),
-        patch("app.api.v1.latex.synctex_forward", AsyncMock(return_value=position)),
+        patch("app.api.v1.latex.synctex_forward", AsyncMock(return_value=position)) as forward,
     ):
         resp = await client.post(
             f"/v1/projects/{project.id}/latex/{doc.id}/synctex/forward",
@@ -218,6 +218,16 @@ async def test_forward_sync_maps_a_line_to_a_page_position(
             headers={"X-Dev-User-Id": you.id},
         )
 
+    # TRANSITIONAL (Task 3): pins the exact kwargs the route sends today --
+    # root=None, main_path="", file="" -- which keep the compiler on its
+    # legacy single-file branch. Task 4 legitimately changes these once the
+    # route threads the document's real tree/root through; that change must
+    # be a deliberate edit to this assertion, not a silent behaviour drift
+    # that 63 mocked/route-level tests wave through unnoticed (as it did
+    # before this test existed: main_path="master.tex" with root=None passed
+    # every existing test while reverse sync silently started answering
+    # `found: false`, measured live).
+    forward.assert_called_once_with(b"%PDF", b"gz", root=None, main_path="", file="", line=161)
     assert resp.json() == {
         "found": True,
         "page": 1,
@@ -269,7 +279,7 @@ async def test_reverse_sync_maps_a_point_to_a_line(
         patch(
             "app.api.v1.latex.synctex_reverse",
             AsyncMock(return_value=SourcePoint(file="master.tex", line=161)),
-        ),
+        ) as reverse,
     ):
         resp = await client.post(
             f"/v1/projects/{project.id}/latex/{doc.id}/synctex/reverse",
@@ -277,6 +287,15 @@ async def test_reverse_sync_maps_a_point_to_a_line(
             headers={"X-Dev-User-Id": you.id},
         )
 
+    # TRANSITIONAL (Task 3): same pin as the forward test above -- root=None,
+    # main_path="" keep the compiler on its legacy single-file branch. This
+    # is the assertion that would have caught reverse sync silently going
+    # `found: false` if main_path had been set to the document's real path
+    # instead (measured live: main_path="master.tex"/file="master.tex" makes
+    # synctex_reverse return None against the real compiler, with root=None).
+    reverse.assert_called_once_with(
+        b"%PDF", b"gz", root=None, main_path="", page=1, x=36.0, y=122.0
+    )
     assert resp.json() == {"found": True, "line": 161}
 
 

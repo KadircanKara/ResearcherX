@@ -34,6 +34,7 @@ import tarfile
 import tempfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
+from urllib.parse import unquote
 
 # Wall-clock ceiling for one compile. A runaway document is the common case
 # (a recursive macro), not the rare one.
@@ -750,7 +751,12 @@ class Handler(BaseHTTPRequestHandler):
             # around log_message's override that exists to keep request
             # data out of logs.
             engine = self.headers.get("X-Engine", "pdflatex")
-            main_path = self.headers.get("X-Main-Path", "")
+            # Percent-decoded: httpx (every client) encodes header values as
+            # ASCII, so a non-ASCII main file name (plan 2 supports these --
+            # measured, e.g. resume/cafe.tex) arrives percent-encoded. The tar
+            # itself carries non-ASCII paths natively (PAX); only this header
+            # needs the round trip.
+            main_path = unquote(self.headers.get("X-Main-Path", ""))
             bounded = _Bounded(self.rfile, length)
             try:
                 result = compile_tree(bounded, engine, main_path)
