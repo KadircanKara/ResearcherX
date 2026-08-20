@@ -414,6 +414,28 @@ export function useLatexDocument(projectId: string, canEdit: boolean): UseLatexD
         setActivePath(path);
         return;
       }
+      // A pending or in-flight autosave for this path must LAND before the
+      // re-fetch below, or the fetch reads the pre-edit content and then
+      // re-baselines against it.
+      //
+      // The sequence this closes: `closeFile` drops the buffer (so a reopen
+      // always re-fetches) and deliberately leaves the `SaveEngine` alone (so
+      // a pending autosave still fires on its own timer). Close a tab and
+      // reopen it inside the 800ms debounce window and the GET returned the
+      // OLD text, which then became both the buffer AND the new baseline;
+      // the pending PUT wrote the good text to the server moments later.
+      // The editor showed stale text, `isDirty()` said clean, and the next
+      // keystroke overwrote the server's good content with it.
+      //
+      // `flushPath` is safe to call for a path with nothing pending -- it
+      // awaits any in-flight send and returns -- but the `dirtyPaths` test
+      // keeps the common case (opening a file nobody has touched) free of an
+      // extra await, and says out loud which paths this is for.
+      const saveEngine = engineRef.current;
+      if (saveEngine?.dirtyPaths().includes(path)) {
+        await saveEngine.flushPath(path);
+        if (selectedIdRef.current !== docId) return;
+      }
       let text: string;
       try {
         text = await readTextFile(projectId, docId, path);
