@@ -419,7 +419,23 @@ export function LatexWorkspace({ projectId, role }: LatexWorkspaceProps) {
                 <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
                   Select or create a file to start writing.
                 </div>
-              ) : isTexPath(activePath) ? (
+              ) : /*
+                  BOTH signals, never `isTexPath` alone. The two answer
+                  DIFFERENT questions (see `isTexPath`'s own comment in
+                  `lib/latex-tree.ts`): `is_binary` is how the backend STORED
+                  the bytes, `isTexPath` is whether a human should be shown a
+                  text buffer. A `.bib`/`.sty`/`.bst` in latin-1 out of a real
+                  Overleaf or arXiv project decodes as binary and is stored
+                  that way, and so is every file uploaded through the file
+                  tree whatever its extension. `openFile` correctly skips the
+                  fetch and the buffer for such a path -- so routing on the
+                  extension alone rendered an EMPTY editor over it, and the
+                  first keystroke PUT that empty buffer through `write_text`,
+                  which sets `is_binary=False` and `blob=None`. The original
+                  bytes were gone permanently and silently. Do not
+                  re-simplify this to one test.
+                */
+              isTexPath(activePath) && !activeMeta?.is_binary ? (
                 <EditorPane
                   path={activePath}
                   openPaths={doc.openPaths}
