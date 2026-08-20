@@ -66,7 +66,9 @@ export function startedLabel(stamp: string, now: string): string {
   return formatDate(stamp);
 }
 
-function plural(n: number, one: string, many = `${one}s`): string {
+/** `1 paper` / `2 papers`. Exported because Chat's scope line needs exactly
+ *  this rule, and two pluralizers are two things that can disagree. */
+export function plural(n: number, one: string, many = `${one}s`): string {
   return `${n} ${n === 1 ? one : many}`;
 }
 
