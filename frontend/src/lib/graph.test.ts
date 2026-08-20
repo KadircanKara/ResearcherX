@@ -266,6 +266,15 @@ describe("geometry", () => {
     expect(movedEnough({ x: 50, y: 50 }, { x: 50, y: 48 })).toBe(true);
   });
 
+  it("carries the node with the cursor rather than teleporting it", () => {
+    const rect = { left: 0, top: 0, width: 1000, height: 500 };
+    // grabbed 4% left of and 3% above the node's centre
+    expect(pointerToPercent(500, 250, rect, { x: 4, y: 3 })).toEqual({
+      x: 54,
+      y: 53,
+    });
+  });
+
   it("survives a canvas that has not been measured yet", () => {
     expect(
       pointerToPercent(10, 10, { left: 0, top: 0, width: 0, height: 0 })

@@ -145,18 +145,24 @@ export function clampPosition(p: Point): Point {
   };
 }
 
-/** A pointer position, in percent of the canvas box and already clamped. The
- *  node is centred on the pointer, which is what makes a drag feel like the
- *  node is being carried rather than nudged. */
+/**
+ * A pointer position, in percent of the canvas box and already clamped.
+ *
+ * `offset` is the gap between the node's centre and where the pointer grabbed
+ * it, so the node travels WITH the cursor instead of teleporting its centre
+ * under it on the first move. Grabbing a node by its corner and having it jump
+ * is the difference between dragging a thing and re-placing it.
+ */
 export function pointerToPercent(
   clientX: number,
   clientY: number,
-  rect: { left: number; top: number; width: number; height: number }
+  rect: { left: number; top: number; width: number; height: number },
+  offset: Point = { x: 0, y: 0 }
 ): Point {
   if (rect.width === 0 || rect.height === 0) return clampPosition({ x: 0, y: 0 });
   return clampPosition({
-    x: ((clientX - rect.left) / rect.width) * 100,
-    y: ((clientY - rect.top) / rect.height) * 100,
+    x: ((clientX - rect.left) / rect.width) * 100 + offset.x,
+    y: ((clientY - rect.top) / rect.height) * 100 + offset.y,
   });
 }
 
