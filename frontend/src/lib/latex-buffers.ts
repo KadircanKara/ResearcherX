@@ -40,7 +40,13 @@ export class SaveEngine {
    * result is about a path that no longer means what it meant.
    */
   private epoch = new Map<string, number>();
-  /** The text each in-flight send is carrying, so `rename` can re-queue it. */
+  /**
+   * The LATEST text queued on the wire for a path, so `rename` can re-queue
+   * it under the new name. Sends for one path are serialised (see
+   * `flushPath`), so this is exactly what the server will hold once
+   * everything outstanding for the path has landed -- and re-queueing only
+   * the latest is right, because anything earlier is superseded by it.
+   */
   private inFlightText = new Map<string, string>();
   private disposed = false;
 
@@ -158,35 +164,65 @@ export class SaveEngine {
       await this.inFlight.get(path);
       return;
     }
-    // Skip the send only when the text already matches WHAT THE SERVER IS
-    // ABOUT TO HOLD -- which is `baseline` only while nothing is on the wire
-    // for this path.
-    //
-    // The naive `text === baseline` check was written when `baseline` really
-    // was the server's state; the in-flight bookkeeping added later
-    // (`inFlight`/`inFlightText`/`epoch`) made it a LAGGING record for the
-    // duration of a send. The failure it caused: baseline "A", the user
-    // types "B", the debounce sends "B", and inside that round trip the user
-    // undoes back to "A". The next flush compared "A" against a baseline
-    // still reading "A" -- because "B" had not resolved yet -- and returned
-    // without sending. Then "B" resolved and set baseline to "B". End state:
-    // the editor showed "A", the server held "B", `pending`/`inFlight`/
-    // `failed` were all empty, `isDirty()` was false, and the next compile
-    // built "B" and reported itself up to date. The user's undo was
-    // discarded and the version they explicitly reverted is what compiled
-    // and exported.
-    //
-    // While a send IS in flight, `inFlightText` is what the server will hold
-    // once it lands, so that is the only correct comparand. If that send
-    // ultimately FAILS the extra write is redundant rather than wrong -- and
-    // it is what clears the `failed` flag.
-    const flying = this.inFlightText.get(path);
-    if (text === (flying !== undefined ? flying : this.baseline.get(path))) return;
-
     if (this.disposed) return;
-    this.opts.onStateChange?.("saving", path);
+
+    // ONE send outstanding per path, ever. A new send for a path CHAINS
+    // behind whatever is already on the wire for it rather than racing it.
+    //
+    // The bug this closes: two overlapping PUTs to one endpoint, whose
+    // response order the client does not control and the server does not
+    // promise. Baseline "A"; the user types "B"; the debounce puts "B" on
+    // the wire; the user undoes back to "A"; the next debounce put "A" on
+    // the wire ALONGSIDE it. If "A" resolved first and "B" second, both
+    // continuations wrote `baseline` and the last one won: `baseline` read
+    // "B", the editor showed "A", `pending`/`inFlight`/`failed` were all
+    // empty and `isDirty()` was false. Worse, WHICHEVER PUT THE SERVER
+    // APPLIED LAST decided the file's real contents, and nothing on the
+    // client could tell which that was.
+    //
+    // Note what merely INVALIDATING the superseded send would NOT have
+    // fixed: both requests are already on the wire, so the server's final
+    // state is still whichever it happened to apply last. Only serialising
+    // them makes the server's end state deterministic -- and equal to the
+    // last text the user typed, which is the only answer that can be
+    // called correct. Widening the text comparison further, which is how
+    // this class of bug got here, fixes neither half.
+    //
+    // `prev` is captured and `inFlight` is replaced SYNCHRONOUSLY, above
+    // any await, so a third flush arriving while this one waits chains
+    // behind THIS send rather than behind the one already landing.
+    const prev = this.inFlight.get(path);
+    // The text the server will hold once everything queued for this path
+    // has landed -- true precisely because sends are serialised. `rename`
+    // reads it to re-queue an edit that is already (or still) on the wire
+    // under the old name.
     this.inFlightText.set(path, text);
     const send = (async () => {
+      if (prev) {
+        // `prev` never rejects -- the catch below is inside it -- so this
+        // resolves whether the earlier save succeeded or failed.
+        await prev;
+        // A `rename`/`forget` during the wait means this send is about a
+        // path that no longer means what it meant. Its text was already
+        // re-queued under the new name by `rename`; sending it here would
+        // PUT to a path the server no longer has.
+        if (this.obsolete(path, epoch) || this.disposed) return;
+      }
+      // Nothing is on the wire for this path now, so `baseline` really is
+      // what the server holds and is the correct comparand again. Skipping
+      // here rather than before the chain is what keeps a revert from being
+      // dropped: with the earlier send resolved, "A" is compared against a
+      // baseline that has caught up to "B" and is correctly sent.
+      //
+      // `failed` vetoes the skip: after a rejected save the server does NOT
+      // hold `baseline`'s text for this path, and the redundant-looking
+      // write is the only thing that clears the flag.
+      if (text === this.baseline.get(path) && !this.failed.has(path)) return;
+      // Announced HERE, not when the flush was queued: a chained send that
+      // is only waiting its turn is already covered by the "saving" the
+      // send ahead of it announced, and a send that turns out to be
+      // redundant should not flicker the badge through saving/idle at all.
+      this.opts.onStateChange?.("saving", path);
       try {
         await this.opts.send(path, text);
         if (this.obsolete(path, epoch)) return;

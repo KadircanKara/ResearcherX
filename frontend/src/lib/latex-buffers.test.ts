@@ -290,6 +290,10 @@ describe("revert while a save is in flight", () => {
     // revert was never sent -- baseline still read "A" because "B" had not
     // resolved -- and "B" then landed as the server's state with the engine
     // reporting perfectly clean. The next compile built "B".
+    //
+    // The revert is now CHAINED behind "B" rather than racing it (see
+    // `flushPath`), so it is dispatched once "B" lands, not alongside it --
+    // which is why "B" is released before the second call is expected.
     const releases: Array<() => void> = [];
     const send = vi.fn(() => new Promise<void>((r) => { releases.push(r); }));
     const { e } = engine(send);
@@ -301,6 +305,12 @@ describe("revert while a save is in flight", () => {
 
     e.schedule("a.tex", "A"); // the undo, inside "B"'s round trip
     await vi.advanceTimersByTimeAsync(800);
+    // Nothing new on the wire yet: one PUT per path at a time is the whole
+    // point, and the revert is queued behind "B".
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(e.isDirty()).toBe(true);
+
+    releases[0]();
     // BOUNDED on purpose -- an unbounded spin does not fail against a broken
     // module, it hangs the suite, because fake timers starve vitest's own
     // testTimeout. See `flushAll waits out an edit a rename requeued` above.
@@ -318,18 +328,84 @@ describe("revert while a save is in flight", () => {
     expect(e.isDirty()).toBe(false);
   });
 
-  it("still skips a send whose text is already the one on the wire", async () => {
-    // The don't-resend optimisation is kept, just re-pointed: the comparand
-    // while a send is outstanding is what THAT send will make the server
-    // hold, not the stale baseline.
-    const send = vi.fn(() => new Promise<void>(() => {}));
+  it("still skips a send whose text the server already holds", async () => {
+    // The don't-resend optimisation is kept, just moved: the comparison now
+    // happens after the chain has drained, at the one moment `baseline` is
+    // guaranteed to be what the server holds.
+    const releases: Array<() => void> = [];
+    const send = vi.fn(() => new Promise<void>((r) => { releases.push(r); }));
     const { e } = engine(send);
     e.setBaseline("a.tex", "A");
     e.schedule("a.tex", "B");
     await vi.advanceTimersByTimeAsync(800);
     e.schedule("a.tex", "B"); // same text again, still in flight
     await vi.advanceTimersByTimeAsync(800);
-    for (let i = 0; i < 20; i += 1) await Promise.resolve();
+    releases[0]();
+    for (let i = 0; i < 100 && e.isDirty(); i += 1) await Promise.resolve();
     expect(send).toHaveBeenCalledTimes(1);
+    expect(e.isDirty()).toBe(false);
+  });
+
+  it("ends with the server holding the LAST text even when responses resolve out of order", async () => {
+    // Two overlapping PUTs to one endpoint is the failure this closes, and
+    // response ordering is the part nobody controls. Sequence: baseline
+    // "A", type "B", debounce sends "B"; revert to "A", debounce would have
+    // sent "A" alongside it. Before the fix both were outstanding, and
+    // resolving "A" first and "B" second left `baseline` reading "B" while
+    // the editor showed "A", everything empty and `isDirty()` false -- and
+    // the file's real contents decided by whichever PUT the server applied
+    // last, unknowably.
+    //
+    // The probe is deliberately hostile: whatever is outstanding is
+    // released NEWEST-FIRST, which is exactly the ordering that broke the
+    // old code. With sends serialised there is only ever one outstanding,
+    // so "newest first" and "in order" are the same thing and the end state
+    // is deterministic.
+    const calls: Array<{ path: string; text: string; resolve: () => void; done: boolean }> = [];
+    const send = vi.fn(
+      (path: string, text: string) =>
+        new Promise<void>((r) => {
+          const entry = { path, text, done: false, resolve: () => { entry.done = true; r(); } };
+          calls.push(entry);
+        })
+    );
+    const { e } = engine(send);
+    e.setBaseline("a.tex", "A");
+
+    e.schedule("a.tex", "B");
+    await vi.advanceTimersByTimeAsync(800);
+    e.schedule("a.tex", "A");
+    await vi.advanceTimersByTimeAsync(800);
+
+    // BOUNDED, like every other poll in this file: an unbounded loop hangs
+    // the suite under fake timers instead of reporting a regression.
+    for (let pass = 0; pass < 10; pass += 1) {
+      const outstanding = calls.filter((c) => !c.done);
+      if (outstanding.length === 0) break;
+      outstanding[outstanding.length - 1].resolve(); // newest first
+      for (let i = 0; i < 50; i += 1) await Promise.resolve();
+    }
+
+    // The last thing the server was told is the text the editor shows, and
+    // nothing is left claiming otherwise.
+    expect(send.mock.calls.at(-1)).toEqual(["a.tex", "A"]);
+    expect(e.isDirty()).toBe(false);
+    expect(e.dirtyPaths()).toEqual([]);
+
+    // Re-scheduling the SAME text must now be a no-op: that is only true if
+    // `baseline` genuinely records "A". If it recorded "B" -- the old end
+    // state -- this would send again, so this assertion is the one that
+    // pins which text the engine believes the server holds.
+    //
+    // Deliberately NOT `await e.flushAll()`: against the broken module that
+    // send is never released and the flush never resolves, so the test would
+    // HANG on vitest's testTimeout instead of reporting the wrong baseline.
+    // A timer advance plus a bounded settle turns the same regression into a
+    // plain assertion failure.
+    const before = send.mock.calls.length;
+    e.schedule("a.tex", "A");
+    await vi.advanceTimersByTimeAsync(800);
+    for (let i = 0; i < 50; i += 1) await Promise.resolve();
+    expect(send.mock.calls.length).toBe(before);
   });
 });
