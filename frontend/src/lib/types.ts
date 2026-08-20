@@ -9,6 +9,8 @@ export interface Project {
   title: string;
   description: string | null;
   topic_keywords: string[];
+  /** Always one of `PROJECT_COLORS`; the server derives one when unset. */
+  color: string;
   my_role: Role;
   counts: {
     members: number;

@@ -23,6 +23,8 @@ export async function updateProject(
     title?: string;
     description?: string | null;
     topic_keywords?: string[];
+    /** Must be a `PROJECT_COLORS` entry; the server 422s anything else. */
+    color?: string;
   }
 ): Promise<Project> {
   return (await apiSend<Project>("PATCH", `/projects/${id}`, body)) as Project;

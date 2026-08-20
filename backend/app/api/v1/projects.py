@@ -7,6 +7,7 @@ from openai import RateLimitError
 from sqlalchemy import desc, select as sa_select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core import palette
 from app.core.config import settings
 from app.core.identity import get_current_user
 from app.core.logging import log
@@ -50,6 +51,10 @@ def _project_out(project, my_role: str, members_count: int) -> ProjectOut:
         title=project.title,
         description=project.description,
         topic_keywords=project.topic_keywords,
+        # Derived when the column is NULL so the client is handed a usable
+        # colour for every project, including the ones created before the
+        # column existed.
+        color=project.color or palette.color_for(project.id),
         my_role=my_role,
         counts=Counts(members=members_count, papers=0, chats=0),
         created_at=project.created_at,

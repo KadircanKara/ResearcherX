@@ -3,7 +3,8 @@
 from sqlalchemy import select
 import pytest_asyncio
 
-from app.db.models import User
+from app.core.palette import PROJECT_COLORS
+from app.db.models import Project, User
 from app.db.seed import seed_users
 
 
@@ -272,3 +273,77 @@ async def test_owner_can_remove_member(client, users):
         headers={"X-Dev-User-Id": you.id},
     )
     assert r.status_code == 204
+
+
+# ── project colour ───────────────────────────────────────────────────────────
+
+
+async def test_a_new_project_is_given_a_palette_colour(client, users):
+    you, _, _ = users
+    r = await client.post(
+        "/v1/projects",
+        json={"title": "Coloured"},
+        headers={"X-Dev-User-Id": you.id},
+    )
+    assert r.status_code == 201
+    assert r.json()["color"] in PROJECT_COLORS
+
+
+async def test_a_colour_outside_the_palette_is_refused(client, users):
+    """The allowlist is the containment for a value that ends up in a `style`
+    attribute -- a syntactically valid hex is not the test."""
+    you, _, _ = users
+    r = await client.post(
+        "/v1/projects",
+        json={"title": "Invisible", "color": "#123456"},
+        headers={"X-Dev-User-Id": you.id},
+    )
+    assert r.status_code == 422
+
+
+async def test_a_colour_that_is_not_a_colour_is_refused(client, users):
+    you, _, _ = users
+    r = await client.post(
+        "/v1/projects",
+        json={"title": "Injected", "color": "red; background: url(x)"},
+        headers={"X-Dev-User-Id": you.id},
+    )
+    assert r.status_code == 422
+
+
+async def test_an_owner_can_change_the_colour(client, users):
+    you, _, _ = users
+    created = await client.post(
+        "/v1/projects",
+        json={"title": "Repaint"},
+        headers={"X-Dev-User-Id": you.id},
+    )
+    project_id = created.json()["id"]
+    target = PROJECT_COLORS[3]
+    r = await client.patch(
+        f"/v1/projects/{project_id}",
+        json={"color": target},
+        headers={"X-Dev-User-Id": you.id},
+    )
+    assert r.status_code == 200
+    assert r.json()["color"] == target
+
+
+async def test_a_project_with_no_stored_colour_still_reports_one(client, users, db_session):
+    """Every project that predates the column reads back as NULL. The column is
+    deliberately not back-filled, so the derivation in `_project_out` is the
+    only thing standing between those rows and a client with no colour."""
+    you, _, _ = users
+    created = await client.post(
+        "/v1/projects",
+        json={"title": "Legacy"},
+        headers={"X-Dev-User-Id": you.id},
+    )
+    project_id = created.json()["id"]
+    project = await db_session.get(Project, project_id)
+    project.color = None
+    await db_session.commit()
+
+    r = await client.get("/v1/projects", headers={"X-Dev-User-Id": you.id})
+    row = next(p for p in r.json() if p["id"] == project_id)
+    assert row["color"] in PROJECT_COLORS

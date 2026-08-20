@@ -113,6 +113,10 @@ class Project(Base):
     title: Mapped[str] = mapped_column(String(255))
     description: Mapped[str | None] = mapped_column(Text, default=None)
     topic_keywords: Mapped[list] = mapped_column(JSON, default=list)
+    # Nullable because every project that predates this column has no colour
+    # and must not be back-filled: `palette.color_for` derives a stable one
+    # from the id, so a NULL is a working default rather than a gap.
+    color: Mapped[str | None] = mapped_column(String(7), default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now, onupdate=_now

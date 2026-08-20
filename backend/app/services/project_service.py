@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi import HTTPException
 
 from app.core.permissions import can
+from app.core import palette
 from app.db.models import Project, ProjectMember, User
 from app.schemas.project import ProjectCreate, ProjectUpdate
 
@@ -98,6 +99,10 @@ async def create_project(db: AsyncSession, user: User, data: ProjectCreate) -> P
         title=data.title,
         description=data.description,
         topic_keywords=data.topic_keywords,
+        # Assigned here rather than left NULL so a new project's colour is
+        # a stored fact the user can then change, not a derivation that
+        # would shift if the palette were ever reordered.
+        color=data.color or palette.color_for(user.id + data.title),
     )
     db.add(project)
     await db.flush()
@@ -132,6 +137,8 @@ async def update_project(
         project.description = data.description
     if data.topic_keywords is not None:
         project.topic_keywords = data.topic_keywords
+    if data.color is not None:
+        project.color = data.color
 
     await db.commit()
     await db.refresh(project)
