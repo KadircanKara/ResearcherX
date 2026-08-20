@@ -344,7 +344,7 @@ async def rename_file(db: AsyncSession, document_id: str, src: str, dst: str) ->
 def tree_hash(entries: Sequence[tuple[str, bytes]], engine: str, main_path: str) -> str:
     """Cache key for a compiled tree.
 
-    Same property the single-file `source_hash` had: identical input cannot
+    Same property the retired single-file hash had: identical input cannot
     produce a different PDF. The engine and the main file are part of it
     because the same bytes compiled by xelatex, or with a different root
     file, are a different document.

@@ -678,8 +678,10 @@ class Handler(BaseHTTPRequestHandler):
             # truncating every multi-MB PDF sent to a client that could not
             # read faster than the timeout allowed -- measured live, a
             # 5.6MB PDF to a slow reader delivered only 556,905 of 5,619,935
-            # bytes over the tar path while an identical JSON-path control
-            # (which never touches the socket timeout) delivered all of it.
+            # bytes over the tar path, while a control request that never
+            # touches this drain (measured at the time against the JSON
+            # /compile form this service has since retired) delivered all of
+            # it.
             # A byte bound cannot leak into unrelated code the way a
             # deadline on the connection itself can. See MAX_DRAIN_BYTES's
             # own comment for what this bound does and does not close.

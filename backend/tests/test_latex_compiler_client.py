@@ -7,7 +7,6 @@ import tarfile
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from app.services.latex_compiler import (
-    compile_source,
     compile_tree,
     synctex_forward,
     synctex_reverse,
@@ -70,124 +69,6 @@ def _client_capturing(payload):
     client.__aenter__.return_value = client
     client.__aexit__.return_value = False
     return client, calls
-
-
-async def test_a_successful_compile_decodes_both_artifacts():
-    payload = {
-        "ok": True,
-        "log": "",
-        "pdf_b64": base64.b64encode(b"%PDF-1.5").decode(),
-        "synctex_b64": base64.b64encode(b"gzbytes").decode(),
-    }
-    with patch("httpx.AsyncClient", return_value=_client_returning(payload)):
-        result = await compile_source("\\documentclass{article}", "pdflatex")
-
-    assert result.ok
-    assert result.pdf == b"%PDF-1.5"
-    assert result.synctex_gz == b"gzbytes"
-
-
-async def test_a_failed_compile_carries_the_log_and_no_pdf():
-    payload = {
-        "ok": False,
-        "log": "! Undefined control sequence.",
-        "pdf_b64": None,
-        "synctex_b64": None,
-    }
-    with patch("httpx.AsyncClient", return_value=_client_returning(payload)):
-        result = await compile_source("\\bogus", "pdflatex")
-
-    assert not result.ok
-    assert result.pdf is None
-    assert "Undefined control sequence" in result.log
-
-
-async def test_a_compile_without_a_map_still_returns_the_pdf():
-    """Navigation is an enhancement. An engine that ignored -synctex=1 must
-    not cost the user their PDF."""
-    payload = {
-        "ok": True,
-        "log": "",
-        "pdf_b64": base64.b64encode(b"%PDF-1.5").decode(),
-        "synctex_b64": None,
-    }
-    with patch("httpx.AsyncClient", return_value=_client_returning(payload)):
-        result = await compile_source("\\documentclass{article}", "pdflatex")
-
-    assert result.ok
-    # The POINT of this test: the PDF survives a missing map. Asserting only
-    # that synctex_gz is None would pass with pdf wrongly None too.
-    assert result.pdf == b"%PDF-1.5"
-    assert result.synctex_gz is None
-
-
-async def test_malformed_base64_degrades_instead_of_raising():
-    """A truncated body is a failed compile, not a 500 out of a chat turn."""
-    payload = {
-        "ok": True,
-        "log": "",
-        "pdf_b64": "not-valid-base64!!",
-        "synctex_b64": None,
-    }
-    with patch("httpx.AsyncClient", return_value=_client_returning(payload)):
-        result = await compile_source("\\documentclass{article}", "pdflatex")
-
-    assert not result.ok
-    assert result.pdf is None
-
-
-async def test_a_non_2xx_response_degrades():
-    class _Failing(_Response):
-        def raise_for_status(self):
-            import httpx
-
-            raise httpx.HTTPStatusError("boom", request=None, response=None)
-
-    client = MagicMock()
-    client.post = AsyncMock(return_value=_Failing({}))
-    client.__aenter__.return_value = client
-    client.__aexit__.return_value = False
-
-    with patch("httpx.AsyncClient", return_value=client):
-        result = await compile_source("\\documentclass{article}", "pdflatex")
-
-    assert not result.ok
-    assert "boom" not in result.log
-
-
-async def test_a_malformed_json_body_degrades():
-    class _BadJson(_Response):
-        def json(self):
-            raise ValueError("not json")
-
-    client = MagicMock()
-    client.post = AsyncMock(return_value=_BadJson({}))
-    client.__aenter__.return_value = client
-    client.__aexit__.return_value = False
-
-    with patch("httpx.AsyncClient", return_value=client):
-        result = await compile_source("\\documentclass{article}", "pdflatex")
-
-    assert not result.ok
-    assert "not json" not in result.log
-
-
-async def test_an_unreachable_compiler_fails_open_to_a_generic_message():
-    """The service being down is a server internal. The user sees a generic
-    line, never the exception text."""
-    import httpx
-
-    client = MagicMock()
-    client.post = AsyncMock(side_effect=httpx.ConnectError("nope"))
-    client.__aenter__.return_value = client
-    client.__aexit__.return_value = False
-
-    with patch("httpx.AsyncClient", return_value=client):
-        result = await compile_source("\\documentclass{article}", "pdflatex")
-
-    assert not result.ok
-    assert result.pdf is None
-    assert "nope" not in result.log
 
 
 # --- compile_tree -----------------------------------------------------
@@ -493,52 +374,15 @@ async def test_reverse_sync_with_an_empty_string_file_degrades_rather_than_openi
     assert point is None
 
 
-async def test_concurrent_compiles_are_bounded_by_the_semaphore():
+async def test_compile_tree_is_bounded_by_the_compile_semaphore():
     """A fresh Semaphore(2) for the test -- the point under test is that a
     third concurrent compile has to wait for one of the first two to finish,
-    not that the production default (8) is exactly right. Without the
-    semaphore in compile_source, all four tasks below would enter `_post`
-    immediately and `entered` would reach 4, not 2."""
-    limit = asyncio.Semaphore(2)
-    entered = 0
-    max_entered = 0
-    release = asyncio.Event()
-    entered_two = asyncio.Event()
-
-    async def fake_post(path, payload):
-        nonlocal entered, max_entered
-        entered += 1
-        max_entered = max(max_entered, entered)
-        if entered == 2:
-            entered_two.set()
-        await release.wait()
-        entered -= 1
-        return {"ok": True, "log": "", "pdf_b64": None, "synctex_b64": None}
-
-    with (
-        patch("app.services.latex_compiler._compile_semaphore", limit),
-        patch("app.services.latex_compiler._post", fake_post),
-    ):
-        tasks = [asyncio.create_task(compile_source("x", "pdflatex")) for _ in range(4)]
-        await asyncio.wait_for(entered_two.wait(), timeout=2)
-        # Yield once so a wrongly-admitted third task would have a chance to
-        # run before we check.
-        await asyncio.sleep(0)
-        assert entered == 2
-
-        release.set()
-        results = await asyncio.gather(*tasks)
-
-    assert max_entered == 2
-    assert all(r.ok for r in results)
-
-
-async def test_compile_tree_is_bounded_by_the_same_semaphore_as_compile_source():
-    """compile_tree keeps `_compile_semaphore` around the call for the same
-    reason compile_source does: it is bounded CPU work in the sandboxed
-    container whether it is one file or a whole tree. Fails if compile_tree
-    ever stopped acquiring the semaphore -- all four tasks would enter
-    `_post_body` immediately and `entered` would reach 4, not 2."""
+    not that the production default (8) is exactly right. `compile_tree`
+    keeps `_compile_semaphore` held around the call because a compile is
+    bounded CPU work in the sandboxed container whether it is one file or a
+    whole tree. Fails if compile_tree ever stopped acquiring the semaphore --
+    all four tasks would enter `_post_body` immediately and `entered` would
+    reach 4, not 2."""
     limit = asyncio.Semaphore(2)
     entered = 0
     max_entered = 0

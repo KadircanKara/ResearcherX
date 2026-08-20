@@ -23,7 +23,7 @@ from app.core.logging import log
 
 # Bounds concurrent COMPILES only -- synctex is short and cheap and does not
 # spawn latexmk, so it is deliberately left outside this gate (see the call
-# site in compile_source below). Module-level, valid only because uvicorn
+# site in compile_tree below). Module-level, valid only because uvicorn
 # runs a single worker -- the same invariant the event bus, the rate limiter
 # and latex_cache already depend on. See `latex_max_concurrent_compiles` in
 # config.py for the pids_limit math behind the number.
@@ -43,8 +43,8 @@ class CompileResult:
     log: str
     pdf: bytes | None
     synctex_gz: bytes | None
-    # None for a single-file compile (compile_source) and for any degraded
-    # result. Set by compile_tree from the tar-compile response -- the
+    # None for a degraded result. Set by compile_tree from the
+    # tar-compile response -- the
     # extraction directory the tree was built in, needed so a later
     # reverse-sync query can resolve tree-relative paths (see _tree_path in
     # latex-compiler/app.py).
@@ -101,34 +101,6 @@ async def _post_body(path: str, content: AsyncIterator[bytes], headers: dict) ->
     except Exception as exc:
         log.warning("latex_compiler_unavailable", path=path, error=str(exc)[:200])
         return None
-
-
-async def compile_source(source: str, engine: str) -> CompileResult:
-    # Queue rather than reject beyond the limit: a compile is normally
-    # sub-second, and the failure this guards against -- pid exhaustion in
-    # the compiler container -- is neither self-limiting nor confined to
-    # whoever caused it, so a slower response beats a 429 that some other
-    # request's flood earned this one.
-    async with _compile_semaphore:
-        payload = await _post("/compile", {"source": source, "engine": engine})
-    if payload is None:
-        return CompileResult(ok=False, log=_UNAVAILABLE, pdf=None, synctex_gz=None)
-    try:
-        pdf_b64 = payload.get("pdf_b64")
-        synctex_b64 = payload.get("synctex_b64")
-        return CompileResult(
-            ok=bool(payload.get("ok")),
-            log=payload.get("log") or "",
-            pdf=base64.b64decode(pdf_b64) if pdf_b64 else None,
-            synctex_gz=base64.b64decode(synctex_b64) if synctex_b64 else None,
-        )
-    except Exception as exc:
-        # Shaping the RESPONSE can fail too, not just the network call: a
-        # truncated or malformed base64 body raises binascii.Error. Guarding
-        # only _post would leave the module's fail-open promise true of the
-        # request and false of the reply.
-        log.warning("latex_compiler_bad_payload", path="/compile", error=str(exc)[:200])
-        return CompileResult(ok=False, log=_UNAVAILABLE, pdf=None, synctex_gz=None)
 
 
 def _build_tar(entries: Sequence[tuple[str, bytes]]) -> tempfile.SpooledTemporaryFile:
@@ -222,7 +194,7 @@ async def compile_tree(
             # needs the round trip. The compiler unquotes it back.
             "X-Main-Path": quote(main_path, safe="/"),
         }
-        # Same gate as compile_source, for the same reason: a compile is
+        # Same gate as compile_tree, for the same reason: a compile is
         # bounded CPU work in the sandboxed container, whole-tree or not.
         async with _compile_semaphore:
             payload = await _post_body("/compile", _aiter_spooled(spool), headers)
@@ -247,7 +219,7 @@ async def compile_tree(
             root=root,
         )
     except Exception as exc:
-        # Same reasoning as compile_source's matching except: shaping the
+        # Same reasoning as compile_tree's matching except: shaping the
         # RESPONSE can fail independently of the request succeeding.
         log.warning("latex_compiler_bad_payload", path="/compile", error=str(exc)[:200])
         return CompileResult(ok=False, log=_UNAVAILABLE, pdf=None, synctex_gz=None, root=None)

@@ -1,10 +1,11 @@
-"""In-memory cache of compiled artifacts, keyed by source hash.
+"""In-memory cache of compiled artifacts, keyed by `tree_hash`
+(`latex_files_service.tree_hash`) over the WHOLE document tree, not just the
+main file.
 
 The PDF is DERIVED: the source of truth is the `latex_files` tree in
-Postgres (read through `latex_files_service`), specifically the file named
-by the document's `main_path`. A cache miss simply re-reads that file and
-recompiles. Nothing here is persisted, and nothing here may be treated as
-durable.
+Postgres (read through `latex_files_service`). A cache miss simply re-reads
+every file in the tree and recompiles. Nothing here is persisted, and
+nothing here may be treated as durable.
 
 Valid only because uvicorn runs a single worker -- the same invariant the
 event bus and the in-memory rate limiter already depend on. Under multiple
@@ -18,22 +19,10 @@ them -- both sync directions answer from the PDF and the map alone (see
 text here would only be dead weight against `size`'s eviction accounting.
 """
 
-import hashlib
 from collections import OrderedDict
 from dataclasses import dataclass
 
 from app.core.config import settings
-
-
-def source_hash(source: str, engine: str) -> str:
-    """Cache key. The engine is part of it: the same source compiled by
-    xelatex is a different document, and keying on source alone would serve
-    the wrong artifact after an engine switch."""
-    digest = hashlib.sha256()
-    digest.update(engine.encode("utf-8"))
-    digest.update(b"\0")
-    digest.update(source.encode("utf-8"))
-    return digest.hexdigest()
 
 
 @dataclass(frozen=True)

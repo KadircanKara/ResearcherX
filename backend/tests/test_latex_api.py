@@ -9,7 +9,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import LatexDocument, Project, ProjectMember, User
 from app.db.seed import seed_users
-from app.services.latex_cache import CachedBuild, LatexCache, source_hash
+from app.db.session import SessionLocal, get_session
+from app.main import app
+from app.services.latex_cache import CachedBuild, LatexCache
 from app.services.latex_compiler import CompileResult, PdfPosition, SourcePoint
 from app.services.latex_files_service import tree_hash
 
@@ -156,6 +158,114 @@ async def test_compile_stores_the_pdf_and_returns_its_hash(
     assert cache.get(body["pdf_hash"]) is not None
 
 
+async def test_compile_ends_its_db_transaction_before_calling_the_compiler(
+    client: AsyncClient, you: User, project: Project
+):
+    """A compile is bounded at `latex_compile_timeout` (up to 60s) and the
+    Postgres pool is 5 + 5 overflow -- holding a checked-out connection
+    across that call would starve every other request in the app, including
+    ones that have nothing to do with LaTeX. This is the first route to
+    interleave DB work with an external compiler call in the same request,
+    protected today by a comment alone, so it is pinned directly: the
+    request's own session must report no active transaction at the exact
+    moment `compile_tree` is invoked. Breaks if a future refactor moves the
+    tree-read loop, or the `await db.commit()` that ends it, to land after
+    this call instead of before it."""
+    created = await client.post(
+        f"/v1/projects/{project.id}/latex",
+        json={"name": "main.tex", "source": "x"},
+        headers={"X-Dev-User-Id": you.id},
+    )
+    doc_id = created.json()["id"]
+
+    # The route's own `db` comes from `Depends(get_session)`, a fresh session
+    # per request -- not the fixture's `db_session`. Overriding the
+    # dependency to also stash each created session is the only way to
+    # inspect the exact session the route is using at the moment the
+    # (mocked) external call happens.
+    sessions: list[AsyncSession] = []
+
+    async def tracking_get_session():
+        async with SessionLocal() as session:
+            sessions.append(session)
+            yield session
+
+    observed: dict[str, bool] = {}
+
+    async def fake_compile_tree(entries, engine, main_path):
+        observed["in_transaction"] = sessions[-1].in_transaction()
+        return CompileResult(ok=True, log="", pdf=b"%PDF", synctex_gz=None, root="/tmp/rx-7")
+
+    app.dependency_overrides[get_session] = tracking_get_session
+    try:
+        with patch("app.api.v1.latex.compile_tree", AsyncMock(side_effect=fake_compile_tree)):
+            resp = await client.post(
+                f"/v1/projects/{project.id}/latex/{doc_id}/compile",
+                headers={"X-Dev-User-Id": you.id},
+            )
+    finally:
+        app.dependency_overrides.pop(get_session, None)
+
+    assert resp.status_code == 200
+    assert observed["in_transaction"] is False
+
+
+async def test_reverse_sync_ends_its_db_transaction_before_calling_the_compiler(
+    client: AsyncClient, you: User, project: Project
+):
+    """Same invariant as the compile route above, pinned separately for
+    `synctex_reverse_route`: it now reads the tree (`files.read_file`) AFTER
+    the external `synctex_reverse` call, to filter the result against the
+    live tree. Move that read three lines earlier in some future refactor
+    -- to "simplify" the flow, say -- and the transaction it opens would be
+    held across the external call again, with every other test in this
+    file still green."""
+    created = await client.post(
+        f"/v1/projects/{project.id}/latex",
+        json={"name": "main.tex", "source": "src"},
+        headers={"X-Dev-User-Id": you.id},
+    )
+    doc_id = created.json()["id"]
+
+    prepared = LatexCache(max_entries=4, max_bytes=10_000)
+    prepared.put(
+        "prehash",
+        CachedBuild(pdf=b"%PDF", synctex_gz=b"gz", log="", root="/tmp/rx-8", main_path="main.tex"),
+        document_id=doc_id,
+    )
+
+    sessions: list[AsyncSession] = []
+
+    async def tracking_get_session():
+        async with SessionLocal() as session:
+            sessions.append(session)
+            yield session
+
+    observed: dict[str, bool] = {}
+
+    async def fake_synctex_reverse(pdf, synctex_gz, root, main_path, page, x, y):
+        observed["in_transaction"] = sessions[-1].in_transaction()
+        return SourcePoint(file="main.tex", line=1)
+
+    app.dependency_overrides[get_session] = tracking_get_session
+    try:
+        with (
+            patch("app.api.v1.latex.cache", prepared),
+            patch("app.api.v1.latex.synctex_reverse", AsyncMock(side_effect=fake_synctex_reverse)),
+        ):
+            resp = await client.post(
+                f"/v1/projects/{project.id}/latex/{doc_id}/synctex/reverse",
+                json={"page": 1, "x": 1.0, "y": 2.0},
+                headers={"X-Dev-User-Id": you.id},
+            )
+    finally:
+        app.dependency_overrides.pop(get_session, None)
+
+    assert resp.status_code == 200
+    assert resp.json()["found"] is True
+    assert observed["in_transaction"] is False
+
+
 async def test_a_failed_compile_returns_the_log_and_no_hash(
     client: AsyncClient, you: User, project: Project, db_session: AsyncSession
 ):
@@ -205,7 +315,7 @@ async def test_forward_sync_maps_a_line_to_a_page_position(
 
     prepared = LatexCache(max_entries=4, max_bytes=10_000)
     prepared.put(
-        source_hash("src", "pdflatex"),
+        "prehash",
         CachedBuild(
             pdf=b"%PDF", synctex_gz=b"gz", log="", root="/tmp/rx-latex-abc", main_path="main.tex"
         ),
@@ -255,7 +365,7 @@ async def test_forward_sync_with_an_explicit_file_passes_it_through(
 
     prepared = LatexCache(max_entries=4, max_bytes=10_000)
     prepared.put(
-        source_hash("src", "pdflatex"),
+        "prehash",
         CachedBuild(
             pdf=b"%PDF", synctex_gz=b"gz", log="", root="/tmp/rx-latex-abc", main_path="main.tex"
         ),
@@ -321,7 +431,7 @@ async def test_reverse_sync_maps_a_point_to_a_line(
 
     prepared = LatexCache(max_entries=4, max_bytes=10_000)
     prepared.put(
-        source_hash("src", "pdflatex"),
+        "prehash",
         CachedBuild(
             pdf=b"%PDF", synctex_gz=b"gz", log="", root="/tmp/rx-latex-abc", main_path="main.tex"
         ),
@@ -351,38 +461,48 @@ async def test_reverse_sync_maps_a_point_to_a_line(
 
 
 async def test_a_reverse_result_naming_a_file_no_longer_in_the_tree_returns_cleanly(
-    client: AsyncClient, you: User, project: Project, db_session: AsyncSession
+    client: AsyncClient, you: User, project: Project
 ):
     """The compiler cannot know the current tree -- it answers from the PDF
     and the map alone -- so it can hand back a build artifact (main.toc,
     main.aux) or a since-deleted source file as if it were still openable.
     A file the editor cannot open is worse than no answer: the route must
-    filter this to `found: false` rather than pass it straight through."""
-    doc = LatexDocument(project_id=project.id, name="main.tex")
-    db_session.add(doc)
-    await db_session.commit()
-    await db_session.refresh(doc)
+    filter this to `found: false` rather than pass it straight through.
+
+    Created through the API, not a raw ORM insert, so `main.tex` genuinely
+    exists in the tree -- an empty tree would make `found: false` hold for
+    EVERY `point.file`, artifact or not, and a mutant that always returns
+    `found: false` would survive unnoticed. `main.toc` is real proof the
+    filter is doing the work: it is never a row in `latex_files`, only a
+    build artifact the compile produced beside the PDF, so this only passes
+    if the route actually checks tree membership rather than just answering
+    `found: true` for anything `synctex_reverse` hands back.
+    """
+    created = await client.post(
+        f"/v1/projects/{project.id}/latex",
+        json={"name": "main.tex", "source": "src"},
+        headers={"X-Dev-User-Id": you.id},
+    )
+    doc_id = created.json()["id"]
 
     prepared = LatexCache(max_entries=4, max_bytes=10_000)
     prepared.put(
-        source_hash("src", "pdflatex"),
+        "prehash",
         CachedBuild(
             pdf=b"%PDF", synctex_gz=b"gz", log="", root="/tmp/rx-latex-abc", main_path="main.tex"
         ),
-        document_id=doc.id,
+        document_id=doc_id,
     )
 
     with (
         patch("app.api.v1.latex.cache", prepared),
         patch(
             "app.api.v1.latex.synctex_reverse",
-            # main.toc is never a real file in latex_files -- it is a build
-            # artifact the compile produced beside the PDF.
             AsyncMock(return_value=SourcePoint(file="main.toc", line=1)),
         ),
     ):
         resp = await client.post(
-            f"/v1/projects/{project.id}/latex/{doc.id}/synctex/reverse",
+            f"/v1/projects/{project.id}/latex/{doc_id}/synctex/reverse",
             json={"page": 1, "x": 36.0, "y": 122.0},
             headers={"X-Dev-User-Id": you.id},
         )

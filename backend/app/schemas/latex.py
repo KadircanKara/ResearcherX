@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 # a read-only rootfs cannot give it. Pinning the type here rather than taking
 # a free string means an unsupported engine is a 422 at the edge instead of a
 # silent fallback deep in the service -- and it keeps `engine` out of
-# `source_hash` as an arbitrary user-controlled string.
+# `tree_hash` as an arbitrary user-controlled string.
 Engine = Literal["pdflatex", "xelatex"]
 
 # A LaTeX source is text, and 2MB is far beyond any real paper. Bounding it

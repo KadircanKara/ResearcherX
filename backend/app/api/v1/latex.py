@@ -241,9 +241,9 @@ async def compile_document(
         )
     await db.commit()
 
-    # tree_hash, not source_hash: a chapter edit must invalidate the cached
-    # build. source_hash over the main file alone would return a stale PDF
-    # forever after editing anything but the main file.
+    # tree_hash, over the WHOLE tree -- a chapter edit must invalidate the
+    # cached build. A hash over the main file's bytes alone would return a
+    # stale PDF forever after editing anything but the main file.
     key = files.tree_hash(entries, engine, main_path)
     cached = cache.get(key)
     if cached is not None:
@@ -331,7 +331,18 @@ async def synctex_forward_route(
     # and a repointed main_path since then would name a file this build
     # never compiled. This is also what keeps the existing single-file
     # frontend (which sends no `file` at all) working unchanged.
-    file = payload.file if payload.file is not None else build.main_path
+    #
+    # Normalized the same way `point.file` is guarded on the reverse side:
+    # it is the only path-shaped string in this subsystem that reaches the
+    # compiler without a length bound or a normalize_path pass otherwise.
+    # Not exploitable -- `synctex view -i` never opens the named file, so an
+    # absolute or traversal-shaped string just fails to match a box -- but
+    # this is defence in depth and consistency with the reverse side, not a
+    # response to a real hole.
+    try:
+        file = normalize_path(payload.file) if payload.file is not None else build.main_path
+    except InvalidPath:
+        return SynctexForwardOut(found=False)
     position = await synctex_forward(
         build.pdf,
         build.synctex_gz,

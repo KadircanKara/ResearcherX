@@ -2,20 +2,13 @@
 valid for the same reason the event bus and the rate limiter are: uvicorn runs
 a single worker by design."""
 
-from app.services.latex_cache import CachedBuild, LatexCache, source_hash
+from app.services.latex_cache import CachedBuild, LatexCache
 
 
 def _build(
     pdf: bytes = b"%PDF", root: str | None = "/tmp/rx-latex-abc", main_path: str = "master.tex"
 ) -> CachedBuild:
     return CachedBuild(pdf=pdf, synctex_gz=b"gz", log="", root=root, main_path=main_path)
-
-
-def test_the_hash_covers_the_engine_not_just_the_source():
-    """The same source compiled by xelatex is a different PDF. Keying on
-    source alone would serve the wrong artifact after an engine switch."""
-    assert source_hash("x", "pdflatex") != source_hash("x", "xelatex")
-    assert source_hash("x", "pdflatex") == source_hash("x", "pdflatex")
 
 
 def test_a_put_can_be_read_back():
