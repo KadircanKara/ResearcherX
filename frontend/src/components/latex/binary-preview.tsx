@@ -4,18 +4,13 @@ import { useEffect, useState } from "react";
 import { Download, File as FileIcon, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { readBinaryFile, LatexRequestError } from "@/lib/latex";
-import { formatBytes, isImagePath } from "@/lib/latex-tree";
+import { basename, formatBytes, isImagePath } from "@/lib/latex-tree";
 
 interface BinaryPreviewProps {
   projectId: string;
   documentId: string;
   path: string;
   sizeBytes: number;
-}
-
-function basename(path: string): string {
-  const slash = path.lastIndexOf("/");
-  return slash === -1 ? path : path.slice(slash + 1);
 }
 
 /**
@@ -65,7 +60,12 @@ export function BinaryPreview({ projectId, documentId, path, sizeBytes }: Binary
       a.href = url;
       a.download = basename(path);
       a.click();
-      URL.revokeObjectURL(url);
+      // Deferred rather than revoked immediately after `click()`: Safari can
+      // cancel a download that's still being handed off to the OS if the
+      // blob: URL it points at is revoked out from under it synchronously.
+      // A macrotask delay lets the click's own download handling complete
+      // first; this is the standard workaround for that race.
+      setTimeout(() => URL.revokeObjectURL(url), 0);
     } catch (err) {
       setError(err instanceof LatexRequestError ? err.userMessage : "Could not download the file.");
     } finally {

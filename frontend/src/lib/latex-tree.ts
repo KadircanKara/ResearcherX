@@ -49,6 +49,12 @@ export function joinPath(dir: string, name: string): string {
   return dir ? `${dir}/${name}` : name;
 }
 
+/** The last path segment -- what a tab or a download names the file as. */
+export function basename(path: string): string {
+  const slash = path.lastIndexOf("/");
+  return slash === -1 ? path : path.slice(slash + 1);
+}
+
 /**
  * Flat paths into a nested tree.
  *

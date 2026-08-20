@@ -11,6 +11,18 @@ import { stex } from "@codemirror/legacy-modes/mode/stex";
 interface EditorPaneProps {
   /** Which buffer is showing. Null when no file is open. */
   path: string | null;
+  /**
+   * Every path currently open in a tab.
+   *
+   * Needed because `statesRef` is keyed on the path STRING, and a path can
+   * be reused: delete `a.tex`, create a new `a.tex`, open it, and a map
+   * that was never pruned hands back the dead file's EditorState -- its
+   * text is corrected by the value effect, but its UNDO HISTORY is not, so
+   * Ctrl+Z resurrects content the user deleted. This component only ever
+   * sees the ACTIVE path, so it cannot tell a dead key from a closed tab
+   * without being told.
+   */
+  openPaths: string[];
   value: string;
   onChange: (next: string) => void;
   onLineDoubleClick: (line: number) => void;
@@ -21,6 +33,7 @@ interface EditorPaneProps {
 
 export function EditorPane({
   path,
+  openPaths,
   value,
   onChange,
   onLineDoubleClick,
@@ -140,6 +153,29 @@ export function EditorPane({
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [path]);
+
+  // Drop cached buffers for paths that are no longer open. Closing a tab
+  // therefore discards that file's undo history -- deliberate: the
+  // alternative is a map keyed on a string that can be reused by a
+  // different file, and resurrecting a deleted file's edits is far worse
+  // than losing undo across a close. A rename is covered by the same rule,
+  // since the old path leaves `openPaths` and the new one arrives with no
+  // cached state.
+  //
+  // Declared AFTER the path-switch effect above, which matters when a tab
+  // switch and a tab close land in the SAME commit (e.g. selecting a
+  // neighbour tab and closing the one just left, both driven off one state
+  // update in the parent): the switch effect has already stashed the
+  // outgoing buffer's live state into `statesRef` by the time this effect
+  // runs, so pruning here only ever removes a state that has already been
+  // safely handed off -- it can never delete the buffer a switch is still
+  // in the middle of stashing.
+  useEffect(() => {
+    const live = new Set(openPaths);
+    for (const cached of statesRef.current.keys()) {
+      if (!live.has(cached)) statesRef.current.delete(cached);
+    }
+  }, [openPaths]);
 
   // Push an externally-changed document in (e.g. a fresh fetch landing for
   // the currently-open file), but never echo back what the user just typed

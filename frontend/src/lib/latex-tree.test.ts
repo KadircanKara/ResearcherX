@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildTree, formatBytes, isImagePath, isTexPath, joinPath, parentDir } from "./latex-tree";
+import { basename, buildTree, formatBytes, isImagePath, isTexPath, joinPath, parentDir } from "./latex-tree";
 
 const meta = (path: string, size = 10, binary = false) => ({
   path,
@@ -62,6 +62,20 @@ describe("path arithmetic", () => {
   it("joinPath does not emit a leading slash at the root", () => {
     expect(joinPath("", "main.tex")).toBe("main.tex");
     expect(joinPath("chapters", "intro.tex")).toBe("chapters/intro.tex");
+  });
+});
+
+describe("basename", () => {
+  it("returns a root file's path unchanged", () => {
+    expect(basename("main.tex")).toBe("main.tex");
+  });
+
+  it("returns the last segment of a nested path", () => {
+    expect(basename("chapters/intro.tex")).toBe("intro.tex");
+  });
+
+  it("handles a deeply nested path the same way", () => {
+    expect(basename("a/b/c/deep.tex")).toBe("deep.tex");
   });
 });
 

@@ -2,6 +2,7 @@
 
 import { X } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { basename } from "@/lib/latex-tree";
 
 interface OpenTabsProps {
   paths: string[];
@@ -10,11 +11,6 @@ interface OpenTabsProps {
   dirtyPaths: string[];
   onSelect: (path: string) => void;
   onClose: (path: string) => void;
-}
-
-function basename(path: string): string {
-  const slash = path.lastIndexOf("/");
-  return slash === -1 ? path : path.slice(slash + 1);
 }
 
 export function OpenTabs({ paths, activePath, dirtyPaths, onSelect, onClose }: OpenTabsProps) {
