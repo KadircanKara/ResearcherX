@@ -14,7 +14,7 @@ from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import LatexDocument, LatexDocumentMember, Project
+from app.db.models import LatexDocument, LatexDocumentMember, ProjectMember
 from app.services import project_service
 
 EDITOR = "editor"
@@ -77,7 +77,15 @@ async def require(
     user_id: str,
     need: str = VIEWER,
 ) -> str:
-    """`resolve`, plus a 403 when the caller falls short of *need*."""
+    """`resolve`, plus a 403 when the caller falls short of *need*.
+
+    `need` is developer-supplied, never database- or client-supplied, so an
+    unrecognized value is our bug and must crash loudly (ValueError) rather
+    than silently perform no check -- unlike a role string read back from the
+    database, which must never crash a request.
+    """
+    if need not in (VIEWER, EDITOR):
+        raise ValueError(f"unknown need: {need}")
     access = await resolve(db, project_id, document_id, user_id)
     if need == EDITOR and access != EDITOR:
         raise HTTPException(status_code=403, detail="Insufficient permissions")
@@ -85,8 +93,19 @@ async def require(
 
 
 async def owner_id_of(db: AsyncSession, project_id: str) -> str | None:
-    """The project's owner, for the grant routes' refusal check."""
-    project = (
-        await db.execute(select(Project).where(Project.id == project_id))
+    """The project's owner, for the grant routes' refusal check.
+
+    Reads the same `ProjectMember` row that `resolve` uses to decide who the
+    owner is -- `ProjectMember` is the single authority for access decisions,
+    so this must not read `Project.owner_id` as a second, potentially
+    disagreeing source of truth.
+    """
+    membership = (
+        await db.execute(
+            select(ProjectMember).where(
+                ProjectMember.project_id == project_id,
+                ProjectMember.role == "owner",
+            )
+        )
     ).scalar_one_or_none()
-    return None if project is None else project.owner_id
+    return None if membership is None else membership.user_id
