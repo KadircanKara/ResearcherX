@@ -27,6 +27,7 @@ poison.
 import base64
 import json
 import os
+import posixpath
 import signal
 import subprocess
 import tarfile
@@ -432,15 +433,63 @@ def _records(output: str) -> list[dict]:
 
 
 def query_synctex(body: dict) -> dict:
-    """`body`: source, pdf_b64, synctex_b64, direction, and the coordinates
-    for that direction."""
+    """`body`: direction, pdf_b64, synctex_b64, main_path, root, plus the
+    coordinates for that direction.
+
+    NO SOURCE. Measured in plan 1: both directions answer from the PDF and the
+    map alone, with no .tex staged at all. Shipping the tree here would mean
+    sending up to 25MB to answer one double-click.
+
+    The wire protocol is TREE-RELATIVE. synctex itself speaks paths relative
+    to the main file's DIRECTORY (measured: `-i 2:0:chapters/intro.tex`
+    resolves, `-i 2:0:src/chapters/intro.tex` does not), so this function owns
+    both conversions. When the main file is at the tree root -- the common
+    case -- every conversion is the identity.
+
+    LIMITATION, not fixed here: forward sync cannot address a file outside
+    the main file's directory. `posixpath.relpath` on such a file yields a
+    `../`-prefixed path, and synctex's `view` returns NOT FOUND for it
+    (measured) -- so a subdirectory main file can forward-sync anything
+    under that subdirectory, but not a file reached only via `..`. Reverse
+    sync has no such restriction (see `_tree_path`), so the two directions
+    are asymmetric.
+    """
     direction = body.get("direction")
+    if direction not in ("forward", "reverse"):
+        return {"found": False}
+
+    # Type-confusion guard: these three arrive as untyped JSON. A non-string
+    # value (a list, a number, null) must be treated as absent rather than
+    # reaching string operations below and raising a 500 -- pdf_b64/
+    # synctex_b64/the coordinates already fail correctly (base64/int/float
+    # parsing raises, caught by the try/except 500 in do_POST) so only the
+    # path-shaped fields need this.
+    raw_main_path = body.get("main_path")
+    main_path = raw_main_path if isinstance(raw_main_path, str) else ""
+    raw_root = body.get("root")
+    root = raw_root if isinstance(raw_root, str) else None
+    raw_file = body.get("file")
+    file_param = raw_file if isinstance(raw_file, str) else None
+
+    main_dir = posixpath.dirname(main_path)
+    stem = posixpath.splitext(posixpath.basename(main_path))[0] or "master"
+    # BACKWARD COMPATIBILITY, until the backend client is switched over
+    # (Task 3) -- deleted in Task 4 along with this fallback and its pinning
+    # test. The pre-existing client still calls /synctex with no `main_path`
+    # at all. What this preserves is the DEFAULT `file` a forward query gets
+    # when the caller sends none: "master.tex", the pre-existing client's
+    # only document. The stem used to stage the pdf/map below ("master" in
+    # that case) is NOT itself part of the contract -- synctex only needs
+    # the pdf and map to share *a* stem, whatever it is called -- so this
+    # fallback exists solely to give `tree_file` the right default, not to
+    # preserve "master" as a name.
+    legacy_default_file = "master.tex" if not main_path else main_path
+
     with tempfile.TemporaryDirectory(prefix="rx-synctex-") as tmp:
         directory = Path(tmp)
-        (directory / _MASTER).write_text(body.get("source", ""), encoding="utf-8")
-        (directory / "master.pdf").write_bytes(base64.b64decode(body["pdf_b64"]))
-        (directory / "master.synctex.gz").write_bytes(base64.b64decode(body["synctex_b64"]))
-        pdf = directory / "master.pdf"
+        pdf = directory / f"{stem}.pdf"
+        pdf.write_bytes(base64.b64decode(body["pdf_b64"]))
+        (directory / f"{stem}.synctex.gz").write_bytes(base64.b64decode(body["synctex_b64"]))
 
         # `-d <dir>` is load-bearing: the map records ABSOLUTE paths from the
         # directory it was compiled in, which no longer exists by the time
@@ -448,9 +497,12 @@ def query_synctex(body: dict) -> dict:
         # both view and edit answer correctly from a directory the document
         # was never compiled in.
         if direction == "forward":
+            tree_file = file_param or legacy_default_file
+            # tree-relative -> main-dir-relative
+            rel = posixpath.relpath(tree_file, main_dir) if main_dir else tree_file
             args = [
                 "synctex", "view",
-                "-i", f"{body['line']}:0:{_MASTER}",
+                "-i", f"{body['line']}:0:{rel}",
                 "-o", str(pdf),
                 "-d", str(directory),
             ]
@@ -493,14 +545,62 @@ def query_synctex(body: dict) -> dict:
                 "width": float(box.get("W") or 0),
                 "height": float(box.get("H") or 0),
             }
-        # `Input:` is NOT trustworthy after staging -- the client echoes the
-        # original compile-time path, a stale string naming a deleted
-        # directory. Only `Line:` is re-derived, which is why a document is
-        # one file in v1.
         lines = [r for r in records if "Line" in r]
         if not lines:
             return {"found": False}
-        return {"found": True, "line": int(lines[0]["Line"])}
+        record = lines[0]
+        resolved = _tree_path(record.get("Input", ""), root)
+        if resolved is None:
+            # BACKWARD COMPATIBILITY, same lifetime as legacy_default_file
+            # above. The legacy single-file client never sends `root`, so
+            # `_tree_path` correctly refuses to resolve (it cannot verify
+            # containment without one) -- but that mode has exactly one
+            # document, so report it directly instead of losing reverse
+            # navigation entirely. Tree mode (root present) is unaffected:
+            # this only fires when main_path/root were never sent at all.
+            if not main_path:
+                return {"found": True, "file": legacy_default_file, "line": int(record["Line"])}
+            return {"found": False}
+        return {"found": True, "file": resolved, "line": int(record["Line"])}
+
+
+def _tree_path(raw_input: str, root: str | None) -> str | None:
+    """Turn synctex's `Input:` into a TREE-RELATIVE path, or None.
+
+    `Input:` is `<root>/<whatever the engine recorded>`. Once the recorded
+    root is stripped, the remainder is already tree-relative -- an earlier
+    version rejoined the main file's directory on top of it, which
+    double-counted the prefix and silently returned the wrong file for any
+    project whose main file sits in a subdirectory.
+
+    Returns None rather than guessing. A wrong file opens the wrong document
+    with full confidence; `found: false` renders cleanly. Refused: anything
+    not under the compile root (system inputs like `article.cls` live in the
+    TeX Live tree), and anything that still escapes after normalisation
+    (`\\input{../../etc/hostname}` is a document the user can write).
+    """
+    if not raw_input or not root:
+        return None
+    # A bare `startswith(root)` would also match a SIBLING directory whose
+    # name merely extends root's characters (`/tmp/RX/...` starts with
+    # `/tmp/R`) -- the same class of bug `compile_tree`'s containment check
+    # guards against with `str(directory.resolve()) + os.sep`. Requiring the
+    # separator keeps both checks in this module consistent.
+    prefix = root.rstrip("/") + "/"
+    if not raw_input.startswith(prefix):
+        return None
+    tail = raw_input[len(prefix):]
+    # `/./` is how synctex separates the recorded cwd from the relative path.
+    # Collapse it IN PLACE; do not treat it as a split point.
+    tail = tail.replace("/./", "/")
+    if tail.startswith("./"):
+        tail = tail[2:]
+    if not tail:
+        return None
+    candidate = posixpath.normpath(tail)
+    if candidate.startswith("/") or candidate == ".." or candidate.startswith("../"):
+        return None
+    return candidate
 
 
 class Handler(BaseHTTPRequestHandler):

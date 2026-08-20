@@ -673,3 +673,349 @@ def test_trailing_bytes_under_an_honest_content_length_still_get_a_response():
     assert b" 200 " in header.split(b"\r\n", 1)[0], header
     payload = json.loads(raw_body)
     assert payload["ok"] is True, payload.get("log")
+
+
+@pytest.mark.container
+def test_sync_round_trips_a_line_in_a_chapter_file():
+    """Forward from a chapter, then reverse back to it. The chapter is the
+    case that single-file sync could not express at all."""
+    body = _tar({"main.tex": ROOT_DOC, "chapters/intro.tex": CHAPTER})
+    compiled = httpx.post(
+        f"{COMPILER_URL}/compile",
+        content=body,
+        headers={
+            "Content-Type": "application/x-tar",
+            "X-Engine": "pdflatex",
+            "X-Main-Path": "main.tex",
+        },
+        timeout=120,
+    ).json()
+    assert compiled["ok"] is True, compiled["log"]
+
+    common = {
+        "pdf_b64": compiled["pdf_b64"],
+        "synctex_b64": compiled["synctex_b64"],
+        "main_path": "main.tex",
+        "root": compiled["root"],
+    }
+    fwd = httpx.post(
+        f"{COMPILER_URL}/synctex",
+        json={**common, "direction": "forward", "file": "chapters/intro.tex", "line": 2},
+        timeout=60,
+    ).json()
+    assert fwd["found"] is True
+
+    rev = httpx.post(
+        f"{COMPILER_URL}/synctex",
+        json={**common, "direction": "reverse", "page": fwd["page"], "x": fwd["x"], "y": fwd["y"]},
+        timeout=60,
+    ).json()
+    assert rev["found"] is True
+    assert rev["file"] == "chapters/intro.tex"
+    assert rev["line"] == 2
+
+
+@pytest.mark.container
+def test_sync_round_trips_when_the_main_file_is_in_a_subdirectory():
+    """synctex speaks paths relative to the MAIN FILE'S DIRECTORY, not the
+    tree root -- measured. The wire protocol is tree-relative and the
+    compiler converts, so this must work identically to the flat case."""
+    body = _tar({"src/paper.tex": ROOT_DOC, "src/chapters/intro.tex": CHAPTER})
+    compiled = httpx.post(
+        f"{COMPILER_URL}/compile",
+        content=body,
+        headers={
+            "Content-Type": "application/x-tar",
+            "X-Engine": "pdflatex",
+            "X-Main-Path": "src/paper.tex",
+        },
+        timeout=120,
+    ).json()
+    assert compiled["ok"] is True, compiled["log"]
+
+    common = {
+        "pdf_b64": compiled["pdf_b64"],
+        "synctex_b64": compiled["synctex_b64"],
+        "main_path": "src/paper.tex",
+        "root": compiled["root"],
+    }
+    fwd = httpx.post(
+        f"{COMPILER_URL}/synctex",
+        json={**common, "direction": "forward", "file": "src/chapters/intro.tex", "line": 2},
+        timeout=60,
+    ).json()
+    assert fwd["found"] is True
+
+    rev = httpx.post(
+        f"{COMPILER_URL}/synctex",
+        json={**common, "direction": "reverse", "page": fwd["page"], "x": fwd["x"], "y": fwd["y"]},
+        timeout=60,
+    ).json()
+    assert rev["found"] is True
+    assert rev["file"] == "src/chapters/intro.tex"
+    assert rev["line"] == 2
+
+
+@pytest.mark.container
+def test_reverse_sync_in_the_main_file_reports_the_main_file():
+    body = _tar({"main.tex": ROOT_DOC, "chapters/intro.tex": CHAPTER})
+    compiled = httpx.post(
+        f"{COMPILER_URL}/compile",
+        content=body,
+        headers={
+            "Content-Type": "application/x-tar",
+            "X-Engine": "pdflatex",
+            "X-Main-Path": "main.tex",
+        },
+        timeout=120,
+    ).json()
+    common = {
+        "pdf_b64": compiled["pdf_b64"],
+        "synctex_b64": compiled["synctex_b64"],
+        "main_path": "main.tex",
+        "root": compiled["root"],
+    }
+    fwd = httpx.post(
+        f"{COMPILER_URL}/synctex",
+        json={**common, "direction": "forward", "file": "main.tex", "line": 4},
+        timeout=60,
+    ).json()
+    assert fwd["found"] is True
+    rev = httpx.post(
+        f"{COMPILER_URL}/synctex",
+        json={**common, "direction": "reverse", "page": fwd["page"], "x": fwd["x"], "y": fwd["y"]},
+        timeout=60,
+    ).json()
+    assert rev["found"] is True
+    assert rev["file"] == "main.tex"
+    # NOT an exact line assertion: lines 3 and 4 of this document produce the
+    # identical synctex box (measured), so reverse returns the first of them
+    # for either. Node merging is a property of the document, not of the
+    # conversion under test -- and this test is named for the FILE. The
+    # chapter round-trip tests do pin an exact line, where the boxes are
+    # distinct.
+    assert rev["line"] in (3, 4)
+
+
+@pytest.mark.container
+def test_sync_needs_no_source_files_at_all():
+    """Measured in plan 1: both directions answer from the PDF and the map
+    alone -- so a stray `source` key in the payload (the old client's shape,
+    or a caller that has not been updated yet) must be IGNORED, not consulted.
+    A payload that merely omits `source` cannot tell the two apart; sending a
+    deliberately wrong one and comparing to the no-source answer can."""
+    body = _tar({"main.tex": ROOT_DOC, "chapters/intro.tex": CHAPTER})
+    compiled = httpx.post(
+        f"{COMPILER_URL}/compile",
+        content=body,
+        headers={
+            "Content-Type": "application/x-tar",
+            "X-Engine": "pdflatex",
+            "X-Main-Path": "main.tex",
+        },
+        timeout=120,
+    ).json()
+    payload = {
+        "pdf_b64": compiled["pdf_b64"],
+        "synctex_b64": compiled["synctex_b64"],
+        "main_path": "main.tex",
+        "root": compiled["root"],
+        "direction": "forward",
+        "file": "chapters/intro.tex",
+        "line": 2,
+    }
+    baseline = httpx.post(f"{COMPILER_URL}/synctex", json=payload, timeout=60).json()
+    assert baseline["found"] is True
+
+    poisoned = {
+        **payload,
+        "source": "\\documentclass{article}\\begin{document}wrong\\end{document}",
+    }
+    answer = httpx.post(f"{COMPILER_URL}/synctex", json=poisoned, timeout=60).json()
+    assert answer == baseline
+
+
+@pytest.mark.container
+def test_the_legacy_single_file_synctex_contract_still_works():
+    """Compatibility shim, scoped to last exactly as long as the pre-tree
+    backend client does: Task 3 switches that client to main_path/file/root,
+    and Task 4 deletes this test along with the fallback in query_synctex.
+
+    The pre-existing client (`app/services/latex_compiler.py`) posts `source`
+    and no `main_path`/`file`/`root` at all -- the single-file contract that
+    predates the tree. `main_path` absent must still resolve against the
+    compiled `master.tex`/`master.pdf`/`master.synctex.gz` triple, exactly as
+    it did before this task's rewrite."""
+    compiled = httpx.post(
+        f"{COMPILER_URL}/compile",
+        json={"source": SELF_CONTAINED.decode(), "engine": "pdflatex"},
+        timeout=120,
+    ).json()
+    assert compiled["ok"] is True, compiled["log"]
+
+    payload = {
+        "source": SELF_CONTAINED.decode(),
+        "pdf_b64": compiled["pdf_b64"],
+        "synctex_b64": compiled["synctex_b64"],
+        "direction": "forward",
+        "line": 3,
+    }
+    assert "main_path" not in payload
+    assert "file" not in payload
+    fwd = httpx.post(f"{COMPILER_URL}/synctex", json=payload, timeout=60).json()
+    assert fwd["found"] is True
+
+
+@pytest.mark.container
+def test_reverse_sync_resolves_a_file_reached_through_a_parent_relative_input():
+    """Pins the root-strip in `_tree_path`: a mutant deleting it passed every
+    other test here, because every other test's main file sits at the tree
+    root (main_dir == "") where the strip is a no-op. A subdirectory main
+    file whose own `\\input` escapes it (`\\input{../shared/x}`, cwd == the
+    main file's directory because of `latexmk -cd`) records
+    `Input:<root>/src/../shared/x.tex` -- measured, the exact shape in the
+    corrected design's own example table -- and only the strip plus `../`
+    normalisation together turn that into the tree-relative `shared/x.tex`
+    rather than `src/../shared/x.tex` or nothing at all.
+
+    Forward sync cannot reach this box (documented asymmetry: `shared/x.tex`
+    is unaddressable via `file=` from a `src/` main -- `relpath` yields a
+    `../`-prefixed path and synctex's `view` returns NOT FOUND for it), so
+    the page/x/y here are measured directly against the compiled PDF -- by
+    scanning `synctex edit` across the page -- rather than obtained through a
+    forward query."""
+    main = b"""\\documentclass{article}
+\\begin{document}
+\\section{Root}
+Alpha.
+\\input{../shared/x}
+\\end{document}
+"""
+    shared = (
+        b"\\section{Shared}\n"
+        b"Gamma lives outside src, and this is a longer sentence so it gets its "
+        b"own paragraph box distinct from the includer line, hopefully producing "
+        b"a synctex node whose Input points at this file rather than the "
+        b"includer.\n"
+    )
+    body = _tar({"src/paper.tex": main, "shared/x.tex": shared})
+    compiled = httpx.post(
+        f"{COMPILER_URL}/compile",
+        content=body,
+        headers={
+            "Content-Type": "application/x-tar",
+            "X-Engine": "pdflatex",
+            "X-Main-Path": "src/paper.tex",
+        },
+        timeout=120,
+    ).json()
+    assert compiled["ok"] is True, compiled["log"]
+
+    rev = httpx.post(
+        f"{COMPILER_URL}/synctex",
+        json={
+            "pdf_b64": compiled["pdf_b64"],
+            "synctex_b64": compiled["synctex_b64"],
+            "main_path": "src/paper.tex",
+            "root": compiled["root"],
+            "direction": "reverse",
+            "page": 1,
+            "x": 100,
+            "y": 170,
+        },
+        timeout=60,
+    ).json()
+    assert rev["found"] is True
+    assert rev["file"] == "shared/x.tex"
+    assert rev["line"] == 1
+
+
+@pytest.mark.container
+def test_an_unrecognised_direction_is_rejected_rather_than_falling_through_to_reverse():
+    """`direction` is attacker-controlled JSON. Anything other than the two
+    known values must be a clean miss, not a silent fall-through into the
+    `else` branch that used to mean "reverse" -- which would try to build a
+    `synctex edit` command out of a forward-shaped payload (no page/x/y) and
+    KeyError, or worse, coincidentally succeed on stale defaults."""
+    body = _tar({"main.tex": ROOT_DOC, "chapters/intro.tex": CHAPTER})
+    compiled = httpx.post(
+        f"{COMPILER_URL}/compile",
+        content=body,
+        headers={
+            "Content-Type": "application/x-tar",
+            "X-Engine": "pdflatex",
+            "X-Main-Path": "main.tex",
+        },
+        timeout=120,
+    ).json()
+    assert compiled["ok"] is True, compiled["log"]
+
+    answer = httpx.post(
+        f"{COMPILER_URL}/synctex",
+        json={
+            "pdf_b64": compiled["pdf_b64"],
+            "synctex_b64": compiled["synctex_b64"],
+            "main_path": "main.tex",
+            "root": compiled["root"],
+            "direction": "sideways",
+            "line": 2,
+        },
+        timeout=60,
+    ).json()
+    assert answer == {"found": False}
+
+
+@pytest.mark.container
+def test_a_non_string_main_path_root_or_file_is_treated_as_absent_not_a_500():
+    """`main_path`/`root`/`file` arrive as untyped JSON. A list, number, or
+    null must fall back to the legacy default rather than reaching a string
+    operation (`posixpath.dirname`, `.startswith`, string concatenation) and
+    raising -- which do_POST's generic except turns into a 500, but a 500
+    here means the double-click silently does nothing instead of a clean
+    `found: false`. `main_path` and `file` are exercised on a forward query
+    (both feed `posixpath.relpath`/`.dirname`); `root` only matters on
+    reverse, since it is `_tree_path`'s alone."""
+    body = _tar({"main.tex": ROOT_DOC, "chapters/intro.tex": CHAPTER})
+    compiled = httpx.post(
+        f"{COMPILER_URL}/compile",
+        content=body,
+        headers={
+            "Content-Type": "application/x-tar",
+            "X-Engine": "pdflatex",
+            "X-Main-Path": "main.tex",
+        },
+        timeout=120,
+    ).json()
+    assert compiled["ok"] is True, compiled["log"]
+    common = {
+        "pdf_b64": compiled["pdf_b64"],
+        "synctex_b64": compiled["synctex_b64"],
+        "main_path": "main.tex",
+        "root": compiled["root"],
+    }
+
+    for bad in ({"main_path": 4}, {"file": None}):
+        payload = {**common, "direction": "forward", "file": "main.tex", "line": 3, **bad}
+        response = httpx.post(f"{COMPILER_URL}/synctex", json=payload, timeout=60)
+        assert response.status_code == 200, (bad, response.text)
+
+    fwd = httpx.post(
+        f"{COMPILER_URL}/synctex",
+        json={**common, "direction": "forward", "file": "main.tex", "line": 3},
+        timeout=60,
+    ).json()
+    assert fwd["found"] is True
+    rev_response = httpx.post(
+        f"{COMPILER_URL}/synctex",
+        json={
+            **common,
+            "root": ["not", "a", "string"],
+            "direction": "reverse",
+            "page": fwd["page"],
+            "x": fwd["x"],
+            "y": fwd["y"],
+        },
+        timeout=60,
+    )
+    assert rev_response.status_code == 200, rev_response.text
+    assert rev_response.json() == {"found": False}
