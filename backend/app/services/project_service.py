@@ -153,7 +153,7 @@ async def delete_project(db: AsyncSession, user: User, project_id: str) -> None:
     await db.commit()
 
 
-ASSIGNABLE_ROLES = ("editor", "commenter", "viewer")
+ASSIGNABLE_ROLES = ("member",)
 
 
 async def add_member(

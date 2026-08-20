@@ -45,11 +45,11 @@ class ProjectUpdate(BaseModel):
 
 class MemberCreate(BaseModel):
     user_id: str
-    role: Literal["editor", "commenter", "viewer"]
+    role: Literal["member"] = "member"
 
 
 class MemberRoleUpdate(BaseModel):
-    role: Literal["editor", "commenter", "viewer"]
+    role: Literal["member"]
 
 
 class MemberOut(BaseModel):

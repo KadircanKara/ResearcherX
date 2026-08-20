@@ -1,10 +1,18 @@
-"""Role-based permission helper for project access control."""
+"""Role-based permission helper for project access control.
+
+Two ranks, not four. Project membership answers one question -- may this
+person see the project -- and the finer editor/viewer distinction lives on
+individual LaTeX documents (`services/latex_access.py`), where the thing
+being shared actually is.
+
+`can` returns False for any role not in this table, which is what makes the
+retired `editor`/`commenter`/`viewer` values safe to leave in an old client's
+memory: they rank -1 and satisfy nothing.
+"""
 
 ROLE_RANK: dict[str, int] = {
-    "viewer": 0,
-    "commenter": 1,
-    "editor": 2,
-    "owner": 3,
+    "member": 0,
+    "owner": 1,
 }
 
 

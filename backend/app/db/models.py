@@ -94,9 +94,7 @@ class User(Base):
 
 class Role(StrEnum):
     OWNER = "owner"
-    EDITOR = "editor"
-    COMMENTER = "commenter"
-    VIEWER = "viewer"
+    MEMBER = "member"
 
 
 class PaperSource(StrEnum):
