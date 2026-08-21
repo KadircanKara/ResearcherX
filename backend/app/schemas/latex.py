@@ -187,6 +187,52 @@ class LatexImportOut(BaseModel):
     file_count: int
 
 
+class LatexCollisionOut(BaseModel):
+    """One incoming file that cannot be written as-is, with the `(n)` name it
+    would get. The server computes the suggestion (`latex_dedupe`); the
+    client displays it and never recomputes it."""
+
+    path: str
+    existing: str
+    suggestion: str
+
+
+class LatexNameCollisionOut(BaseModel):
+    name: str
+    suggestion: str
+
+
+class LatexImportPlanOut(BaseModel):
+    """Everything the client must ask the user about, from ONE upload.
+
+    A merge collides by definition -- it is the common path, not the rare
+    one -- so a plan that answered with a 409 would make every merge cost
+    two uploads.
+    """
+
+    staging_id: str
+    mode: Literal["create", "merge"]
+    file_count: int
+    collisions: list[LatexCollisionOut]
+    name_collision: LatexNameCollisionOut | None = None
+    # Detection could not choose. The client must send `main_path` on commit.
+    ambiguous_main: list[str] | None = None
+
+
+class LatexImportDecision(BaseModel):
+    path: str
+    new_path: str = Field(min_length=1, max_length=400)
+
+
+class LatexImportCommit(BaseModel):
+    staging_id: str
+    # Present for a create, ignored for a merge.
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    main_path: str | None = None
+    document_id: str | None = None
+    decisions: list[LatexImportDecision] = Field(default_factory=list, max_length=2000)
+
+
 class LatexMemberCreate(BaseModel):
     user_id: str
     role: Literal["editor", "viewer"]

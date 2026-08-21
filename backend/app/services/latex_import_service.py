@@ -59,6 +59,40 @@ def _parse_manifest(data: bytes, entries: list[ArchiveEntry]) -> tuple[str | Non
     return main_path, engine
 
 
+def _split_manifest(
+    entries: list[ArchiveEntry],
+) -> tuple[list[ArchiveEntry], str | None, str | None]:
+    """The entries that will land in the tree, plus whatever the manifest
+    decided. The manifest is consumed, never written."""
+    manifest_source = next((e for e in entries if e.path == MANIFEST_PATH), None)
+    kept = _without_manifest(entries)
+    if manifest_source is None:
+        return kept, None, None
+    manifest_main, manifest_engine = _parse_manifest(manifest_source.data, kept)
+    return kept, manifest_main, manifest_engine
+
+
+def detect_main_for(entries: list[ArchiveEntry], *, override: str | None = None) -> str:
+    """Which file this archive would compile, deciding nothing else.
+
+    Split out of `import_archive` so the `import/plan` step can ask whether
+    the main file is undecidable WITHOUT creating anything -- the logic
+    therefore exists exactly once. Raises `AmbiguousMain` / `NoMainFile`
+    just as detection does.
+
+    Precedence: explicit override > manifest > detection.
+    """
+    kept, manifest_main, _ = _split_manifest(entries)
+    # detect_main must never see a binary file: it judges candidacy by
+    # decodability, but a .tex file containing a NUL decodes cleanly while
+    # still being unusable as source (Finding 2).
+    return (
+        override
+        or manifest_main
+        or detect_main([(e.path, e.data) for e in kept if not e.is_binary])
+    )
+
+
 async def import_archive(
     db: AsyncSession,
     *,
@@ -67,6 +101,7 @@ async def import_archive(
     entries: list[ArchiveEntry],
     name: str,
     main_path: str | None = None,
+    renames: dict[str, str] | None = None,
 ) -> tuple[LatexDocument, int]:
     """Create the document and write every entry. Caller commits.
 
@@ -76,31 +111,26 @@ async def import_archive(
 
     Precedence for both `main_path` and `engine`: explicit query override >
     manifest > detection.
+
+    `renames` maps an archive path to the path it should land at. A create
+    cannot collide with an existing tree, but the user's decisions still
+    reach here -- and the stored `main_path` follows its own rename, or the
+    document would point at a file the tree does not contain.
     """
-    manifest_source = next((e for e in entries if e.path == MANIFEST_PATH), None)
-    entries = [e for e in entries if e.path != MANIFEST_PATH]
-
-    manifest_main, manifest_engine = (
-        _parse_manifest(manifest_source.data, entries)
-        if manifest_source is not None
-        else (None, None)
-    )
-
-    # detect_main must never see a binary file: it judges candidacy by
-    # decodability, but a .tex file containing a NUL decodes cleanly while
-    # still being unusable as source (Finding 2).
-    chosen = (
-        main_path
-        or manifest_main
-        or detect_main([(e.path, e.data) for e in entries if not e.is_binary])
-    )
+    renames = renames or {}
+    # `detect_main_for` is handed the ORIGINAL entries, manifest included --
+    # it is what reads the manifest's `main_path`, and stripping the
+    # manifest first would silently demote every exported project back to
+    # detection and re-raise the AmbiguousMain the manifest exists to answer.
+    chosen = detect_main_for(entries, override=main_path)
+    entries, _, manifest_engine = _split_manifest(entries)
     main = next(e for e in entries if e.path == chosen)
     engine = manifest_engine or detect_engine(main.data.decode("utf-8", errors="replace"))
 
     document = LatexDocument(
         project_id=project_id,
         name=name,
-        main_path=chosen,
+        main_path=renames.get(chosen, chosen),
         engine=engine,
         created_by=user_id,
     )
@@ -112,7 +142,7 @@ async def import_archive(
     # per-write collision scan and quota SUM those functions perform are
     # vacuous here and cost O(n^2) database round trips on a large import.
     count = await files.bulk_create(
-        db, document.id, [(e.path, e.data, e.is_binary) for e in entries]
+        db, document.id, [(renames.get(e.path, e.path), e.data, e.is_binary) for e in entries]
     )
     return document, count
 

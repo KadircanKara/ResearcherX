@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import time
 import urllib.parse
 import zipfile
 from typing import Literal
@@ -29,19 +30,25 @@ from app.core.identity import get_current_user
 from app.db.models import LatexDocument, LatexFile, User
 from app.db.session import get_session
 from app.schemas.latex import (
+    LatexCollisionOut,
     LatexFileContentOut,
     LatexFileOut,
     LatexFileRename,
     LatexFileWrite,
+    LatexImportCommit,
     LatexImportOut,
+    LatexImportPlanOut,
     LatexMutationOut,
+    LatexNameCollisionOut,
     LatexTreeOut,
 )
 from app.services import latex_access
+from app.services import latex_dedupe
 from app.services import latex_files_service as files
 from app.services import latex_import_service
 from app.services import project_service
 from app.services.latex_archive import (
+    ArchiveEntry,
     ArchiveTooLarge,
     EncryptedArchive,
     InvalidArchive,
@@ -49,6 +56,12 @@ from app.services.latex_archive import (
 )
 from app.services.latex_detect import AmbiguousMain, NoMainFile
 from app.services.latex_paths import MANIFEST_PATH, InvalidPath, normalize_path
+from app.services.latex_staging import (
+    StagedImport,
+    StagingExpired,
+    StagingNotFound,
+    staging,
+)
 
 router = APIRouter(tags=["latex"])
 
@@ -118,23 +131,16 @@ def _translate(exc: Exception) -> HTTPException:
     raise exc
 
 
-@router.post("/projects/{project_id}/latex/import", response_model=LatexImportOut, status_code=201)
-async def import_archive_route(
-    project_id: str,
-    request: Request,
-    name: str = Query("Imported project", min_length=1, max_length=200),
-    main_path: str | None = None,
-    user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_session),
-) -> LatexImportOut:
-    """Create a NEW document from an uploaded .zip. Never overwrites one.
+async def _read_archive_body(request: Request) -> list[ArchiveEntry]:
+    """The streamed, bounded, validated read.
 
-    The body is streamed against a running counter rather than `await
-    request.body()`: a client can lie in Content-Length, or send chunked with
-    no Content-Length at all, and the counter is the only real bound.
+    Unchanged from the single-shot route it was lifted out of: the body is
+    streamed against a running counter rather than `await request.body()`
+    because a client can lie in Content-Length, or send chunked with no
+    Content-Length at all, and the counter is the only real bound. Every
+    traversal, symlink, encryption and decompression-bomb guard lives behind
+    `read_archive`, which runs in a threadpool under `_import_semaphore`.
     """
-    await project_service.require_member(db, project_id, user.id, "member")
-
     cap = settings.latex_project_max_bytes
     chunks: list[bytes] = []
     total = 0
@@ -149,43 +155,192 @@ async def import_archive_route(
     blob = b"".join(chunks)
     try:
         async with _import_semaphore:
-            entries = await run_in_threadpool(read_archive, blob)
+            return await run_in_threadpool(read_archive, blob)
     except ArchiveTooLarge as exc:
         raise HTTPException(status_code=413, detail=str(exc)) from exc
     except (EncryptedArchive, InvalidArchive) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    if main_path is not None:
-        chosen = next((e for e in entries if e.path == main_path), None)
-        if chosen is None:
-            raise HTTPException(status_code=422, detail=f"{main_path} is not in the archive")
-        if chosen.is_binary or not chosen.path.endswith(".tex"):
-            raise HTTPException(
-                status_code=422,
-                detail=f"{main_path} is not a .tex source file in the archive",
-            )
 
-    try:
-        document, count = await latex_import_service.import_archive(
-            db,
-            project_id=project_id,
-            user_id=user.id,
-            entries=entries,
-            name=name,
-            main_path=main_path,
-        )
-    except AmbiguousMain as exc:
-        await db.rollback()
+def _require_main_in_archive(entries: list[ArchiveEntry], main_path: str) -> None:
+    """The same guard the manifest's own `main_path` gets in the service: it
+    must name an entry in THIS archive, and that entry must be usable as
+    source. Applied wherever a caller names a main file -- the plan step and
+    the commit step both -- so neither can hand the service a path it will
+    fail to find."""
+    chosen = next((e for e in entries if e.path == main_path), None)
+    if chosen is None:
+        raise HTTPException(status_code=422, detail=f"{main_path} is not in the archive")
+    if chosen.is_binary or not chosen.path.endswith(".tex"):
         raise HTTPException(
             status_code=422,
-            detail={"error": "ambiguous_main", "candidates": exc.paths},
+            detail=f"{main_path} is not a .tex source file in the archive",
+        )
+
+
+@router.post("/projects/{project_id}/latex/import/plan", response_model=LatexImportPlanOut)
+async def import_plan_route(
+    project_id: str,
+    request: Request,
+    document_id: str | None = None,
+    name: str = Query("Imported project", min_length=1, max_length=200),
+    main_path: str | None = None,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
+) -> LatexImportPlanOut:
+    """Upload the archive ONCE, and answer with everything the client must
+    ask the user about: colliding files, a duplicate document name, and an
+    undecidable main file.
+
+    The parsed entries are parked in `latex_staging` so the commit step
+    carries a token instead of the archive again. A merge collides by
+    definition -- it is the common path, not the rare one -- so making the
+    client re-upload on collision would make every merge cost two uploads.
+    """
+    await project_service.require_member(db, project_id, user.id, "member")
+    entries = await _read_archive_body(request)
+    if main_path is not None:
+        _require_main_in_archive(entries, main_path)
+
+    collisions: list[latex_dedupe.Collision] = []
+    name_collision: LatexNameCollisionOut | None = None
+    ambiguous: list[str] | None = None
+
+    if document_id is not None:
+        mode = "merge"
+        await latex_access.require(db, project_id, document_id, user.id, need="editor")
+        await _document_or_404(db, project_id, document_id)
+        taken = [f.path for f in await files.list_files(db, document_id)]
+        collisions = latex_import_service.plan_merge(taken, entries)
+    else:
+        mode = "create"
+        existing_names = (
+            (
+                await db.execute(
+                    select(LatexDocument.name).where(LatexDocument.project_id == project_id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        suggestion = latex_dedupe.suffix_name(name, existing_names)
+        if suggestion != name:
+            name_collision = LatexNameCollisionOut(name=name, suggestion=suggestion)
+        try:
+            latex_import_service.detect_main_for(entries, override=main_path)
+        except AmbiguousMain as exc:
+            # Reported as a FIELD, not a 422: the plan step is where the
+            # client learns everything it must ask the user about, and
+            # asking twice in two different shapes is worse. An archive with
+            # NO main file at all is different -- there is nothing to ask.
+            ambiguous = exc.paths
+        except NoMainFile as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    token = staging.put(
+        StagedImport(project_id=project_id, user_id=user.id, entries=entries),
+        now=time.monotonic(),
+    )
+    return LatexImportPlanOut(
+        staging_id=token,
+        mode=mode,
+        file_count=len(entries),
+        collisions=[
+            LatexCollisionOut(path=c.path, existing=c.existing, suggestion=c.suggestion)
+            for c in collisions
+        ],
+        name_collision=name_collision,
+        ambiguous_main=ambiguous,
+    )
+
+
+@router.post(
+    "/projects/{project_id}/latex/import/commit",
+    response_model=LatexImportOut,
+    status_code=201,
+)
+async def import_commit_route(
+    project_id: str,
+    payload: LatexImportCommit,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
+) -> LatexImportOut:
+    """Redeem a staging token and write the tree.
+
+    Every `new_path` a decision names goes through `normalize_path` and the
+    reserved-manifest check exactly like any other write: a decision is user
+    input from the same untrusted surface as the archive itself.
+    """
+    await project_service.require_member(db, project_id, user.id, "member")
+    try:
+        staged = staging.take(payload.staging_id, project_id, user.id, now=time.monotonic())
+    except StagingExpired as exc:
+        raise HTTPException(
+            status_code=410,
+            detail="That upload expired. Please choose the .zip again.",
         ) from exc
-    except NoMainFile as exc:
-        await db.rollback()
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    except Exception as exc:
-        await db.rollback()
-        raise _translate(exc) from exc
+    except StagingNotFound as exc:
+        raise HTTPException(status_code=404, detail="Unknown upload.") from exc
+
+    archive_paths = {e.path for e in staged.entries}
+    renames: dict[str, str] = {}
+    for decision in payload.decisions:
+        if decision.path not in archive_paths:
+            raise HTTPException(status_code=422, detail=f"{decision.path} is not in the archive")
+        try:
+            target = normalize_path(decision.new_path)
+        except InvalidPath as exc:
+            raise _translate(exc) from exc
+        if target == MANIFEST_PATH:
+            raise HTTPException(
+                status_code=422, detail=f"{target} is reserved for the export manifest"
+            )
+        renames[decision.path] = target
+
+    if payload.document_id is not None:
+        await latex_access.require(db, project_id, payload.document_id, user.id, need="editor")
+        document = await _document_or_404(db, project_id, payload.document_id)
+        try:
+            count = await latex_import_service.merge_archive(
+                db,
+                document_id=document.id,
+                entries=staged.entries,
+                renames=renames,
+            )
+        except Exception as exc:
+            await db.rollback()
+            raise _translate(exc) from exc
+    else:
+        # A merge never touches the document's main file, so this guard
+        # belongs to the create path only -- refusing a `main_path` a merge
+        # ignores would reject a request that is otherwise fine.
+        if payload.main_path is not None:
+            _require_main_in_archive(staged.entries, payload.main_path)
+        try:
+            document, count = await latex_import_service.import_archive(
+                db,
+                project_id=project_id,
+                user_id=user.id,
+                entries=staged.entries,
+                name=payload.name or "Imported project",
+                main_path=payload.main_path,
+                renames=renames,
+            )
+        except AmbiguousMain as exc:
+            # Defensive: `plan` already told the client the main file was
+            # undecidable, in a shape it could act on. Reaching here means
+            # the client committed without answering.
+            await db.rollback()
+            raise HTTPException(
+                status_code=422,
+                detail={"error": "ambiguous_main", "candidates": exc.paths},
+            ) from exc
+        except NoMainFile as exc:
+            await db.rollback()
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except Exception as exc:
+            await db.rollback()
+            raise _translate(exc) from exc
 
     await db.commit()
     await db.refresh(document)
