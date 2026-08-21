@@ -243,21 +243,26 @@ async def test_a_chunked_upload_with_no_content_length_is_still_capped(
     assert pulled < 16  # the server stopped consuming before the end
 
 
-async def test_a_viewer_cannot_import(
+async def test_any_member_may_import(
     client: AsyncClient, db_session: AsyncSession, project: Project, you: User
 ):
-    viewer = (
+    """Import creates a NEW document and is project-scoped -- any project
+    member may start one (`created_by` then makes them its editor), the same
+    rule `create_document` follows. Project membership is binary
+    (owner/member) now; there is no project-level "viewer" that could be
+    refused here."""
+    member = (
         await db_session.execute(select(User).where(User.email == "amelia@lab.io"))
     ).scalar_one()
-    db_session.add(ProjectMember(project_id=project.id, user_id=viewer.id, role="viewer"))
+    db_session.add(ProjectMember(project_id=project.id, user_id=member.id, role="member"))
     await db_session.commit()
 
     resp = await client.post(
         f"/v1/projects/{project.id}/latex/import",
         content=_zip({"main.tex": DOC}),
-        headers=_h(viewer),
+        headers=_h(member),
     )
-    assert resp.status_code == 403
+    assert resp.status_code == 201
 
 
 async def test_a_non_member_gets_404_on_import(

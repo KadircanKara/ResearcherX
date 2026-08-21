@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.latex_files import _translate
 from app.core.identity import get_current_user
-from app.db.models import LatexDocument, User
+from app.db.models import LatexDocument, LatexDocumentMember, User
 from app.db.session import get_session
 from app.schemas.latex import (
     CompileOut,
@@ -63,7 +63,7 @@ async def list_documents(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_session),
 ) -> list[LatexDocumentOut]:
-    await project_service.require_member(db, project_id, user.id, "member")
+    membership = await project_service.require_member(db, project_id, user.id, "member")
     rows = (
         (
             await db.execute(
@@ -75,8 +75,35 @@ async def list_documents(
         .scalars()
         .all()
     )
+    # ONE query for the caller's grants across every document in this
+    # project, instead of `latex_access.resolve`'s own per-document grant
+    # query run N times -- the membership row above is likewise fetched
+    # once and reused. `decide` is the single implementation of the
+    # owner -> creator -> grant -> viewer ordering; this loop supplies it
+    # the same three inputs `resolve` would, just gathered in bulk.
+    grants = (
+        (
+            await db.execute(
+                select(LatexDocumentMember).where(
+                    LatexDocumentMember.document_id.in_([row.id for row in rows]),
+                    LatexDocumentMember.user_id == user.id,
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    grant_role_by_document = {g.document_id: str(g.role) for g in grants}
     return [
-        _document_out(row, await latex_access.resolve(db, project_id, row.id, user.id))
+        _document_out(
+            row,
+            latex_access.decide(
+                str(membership.role),
+                row.created_by,
+                grant_role_by_document.get(row.id),
+                user.id,
+            ),
+        )
         for row in rows
     ]
 

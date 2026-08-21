@@ -21,6 +21,32 @@ EDITOR = "editor"
 VIEWER = "viewer"
 
 
+def decide(
+    membership_role: str, created_by: str | None, grant_role: str | None, user_id: str
+) -> str:
+    """The ordering itself, and the ONLY place it is written down.
+
+    Pure -- no I/O, no ORM types -- so `resolve` (one document) and
+    `list_documents` (N documents, one query) can both call this and get
+    identical behaviour instead of a second, drifting implementation of the
+    ordering. `owner` and `created_by` short-circuit ahead of the grant
+    deliberately: a grant row saying "viewer" must not lock the project owner
+    out of their own project, nor the creator out of what they made. The
+    grant routes refuse to create such a row, so this ordering never silently
+    contradicts a row a user can see in the share dialog -- the row cannot
+    exist.
+    """
+    if membership_role == "owner":
+        return EDITOR
+    if created_by is not None and created_by == user_id:
+        return EDITOR
+    if grant_role is not None:
+        return grant_role
+    # Every project member reads every document in the project. This is the
+    # approved default, not a failure to find a grant.
+    return VIEWER
+
+
 async def resolve(db: AsyncSession, project_id: str, document_id: str, user_id: str) -> str:
     """Return "editor" or "viewer", or raise 404 for anything unreachable.
 
@@ -44,16 +70,6 @@ async def resolve(db: AsyncSession, project_id: str, document_id: str, user_id: 
         # one.
         raise HTTPException(status_code=404, detail="Document not found")
 
-    # Both short-circuits sit ahead of the grant lookup deliberately. A grant
-    # row saying "viewer" must not lock the project owner out of their own
-    # project, nor the creator out of what they made. The grant routes refuse
-    # to create such a row, so this ordering never silently contradicts a row
-    # a user can see in the share dialog -- the row cannot exist.
-    if str(membership.role) == "owner":
-        return EDITOR
-    if document.created_by is not None and document.created_by == user_id:
-        return EDITOR
-
     grant = (
         await db.execute(
             select(LatexDocumentMember).where(
@@ -62,12 +78,9 @@ async def resolve(db: AsyncSession, project_id: str, document_id: str, user_id: 
             )
         )
     ).scalar_one_or_none()
-    if grant is not None:
-        return str(grant.role)
+    grant_role = str(grant.role) if grant is not None else None
 
-    # Every project member reads every document in the project. This is the
-    # approved default, not a failure to find a grant.
-    return VIEWER
+    return decide(str(membership.role), document.created_by, grant_role, user_id)
 
 
 async def require(

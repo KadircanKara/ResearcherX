@@ -1,11 +1,14 @@
 """One test per direction on the routes that actually change something."""
 
+from unittest.mock import AsyncMock, patch
+
 import pytest
 import pytest_asyncio
 from sqlalchemy import select
 
 from app.db.models import LatexDocumentMember, User
 from app.db.seed import seed_users
+from app.services.latex_compiler import CompileResult
 
 
 @pytest_asyncio.fixture
@@ -123,3 +126,42 @@ async def test_any_member_may_create_a_document(client, shared):
     )
     assert r.status_code == 201
     assert r.json()["my_access"] == "editor"
+
+
+# Compile, PDF, and SyncTeX moved from an editor-level guard to a
+# viewer-level one in this task -- none of them writes the document, so a
+# viewer reading it may use them. This pins the widening: a viewer must
+# never see 403 on any of the four.
+_VIEWER_OK_ROUTES = [
+    ("POST", "/compile", None),
+    ("GET", "/pdf", None),
+    ("POST", "/synctex/forward", {"line": 1}),
+    ("POST", "/synctex/reverse", {"page": 1, "x": 0.0, "y": 0.0}),
+]
+
+
+@pytest.mark.parametrize(
+    "method,suffix,body", _VIEWER_OK_ROUTES, ids=[f"{m}{s}" for m, s, _ in _VIEWER_OK_ROUTES]
+)
+async def test_a_viewer_gets_a_non_403_on_every_compile_and_sync_route(
+    client, shared, method: str, suffix: str, body
+):
+    base = f"/v1/projects/{shared['project_id']}/latex/{shared['document_id']}"
+    headers = {"X-Dev-User-Id": shared["amelia"].id}
+
+    if suffix == "/compile":
+        result = CompileResult(ok=True, log="", pdf=b"%PDF-1.4", synctex_gz=b"gz", root="/tmp/rx")
+        with patch("app.api.v1.latex.compile_tree", AsyncMock(return_value=result)):
+            resp = await client.post(f"{base}{suffix}", headers=headers)
+    elif suffix == "/pdf":
+        # No build has ever been cached for this document -- a real hash
+        # would require an actual compile, which is beside the point here.
+        # `cache.get` misses and the route answers 404, never 403.
+        resp = await client.get(f"{base}{suffix}", params={"hash": "nonexistent"}, headers=headers)
+    else:
+        # Nothing has been compiled either, so both SyncTeX routes take
+        # their early `cache.latest_for(doc_id) is None` return -- a 200
+        # with `found: false`, never a 403.
+        resp = await client.post(f"{base}{suffix}", json=body, headers=headers)
+
+    assert resp.status_code != 403
