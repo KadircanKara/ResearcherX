@@ -1284,3 +1284,26 @@ async def test_creating_a_document_that_would_exceed_the_project_quota_is_a_413_
 
     listed = await client.get(f"/v1/projects/{project.id}/latex", headers={"X-Dev-User-Id": you.id})
     assert listed.json() == []
+
+
+async def test_creating_a_document_with_a_taken_name_answers_a_suggestion(
+    client: AsyncClient, you: User, project: Project
+):
+    """Warned, never forbidden: there is no unique constraint on the name.
+    The 409 lets the client offer a one-click "Keep both" with the
+    suggestion, exactly like the import path's colliding-file check."""
+    body = {"name": "paper", "engine": "pdflatex", "source": ""}
+    await client.post(
+        f"/v1/projects/{project.id}/latex", json=body, headers={"X-Dev-User-Id": you.id}
+    )
+
+    r = await client.post(
+        f"/v1/projects/{project.id}/latex", json=body, headers={"X-Dev-User-Id": you.id}
+    )
+
+    assert r.status_code == 409
+    assert r.json()["detail"] == {
+        "error": "name_collision",
+        "name": "paper",
+        "suggestion": "paper (1)",
+    }

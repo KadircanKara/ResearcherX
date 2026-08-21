@@ -26,6 +26,7 @@ from app.schemas.latex import (
     SynctexReverseOut,
 )
 from app.services import latex_access
+from app.services import latex_dedupe
 from app.services import latex_files_service as files
 from app.services import project_service
 from app.services.latex_cache import CachedBuild, cache
@@ -116,6 +117,24 @@ async def create_document(
     db: AsyncSession = Depends(get_session),
 ) -> LatexDocumentOut:
     await project_service.require_member(db, project_id, user.id, "member")
+    # Warned, never forbidden: two documents may legitimately share a name,
+    # and there is no unique constraint. The client offers the suggestion as
+    # a one-click "Keep both", exactly like a colliding file.
+    existing_names = (
+        (await db.execute(select(LatexDocument.name).where(LatexDocument.project_id == project_id)))
+        .scalars()
+        .all()
+    )
+    suggestion = latex_dedupe.suffix_name(payload.name, existing_names)
+    if suggestion != payload.name:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "name_collision",
+                "name": payload.name,
+                "suggestion": suggestion,
+            },
+        )
     document = LatexDocument(
         project_id=project_id,
         name=payload.name,
