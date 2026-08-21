@@ -82,6 +82,7 @@ export default function ChatPage() {
       return;
     }
     setBulkBusy(true);
+    setBulkError(null);
     const ids = [...selected];
     const results = await Promise.allSettled(
       ids.map((id) => deleteConversation(projectId, id))

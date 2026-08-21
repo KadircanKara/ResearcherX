@@ -77,6 +77,7 @@ export default function PapersPage() {
       return;
     }
     setBulkBusy(true);
+    setBulkError(null);
     const ids = [...selected];
     const results = await Promise.allSettled(
       ids.map((id) => deletePaper(projectId, id))
