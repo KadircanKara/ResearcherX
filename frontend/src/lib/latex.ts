@@ -514,3 +514,60 @@ export function errorText(err: unknown): string {
     ? err.userMessage
     : "Something went wrong. Please try again.";
 }
+
+/** A per-document grant. Absence of a grant resolves to "viewer" (see
+ * `document-share-dialog.tsx`), so `role` here is never "viewer" as stored --
+ * the server only ever returns rows that exist. */
+export interface LatexGrant {
+  user: { id: string; name: string; email: string };
+  role: "editor" | "viewer";
+}
+
+export function listGrants(projectId: string, documentId: string): Promise<LatexGrant[]> {
+  return send<LatexGrant[]>(
+    `${API_BASE}/v1/projects/${projectId}/latex/${documentId}/members`,
+    { headers: headers() }
+  );
+}
+
+export function addGrant(
+  projectId: string,
+  documentId: string,
+  body: { user_id: string; role: "editor" | "viewer" }
+): Promise<LatexGrant> {
+  return send<LatexGrant>(
+    `${API_BASE}/v1/projects/${projectId}/latex/${documentId}/members`,
+    {
+      method: "POST",
+      headers: headers({ "Content-Type": "application/json" }),
+      body: JSON.stringify(body),
+    }
+  );
+}
+
+export function updateGrant(
+  projectId: string,
+  documentId: string,
+  userId: string,
+  role: "editor" | "viewer"
+): Promise<LatexGrant> {
+  return send<LatexGrant>(
+    `${API_BASE}/v1/projects/${projectId}/latex/${documentId}/members/${userId}`,
+    {
+      method: "PATCH",
+      headers: headers({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ role }),
+    }
+  );
+}
+
+export async function removeGrant(
+  projectId: string,
+  documentId: string,
+  userId: string
+): Promise<void> {
+  await sendVoid(
+    `${API_BASE}/v1/projects/${projectId}/latex/${documentId}/members/${userId}`,
+    { method: "DELETE", headers: headers() }
+  );
+}

@@ -124,6 +124,8 @@ export function ShareDialog({ project, initialMembers }: ShareDialogProps) {
           </DialogDescription>
         </DialogHeader>
 
+        {/* Project sharing is binary. Finer access lives on individual LaTeX
+            projects, in each document's own share dialog. */}
         {/* Members list */}
         <div className="flex flex-col gap-1">
           {loading && members.length === 0 && (

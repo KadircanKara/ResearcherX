@@ -15,6 +15,7 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { BinaryPreview } from "@/components/latex/binary-preview";
+import { DocumentShareDialog } from "@/components/latex/document-share-dialog";
 import { EditorPane } from "@/components/latex/editor-pane";
 import { FileTree } from "@/components/latex/file-tree";
 import { ImportDropzone } from "@/components/latex/import-dropzone";
@@ -30,9 +31,7 @@ import {
   type LatexEngine,
 } from "@/lib/latex";
 import { buildTree, isBeneath, isTexPath, parentDir } from "@/lib/latex-tree";
-import type { Role } from "@/lib/types";
 
-const CAN_EDIT: Role[] = ["owner", "member"];
 const STALE_NOTE = "Out of date — compile to sync";
 // SyncTeX speaks paths relative to the main file's own directory, so a file
 // outside it has no representable coordinate -- this is a documented
@@ -48,14 +47,30 @@ const LOG_FILE_UNKNOWN_NOTE = "Couldn't tell which file that error is in, so the
 interface LatexWorkspaceProps {
   projectId: string;
   documentId: string;
-  role: Role;
+  /** The project's owner, per its member list -- the server refuses a grant
+   * naming them (they already resolve to editor ahead of the grant table),
+   * so the share dialog renders them with no control. Combined below with
+   * the open document's own `created_by` for the same reason. */
+  ownerId: string | null;
 }
 
-export function LatexWorkspace({ projectId, documentId, role }: LatexWorkspaceProps) {
-  const canEdit = CAN_EDIT.includes(role);
+export function LatexWorkspace({ projectId, documentId, ownerId }: LatexWorkspaceProps) {
   const router = useRouter();
 
+  // The server's answer, not the project role: access is per document now.
+  // Starts false (the safe direction) because the document hasn't loaded yet
+  // -- nothing gated behind `canEdit` is reachable before then anyway, since
+  // the whole shell below is still the loading skeleton at that point. The
+  // effect below tracks the hook's own `document.my_access` once it lands;
+  // it can't be read inline here because `doc` is this very hook call's
+  // result.
+  const [canEdit, setCanEdit] = useState(false);
+
   const doc = useLatexDocument(projectId, canEdit, documentId);
+
+  useEffect(() => {
+    setCanEdit(doc.document?.my_access === "editor");
+  }, [doc.document?.my_access]);
 
   // Scoped to the document `compile()` is about to build, exactly like the
   // in-flight patch it awaits -- an engine change for some OTHER document
@@ -367,6 +382,15 @@ export function LatexWorkspace({ projectId, documentId, role }: LatexWorkspacePr
           >
             <Download className="size-4" />
           </button>
+
+          <DocumentShareDialog
+            projectId={projectId}
+            documentId={documentId}
+            canEdit={canEdit}
+            fullAccessUserIds={[ownerId, doc.document?.created_by ?? null].filter(
+              (id): id is string => id !== null
+            )}
+          />
 
           {canEdit && (
             <button

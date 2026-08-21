@@ -4,11 +4,16 @@ import { useEffect, useState } from "react";
 import { useParams } from "next/navigation";
 import { LatexWorkspace } from "@/components/latex/latex-workspace";
 import { getProject } from "@/lib/projects";
-import type { Role } from "@/lib/types";
 
 export default function LatexDocumentPage() {
   const { id: projectId, docId } = useParams<{ id: string; docId: string }>();
-  const [role, setRole] = useState<Role | null>(null);
+  // Access to THIS document is decided per document (`my_access`, resolved
+  // inside `LatexWorkspace`) -- the project role has nothing left to gate
+  // here. What this page still needs from the project is the owner's id, to
+  // hand the share dialog the one person a grant can never name alongside
+  // the document's own creator.
+  const [ownerId, setOwnerId] = useState<string | null>(null);
+  const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -17,10 +22,12 @@ export default function LatexDocumentPage() {
     setError(null);
     getProject(projectId)
       .then((detail) => {
-        if (!cancelled) setRole(detail.my_role);
+        if (cancelled) return;
+        setOwnerId(detail.members.find((m) => m.role === "owner")?.user.id ?? null);
+        setLoaded(true);
       })
       .catch(() => {
-        // Without this, a failed request leaves `role` null forever and
+        // Without this, a failed request leaves `loaded` false forever and
         // this page shows the loading skeleton -- not a wrong project, just
         // an eternal spinner with no way out and nothing telling the user
         // why.
@@ -39,9 +46,9 @@ export default function LatexDocumentPage() {
     );
   }
 
-  if (role === null) {
+  if (!loaded) {
     return <div className="h-[70vh] animate-pulse rounded-xl bg-muted" />;
   }
 
-  return <LatexWorkspace projectId={projectId} documentId={docId} role={role} />;
+  return <LatexWorkspace projectId={projectId} documentId={docId} ownerId={ownerId} />;
 }

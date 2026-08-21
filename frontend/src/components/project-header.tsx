@@ -17,19 +17,19 @@ export function ProjectHeader({ detail }: ProjectHeaderProps) {
     <div className="flex items-start justify-between gap-4">
       {/* Left: eyebrow + title + description */}
       <div className="min-w-0 flex-1">
-        <div className="mb-2 flex items-center gap-2">
-          <Badge variant="secondary" className="text-xs font-normal">
-            Research project
-          </Badge>
+        <Badge variant="secondary" className="mb-2 text-xs font-normal">
+          Research project
+        </Badge>
+        <div className="flex items-center gap-2.5">
           <ProjectColorPicker
             projectId={project.id}
             color={project.color}
-            canEdit={detail.my_role === "owner" || detail.my_role === "member"}
+            canEdit={detail.my_role === "owner"}
           />
+          <h1 className="truncate text-2xl font-semibold tracking-tight text-foreground">
+            {project.title}
+          </h1>
         </div>
-        <h1 className="truncate text-2xl font-semibold tracking-tight text-foreground">
-          {project.title}
-        </h1>
         {project.description && (
           <p className="mt-1 line-clamp-2 text-sm text-muted-foreground">
             {project.description}
