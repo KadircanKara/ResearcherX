@@ -7,13 +7,13 @@ Gates:
 
 from __future__ import annotations
 
-from sqlalchemy import select
+from sqlalchemy import delete as sa_delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi import HTTPException
 
 from app.core.permissions import can
 from app.core import palette
-from app.db.models import Project, ProjectMember, User
+from app.db.models import LatexDocument, LatexDocumentMember, Project, ProjectMember, User
 from app.schemas.project import ProjectCreate, ProjectUpdate
 
 
@@ -220,6 +220,18 @@ async def remove_member(
         owner_count = sum(1 for m in members if m.role == "owner")
         if owner_count <= 1:
             raise HTTPException(status_code=400, detail="Cannot remove the last owner")
+
+    # In the SAME transaction as the membership removal, not a cleanup job: a
+    # document grant that outlives project membership is an access path the
+    # project's share dialog does not show.
+    await db.execute(
+        sa_delete(LatexDocumentMember).where(
+            LatexDocumentMember.user_id == target_user_id,
+            LatexDocumentMember.document_id.in_(
+                select(LatexDocument.id).where(LatexDocument.project_id == project_id)
+            ),
+        )
+    )
 
     await db.delete(target)
     await db.commit()

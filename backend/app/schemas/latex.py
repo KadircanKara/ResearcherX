@@ -3,6 +3,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from app.schemas.user import UserOut
+
 # The compile service offers exactly these two. lualatex was measured and
 # dropped: luaotfload demands a writable cache path during format load, which
 # a read-only rootfs cannot give it. Pinning the type here rather than taking
@@ -183,3 +185,18 @@ class LatexImportOut(BaseModel):
     engine: str
     revision: int
     file_count: int
+
+
+class LatexMemberCreate(BaseModel):
+    user_id: str
+    role: Literal["editor", "viewer"]
+
+
+class LatexMemberRoleUpdate(BaseModel):
+    role: Literal["editor", "viewer"]
+
+
+class LatexMemberOut(BaseModel):
+    user: UserOut
+    role: str
+    model_config = {"from_attributes": True}
