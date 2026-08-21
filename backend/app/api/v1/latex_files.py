@@ -17,6 +17,7 @@ import io
 import json
 import urllib.parse
 import zipfile
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from sqlalchemy import select
@@ -94,8 +95,21 @@ def _translate(exc: Exception) -> HTTPException:
             status_code=413, detail=f"{exc.count} files exceeds the {exc.cap} file limit"
         )
     if isinstance(exc, files.PathCollision):
+        # A structured detail, following the `ambiguous_main` precedent in
+        # this same module: the client needs the suggestion to offer "Keep
+        # both", and a sentence cannot carry it.
         return HTTPException(
-            status_code=409, detail=f"{exc.path} collides with existing {exc.existing}"
+            status_code=409,
+            detail={
+                "error": "path_collision",
+                "collisions": [
+                    {
+                        "path": exc.path,
+                        "existing": exc.existing,
+                        "suggestion": exc.suggestion,
+                    }
+                ],
+            },
         )
     if isinstance(exc, files.FileNotFound):
         return HTTPException(status_code=404, detail=f"{exc.path} is not in this document")
@@ -328,13 +342,14 @@ async def write_file(
     document_id: str,
     path: str,
     payload: LatexFileWrite,
+    if_exists: Literal["fail", "replace"] = "fail",
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_session),
 ) -> LatexMutationOut:
     await latex_access.require(db, project_id, document_id, user.id, need="editor")
     await _document_or_404(db, project_id, document_id)
     try:
-        row = await files.write_text(db, document_id, path, payload.content)
+        row = await files.write_text(db, document_id, path, payload.content, if_exists=if_exists)
     except Exception as exc:
         await db.rollback()
         raise _translate(exc) from exc

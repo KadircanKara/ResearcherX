@@ -82,7 +82,7 @@ async def test_writing_over_a_file_replaces_it_rather_than_adding_a_second_row(
 ):
     await svc.write_text(db_session, document.id, "main.tex", "old")
     await db_session.commit()
-    await svc.write_text(db_session, document.id, "main.tex", "new")
+    await svc.write_text(db_session, document.id, "main.tex", "new", if_exists="replace")
     await db_session.commit()
 
     rows = (
@@ -121,7 +121,7 @@ async def test_overwriting_a_text_file_with_binary_clears_the_text_column(
 ):
     await svc.write_text(db_session, document.id, "f.dat", "text")
     await db_session.commit()
-    row = await svc.write_binary(db_session, document.id, "f.dat", b"\x00\x01")
+    row = await svc.write_binary(db_session, document.id, "f.dat", b"\x00\x01", if_exists="replace")
     await db_session.commit()
 
     assert row.is_binary is True
@@ -135,7 +135,7 @@ async def test_overwriting_a_binary_file_with_text_clears_the_blob_column(
 ):
     await svc.write_binary(db_session, document.id, "f.dat", b"\x00\x01")
     await db_session.commit()
-    row = await svc.write_text(db_session, document.id, "f.dat", "café")
+    row = await svc.write_text(db_session, document.id, "f.dat", "café", if_exists="replace")
     await db_session.commit()
 
     assert row.is_binary is False
@@ -172,7 +172,7 @@ async def test_overwriting_a_file_does_not_count_its_old_size_against_the_cap(
     await svc.write_text(db_session, document.id, "a.tex", "x" * 20)
     await db_session.commit()
 
-    row = await svc.write_text(db_session, document.id, "a.tex", "y" * 20)
+    row = await svc.write_text(db_session, document.id, "a.tex", "y" * 20, if_exists="replace")
     await db_session.commit()
 
     assert row.content == "y" * 20
@@ -298,3 +298,71 @@ def test_tree_hash_cannot_be_forged_by_moving_bytes_between_path_and_content():
     a = svc.tree_hash([("ab.tex", b"")], "pdflatex", "m.tex")
     b = svc.tree_hash([("a.tex", b"b")], "pdflatex", "m.tex")
     assert a != b
+
+
+async def test_creating_a_file_at_a_taken_path_refuses_instead_of_blanking_it(
+    db_session: AsyncSession, document: LatexDocument
+):
+    # The live data-loss bug this whole feature exists to close: the "New
+    # file" box PUT an empty string, and the write silently replaced the
+    # file's contents with it.
+    doc_id = document.id  # captured before the rollback below expires it
+    await svc.write_text(db_session, doc_id, "main.tex", "\\documentclass{article}")
+    await db_session.commit()
+
+    with pytest.raises(svc.PathCollision) as excinfo:
+        await svc.write_text(db_session, doc_id, "main.tex", "")
+
+    assert excinfo.value.suggestion == "main (1).tex"
+    await db_session.rollback()
+    row = await svc.read_file(db_session, doc_id, "main.tex")
+    assert row.content == "\\documentclass{article}"
+
+
+async def test_an_explicit_replace_still_overwrites(
+    db_session: AsyncSession, document: LatexDocument
+):
+    # Autosave's path. It knows the file exists and means to replace it.
+    await svc.write_text(db_session, document.id, "main.tex", "one")
+    row = await svc.write_text(db_session, document.id, "main.tex", "two", if_exists="replace")
+    await db_session.commit()
+    assert row.content == "two"
+
+
+async def test_a_binary_upload_refuses_a_taken_path(
+    db_session: AsyncSession, document: LatexDocument
+):
+    await svc.write_binary(db_session, document.id, "figures/plot.png", b"\x89PNG")
+    await db_session.commit()
+
+    with pytest.raises(svc.PathCollision) as excinfo:
+        await svc.write_binary(db_session, document.id, "figures/plot.png", b"\x89PNG2")
+
+    assert excinfo.value.suggestion == "figures/plot (1).png"
+
+
+async def test_a_case_only_collision_now_carries_a_suggestion(
+    db_session: AsyncSession, document: LatexDocument
+):
+    # Previously a dead-end 409. The user is now offered a way forward.
+    await svc.write_binary(db_session, document.id, "figures/fig.png", b"\x89PNG")
+    await db_session.commit()
+
+    with pytest.raises(svc.PathCollision) as excinfo:
+        await svc.write_binary(db_session, document.id, "figures/Fig.PNG", b"\x89PNG")
+
+    assert excinfo.value.existing == "figures/fig.png"
+    assert excinfo.value.suggestion == "figures/Fig (1).PNG"
+
+
+async def test_a_rename_onto_a_taken_path_carries_a_suggestion(
+    db_session: AsyncSession, document: LatexDocument
+):
+    await svc.write_text(db_session, document.id, "a.tex", "a")
+    await svc.write_text(db_session, document.id, "b.tex", "b")
+    await db_session.commit()
+
+    with pytest.raises(svc.PathCollision) as excinfo:
+        await svc.rename_file(db_session, document.id, "a.tex", "b.tex")
+
+    assert excinfo.value.suggestion == "b (1).tex"

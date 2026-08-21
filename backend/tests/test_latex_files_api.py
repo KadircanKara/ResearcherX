@@ -612,3 +612,43 @@ async def test_a_chunked_binary_upload_with_no_content_length_is_still_capped(
 
     tree = await client.get(f"{base}/files", headers=_h(you))
     assert tree.json()["files"] == []
+
+
+async def test_creating_a_file_at_a_taken_path_answers_a_structured_409(
+    client: AsyncClient, you: User, project: Project, document: LatexDocument
+):
+    base = f"/v1/projects/{project.id}/latex/{document.id}"
+    await client.put(
+        f"{base}/file", params={"path": "main.tex"}, json={"content": "hello"}, headers=_h(you)
+    )
+
+    r = await client.put(
+        f"{base}/file", params={"path": "main.tex"}, json={"content": ""}, headers=_h(you)
+    )
+
+    assert r.status_code == 409
+    detail = r.json()["detail"]
+    assert detail["error"] == "path_collision"
+    assert detail["collisions"] == [
+        {"path": "main.tex", "existing": "main.tex", "suggestion": "main (1).tex"}
+    ]
+
+
+async def test_the_autosave_query_parameter_still_overwrites(
+    client: AsyncClient, you: User, project: Project, document: LatexDocument
+):
+    base = f"/v1/projects/{project.id}/latex/{document.id}"
+    await client.put(
+        f"{base}/file", params={"path": "main.tex"}, json={"content": "one"}, headers=_h(you)
+    )
+
+    r = await client.put(
+        f"{base}/file",
+        params={"path": "main.tex", "if_exists": "replace"},
+        json={"content": "two"},
+        headers=_h(you),
+    )
+
+    assert r.status_code == 200
+    read = await client.get(f"{base}/file", params={"path": "main.tex"}, headers=_h(you))
+    assert read.json()["content"] == "two"

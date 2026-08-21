@@ -81,7 +81,7 @@ async def test_writing_the_main_file_saves_its_content(
 
     resp = await client.put(
         f"/v1/projects/{project.id}/latex/{doc_id}/file",
-        params={"path": "main.tex"},
+        params={"path": "main.tex", "if_exists": "replace"},
         json={"content": "new"},
         headers={"X-Dev-User-Id": you.id},
     )
@@ -875,7 +875,7 @@ async def test_writing_the_main_file_bumps_the_revision(
 
     written = await client.put(
         f"/v1/projects/{project.id}/latex/{doc_id}/file",
-        params={"path": "main.tex"},
+        params={"path": "main.tex", "if_exists": "replace"},
         json={"content": "new"},
         headers={"X-Dev-User-Id": you.id},
     )
@@ -1144,7 +1144,7 @@ async def test_editing_a_chapter_changes_the_tree_hash_and_triggers_a_real_recom
 
         await client.put(
             f"/v1/projects/{project.id}/latex/{doc_id}/file",
-            params={"path": "chapters/intro.tex"},
+            params={"path": "chapters/intro.tex", "if_exists": "replace"},
             json={"content": "Version two -- the main file never changed."},
             headers={"X-Dev-User-Id": you.id},
         )
