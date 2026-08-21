@@ -1250,3 +1250,235 @@ async def test_planning_a_merge_into_a_document_in_another_project_is_a_404(
     )
 
     assert resp.status_code == 404
+
+
+# --- Fix round 1: decisions can collide with each other, and a token's
+# --- planned target is part of what the user consented to.
+
+
+async def test_two_create_decisions_targeting_one_path_is_not_a_500(
+    client: AsyncClient, you: User, project: Project, db_session: AsyncSession
+):
+    """`bulk_create` runs NO collision scan -- it is only ever used on an
+    empty tree. The decisions are what can break that: two naming one target
+    would hit the unique index and surface as a 500."""
+    plan = await client.post(
+        f"/v1/projects/{project.id}/latex/import/plan?name=Paper",
+        content=_zip({"main.tex": DOC, "a.tex": b"a", "b.tex": b"b"}),
+        headers=_h(you),
+    )
+
+    resp = await client.post(
+        f"/v1/projects/{project.id}/latex/import/commit",
+        json={
+            "staging_id": plan.json()["staging_id"],
+            "name": "Paper",
+            "decisions": [
+                {"path": "a.tex", "new_path": "same.tex"},
+                {"path": "b.tex", "new_path": "same.tex"},
+            ],
+        },
+        headers={"X-Dev-User-Id": you.id},
+    )
+
+    assert resp.status_code == 409
+    assert resp.json()["detail"]["error"] == "path_collision"
+    assert (await db_session.execute(select(LatexDocument))).scalars().all() == []
+
+
+async def test_two_create_decisions_differing_only_in_case_are_refused(
+    client: AsyncClient, you: User, project: Project, db_session: AsyncSession
+):
+    """Case-only targets INSERT cleanly -- no unique-index violation -- and
+    leave a tree that breaks the `collision_key` invariant this whole plan
+    exists to enforce: export then emits two members and `read_archive`
+    refuses the re-import."""
+    plan = await client.post(
+        f"/v1/projects/{project.id}/latex/import/plan?name=Paper",
+        content=_zip({"main.tex": DOC, "a.tex": b"a", "b.tex": b"b"}),
+        headers=_h(you),
+    )
+
+    resp = await client.post(
+        f"/v1/projects/{project.id}/latex/import/commit",
+        json={
+            "staging_id": plan.json()["staging_id"],
+            "name": "Paper",
+            "decisions": [
+                {"path": "a.tex", "new_path": "Same.tex"},
+                {"path": "b.tex", "new_path": "same.tex"},
+            ],
+        },
+        headers={"X-Dev-User-Id": you.id},
+    )
+
+    assert resp.status_code == 409
+    assert (await db_session.execute(select(LatexDocument))).scalars().all() == []
+
+
+async def test_a_decision_colliding_with_an_untouched_archive_entry_is_refused(
+    client: AsyncClient, you: User, project: Project
+):
+    plan = await client.post(
+        f"/v1/projects/{project.id}/latex/import/plan?name=Paper",
+        content=_zip({"main.tex": DOC, "a.tex": b"a"}),
+        headers=_h(you),
+    )
+
+    resp = await client.post(
+        f"/v1/projects/{project.id}/latex/import/commit",
+        json={
+            "staging_id": plan.json()["staging_id"],
+            "name": "Paper",
+            "decisions": [{"path": "a.tex", "new_path": "main.tex"}],
+        },
+        headers={"X-Dev-User-Id": you.id},
+    )
+
+    assert resp.status_code == 409
+
+
+async def test_a_plan_made_as_a_create_cannot_be_committed_as_a_merge(
+    client: AsyncClient, you: User, project: Project
+):
+    """The collision list the user approved was computed for one target. A
+    create plan carries no merge collisions at all, so committing it against
+    a document would apply decisions nobody was shown."""
+    created = await _import(client, you, project.id, _zip({"main.tex": DOC}))
+    doc_id = created.json()["id"]
+    plan = await client.post(
+        f"/v1/projects/{project.id}/latex/import/plan?name=Paper",
+        content=_zip({"other.tex": DOC}),
+        headers=_h(you),
+    )
+
+    resp = await client.post(
+        f"/v1/projects/{project.id}/latex/import/commit",
+        json={"staging_id": plan.json()["staging_id"], "document_id": doc_id},
+        headers={"X-Dev-User-Id": you.id},
+    )
+
+    assert resp.status_code == 422
+
+
+async def test_a_plan_made_as_a_merge_cannot_be_committed_as_a_create(
+    client: AsyncClient, you: User, project: Project, db_session: AsyncSession
+):
+    created = await _import(client, you, project.id, _zip({"main.tex": DOC}))
+    plan = await client.post(
+        f"/v1/projects/{project.id}/latex/import/plan?document_id={created.json()['id']}",
+        content=_zip({"other.tex": DOC}),
+        headers=_h(you),
+    )
+
+    resp = await client.post(
+        f"/v1/projects/{project.id}/latex/import/commit",
+        json={"staging_id": plan.json()["staging_id"], "name": "Paper"},
+        headers={"X-Dev-User-Id": you.id},
+    )
+
+    assert resp.status_code == 422
+    assert len((await db_session.execute(select(LatexDocument))).scalars().all()) == 1
+
+
+async def test_a_merge_plan_cannot_be_redirected_at_another_document(
+    client: AsyncClient, you: User, project: Project
+):
+    first = await _import(client, you, project.id, _zip({"main.tex": DOC}), name="One")
+    second = await _import(client, you, project.id, _zip({"main.tex": DOC}), name="Two")
+    plan = await client.post(
+        f"/v1/projects/{project.id}/latex/import/plan?document_id={first.json()['id']}",
+        content=_zip({"other.tex": DOC}),
+        headers=_h(you),
+    )
+
+    resp = await client.post(
+        f"/v1/projects/{project.id}/latex/import/commit",
+        json={"staging_id": plan.json()["staging_id"], "document_id": second.json()["id"]},
+        headers={"X-Dev-User-Id": you.id},
+    )
+
+    assert resp.status_code == 422
+
+
+async def test_plan_file_count_excludes_the_manifest(
+    client: AsyncClient, you: User, project: Project
+):
+    """`file_count` is the "N files" the user is shown, and the manifest is
+    consumed rather than written -- it must not be counted."""
+    manifest = json.dumps({"main_path": "main.tex", "engine": "pdflatex"}).encode()
+    resp = await client.post(
+        f"/v1/projects/{project.id}/latex/import/plan?name=Paper",
+        content=_zip({"main.tex": DOC, MANIFEST_PATH: manifest}),
+        headers=_h(you),
+    )
+
+    assert resp.json()["file_count"] == 1
+
+
+async def test_a_merge_plan_ignores_a_bad_main_path(
+    client: AsyncClient, you: User, project: Project
+):
+    """A merge never touches the document's main file, so refusing a
+    `main_path` it ignores would reject an otherwise fine request."""
+    created = await _import(client, you, project.id, _zip({"main.tex": DOC}))
+
+    resp = await client.post(
+        f"/v1/projects/{project.id}/latex/import/plan"
+        f"?document_id={created.json()['id']}&main_path=ghost.tex",
+        content=_zip({"other.tex": DOC}),
+        headers=_h(you),
+    )
+
+    assert resp.status_code == 200
+
+
+async def test_a_document_viewer_is_refused_on_a_merge_plan(
+    client: AsyncClient, db_session: AsyncSession, you: User, project: Project
+):
+    """A project member who did not create the document and holds no grant
+    resolves to document-level viewer. Merging writes files, so this is the
+    editor line, and it is a new surface."""
+    created = await _import(client, you, project.id, _zip({"main.tex": DOC}))
+    viewer = (
+        await db_session.execute(select(User).where(User.email == "amelia@lab.io"))
+    ).scalar_one()
+    db_session.add(ProjectMember(project_id=project.id, user_id=viewer.id, role="member"))
+    await db_session.commit()
+
+    resp = await client.post(
+        f"/v1/projects/{project.id}/latex/import/plan?document_id={created.json()['id']}",
+        content=_zip({"other.tex": DOC}),
+        headers=_h(viewer),
+    )
+
+    assert resp.status_code == 403
+
+
+async def test_a_document_viewer_is_refused_on_a_merge_commit(
+    client: AsyncClient, db_session: AsyncSession, you: User, project: Project
+):
+    """Authorized on the document the request NAMES, before anything about
+    the token is considered -- a viewer must not learn whether their token
+    was planned for that document."""
+    created = await _import(client, you, project.id, _zip({"main.tex": DOC}))
+    viewer = (
+        await db_session.execute(select(User).where(User.email == "amelia@lab.io"))
+    ).scalar_one()
+    db_session.add(ProjectMember(project_id=project.id, user_id=viewer.id, role="member"))
+    await db_session.commit()
+    # A create plan is all a viewer can obtain; the merge plan above is
+    # already refused.
+    plan = await client.post(
+        f"/v1/projects/{project.id}/latex/import/plan?name=Paper",
+        content=_zip({"other.tex": DOC}),
+        headers=_h(viewer),
+    )
+
+    resp = await client.post(
+        f"/v1/projects/{project.id}/latex/import/commit",
+        json={"staging_id": plan.json()["staging_id"], "document_id": created.json()["id"]},
+        headers={"X-Dev-User-Id": viewer.id},
+    )
+
+    assert resp.status_code == 403

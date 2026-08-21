@@ -45,6 +45,12 @@ class StagedImport:
     project_id: str
     user_id: str
     entries: list[ArchiveEntry] = field(default_factory=list)
+    # The document the PLAN was computed against, or None for a create. The
+    # commit step compares its own target against this and refuses a
+    # mismatch: the collision list the user approved was computed for one
+    # target, and committing against another silently applies decisions
+    # nobody was shown.
+    document_id: str | None = None
 
     @property
     def size(self) -> int:

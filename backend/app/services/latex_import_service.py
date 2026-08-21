@@ -116,6 +116,12 @@ async def import_archive(
     cannot collide with an existing tree, but the user's decisions still
     reach here -- and the stored `main_path` follows its own rename, or the
     document would point at a file the tree does not contain.
+
+    A rename naming the MANIFEST entry itself is silently inert: the
+    manifest is stripped by `_split_manifest` after `renames` is applied to
+    everything else, so it can neither land in the tree under a new name nor
+    be resurrected by a decision. That is deliberate -- the manifest is
+    consumed metadata, not one of the user's files.
     """
     renames = renames or {}
     # `detect_main_for` is handed the ORIGINAL entries, manifest included --
@@ -151,6 +157,17 @@ def _without_manifest(entries: list[ArchiveEntry]) -> list[ArchiveEntry]:
     """The manifest is consumed by import and never lands in the tree, so it
     can neither collide nor be reported as colliding."""
     return [e for e in entries if e.path != MANIFEST_PATH]
+
+
+def landing_paths(entries: list[ArchiveEntry], renames: dict[str, str] | None = None) -> list[str]:
+    """The paths this archive would actually occupy, decisions applied.
+
+    The manifest is excluded because it is consumed, never written -- so
+    "how many files will this add" and "do the resolved paths collide with
+    each other" are both asked of this list rather than of `entries`.
+    """
+    renames = renames or {}
+    return [renames.get(e.path, e.path) for e in _without_manifest(entries)]
 
 
 def plan_merge(taken: Sequence[str], entries: list[ArchiveEntry]) -> list[latex_dedupe.Collision]:

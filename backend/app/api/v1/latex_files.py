@@ -199,8 +199,6 @@ async def import_plan_route(
     """
     await project_service.require_member(db, project_id, user.id, "member")
     entries = await _read_archive_body(request)
-    if main_path is not None:
-        _require_main_in_archive(entries, main_path)
 
     collisions: list[latex_dedupe.Collision] = []
     name_collision: LatexNameCollisionOut | None = None
@@ -214,6 +212,11 @@ async def import_plan_route(
         collisions = latex_import_service.plan_merge(taken, entries)
     else:
         mode = "create"
+        # Guarded here rather than before the branch: a merge deliberately
+        # ignores `main_path`, so refusing a bad one on a merge plan would
+        # reject a request whose answer does not depend on it.
+        if main_path is not None:
+            _require_main_in_archive(entries, main_path)
         existing_names = (
             (
                 await db.execute(
@@ -238,13 +241,20 @@ async def import_plan_route(
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     token = staging.put(
-        StagedImport(project_id=project_id, user_id=user.id, entries=entries),
+        StagedImport(
+            project_id=project_id,
+            user_id=user.id,
+            entries=entries,
+            document_id=document_id,
+        ),
         now=time.monotonic(),
     )
     return LatexImportPlanOut(
         staging_id=token,
         mode=mode,
-        file_count=len(entries),
+        # What will actually LAND: the manifest is consumed, never written,
+        # and this number is the "N files" the user is shown.
+        file_count=len(latex_import_service.landing_paths(entries)),
         collisions=[
             LatexCollisionOut(path=c.path, existing=c.existing, suggestion=c.suggestion)
             for c in collisions
@@ -282,6 +292,22 @@ async def import_commit_route(
     except StagingNotFound as exc:
         raise HTTPException(status_code=404, detail="Unknown upload.") from exc
 
+    # Authorized on the document this request NAMES, before anything about
+    # the staged plan is considered: what the caller may write into is a
+    # question about them and the document, never about a token they hold.
+    if payload.document_id is not None:
+        await latex_access.require(db, project_id, payload.document_id, user.id, need="editor")
+
+    if staged.document_id != payload.document_id:
+        # The collision list the user approved was computed against ONE
+        # target. Committing against another applies decisions nobody was
+        # shown -- and a plan made as a create carries no merge collisions at
+        # all.
+        raise HTTPException(
+            status_code=422,
+            detail="That upload was planned for a different document. Plan it again.",
+        )
+
     archive_paths = {e.path for e in staged.entries}
     renames: dict[str, str] = {}
     for decision in payload.decisions:
@@ -298,7 +324,6 @@ async def import_commit_route(
         renames[decision.path] = target
 
     if payload.document_id is not None:
-        await latex_access.require(db, project_id, payload.document_id, user.id, need="editor")
         document = await _document_or_404(db, project_id, payload.document_id)
         try:
             count = await latex_import_service.merge_archive(
@@ -316,6 +341,25 @@ async def import_commit_route(
         # ignores would reject a request that is otherwise fine.
         if payload.main_path is not None:
             _require_main_in_archive(staged.entries, payload.main_path)
+        # `bulk_create` performs NO collision scan -- its whole justification
+        # is that a freshly created document has nothing to collide with. It
+        # is the DECISIONS that can break that: two of them naming one target
+        # hit the unique index (a 500), and two differing only in case insert
+        # cleanly and leave a tree violating the `collision_key` invariant,
+        # which export then emits twice and re-import refuses. The merge path
+        # is safe because `bulk_merge` folds each written path into its own
+        # taken set as it goes.
+        self_collisions = latex_dedupe.plan_writes(
+            latex_import_service.landing_paths(staged.entries, renames), []
+        )
+        if self_collisions:
+            raise _translate(
+                files.PathCollision(
+                    self_collisions[0].path,
+                    self_collisions[0].existing,
+                    self_collisions[0].suggestion,
+                )
+            )
         try:
             document, count = await latex_import_service.import_archive(
                 db,
