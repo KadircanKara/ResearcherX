@@ -58,20 +58,27 @@ export function LatexWorkspace({ projectId, documentId, ownerId }: LatexWorkspac
   const router = useRouter();
 
   // `useLatexDocument` needs a `canEdit` boolean as an ARGUMENT, before its
-  // own return value (`doc`) exists to derive one from -- so this state is
-  // purely to satisfy that one circular requirement, and gates nothing a
-  // user can see. It lags the real answer by up to one render on a document
-  // switch (see the load effect's `.then`/`.finally` pair in
-  // `use-latex-document.ts`), which is harmless here because every UI
-  // control a user could act through is instead gated by `canEdit` below,
-  // which never lags.
+  // own return value (`doc`) exists to derive one from -- so this state
+  // exists only to satisfy that one circular requirement. It is NOT inert:
+  // this is the value that gates the hook's own write paths --
+  // `editBuffer`, `createFile`, `removeFile`, `moveFile`, `uploadBinary`,
+  // `setMainPath` all check it before doing anything (`use-latex-document.ts`).
+  // It lags `canEdit` below by one render, and the effect keys on BOTH
+  // `doc.document?.id` and `doc.document?.my_access` -- the same id check
+  // as `canEdit` -- so that render-behind lag can only ever be TOWARD
+  // false: on a document switch the id stops matching before the new
+  // document's access lands, so this closes rather than holding open. Key
+  // it on `my_access` alone and the lag reopens exactly the bug `canEdit`
+  // below was fixed to close, just one layer down -- a keystroke reaching
+  // `editBuffer` for a document the route has already left, saved via a
+  // PUT the server then 403s.
   const [hookCanEdit, setHookCanEdit] = useState(false);
 
   const doc = useLatexDocument(projectId, hookCanEdit, documentId);
 
   useEffect(() => {
-    setHookCanEdit(doc.document?.my_access === "editor");
-  }, [doc.document?.my_access]);
+    setHookCanEdit(doc.document?.id === documentId && doc.document?.my_access === "editor");
+  }, [doc.document?.id, doc.document?.my_access, documentId]);
 
   // The component-facing answer, read fresh every render -- no state, no
   // effect, so it can never lag `doc.document` by a render the way the
