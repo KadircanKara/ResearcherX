@@ -126,6 +126,45 @@ body {
   }
 }
 
+/* ── LaTeX editor syntax colours ───────────────────────────────────────
+   Full colours, not the oklch CHANNELS the semantic tokens above use: no
+   Tailwind utility consumes these, and CodeMirror needs a value it can drop
+   straight into a stylesheet.
+
+   They have to be variables at all because a `HighlightStyle` is compiled
+   into one stylesheet at module load -- literal colours in
+   `lib/latex-syntax.ts` could not follow a theme switch. Tuned against
+   `--background` in each theme: light is the darker, more saturated end,
+   dark the lighter. */
+:root {
+  --tex-comment: oklch(0.55 0.035 150);
+  --tex-structure: oklch(0.48 0.2 278);
+  --tex-command: oklch(0.52 0.16 265);
+  --tex-env: oklch(0.5 0.11 195);
+  --tex-label: oklch(0.55 0.14 55);
+  --tex-package: oklch(0.5 0.14 148);
+  --tex-math: oklch(0.52 0.2 350);
+  --tex-math-var: oklch(0.45 0.05 265);
+  --tex-number: oklch(0.55 0.16 35);
+  --tex-bracket: oklch(0.6 0.015 286);
+  --tex-arg: oklch(0.5 0.1 300);
+  --tex-invalid: oklch(0.55 0.21 27);
+}
+.dark {
+  --tex-comment: oklch(0.66 0.04 150);
+  --tex-structure: oklch(0.8 0.13 278);
+  --tex-command: oklch(0.78 0.12 258);
+  --tex-env: oklch(0.82 0.11 195);
+  --tex-label: oklch(0.83 0.13 75);
+  --tex-package: oklch(0.8 0.15 148);
+  --tex-math: oklch(0.8 0.13 350);
+  --tex-math-var: oklch(0.84 0.04 265);
+  --tex-number: oklch(0.8 0.13 40);
+  --tex-bracket: oklch(0.66 0.015 286);
+  --tex-arg: oklch(0.78 0.1 300);
+  --tex-invalid: oklch(0.71 0.17 22);
+}
+
 /* ── Brand gradient + glow utilities (cobalt → cyan) ───────────────────
    --grad-a / --grad-b are raw hex so they work inside linear-gradient()
    and color-mix(); the semantic tokens above are oklch channels for
