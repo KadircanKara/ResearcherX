@@ -366,3 +366,60 @@ async def test_a_rename_onto_a_taken_path_carries_a_suggestion(
         await svc.rename_file(db_session, document.id, "a.tex", "b.tex")
 
     assert excinfo.value.suggestion == "b (1).tex"
+
+
+async def test_bulk_merge_adds_to_an_existing_tree(
+    db_session: AsyncSession, document: LatexDocument
+):
+    await svc.write_text(db_session, document.id, "main.tex", "existing")
+    await db_session.commit()
+
+    count = await svc.bulk_merge(db_session, document.id, [("chapters/intro.tex", b"intro", False)])
+    await db_session.commit()
+
+    assert count == 1
+    paths = [f.path for f in await svc.list_files(db_session, document.id)]
+    assert paths == ["chapters/intro.tex", "main.tex"]
+
+
+async def test_bulk_merge_bumps_the_revision_exactly_once(
+    db_session: AsyncSession, document: LatexDocument
+):
+    # A merge is ONE change. Bumping per file would make every merged file
+    # look like a separate edit to the compile-staleness check.
+    await svc.write_text(db_session, document.id, "main.tex", "x")
+    await db_session.commit()
+    before = (await db_session.get(LatexDocument, document.id)).revision
+
+    await svc.bulk_merge(
+        db_session,
+        document.id,
+        [("a.tex", b"a", False), ("b.tex", b"b", False), ("c.tex", b"c", False)],
+    )
+    await db_session.commit()
+
+    after = (await db_session.get(LatexDocument, document.id)).revision
+    assert after == before + 1
+
+
+async def test_bulk_merge_refuses_a_path_that_is_already_taken(
+    db_session: AsyncSession, document: LatexDocument
+):
+    # The caller resolves collisions BEFORE calling. Reaching here with a
+    # taken path is a bug in the caller, and it must not overwrite.
+    await svc.write_text(db_session, document.id, "main.tex", "existing")
+    await db_session.commit()
+
+    with pytest.raises(svc.PathCollision):
+        await svc.bulk_merge(db_session, document.id, [("main.tex", b"new", False)])
+
+
+async def test_bulk_merge_counts_the_existing_tree_against_the_byte_cap(
+    db_session: AsyncSession, document: LatexDocument, monkeypatch
+):
+    monkeypatch.setattr(settings, "latex_project_max_bytes", 100)
+    await svc.write_text(db_session, document.id, "main.tex", "x" * 60)
+    await db_session.commit()
+
+    with pytest.raises(svc.QuotaExceeded):
+        await svc.bulk_merge(db_session, document.id, [("big.tex", b"y" * 60, False)])

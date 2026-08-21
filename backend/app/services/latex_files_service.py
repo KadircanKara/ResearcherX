@@ -352,6 +352,85 @@ async def bulk_create(
     return count
 
 
+async def bulk_merge(
+    db: AsyncSession, document_id: str, entries: Sequence[tuple[str, bytes, bool]]
+) -> int:
+    """Insert many files into an EXISTING, non-empty tree in one pass.
+
+    `bulk_create`'s sibling, and deliberately a separate function rather than
+    a flag on it: `bulk_create`'s whole justification is that a freshly
+    created document has nothing to collide with and nothing to add to, so
+    its missing collision scan and missing quota SUM are vacuous. Neither is
+    vacuous here.
+
+    `entries` carry FINAL paths. Every collision has already been resolved by
+    the caller (`latex_dedupe.plan_writes` plus the user's decisions); a path
+    that is still taken when it reaches here is a caller bug and raises
+    rather than overwriting.
+
+    One lock, one taken-paths read, one cap check, one revision bump -- a
+    merge is one change, and doing any of these per file costs O(n) round
+    trips on an import of a real project.
+    """
+    await db.execute(
+        select(LatexDocument.id).where(LatexDocument.id == document_id).with_for_update()
+    )
+
+    taken = (
+        (await db.execute(select(LatexFile.path).where(LatexFile.document_id == document_id)))
+        .scalars()
+        .all()
+    )
+    taken_keys = {collision_key(t): t for t in taken}
+
+    total = await used_bytes(db, document_id)
+    count = len(taken)
+    for path, data, _is_binary in entries:
+        normalized = normalize_path(path)
+        _reject_reserved(normalized)
+        key = collision_key(normalized)
+        if key in taken_keys:
+            raise PathCollision(
+                normalized,
+                taken_keys[key],
+                latex_dedupe.suffix_path(normalized, taken_keys.values()),
+            )
+        taken_keys[key] = normalized
+        if len(data) > settings.latex_file_max_bytes:
+            raise QuotaExceeded(len(data), settings.latex_file_max_bytes)
+        total += len(data)
+        count += 1
+        if total > settings.latex_project_max_bytes:
+            raise QuotaExceeded(total, settings.latex_project_max_bytes)
+        if count > settings.latex_max_files:
+            raise TooManyFiles(count, settings.latex_max_files)
+
+    written = 0
+    for path, data, is_binary in entries:
+        normalized = normalize_path(path)
+        content: str | None = None
+        if not is_binary:
+            try:
+                content = data.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise InvalidEncoding(normalized) from exc
+        db.add(
+            LatexFile(
+                document_id=document_id,
+                path=normalized,
+                is_binary=is_binary,
+                content=content,
+                blob=data if is_binary else None,
+                size_bytes=len(data),
+            )
+        )
+        written += 1
+
+    await db.flush()
+    await _bump_revision(db, document_id)
+    return written
+
+
 async def delete_file(db: AsyncSession, document_id: str, path: str) -> bool:
     """True if a file was removed. A miss is NOT an error -- the caller turns
     it into a 404 with the context it has."""
