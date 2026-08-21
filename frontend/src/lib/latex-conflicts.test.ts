@@ -65,4 +65,17 @@ describe("conflict decisions", () => {
     const state = conflicts.setOverride(conflicts.initialState(), "main.tex", "rename", "FIG.PNG");
     expect(conflicts.problems(state, COLLISIONS, ["fig.png"])["main.tex"]).toMatch(/taken/i);
   });
+
+  it("reports a manual rename back to the exact path it collided with", () => {
+    // c.existing is the file ALREADY in the tree -- the one being kept, not
+    // one this row is "replacing". Typing that exact name is the collision,
+    // not an exemption from it.
+    const state = conflicts.setOverride(conflicts.initialState(), "main.tex", "rename", "main.tex");
+    expect(conflicts.problems(state, COLLISIONS, ["main.tex"])["main.tex"]).toMatch(/taken/i);
+  });
+
+  it("reports that same case-insensitively too", () => {
+    const state = conflicts.setOverride(conflicts.initialState(), "main.tex", "rename", "MAIN.TEX");
+    expect(conflicts.problems(state, COLLISIONS, ["main.tex"])["main.tex"]).toMatch(/taken/i);
+  });
 });

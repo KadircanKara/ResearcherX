@@ -78,9 +78,7 @@ export function problems(
       continue;
     }
     const k = key(resolved);
-    // The path this row is REPLACING is not a conflict with itself: the
-    // original is exactly what is being kept.
-    if (seen.has(k) && key(c.existing) !== k) {
+    if (seen.has(k)) {
       found[c.path] = `${seen.get(k)} is already taken.`;
       continue;
     }
