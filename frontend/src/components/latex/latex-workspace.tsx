@@ -5,11 +5,15 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 import {
   ArrowLeft,
+  Code,
+  Cog,
+  Columns2,
   Download,
   FileDown,
+  FileText,
   Loader2,
+  PanelLeftOpen,
   Play,
-  Settings2,
   Trash2,
   X,
 } from "lucide-react";
@@ -43,6 +47,14 @@ const OUTSIDE_MAIN_NOTE = "Sync only covers files beside or below the main file.
 // jump is DECLINED rather than landed on that line of whatever buffer
 // happens to be active: a confident wrong jump is worse than no jump.
 const LOG_FILE_UNKNOWN_NOTE = "Couldn't tell which file that error is in, so the editor didn't jump.";
+
+type ViewMode = "split" | "code" | "pdf";
+
+const VIEW_MODES: { mode: ViewMode; label: string; Icon: typeof Code }[] = [
+  { mode: "code", label: "Source only", Icon: Code },
+  { mode: "split", label: "Split source and PDF", Icon: Columns2 },
+  { mode: "pdf", label: "PDF only", Icon: FileText },
+];
 
 interface LatexWorkspaceProps {
   projectId: string;
@@ -128,12 +140,32 @@ export function LatexWorkspace({ projectId, documentId, ownerId }: LatexWorkspac
     beforeCompile,
   });
 
-  // Drag handle. Clamped so neither pane can be dragged out of existence.
-  const [splitPercent, setSplitPercent] = useState(60);
+  // Which panes are on screen. The editor and the preview are the only two
+  // that answer to this -- the file tree collapses independently, because
+  // "show me only the PDF" and "give the tree's width back" are different
+  // requests and folding them together would make each imply the other.
+  const [viewMode, setViewMode] = useState<ViewMode>("split");
+
+  // Percent of the EDITOR+PREVIEW region (never of the whole row) taken by
+  // the editor. The tree is outside that region and has its own width, so
+  // this stays a true even split at 50 whatever the tree is doing -- the
+  // previous percent-of-the-whole-row reading made the default silently
+  // uneven, and made every tree resize move the seam.
+  const [splitPercent, setSplitPercent] = useState(50);
+  const [treeWidth, setTreeWidth] = useState(256);
+  const [treeCollapsed, setTreeCollapsed] = useState(false);
+
   // The active drag's teardown, so an unmount mid-drag can still run it.
   const dragCleanup = useRef<(() => void) | null>(null);
 
-  function startDrag(e: React.PointerEvent<HTMLDivElement>) {
+  // Shared by both seams. The pointer-capture and teardown rules below are
+  // subtle enough that a second copy of them would be a second place for
+  // the pointercancel case to go missing; only the per-drag maths differs,
+  // and that arrives as `onMove`.
+  function beginDrag(
+    e: React.PointerEvent<HTMLDivElement>,
+    onMove: (ev: PointerEvent, hostBox: DOMRect) => void
+  ) {
     const handle = e.currentTarget;
     const host = handle.parentElement;
     if (!host) return;
@@ -144,10 +176,7 @@ export function LatexWorkspace({ projectId, documentId, ownerId }: LatexWorkspac
     // more than a few pixels, not an edge case.
     handle.setPointerCapture(pointerId);
 
-    const move = (ev: PointerEvent) => {
-      const pct = ((ev.clientX - box.left) / box.width) * 100;
-      setSplitPercent(Math.min(75, Math.max(25, pct)));
-    };
+    const move = (ev: PointerEvent) => onMove(ev, box);
     const stop = () => {
       handle.removeEventListener("pointermove", move);
       handle.removeEventListener("pointerup", stop);
@@ -167,6 +196,24 @@ export function LatexWorkspace({ projectId, documentId, ownerId }: LatexWorkspac
     handle.addEventListener("pointerup", stop);
     handle.addEventListener("pointercancel", stop);
     dragCleanup.current = stop;
+  }
+
+  // Clamped so neither pane can be dragged out of existence.
+  function startSplitDrag(e: React.PointerEvent<HTMLDivElement>) {
+    beginDrag(e, (ev, box) => {
+      const pct = ((ev.clientX - box.left) / box.width) * 100;
+      setSplitPercent(Math.min(80, Math.max(20, pct)));
+    });
+  }
+
+  // Clamped in pixels, not percent: the tree holds file names, whose
+  // legibility has nothing to do with how wide the window is. The floor is
+  // the point below which the header controls stop fitting; collapsing
+  // entirely is the button's job, not the drag's.
+  function startTreeDrag(e: React.PointerEvent<HTMLDivElement>) {
+    beginDrag(e, (ev, box) => {
+      setTreeWidth(Math.min(520, Math.max(180, ev.clientX - box.left)));
+    });
   }
 
   // A drag in progress when the component unmounts (e.g. a route change
@@ -427,6 +474,31 @@ export function LatexWorkspace({ projectId, documentId, ownerId }: LatexWorkspac
           )}
 
           {/*
+            Three states, not a single "focus" toggle: a writer wants the
+            source alone while drafting and the PDF alone while reading, and
+            a toggle between "split" and one favoured pane cannot express
+            both without a second control anyway.
+          */}
+          <div className="mr-1 flex items-center rounded-md border border-border p-0.5">
+            {VIEW_MODES.map(({ mode, label, Icon }) => (
+              <button
+                key={mode}
+                onClick={() => setViewMode(mode)}
+                title={label}
+                aria-label={label}
+                aria-pressed={viewMode === mode}
+                className={
+                  viewMode === mode
+                    ? "rounded-[3px] bg-muted p-1 text-foreground"
+                    : "rounded-[3px] p-1 text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground"
+                }
+              >
+                <Icon className="size-3.5" />
+              </button>
+            ))}
+          </div>
+
+          {/*
             The engine lives behind this popover rather than on the rail
             because it is ALREADY decided for the user: import picks xelatex
             when the source loads fontspec/unicode-math/polyglossia, which
@@ -441,7 +513,7 @@ export function LatexWorkspace({ projectId, documentId, ownerId }: LatexWorkspac
               aria-expanded={engineOpen}
               className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
             >
-              <Settings2 className="size-4" />
+              <Cog className="size-4" />
             </button>
             {engineOpen && (
               <div className="absolute right-0 z-20 mt-1 w-72 rounded-lg border border-border bg-popover p-3 text-left shadow-md">
@@ -491,118 +563,190 @@ export function LatexWorkspace({ projectId, documentId, ownerId }: LatexWorkspac
         <div className="flex-1 animate-pulse rounded-xl bg-muted" />
       ) : (
         <div className="relative flex flex-1 overflow-hidden rounded-xl border border-border">
-          <FileTree
-            nodes={buildTree(doc.files)}
-            activePath={doc.activePath}
-            mainPath={doc.mainPath}
-            canEdit={canEdit}
-            usedBytes={doc.usedBytes}
-            maxBytes={doc.maxBytes}
-            error={doc.error}
-            onOpen={(path) => void doc.openFile(path)}
-            onCreate={(path) => void doc.createFile(path)}
-            onDelete={(path) => void doc.removeFile(path)}
-            onRename={(from, to) => void doc.moveFile(from, to)}
-            onSetMain={(path) => void doc.setMainPath(path)}
-            onUpload={(path, data) => void doc.uploadBinary(path, data)}
-            onImportClick={() => {
-              setImportCandidates([]);
-              setImportOpen(true);
-            }}
-            onExport={() => void handleExport()}
-          />
-
-          <div style={{ width: `${splitPercent}%` }} className="flex flex-col overflow-hidden">
-            <OpenTabs
-              paths={doc.openPaths}
-              activePath={doc.activePath}
-              dirtyPaths={doc.dirtyPaths}
-              onSelect={(path) => void doc.openFile(path)}
-              onClose={doc.closeFile}
-            />
-            <div className="flex items-center justify-end border-b border-border px-3 py-1 text-[11px] text-muted-foreground">
-              {doc.saveState === "saving" && "Saving…"}
-              {doc.saveState === "error" && (
-                <span className="text-destructive">Could not save</span>
-              )}
+          {treeCollapsed ? (
+            /* A rail, not nothing: with the tree gone there would otherwise
+               be no control anywhere on screen to bring it back. */
+            <div className="flex w-9 shrink-0 flex-col items-center border-r border-border pt-2">
+              <Button
+                size="icon-sm"
+                variant="ghost"
+                title="Show file tree"
+                aria-label="Show file tree"
+                onClick={() => setTreeCollapsed(false)}
+              >
+                <PanelLeftOpen className="size-3.5" />
+              </Button>
             </div>
-            <div className="flex-1 overflow-hidden">
-              {activePath === null ? (
-                <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
-                  Select or create a file to start writing.
+          ) : (
+            <>
+              <FileTree
+                nodes={buildTree(doc.files)}
+                width={treeWidth}
+                activePath={doc.activePath}
+                mainPath={doc.mainPath}
+                canEdit={canEdit}
+                usedBytes={doc.usedBytes}
+                maxBytes={doc.maxBytes}
+                error={doc.error}
+                onOpen={(path) => void doc.openFile(path)}
+                onCreate={(path) => void doc.createFile(path)}
+                onDelete={(path) => void doc.removeFile(path)}
+                onRename={(from, to) => void doc.moveFile(from, to)}
+                onSetMain={(path) => void doc.setMainPath(path)}
+                onUpload={(path, data) => void doc.uploadBinary(path, data)}
+                onImportClick={() => {
+                  setImportCandidates([]);
+                  setImportOpen(true);
+                }}
+                onExport={() => void handleExport()}
+                onCollapse={() => setTreeCollapsed(true)}
+              />
+              {/* Sits OUTSIDE the tree so its drag maths reads the row's own
+                  box -- `beginDrag` measures `parentElement`, and inside the
+                  tree that would be the tree itself, which is the thing
+                  being resized. */}
+              <div
+                onPointerDown={startTreeDrag}
+                className="w-1.5 shrink-0 cursor-col-resize bg-border transition-colors hover:bg-primary/40"
+                role="separator"
+                aria-orientation="vertical"
+                aria-label="Resize file tree"
+              />
+            </>
+          )}
+
+          {/* The editor+preview region. `min-w-0` is load-bearing on a flex
+              child holding a horizontally-scrolling editor: without it the
+              region refuses to shrink below its content and the tree's drag
+              pushes the preview off-screen instead of narrowing anything. */}
+          <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
+            <div className="flex min-h-0 flex-1">
+              {/*
+                Hidden with `display: none`, never unmounted. CodeMirror's
+                undo history, cursor and scroll position live in the editor
+                instance, and pdf.js re-parses the document on mount -- so
+                unmounting would make every flip through the view modes cost
+                the user real state and the browser a full re-render of the
+                PDF.
+              */}
+              <div
+                style={viewMode === "split" ? { width: `${splitPercent}%` } : undefined}
+                className={
+                  viewMode === "pdf"
+                    ? "hidden"
+                    : viewMode === "code"
+                      ? "flex min-w-0 flex-1 flex-col overflow-hidden"
+                      : "flex min-w-0 shrink-0 flex-col overflow-hidden"
+                }
+              >
+                <OpenTabs
+                  paths={doc.openPaths}
+                  activePath={doc.activePath}
+                  dirtyPaths={doc.dirtyPaths}
+                  onSelect={(path) => void doc.openFile(path)}
+                  onClose={doc.closeFile}
+                />
+                <div className="flex items-center justify-end border-b border-border px-3 py-1 text-[11px] text-muted-foreground">
+                  {doc.saveState === "saving" && "Saving…"}
+                  {doc.saveState === "error" && (
+                    <span className="text-destructive">Could not save</span>
+                  )}
                 </div>
-              ) : /*
-                  BOTH signals, never `isTexPath` alone. The two answer
-                  DIFFERENT questions (see `isTexPath`'s own comment in
-                  `lib/latex-tree.ts`): `is_binary` is how the backend STORED
-                  the bytes, `isTexPath` is whether a human should be shown a
-                  text buffer. A `.bib`/`.sty`/`.bst` in latin-1 out of a real
-                  Overleaf or arXiv project decodes as binary and is stored
-                  that way, and so is every file uploaded through the file
-                  tree whatever its extension. `openFile` correctly skips the
-                  fetch and the buffer for such a path -- so routing on the
-                  extension alone rendered an EMPTY editor over it, and the
-                  first keystroke PUT that empty buffer through `write_text`,
-                  which sets `is_binary=False` and `blob=None`. The original
-                  bytes were gone permanently and silently. Do not
-                  re-simplify this to one test.
-                */
-              isTexPath(activePath) && !activeMeta?.is_binary ? (
-                <EditorPane
-                  path={activePath}
-                  openPaths={doc.openPaths}
-                  value={doc.buffers[activePath] ?? ""}
-                  onChange={handleChange}
-                  onLineDoubleClick={handleLineDoubleClick}
-                  gotoLine={compile.gotoLine}
-                  readOnly={!canEdit}
-                />
-              ) : (
-                <BinaryPreview
-                  projectId={projectId}
-                  documentId={doc.selectedId}
-                  path={activePath}
-                  sizeBytes={activeMeta?.size_bytes ?? 0}
+                <div className="flex-1 overflow-hidden">
+                  {activePath === null ? (
+                    <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
+                      Select or create a file to start writing.
+                    </div>
+                  ) : /*
+                      BOTH signals, never `isTexPath` alone. The two answer
+                      DIFFERENT questions (see `isTexPath`'s own comment in
+                      `lib/latex-tree.ts`): `is_binary` is how the backend STORED
+                      the bytes, `isTexPath` is whether a human should be shown a
+                      text buffer. A `.bib`/`.sty`/`.bst` in latin-1 out of a real
+                      Overleaf or arXiv project decodes as binary and is stored
+                      that way, and so is every file uploaded through the file
+                      tree whatever its extension. `openFile` correctly skips the
+                      fetch and the buffer for such a path -- so routing on the
+                      extension alone rendered an EMPTY editor over it, and the
+                      first keystroke PUT that empty buffer through `write_text`,
+                      which sets `is_binary=False` and `blob=None`. The original
+                      bytes were gone permanently and silently. Do not
+                      re-simplify this to one test.
+                    */
+                  isTexPath(activePath) && !activeMeta?.is_binary ? (
+                    <EditorPane
+                      path={activePath}
+                      openPaths={doc.openPaths}
+                      value={doc.buffers[activePath] ?? ""}
+                      onChange={handleChange}
+                      onLineDoubleClick={handleLineDoubleClick}
+                      gotoLine={compile.gotoLine}
+                      readOnly={!canEdit}
+                    />
+                  ) : (
+                    <BinaryPreview
+                      projectId={projectId}
+                      documentId={doc.selectedId}
+                      path={activePath}
+                      sizeBytes={activeMeta?.size_bytes ?? 0}
+                    />
+                  )}
+                </div>
+              </div>
+
+              {viewMode === "split" && (
+                <div
+                  onPointerDown={startSplitDrag}
+                  className="w-1.5 shrink-0 cursor-col-resize bg-border transition-colors hover:bg-primary/40"
+                  role="separator"
+                  aria-orientation="vertical"
+                  aria-label="Resize editor and preview"
                 />
               )}
-            </div>
-          </div>
 
-          <div
-            onPointerDown={startDrag}
-            className="w-1.5 shrink-0 cursor-col-resize bg-border transition-colors hover:bg-primary/40"
-            role="separator"
-            aria-orientation="vertical"
-          />
-
-          <div className="flex flex-1 flex-col overflow-hidden">
-            <div className="flex items-center justify-between border-b border-border px-3 py-1.5 text-xs">
-              <div className="flex items-center gap-2">
-                <span className="text-muted-foreground">Preview</span>
-                {compile.pdfBytes && compile.stale && (
-                  <span className="rounded-full bg-amber-500/15 px-2 py-0.5 text-[11px] font-medium text-amber-700 dark:text-amber-400">
-                    {STALE_NOTE}
-                  </span>
-                )}
-                {/* `compile.syncNote` is already gated inside the hook: the
-                    "PDF is out of date" message can never render while the
-                    PDF is not, in fact, out of date. Every OTHER message
-                    (declined-sync, "no place matches", "unavailable") passes
-                    through unconditionally. */}
-                {compile.syncNote && (
-                  <span className="text-[11px] text-muted-foreground">{compile.syncNote}</span>
-                )}
+              <div
+                className={
+                  viewMode === "code"
+                    ? "hidden"
+                    : "flex min-w-0 flex-1 flex-col overflow-hidden"
+                }
+              >
+                <div className="flex items-center justify-between border-b border-border px-3 py-1.5 text-xs">
+                  <div className="flex items-center gap-2">
+                    <span className="text-muted-foreground">Preview</span>
+                    {compile.pdfBytes && compile.stale && (
+                      <span className="rounded-full bg-amber-500/15 px-2 py-0.5 text-[11px] font-medium text-amber-700 dark:text-amber-400">
+                        {STALE_NOTE}
+                      </span>
+                    )}
+                    {/* `compile.syncNote` is already gated inside the hook: the
+                        "PDF is out of date" message can never render while the
+                        PDF is not, in fact, out of date. Every OTHER message
+                        (declined-sync, "no place matches", "unavailable") passes
+                        through unconditionally. */}
+                    {compile.syncNote && (
+                      <span className="text-[11px] text-muted-foreground">{compile.syncNote}</span>
+                    )}
+                  </div>
+                </div>
+                <div className="flex-1 overflow-hidden">
+                  <PdfViewer
+                    bytes={compile.pdfBytes}
+                    scale={1.25}
+                    highlight={compile.highlight}
+                    scrollToPage={compile.scrollToPage}
+                    onPageDoubleClick={(page, point) => void compile.jumpToSource(page, point)}
+                  />
+                </div>
               </div>
             </div>
-            <div className="flex-1 overflow-hidden">
-              <PdfViewer
-                bytes={compile.pdfBytes}
-                scale={1.25}
-                highlight={compile.highlight}
-                scrollToPage={compile.scrollToPage}
-                onPageDoubleClick={(page, point) => void compile.jumpToSource(page, point)}
-              />
-            </div>
+
+            {/*
+              Spans BOTH panes rather than living inside the preview, because
+              a compile log is the only place a failed build explains itself
+              -- inside the preview it would be invisible in source-only
+              mode, which is exactly the mode someone fixing an error is in.
+            */}
             {compile.log !== null && (
               <LogPanel
                 log={compile.log.text}

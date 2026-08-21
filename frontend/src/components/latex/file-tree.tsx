@@ -7,6 +7,7 @@ import {
   Download,
   FileCode,
   Folder,
+  PanelLeftClose,
   Pencil,
   Plus,
   Star,
@@ -19,6 +20,11 @@ import { formatBytes, joinPath, type TreeNode } from "@/lib/latex-tree";
 
 interface FileTreeProps {
   nodes: TreeNode[];
+  /** Owned by the workspace, not by this component: the drag handle that
+   * sets it lives OUTSIDE the tree's own border (it is the seam between the
+   * tree and the editor), so the two would fight over the value if the tree
+   * kept its own copy. */
+  width: number;
   activePath: string | null;
   mainPath: string | null;
   canEdit: boolean;
@@ -33,10 +39,12 @@ interface FileTreeProps {
   onUpload: (path: string, data: Blob) => void;
   onImportClick: () => void;
   onExport: () => void;
+  onCollapse: () => void;
 }
 
 export function FileTree({
   nodes,
+  width,
   activePath,
   mainPath,
   canEdit,
@@ -51,6 +59,7 @@ export function FileTree({
   onUpload,
   onImportClick,
   onExport,
+  onCollapse,
 }: FileTreeProps) {
   // Every directory starts expanded -- a LaTeX project is small (a handful
   // of chapters, a bib file, some figures) and a collapsed-by-default tree
@@ -92,12 +101,24 @@ export function FileTree({
   const pctUsed = maxBytes > 0 ? (usedBytes / maxBytes) * 100 : 0;
 
   return (
-    <div className="flex w-64 shrink-0 flex-col border-r border-border">
-      <div className="flex items-center justify-between px-3 pb-1 pt-2">
-        <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+    <div
+      style={{ width }}
+      className="flex min-w-0 shrink-0 flex-col border-r border-border"
+    >
+      <div className="flex items-center justify-between gap-1 px-3 pb-1 pt-2">
+        <span className="truncate text-xs font-medium uppercase tracking-wide text-muted-foreground">
           Files
         </span>
-        <div className="flex items-center gap-0.5">
+        <div className="flex shrink-0 items-center gap-0.5">
+          <Button
+            size="icon-sm"
+            variant="ghost"
+            title="Hide file tree"
+            aria-label="Hide file tree"
+            onClick={onCollapse}
+          >
+            <PanelLeftClose className="size-3.5" />
+          </Button>
           <Button
             size="icon-sm"
             variant="ghost"
