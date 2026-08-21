@@ -11,6 +11,7 @@ import {
   PathCollisionError,
   NameCollisionError,
   LatexRequestError,
+  errorText,
 } from "./latex";
 
 function mockFetch(status: number, body: unknown, contentType = "application/json") {
@@ -153,5 +154,49 @@ describe("errors", () => {
       "Something went wrong. Please try again."
     );
     expect((err as LatexRequestError).userMessage).not.toContain("Traceback");
+  });
+});
+
+describe("errorText", () => {
+  // The typed 4xx errors are NOT `LatexRequestError`s, so they used to fall
+  // straight through to the generic line. Both production create sites route
+  // a failure through `errorText`, which made "that name is taken" read as
+  // "Something went wrong. Please try again." -- an unactionable dead end on
+  // the one failure that has an obvious one-click answer.
+  it("names the taken document name AND the server's suggestion", () => {
+    const text = errorText(new NameCollisionError("Paper", "Paper (1)"));
+    expect(text).toContain("Paper");
+    expect(text).toContain("Paper (1)");
+    expect(text).not.toBe("Something went wrong. Please try again.");
+  });
+
+  it("says what an ambiguous main file actually is, and lists the candidates", () => {
+    const text = errorText(new AmbiguousMainError(["main.tex", "paper.tex"]));
+    expect(text).toContain("main.tex");
+    expect(text).toContain("paper.tex");
+    expect(text).not.toBe("Something went wrong. Please try again.");
+  });
+
+  it("still says something useful when the candidate list is empty", () => {
+    const text = errorText(new AmbiguousMainError([]));
+    expect(text).toMatch(/more than one main file/i);
+  });
+
+  it("keeps a 4xx's own detail", () => {
+    expect(errorText(new LatexRequestError(413, "That archive is too large."))).toBe(
+      "That archive is too large."
+    );
+  });
+
+  it("still refuses to leak a 5xx's text", () => {
+    expect(errorText(new LatexRequestError(500, "Traceback (most recent call last): ..."))).toBe(
+      "Something went wrong. Please try again."
+    );
+  });
+
+  it("gives a plain Error the generic line", () => {
+    expect(errorText(new TypeError("Failed to fetch"))).toBe(
+      "Something went wrong. Please try again."
+    );
   });
 });

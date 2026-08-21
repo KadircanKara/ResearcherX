@@ -6,6 +6,7 @@ import Link from "next/link";
 import { Download, FileCode2, Plus, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { BulkEditBar } from "@/components/bulk-edit-bar";
+import { ConflictDialog } from "@/components/latex/conflict-dialog";
 import { ImportDropzone } from "@/components/latex/import-dropzone";
 import { NewDocumentDialog } from "@/components/latex/new-document-dialog";
 import {
@@ -14,6 +15,8 @@ import {
   downloadExport,
   listDocuments,
   errorText,
+  NameCollisionError,
+  type LatexCollision,
   type LatexDocument,
 } from "@/lib/latex";
 import { getProject } from "@/lib/projects";
@@ -53,6 +56,11 @@ export default function LatexIndexPage() {
   // is nothing open to merge into -- and the only duplicate it can report is
   // a duplicate document NAME.
   const [importOpen, setImportOpen] = useState(false);
+
+  // The duplicate document-NAME question, rendered through the same shared
+  // dialog every other duplicate on this branch uses.
+  const [nameConflict, setNameConflict] = useState<{ collisions: LatexCollision[] } | null>(null);
+  const [nameBusy, setNameBusy] = useState(false);
 
   // `silent` skips the full-page loading skeleton. The skeleton branch below
   // unmounts the whole page -- including any error banner just set by a bulk
@@ -94,14 +102,53 @@ export default function LatexIndexPage() {
   // failure banner and making "all selected" unreachable by clicking.
   const deletableIds = docs.filter((d) => d.my_access === "editor").map((d) => d.id);
 
-  async function handleCreate(name: string) {
+  /**
+   * Create, and turn a duplicate NAME into the same Keep both / Rename /
+   * Cancel question a duplicate FILE already gets.
+   *
+   * `createDocument` rethrows `NameCollisionError` unchanged for exactly
+   * this: the dialog is built from the server's own `suggestion`, which
+   * `errorText` could name but not offer in one click. Without this the 409
+   * fell through to the generic line and creating a second "Paper" was an
+   * unactionable dead end. Every other failure keeps going to `error`.
+   */
+  async function createNamed(name: string) {
     setError(null);
     try {
       const doc = await createDocument(projectId, { name, source: STARTER });
       router.push(`/research/${projectId}/latex/${doc.id}`);
     } catch (err) {
+      if (err instanceof NameCollisionError) {
+        // One row, the same shape `import-dropzone.tsx` renders a duplicate
+        // document name as -- same question, same server-computed
+        // suggestion, so the same control rather than a second dialog.
+        setNameConflict({
+          collisions: [
+            { path: err.takenName, existing: err.takenName, suggestion: err.suggestion },
+          ],
+        });
+        return;
+      }
       setError(errorText(err));
     }
+  }
+
+  async function confirmNameConflict(decisions: { path: string; new_path: string }[]) {
+    const pending = nameConflict;
+    const chosen = decisions[0]?.new_path;
+    if (!pending || !chosen) return;
+    setNameBusy(true);
+    try {
+      // Straight back through `createNamed`: the retry can collide AGAIN
+      // (another member took that name while the dialog was open), and
+      // `createNamed` replaces the dialog's row with the new collision.
+      await createNamed(chosen);
+    } finally {
+      setNameBusy(false);
+    }
+    // Only dismiss the entry this call opened -- if the retry collided
+    // again, `createNamed` has already installed the newer one.
+    setNameConflict((current) => (current === pending ? null : current));
   }
 
   async function handleDelete(doc: LatexDocument) {
@@ -290,7 +337,7 @@ export default function LatexIndexPage() {
       <NewDocumentDialog
         open={newOpen}
         onClose={() => setNewOpen(false)}
-        onCreateBlank={(name) => void handleCreate(name)}
+        onCreateBlank={(name) => void createNamed(name)}
         onChooseImport={() => setImportOpen(true)}
       />
 
@@ -303,6 +350,17 @@ export default function LatexIndexPage() {
           setImportOpen(false);
           router.push(`/research/${projectId}/latex/${result.id}`);
         }}
+      />
+
+      <ConflictDialog
+        open={nameConflict !== null}
+        busy={nameBusy}
+        title="That name is taken"
+        description="This project already has a LaTeX project with that name. Keep both, or choose a different name."
+        collisions={nameConflict?.collisions ?? []}
+        taken={docs.map((d) => d.name)}
+        onCancel={() => setNameConflict(null)}
+        onConfirm={(decisions) => void confirmNameConflict(decisions)}
       />
     </div>
   );

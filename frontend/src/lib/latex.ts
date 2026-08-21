@@ -608,6 +608,20 @@ export function saveBlob(blob: Blob, filename: string): void {
  * page has no hook and must not invent a second rule for the same errors.
  */
 export function errorText(err: unknown): string {
+  // The typed 4xx errors are NOT `LatexRequestError`s -- they carry a payload
+  // (a suggestion, a candidate list) that no sentence could carry, which is
+  // the whole reason they exist. A caller that can act on one catches it by
+  // type and never reaches here; but a caller that cannot must still say what
+  // actually happened. Falling through to the generic line is how creating a
+  // second document with a taken name became an unactionable dead end.
+  if (err instanceof NameCollisionError) {
+    return `A project called "${err.takenName}" already exists here. Try "${err.suggestion}".`;
+  }
+  if (err instanceof AmbiguousMainError) {
+    return err.candidates.length > 0
+      ? `That archive has more than one main file (${err.candidates.join(", ")}). Choose which one to compile.`
+      : "That archive has more than one main file. Choose which one to compile.";
+  }
   return err instanceof LatexRequestError
     ? err.userMessage
     : "Something went wrong. Please try again.";

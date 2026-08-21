@@ -14,7 +14,6 @@ file a `\\input` names.
 
 from __future__ import annotations
 
-import re
 from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 
@@ -114,9 +113,3 @@ def plan_writes(incoming: Sequence[str], taken: Collection[str]) -> list[Collisi
         taken_keys[collision_key(suggestion)] = suggestion
         out.append(Collision(path=path, existing=existing, suggestion=suggestion))
     return out
-
-
-# Matches a name this module produced, for callers that want to display a
-# suffixed name differently. Not used to UNWRAP a name -- see the test
-# `test_an_already_suffixed_name_is_not_unwrapped` for why.
-SUFFIXED = re.compile(r" \((\d+)\)(\.[^.]*)?$")

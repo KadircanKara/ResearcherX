@@ -789,8 +789,10 @@ export function LatexWorkspace({ projectId, documentId, ownerId }: LatexWorkspac
           if (mode === "merge") {
             // The files landed in the document already on screen -- refresh
             // its tree, and stay exactly where the user was. Navigating
-            // would be navigating to the page they are on.
-            void doc.refreshFiles();
+            // would be navigating to the page they are on. The commit's own
+            // `revision` goes with it: the merge bumped it server-side, and
+            // without folding it in the pre-import PDF stays marked current.
+            void doc.refreshFiles(result.revision);
             return;
           }
           void doc.adoptDocument(result.id);

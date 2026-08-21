@@ -78,7 +78,16 @@ export function ConflictDialog({
 
   const rowProblems = problems(state, collisions, taken);
   const hasProblems = Object.keys(rowProblems).length > 0;
-  const visible = expanded ? collisions : collisions.slice(0, COLLAPSE_AT);
+  // A problem on a COLLAPSED row disables Confirm with nothing on screen to
+  // explain it, and no way to reach the row that caused it. `problems` is
+  // computed over every collision (it has to be -- two hidden rows renamed
+  // to the same thing is a real conflict), so the list force-expands
+  // whenever a hidden row is the one holding Confirm down.
+  const hiddenProblem = collisions
+    .slice(COLLAPSE_AT)
+    .some((c) => rowProblems[c.path] !== undefined);
+  const showAll = expanded || hiddenProblem;
+  const visible = showAll ? collisions : collisions.slice(0, COLLAPSE_AT);
 
   function rowAction(path: string): ConflictAction {
     return state.overrides[path]?.action ?? state.defaultAction;
@@ -219,8 +228,10 @@ export function ConflictDialog({
               size="sm"
               className="self-start"
               onClick={() => setExpanded((e) => !e)}
+              // Collapsing again would re-hide the row the user has to fix.
+              disabled={hiddenProblem}
             >
-              {expanded ? "Show fewer" : `Show all ${collisions.length}`}
+              {showAll ? "Show fewer" : `Show all ${collisions.length}`}
             </Button>
           )}
         </div>

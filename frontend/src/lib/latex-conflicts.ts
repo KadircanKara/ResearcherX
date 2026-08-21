@@ -70,8 +70,17 @@ export function decisions(
   return collisions.map((c) => ({ path: c.path, new_path: resolvedPath(state, c) }));
 }
 
-/** Mirrors the backend's own fold (`latex_paths.collision_key`). */
-function key(path: string): string {
+/**
+ * ADVISORY ONLY -- an approximation of the backend's fold
+ * (`latex_paths.collision_key`) that exists to grey out Confirm before a
+ * doomed round trip. It is NOT a validator and must never be promoted into
+ * one: the browser is never a second implementation of a server rule (the
+ * same line `latex_paths.normalize_path` and `latex_dedupe.suffix_path`
+ * hold), and the server re-checks every decision it is sent regardless. If
+ * this ever disagrees with the server, the server wins and the user sees the
+ * conflict dialog again -- which is exactly the intended failure mode.
+ */
+function advisoryKey(path: string): string {
   return path.toLowerCase();
 }
 
@@ -82,7 +91,7 @@ export function problems(
 ): Record<string, string> {
   const found: Record<string, string> = {};
   const seen = new Map<string, string>();
-  for (const t of taken) seen.set(key(t), t);
+  for (const t of taken) seen.set(advisoryKey(t), t);
 
   for (const c of collisions) {
     const resolved = resolvedPath(state, c);
@@ -90,7 +99,7 @@ export function problems(
       found[c.path] = "Enter a name.";
       continue;
     }
-    const k = key(resolved);
+    const k = advisoryKey(resolved);
     if (seen.has(k)) {
       found[c.path] = `${seen.get(k)} is already taken.`;
       continue;

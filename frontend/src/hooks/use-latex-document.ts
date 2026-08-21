@@ -85,8 +85,15 @@ export interface UseLatexDocument {
    * hook does not itself perform: a committed merge import writes files
    * straight into the open document, so nothing here saw the write and the
    * tree on screen would otherwise keep describing the pre-import project.
+   *
+   * `revision` is the number the COMMIT response returned and must be passed
+   * whenever the caller has one: a merge bumped `latex_documents.revision`
+   * server-side, and `revision` is this app's only staleness signal (see the
+   * `isStale` call in `use-latex-compile.ts`). Refreshing the tree alone
+   * leaves the pre-import PDF marked CURRENT after N new files landed --
+   * possibly the very chapter a `\input` names.
    */
-  refreshFiles: () => Promise<void>;
+  refreshFiles: (revision?: number) => Promise<void>;
   /**
    * Takes a document created OUTSIDE this hook (a committed "create" import)
    * into the list and selects it, so the caller does not have to re-list to
@@ -809,6 +816,14 @@ export function useLatexDocument(
         setDocuments((prev) => [...prev, doc]);
         setSelectedId(doc.id);
       } catch (err) {
+        // A duplicate NAME (409 `name_collision`) does NOT get the shared
+        // conflict dialog here, unlike the projects list page: this hook has
+        // no dialog host, and nothing in the workspace calls `createDoc` --
+        // the only surface that creates a document is the list page, which
+        // owns its own `ConflictDialog`. Rethrowing instead would hand a
+        // typed error to a caller that does not exist. What this path must
+        // still do is SAY what happened, and `errorText` now names the taken
+        // name and the server's suggestion rather than the generic line.
         setError(errorText(err));
       }
     },
@@ -855,11 +870,23 @@ export function useLatexDocument(
   // left here is only what a committed import means for state this hook
   // owns.
 
-  const refreshFiles = useCallback(async () => {
+  const refreshFiles = useCallback(async (revision?: number) => {
     const docId = selectedIdRef.current;
     if (!docId) return;
     try {
       await refreshTree(docId);
+      // Taken from the server's own response rather than re-fetched with a
+      // second `getDocument`: this hook's rule is that nothing increments
+      // `revision` itself, every call site uses the number the server
+      // actually returned (see `applyMutation`), and the commit response
+      // already carries it. `used_bytes` is not folded in here because
+      // `refreshTree` just took it from the freshly listed tree.
+      if (revision !== undefined && selectedIdRef.current === docId) {
+        setRevision(revision);
+        setDocumentState((prev) =>
+          prev && prev.id === docId ? { ...prev, revision } : prev
+        );
+      }
     } catch (err) {
       if (selectedIdRef.current !== docId) return;
       setError(errorText(err));
