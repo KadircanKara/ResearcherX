@@ -8,10 +8,12 @@ failure plan 1 fixed in `create_document`.
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import LatexDocument
+from app.services import latex_dedupe
 from app.services import latex_files_service as files
 from app.services.latex_archive import ArchiveEntry
 from app.services.latex_detect import detect_engine, detect_main
@@ -113,3 +115,39 @@ async def import_archive(
         db, document.id, [(e.path, e.data, e.is_binary) for e in entries]
     )
     return document, count
+
+
+def _without_manifest(entries: list[ArchiveEntry]) -> list[ArchiveEntry]:
+    """The manifest is consumed by import and never lands in the tree, so it
+    can neither collide nor be reported as colliding."""
+    return [e for e in entries if e.path != MANIFEST_PATH]
+
+
+def plan_merge(taken: Sequence[str], entries: list[ArchiveEntry]) -> list[latex_dedupe.Collision]:
+    """Which archive entries would collide with the tree they are merging
+    into. Pure -- the caller supplies the taken paths."""
+    return latex_dedupe.plan_writes([e.path for e in _without_manifest(entries)], taken)
+
+
+async def merge_archive(
+    db: AsyncSession,
+    *,
+    document_id: str,
+    entries: list[ArchiveEntry],
+    renames: dict[str, str],
+) -> int:
+    """Add an archive's files to an EXISTING document. Caller commits.
+
+    `renames` maps an archive path to the path it should land at -- the
+    user's resolved decisions. An entry with no rename lands at its own path.
+
+    The document's own `main_path` and `engine` are untouched, deliberately:
+    a merge adds files, and the archive's idea of which file is main has no
+    authority over a document that already compiles.
+    """
+    kept = _without_manifest(entries)
+    return await files.bulk_merge(
+        db,
+        document_id,
+        [(renames.get(e.path, e.path), e.data, e.is_binary) for e in kept],
+    )
