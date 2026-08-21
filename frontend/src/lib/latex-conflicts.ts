@@ -12,11 +12,24 @@ import type { LatexCollision } from "@/lib/latex";
  * server (`latex_dedupe.suffix_path`), which is the single implementation of
  * that rule -- the same reason path validation lives only in
  * `latex_paths.normalize_path` and never in the browser.
+ *
+ * `ConflictState.defaultAction` is read by the DIALOG, not by this module --
+ * see the field's own comment below.
  */
 
 export type ConflictAction = "keep_both" | "rename";
 
 export interface ConflictState {
+  /**
+   * The batch choice, consumed by the DIALOG only -- never read inside this
+   * module. It decides how a row with no override of its own RENDERS: static
+   * resolved text for `keep_both`, an editable field seeded with the
+   * server's suggestion for `rename`. It deliberately does not change what
+   * `resolvedPath`/`decisions` return -- a row the user has not typed into
+   * has no typed value to fall back to either way, so it resolves to the
+   * server's suggestion under either action. Branching on it here would be a
+   * distinction without a difference.
+   */
   defaultAction: ConflictAction;
   overrides: Record<string, { action: ConflictAction; newPath: string }>;
 }
