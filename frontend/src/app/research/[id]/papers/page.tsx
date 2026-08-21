@@ -4,11 +4,13 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams } from "next/navigation";
 import { FileText, Pencil, Plus, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { BulkEditBar } from "@/components/bulk-edit-bar";
 import { PaperDialog } from "@/components/paper-dialog";
 import { getProject, listPapers, deletePaper } from "@/lib/projects";
+import { clear, isAllSelected, selectAll, toggle } from "@/lib/selection";
 import type { Paper, Role } from "@/lib/types";
 
-const CAN_ADD: Role[] = ["owner", "editor"];
+const CAN_ADD: Role[] = ["owner", "member"];
 
 function fmtDate(iso: string) {
   return new Date(iso).toLocaleDateString("en-GB", {
@@ -25,6 +27,11 @@ export default function PapersPage() {
   const [loading, setLoading] = useState(true);
   const [deleting, setDeleting] = useState<string | null>(null);
   const [editing, setEditing] = useState<Paper | null>(null);
+
+  const [editingMode, setEditingMode] = useState(false);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const [bulkError, setBulkError] = useState<string | null>(null);
 
   // `silent` skips the full-page loading skeleton. The skeleton branch below
   // doesn't render <PaperDialog>, so a non-silent reload while the Add Paper
@@ -65,6 +72,26 @@ export default function PapersPage() {
     }
   }
 
+  async function handleBulkDelete() {
+    if (!window.confirm(`Delete ${selected.size} paper${selected.size !== 1 ? "s" : ""}? This cannot be undone.`)) {
+      return;
+    }
+    setBulkBusy(true);
+    const ids = [...selected];
+    const results = await Promise.allSettled(
+      ids.map((id) => deletePaper(projectId, id))
+    );
+    const failed = ids.filter((_, i) => results[i].status === "rejected");
+    setSelected(new Set(failed));
+    if (failed.length > 0) {
+      setBulkError(`${failed.length} of ${ids.length} could not be deleted.`);
+    }
+    setBulkBusy(false);
+    // Re-fetched unconditionally: what just proved unreliable is precisely
+    // this client's idea of what exists.
+    load({ silent: true });
+  }
+
   useEffect(() => {
     load();
   }, [load]);
@@ -80,6 +107,7 @@ export default function PapersPage() {
   }
 
   const canAdd = myRole !== null && CAN_ADD.includes(myRole);
+  const visibleIds = papers.map((p) => p.id);
 
   return (
     <div>
@@ -89,15 +117,40 @@ export default function PapersPage() {
             ? "No papers yet"
             : `${papers.length} paper${papers.length !== 1 ? "s" : ""}`}
         </p>
-        {canAdd && (
-          <PaperDialog projectId={projectId} onSaved={() => load({ silent: true })}>
-            <Button size="sm">
-              <Plus className="mr-1.5 size-3.5" />
-              Add Paper
-            </Button>
-          </PaperDialog>
-        )}
+        <div className="flex items-center gap-2">
+          <BulkEditBar
+            active={editingMode}
+            count={selected.size}
+            total={papers.length}
+            allSelected={isAllSelected(selected, visibleIds)}
+            busy={bulkBusy}
+            onEnter={() => setEditingMode(true)}
+            onSelectAll={() => setSelected(selectAll(selected, visibleIds))}
+            onClear={() => setSelected(clear())}
+            onDelete={() => void handleBulkDelete()}
+            onDone={() => {
+              setEditingMode(false);
+              // A selection that survives invisibly is a delete waiting to
+              // hit the wrong rows.
+              setSelected(clear());
+            }}
+          />
+          {canAdd && (
+            <PaperDialog projectId={projectId} onSaved={() => load({ silent: true })}>
+              <Button size="sm">
+                <Plus className="mr-1.5 size-3.5" />
+                Add Paper
+              </Button>
+            </PaperDialog>
+          )}
+        </div>
       </div>
+
+      {bulkError && (
+        <p className="mb-3 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+          {bulkError}
+        </p>
+      )}
 
       {papers.length === 0 && (
         <div className="flex flex-col items-center gap-3 py-24 text-center">
@@ -116,6 +169,15 @@ export default function PapersPage() {
             key={paper.id}
             className="flex items-start gap-3 rounded-xl border border-border bg-card px-4 py-3"
           >
+            {editingMode && (
+              <input
+                type="checkbox"
+                checked={selected.has(paper.id)}
+                onChange={() => setSelected(toggle(selected, paper.id))}
+                aria-label={`Select ${paper.title}`}
+                className="mt-1 size-4 shrink-0"
+              />
+            )}
             <div className="min-w-0 flex-1">
               <p className="line-clamp-1 text-sm font-medium text-foreground">
                 {paper.title}

@@ -15,6 +15,10 @@ export interface LatexDocument {
   engine: LatexEngine;
   created_at: string;
   updated_at: string;
+  /** Reported by the server; never re-derived from the project role. */
+  my_access: "editor" | "viewer";
+  /** Null for documents that predate the column; see the share dialog. */
+  created_by: string | null;
 }
 
 export interface CompileResult {

@@ -32,7 +32,7 @@ import {
 import { buildTree, isBeneath, isTexPath, parentDir } from "@/lib/latex-tree";
 import type { Role } from "@/lib/types";
 
-const CAN_EDIT: Role[] = ["owner", "editor"];
+const CAN_EDIT: Role[] = ["owner", "member"];
 const STALE_NOTE = "Out of date — compile to sync";
 // SyncTeX speaks paths relative to the main file's own directory, so a file
 // outside it has no representable coordinate -- this is a documented

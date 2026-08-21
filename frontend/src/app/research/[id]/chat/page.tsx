@@ -4,14 +4,16 @@ import { useCallback, useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { MessageSquarePlus, Plus, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { BulkEditBar } from "@/components/bulk-edit-bar";
 import { MentionTextarea } from "@/components/mention-textarea";
 import { createConversation, deleteConversation, listConversations } from "@/lib/chat";
 import type { Mention } from "@/lib/mentions";
 import { getProject, listPapers } from "@/lib/projects";
+import { clear, isAllSelected, selectAll, toggle } from "@/lib/selection";
 import type { ChatConversation, Paper, Role } from "@/lib/types";
 
-// Matches the backend: delete_conversation requires require_member(..., "editor").
-const CAN_DELETE: Role[] = ["owner", "editor"];
+// Project sharing is binary now: any member may delete a conversation.
+const CAN_DELETE: Role[] = ["owner", "member"];
 
 function fmtDate(iso: string): string {
   return new Date(iso).toLocaleDateString("en-GB", {
@@ -33,6 +35,11 @@ export default function ChatPage() {
   const [papers, setPapers] = useState<Paper[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
+
+  const [editingMode, setEditingMode] = useState(false);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const [bulkError, setBulkError] = useState<string | null>(null);
 
   // `silent` skips the loading skeleton — used by handleDelete's error path to
   // resync without flashing the whole list away under the user.
@@ -70,6 +77,26 @@ export default function ChatPage() {
     }
   }
 
+  async function handleBulkDelete() {
+    if (!window.confirm(`Delete ${selected.size} conversation${selected.size !== 1 ? "s" : ""}? This cannot be undone.`)) {
+      return;
+    }
+    setBulkBusy(true);
+    const ids = [...selected];
+    const results = await Promise.allSettled(
+      ids.map((id) => deleteConversation(projectId, id))
+    );
+    const failed = ids.filter((_, i) => results[i].status === "rejected");
+    setSelected(new Set(failed));
+    if (failed.length > 0) {
+      setBulkError(`${failed.length} of ${ids.length} could not be deleted.`);
+    }
+    setBulkBusy(false);
+    // Re-fetched unconditionally: what just proved unreliable is precisely
+    // this client's idea of what exists.
+    load({ silent: true });
+  }
+
   async function handleStart() {
     const q = content.trim();
     if (!q || submitting) return;
@@ -105,13 +132,40 @@ export default function ChatPage() {
             ? "No conversations yet"
             : `${conversations.length} conversation${conversations.length !== 1 ? "s" : ""}`}
         </p>
-        {!showForm && (
-          <Button size="sm" onClick={() => setShowForm(true)}>
-            <Plus className="mr-1.5 size-3.5" />
-            New Chat
-          </Button>
-        )}
+        <div className="flex items-center gap-2">
+          <BulkEditBar
+            active={editingMode}
+            count={selected.size}
+            total={conversations.length}
+            allSelected={isAllSelected(selected, conversations.map((c) => c.id))}
+            busy={bulkBusy}
+            onEnter={() => setEditingMode(true)}
+            onSelectAll={() =>
+              setSelected(selectAll(selected, conversations.map((c) => c.id)))
+            }
+            onClear={() => setSelected(clear())}
+            onDelete={() => void handleBulkDelete()}
+            onDone={() => {
+              setEditingMode(false);
+              // A selection that survives invisibly is a delete waiting to
+              // hit the wrong rows.
+              setSelected(clear());
+            }}
+          />
+          {!showForm && (
+            <Button size="sm" onClick={() => setShowForm(true)}>
+              <Plus className="mr-1.5 size-3.5" />
+              New Chat
+            </Button>
+          )}
+        </div>
       </div>
+
+      {bulkError && (
+        <p className="mb-3 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+          {bulkError}
+        </p>
+      )}
 
       {showForm && (
         <div className="mb-4 rounded-xl border border-border bg-card p-4">
@@ -159,6 +213,15 @@ export default function ChatPage() {
             key={conv.id}
             className="group flex w-full items-start gap-2 rounded-xl border border-border bg-card px-4 py-3 transition-colors hover:bg-muted"
           >
+            {editingMode && (
+              <input
+                type="checkbox"
+                checked={selected.has(conv.id)}
+                onChange={() => setSelected(toggle(selected, conv.id))}
+                aria-label={`Select ${conv.title}`}
+                className="mt-1 size-4 shrink-0"
+              />
+            )}
             <button
               type="button"
               onClick={() => router.push(`/research/${projectId}/chat/${conv.id}`)}

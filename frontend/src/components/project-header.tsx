@@ -24,7 +24,7 @@ export function ProjectHeader({ detail }: ProjectHeaderProps) {
           <ProjectColorPicker
             projectId={project.id}
             color={project.color}
-            canEdit={detail.my_role === "owner" || detail.my_role === "editor"}
+            canEdit={detail.my_role === "owner" || detail.my_role === "member"}
           />
         </div>
         <h1 className="truncate text-2xl font-semibold tracking-tight text-foreground">

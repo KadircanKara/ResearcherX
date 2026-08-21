@@ -5,6 +5,7 @@ import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { Download, FileCode2, Plus, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { BulkEditBar } from "@/components/bulk-edit-bar";
 import { ImportDropzone } from "@/components/latex/import-dropzone";
 import { NewDocumentDialog } from "@/components/latex/new-document-dialog";
 import {
@@ -18,10 +19,11 @@ import {
   type LatexDocument,
 } from "@/lib/latex";
 import { getProject } from "@/lib/projects";
+import { clear, isAllSelected, selectAll, toggle } from "@/lib/selection";
 import { STARTER } from "@/lib/latex-starter";
 import type { Role } from "@/lib/types";
 
-const CAN_EDIT: Role[] = ["owner", "editor"];
+const CAN_EDIT: Role[] = ["owner", "member"];
 
 function fmtDate(iso: string) {
   return new Date(iso).toLocaleDateString("en-GB", {
@@ -40,6 +42,11 @@ export default function LatexIndexPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
+
+  const [editingMode, setEditingMode] = useState(false);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const [bulkError, setBulkError] = useState<string | null>(null);
 
   const [newOpen, setNewOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
@@ -100,6 +107,27 @@ export default function LatexIndexPage() {
     }
   }
 
+  async function handleBulkDelete() {
+    if (!window.confirm(`Delete ${selected.size} project${selected.size !== 1 ? "s" : ""} and all of their files? This cannot be undone.`)) {
+      return;
+    }
+    setBulkBusy(true);
+    setBulkError(null);
+    const ids = [...selected];
+    const results = await Promise.allSettled(
+      ids.map((id) => deleteDocument(projectId, id))
+    );
+    const failed = ids.filter((_, i) => results[i].status === "rejected");
+    setSelected(new Set(failed));
+    if (failed.length > 0) {
+      setBulkError(`${failed.length} of ${ids.length} could not be deleted.`);
+    }
+    setBulkBusy(false);
+    // Re-fetched unconditionally: what just proved unreliable is precisely
+    // this client's idea of what exists.
+    void load();
+  }
+
   async function handleExport(doc: LatexDocument) {
     setBusyId(doc.id);
     setError(null);
@@ -152,17 +180,42 @@ export default function LatexIndexPage() {
             ? "No LaTeX projects yet"
             : `${docs.length} project${docs.length !== 1 ? "s" : ""}`}
         </p>
-        {canEdit && (
-          <Button size="sm" onClick={() => setNewOpen(true)}>
-            <Plus className="mr-1.5 size-3.5" />
-            New project
-          </Button>
-        )}
+        <div className="flex items-center gap-2">
+          <BulkEditBar
+            active={editingMode}
+            count={selected.size}
+            total={docs.length}
+            allSelected={isAllSelected(selected, docs.map((d) => d.id))}
+            busy={bulkBusy}
+            onEnter={() => setEditingMode(true)}
+            onSelectAll={() => setSelected(selectAll(selected, docs.map((d) => d.id)))}
+            onClear={() => setSelected(clear())}
+            onDelete={() => void handleBulkDelete()}
+            onDone={() => {
+              setEditingMode(false);
+              // A selection that survives invisibly is a delete waiting to
+              // hit the wrong rows.
+              setSelected(clear());
+            }}
+          />
+          {canEdit && (
+            <Button size="sm" onClick={() => setNewOpen(true)}>
+              <Plus className="mr-1.5 size-3.5" />
+              New project
+            </Button>
+          )}
+        </div>
       </div>
 
       {error && (
         <p className="mb-3 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
           {error}
+        </p>
+      )}
+
+      {bulkError && (
+        <p className="mb-3 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+          {bulkError}
         </p>
       )}
 
@@ -182,6 +235,17 @@ export default function LatexIndexPage() {
               key={doc.id}
               className="flex items-center gap-3 rounded-xl border border-border bg-card px-4 py-3"
             >
+              {editingMode && (
+                <input
+                  type="checkbox"
+                  checked={selected.has(doc.id)}
+                  disabled={doc.my_access !== "editor"}
+                  onChange={() => setSelected(toggle(selected, doc.id))}
+                  aria-label={`Select ${doc.name}`}
+                  title={doc.my_access === "editor" ? undefined : "You need edit access to delete this project"}
+                  className="mt-1 size-4 shrink-0 disabled:opacity-40"
+                />
+              )}
               {/* The whole name is the link, but the row's buttons are not
                   inside it -- an <a> wrapping the actions would make Export
                   navigate as well as download. */}
@@ -208,7 +272,7 @@ export default function LatexIndexPage() {
                 <Download className="size-4" />
               </button>
 
-              {canEdit && (
+              {doc.my_access === "editor" && (
                 <button
                   onClick={() => void handleDelete(doc)}
                   disabled={busyId === doc.id}

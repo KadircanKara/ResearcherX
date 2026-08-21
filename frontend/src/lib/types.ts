@@ -2,7 +2,7 @@ export type RunStatus = "pending" | "running" | "completed" | "failed";
 
 export type User = { id: string; email: string; name: string; avatar_color: string };
 
-export type Role = "owner" | "editor" | "commenter" | "viewer";
+export type Role = "owner" | "member";
 
 export interface Project {
   id: string;
