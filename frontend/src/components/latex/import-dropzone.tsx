@@ -87,7 +87,11 @@ export function ImportDropzone({
 
   return (
     <Dialog open={open} onOpenChange={(next) => !next && onClose()}>
-      <DialogContent className="sm:max-w-md">
+      {/* `flex ... max-h-[90vh]` and the scroll container below, mirroring
+          the paper dialog: the default `DialogContent` is a grid that grows
+          with its content, so a tall body pushed the footer off the bottom
+          of the viewport with no way to reach it. */}
+      <DialogContent className="flex max-h-[90vh] flex-col sm:max-w-md">
         <DialogHeader>
           <DialogTitle>Import a .zip</DialogTitle>
           {showPicker ? (
@@ -102,73 +106,98 @@ export function ImportDropzone({
           )}
         </DialogHeader>
 
-        {showPicker ? (
-          <div className="flex flex-col gap-1.5">
-            {candidates.map((candidate) => (
-              <label
-                key={candidate}
-                className="flex items-center gap-2 rounded-md border border-input px-2.5 py-1.5 text-sm hover:bg-muted/60"
-              >
-                <input
-                  type="radio"
-                  name="main-candidate"
-                  value={candidate}
-                  checked={chosenMain === candidate}
-                  onChange={() => setChosenMain(candidate)}
-                />
-                <span className="truncate font-mono text-xs">{candidate}</span>
-              </label>
-            ))}
-          </div>
-        ) : (
-          <>
-            <div
-              onDragOver={(e) => {
-                e.preventDefault();
-                setDragOver(true);
-              }}
-              onDragLeave={() => setDragOver(false)}
-              onDrop={handleDrop}
-              className={cn(
-                "flex flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed px-4 py-8 text-center text-sm text-muted-foreground transition-colors",
-                dragOver ? "border-primary bg-primary/5" : "border-input"
-              )}
-            >
-              <UploadCloud className="size-6" />
-              {file ? (
-                <span className="font-medium text-foreground">{file.name}</span>
-              ) : (
-                <span>Drag a .zip here, or</span>
-              )}
-              <label className="cursor-pointer text-primary underline underline-offset-2">
-                browse
-                <input
-                  type="file"
-                  accept=".zip,application/zip"
-                  className="hidden"
-                  onChange={(e) => pickFile(e.target.files?.[0] ?? null)}
-                />
-              </label>
-            </div>
-
-            {file && (
-              <div className="flex flex-col gap-1">
-                <label className="text-xs font-medium text-muted-foreground">
-                  Document name
+        {/* `min-w-0` is what actually contains a long file name. A flex (or
+            grid) item's automatic minimum size is its CONTENT, and an
+            underscore-joined archive name has no break opportunity at all,
+            so without this the body refuses to shrink and the name spills
+            straight out past the dialog's edge. */}
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col gap-4 overflow-y-auto">
+          {showPicker ? (
+            <div className="flex flex-col gap-1.5">
+              {candidates.map((candidate) => (
+                <label
+                  key={candidate}
+                  className="flex items-center gap-2 rounded-md border border-input px-2.5 py-1.5 text-sm hover:bg-muted/60"
+                >
+                  <input
+                    type="radio"
+                    name="main-candidate"
+                    value={candidate}
+                    checked={chosenMain === candidate}
+                    onChange={() => setChosenMain(candidate)}
+                  />
+                  <span
+                    className="min-w-0 truncate font-mono text-xs"
+                    title={candidate}
+                  >
+                    {candidate}
+                  </span>
                 </label>
-                <Input value={name} onChange={(e) => setName(e.target.value)} />
+              ))}
+            </div>
+          ) : (
+            <>
+              <div
+                onDragOver={(e) => {
+                  e.preventDefault();
+                  setDragOver(true);
+                }}
+                onDragLeave={() => setDragOver(false)}
+                onDrop={handleDrop}
+                className={cn(
+                  "flex flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed px-4 py-8 text-center text-sm text-muted-foreground transition-colors",
+                  dragOver ? "border-primary bg-primary/5" : "border-input",
+                )}
+              >
+                <UploadCloud className="size-6" />
+                {file ? (
+                  /* Truncated with the full name on hover, exactly like the
+                   paper upload rows -- wrapping instead would let one long
+                   name resize the dialog under the user. */
+                  <span
+                    className="max-w-full truncate font-medium text-foreground"
+                    title={file.name}
+                  >
+                    {file.name}
+                  </span>
+                ) : (
+                  <span>Drag a .zip here, or</span>
+                )}
+                <label className="cursor-pointer text-primary underline underline-offset-2">
+                  browse
+                  <input
+                    type="file"
+                    accept=".zip,application/zip"
+                    className="hidden"
+                    onChange={(e) => pickFile(e.target.files?.[0] ?? null)}
+                  />
+                </label>
               </div>
-            )}
-          </>
-        )}
 
-        {/*
+              {file && (
+                <div className="flex flex-col gap-1">
+                  <label className="text-xs font-medium text-muted-foreground">
+                    Document name
+                  </label>
+                  <Input
+                    value={name}
+                    onChange={(e) => setName(e.target.value)}
+                  />
+                </div>
+              )}
+            </>
+          )}
+
+          {/*
           Every failure but the ambiguous-main one lands here verbatim: these
           are the user's own errors (too large, not a zip, encrypted,
           traversal, no main file) and the backend's message already names
           the real problem -- see `LatexRequestError.userMessage`.
         */}
-        {error && <p className="text-sm text-destructive">{error}</p>}
+          {error && (
+            <p className="text-sm break-words text-destructive">{error}</p>
+          )}
+        </div>
 
         <DialogFooter>
           <Button variant="outline" onClick={onClose} disabled={busy}>
@@ -176,7 +205,9 @@ export function ImportDropzone({
           </Button>
           <Button
             onClick={submit}
-            disabled={busy || !file || !name.trim() || (showPicker && !chosenMain)}
+            disabled={
+              busy || !file || !name.trim() || (showPicker && !chosenMain)
+            }
           >
             {busy && <Loader2 className="size-3.5 animate-spin" />}
             Import
