@@ -244,6 +244,25 @@ export interface LatexImportResult {
 }
 
 /**
+ * Everything the client must ask the user about, from ONE upload.
+ *
+ * A merge collides by definition -- it is the common path, not the rare
+ * one -- so a plan that answered with a 409 would make every merge cost two
+ * uploads. `collisions`/`name_collision`/`ambiguous_main` are the things
+ * `commitImport` needs decisions for; the client never computes a `(n)`
+ * suggestion itself, it only displays the server's.
+ */
+export interface LatexImportPlan {
+  staging_id: string;
+  mode: "create" | "merge";
+  file_count: number;
+  collisions: LatexCollision[];
+  name_collision: { name: string; suggestion: string } | null;
+  // Detection could not choose. The client must send `main_path` on commit.
+  ambiguous_main: string[] | null;
+}
+
+/**
  * A request the backend refused.
  *
  * `detail` is the server's own message and is shown to the user ONLY for a
@@ -280,6 +299,40 @@ export class AmbiguousMainError extends Error {
   }
 }
 
+export interface LatexCollision {
+  path: string;
+  existing: string;
+  suggestion: string;
+}
+
+/**
+ * A 409 the client can act on: show the conflict dialog and re-send with a
+ * decision. The same shape the `AmbiguousMainError` branch above established
+ * -- a typed error carrying the payload, because the caller needs the
+ * suggestion and a sentence cannot carry it.
+ */
+export class PathCollisionError extends Error {
+  readonly collisions: LatexCollision[];
+  constructor(collisions: LatexCollision[]) {
+    super("path collision");
+    this.name = "PathCollisionError";
+    this.collisions = collisions;
+  }
+}
+
+/** A 409 naming the project-level document name a "create" import collided
+ * with, plus the server's own `(n)` suggestion. */
+export class NameCollisionError extends Error {
+  readonly takenName: string;
+  readonly suggestion: string;
+  constructor(takenName: string, suggestion: string) {
+    super("name collision");
+    this.name = "NameCollisionError";
+    this.takenName = takenName;
+    this.suggestion = suggestion;
+  }
+}
+
 function headers(extra: Record<string, string> = {}): Record<string, string> {
   const h = { ...extra };
   const devUserId = getDevUserId();
@@ -299,9 +352,21 @@ async function raise(r: Response): Promise<never> {
     if (body && typeof body.detail === "object" && body.detail?.error === "ambiguous_main") {
       throw new AmbiguousMainError(body.detail.candidates ?? []);
     }
+    if (body && typeof body.detail === "object" && body.detail?.error === "path_collision") {
+      throw new PathCollisionError(body.detail.collisions ?? []);
+    }
+    if (body && typeof body.detail === "object" && body.detail?.error === "name_collision") {
+      throw new NameCollisionError(body.detail.name, body.detail.suggestion);
+    }
     detail = typeof body?.detail === "string" ? body.detail : null;
   } catch (err) {
-    if (err instanceof AmbiguousMainError) throw err;
+    if (
+      err instanceof AmbiguousMainError ||
+      err instanceof PathCollisionError ||
+      err instanceof NameCollisionError
+    ) {
+      throw err;
+    }
     // A non-JSON error body (a proxy's HTML 502 page) is not a message for
     // the user; it falls through to the generic line.
   }
@@ -361,9 +426,13 @@ export async function writeTextFile(
   projectId: string,
   documentId: string,
   path: string,
-  content: string
+  content: string,
+  // "fail" is the server's default and the safe one. Autosave passes
+  // "replace" because it KNOWS the file exists and means to replace it;
+  // every other caller is creating.
+  ifExists: "fail" | "replace" = "fail"
 ): Promise<LatexMutation> {
-  return send<LatexMutation>(fileUrl(projectId, documentId, path), {
+  return send<LatexMutation>(`${fileUrl(projectId, documentId, path)}&if_exists=${ifExists}`, {
     method: "PUT",
     headers: headers({ "Content-Type": "application/json" }),
     body: JSON.stringify({ content }),
@@ -415,22 +484,51 @@ export async function renameFile(
   );
 }
 
-export async function importArchive(
+/**
+ * Step 1 of the two-step import flow: stage an uploaded archive and report
+ * what it would collide with, without writing anything. `documentId` targets
+ * a merge into an existing document; omitted, the plan is for a new
+ * document. `commitImport` finishes the import against the returned
+ * `staging_id`.
+ */
+export async function planImport(
   projectId: string,
   zip: Blob,
-  name: string,
-  mainPath?: string
-): Promise<LatexImportResult> {
-  const query = new URLSearchParams({ name });
-  if (mainPath) query.set("main_path", mainPath);
-  return send<LatexImportResult>(
-    `${API_BASE}/v1/projects/${projectId}/latex/import?${query.toString()}`,
+  opts: { documentId?: string; name?: string } = {}
+): Promise<LatexImportPlan> {
+  const query = new URLSearchParams();
+  if (opts.documentId) query.set("document_id", opts.documentId);
+  if (opts.name) query.set("name", opts.name);
+  return send<LatexImportPlan>(
+    `${API_BASE}/v1/projects/${projectId}/latex/import/plan?${query.toString()}`,
     {
       method: "POST",
       headers: headers({ "Content-Type": "application/zip" }),
       body: zip,
     }
   );
+}
+
+/**
+ * Step 2: commit a staged import, carrying the caller's resolution for every
+ * collision the plan reported (`decisions`, `path` -> `new_path`) plus
+ * `main_path` when the plan came back with `ambiguous_main`.
+ */
+export async function commitImport(
+  projectId: string,
+  body: {
+    staging_id: string;
+    name?: string;
+    main_path?: string;
+    document_id?: string;
+    decisions: { path: string; new_path: string }[];
+  }
+): Promise<LatexImportResult> {
+  return send<LatexImportResult>(`${API_BASE}/v1/projects/${projectId}/latex/import/commit`, {
+    method: "POST",
+    headers: headers({ "Content-Type": "application/json" }),
+    body: JSON.stringify(body),
+  });
 }
 
 /**
