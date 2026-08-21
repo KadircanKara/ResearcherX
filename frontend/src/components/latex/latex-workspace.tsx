@@ -57,20 +57,36 @@ interface LatexWorkspaceProps {
 export function LatexWorkspace({ projectId, documentId, ownerId }: LatexWorkspaceProps) {
   const router = useRouter();
 
-  // The server's answer, not the project role: access is per document now.
-  // Starts false (the safe direction) because the document hasn't loaded yet
-  // -- nothing gated behind `canEdit` is reachable before then anyway, since
-  // the whole shell below is still the loading skeleton at that point. The
-  // effect below tracks the hook's own `document.my_access` once it lands;
-  // it can't be read inline here because `doc` is this very hook call's
-  // result.
-  const [canEdit, setCanEdit] = useState(false);
+  // `useLatexDocument` needs a `canEdit` boolean as an ARGUMENT, before its
+  // own return value (`doc`) exists to derive one from -- so this state is
+  // purely to satisfy that one circular requirement, and gates nothing a
+  // user can see. It lags the real answer by up to one render on a document
+  // switch (see the load effect's `.then`/`.finally` pair in
+  // `use-latex-document.ts`), which is harmless here because every UI
+  // control a user could act through is instead gated by `canEdit` below,
+  // which never lags.
+  const [hookCanEdit, setHookCanEdit] = useState(false);
 
-  const doc = useLatexDocument(projectId, canEdit, documentId);
+  const doc = useLatexDocument(projectId, hookCanEdit, documentId);
 
   useEffect(() => {
-    setCanEdit(doc.document?.my_access === "editor");
+    setHookCanEdit(doc.document?.my_access === "editor");
   }, [doc.document?.my_access]);
+
+  // The component-facing answer, read fresh every render -- no state, no
+  // effect, so it can never lag `doc.document` by a render the way the
+  // hook-gate above deliberately does. The `doc.document?.id === documentId`
+  // half is load-bearing on its own: `documentState` only resets to `null`
+  // on the hook's `!docId` branch, so switching between two non-null
+  // documents leaves the PREVIOUS document's `my_access` sitting in
+  // `doc.document` for one render after `documentId` (the route) has
+  // already moved on -- `my_access` alone would fail OPEN for that render
+  // (a viewer landing on a document they could edit a moment ago would
+  // briefly see compile enabled, delete visible, and a writable editor).
+  // Requiring the id match closes that: a document swap can only ever
+  // render `canEdit` false until the NEW document's own access lands, never
+  // the old one's.
+  const canEdit = doc.document?.id === documentId && doc.document?.my_access === "editor";
 
   // Scoped to the document `compile()` is about to build, exactly like the
   // in-flight patch it awaits -- an engine change for some OTHER document
