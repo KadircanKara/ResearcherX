@@ -112,13 +112,26 @@ async def owner_id_of(db: AsyncSession, project_id: str) -> str | None:
     owner is -- `ProjectMember` is the single authority for access decisions,
     so this must not read `Project.owner_id` as a second, potentially
     disagreeing source of truth.
+
+    Orders deterministically and takes the first row rather than asserting
+    uniqueness with `scalar_one_or_none()`. The contract here is "an owner",
+    not "proof there is exactly one" -- the API can no longer create a second
+    owner row after the role collapse, but seed data or a direct database
+    write still can, and this function must not 500 every grant-route POST
+    if that happens.
     """
     membership = (
-        await db.execute(
-            select(ProjectMember).where(
-                ProjectMember.project_id == project_id,
-                ProjectMember.role == "owner",
+        (
+            await db.execute(
+                select(ProjectMember)
+                .where(
+                    ProjectMember.project_id == project_id,
+                    ProjectMember.role == "owner",
+                )
+                .order_by(ProjectMember.created_at, ProjectMember.id)
             )
         )
-    ).scalar_one_or_none()
+        .scalars()
+        .first()
+    )
     return None if membership is None else membership.user_id

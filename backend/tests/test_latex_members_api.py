@@ -146,11 +146,22 @@ async def test_a_grant_is_updated_and_revoked(client, shared):
 
 
 async def test_removing_a_project_member_revokes_their_document_grants(client, shared):
-    await client.post(
+    granted = await client.post(
         f"/v1/projects/{shared['project_id']}/latex/{shared['document_id']}/members",
         json={"user_id": shared["amelia"].id, "role": "editor"},
         headers={"X-Dev-User-Id": shared["you"].id},
     )
+    assert granted.status_code == 201
+
+    before = await client.get(
+        f"/v1/projects/{shared['project_id']}/latex/{shared['document_id']}/members",
+        headers={"X-Dev-User-Id": shared["you"].id},
+    )
+    # Proves the assertion below is not vacuously true: if grant creation ever
+    # started returning a non-201, this would already be empty and the final
+    # `== []` would prove nothing.
+    assert before.json() != []
+
     await client.delete(
         f"/v1/projects/{shared['project_id']}/members/{shared['amelia'].id}",
         headers={"X-Dev-User-Id": shared["you"].id},
@@ -161,3 +172,32 @@ async def test_removing_a_project_member_revokes_their_document_grants(client, s
         headers={"X-Dev-User-Id": shared["you"].id},
     )
     assert listed.json() == []
+
+
+async def test_reposting_a_grant_updates_the_existing_row_instead_of_adding_one(client, shared):
+    """The upsert branch: re-sharing with someone who already has access
+    updates their role rather than 409ing or creating a second row. The row
+    COUNT after the second POST is what proves an update happened, not just
+    the returned role."""
+    first = await client.post(
+        f"/v1/projects/{shared['project_id']}/latex/{shared['document_id']}/members",
+        json={"user_id": shared["amelia"].id, "role": "editor"},
+        headers={"X-Dev-User-Id": shared["you"].id},
+    )
+    assert first.status_code == 201
+
+    second = await client.post(
+        f"/v1/projects/{shared['project_id']}/latex/{shared['document_id']}/members",
+        json={"user_id": shared["amelia"].id, "role": "viewer"},
+        headers={"X-Dev-User-Id": shared["you"].id},
+    )
+    assert second.status_code == 201
+    assert second.json()["role"] == "viewer"
+
+    listed = await client.get(
+        f"/v1/projects/{shared['project_id']}/latex/{shared['document_id']}/members",
+        headers={"X-Dev-User-Id": shared["you"].id},
+    )
+    rows = [m for m in listed.json() if m["user"]["id"] == shared["amelia"].id]
+    assert len(rows) == 1
+    assert rows[0]["role"] == "viewer"

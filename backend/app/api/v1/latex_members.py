@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import delete as sa_delete, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.identity import get_current_user
@@ -110,7 +111,26 @@ async def add_grant(
 
     grant = LatexDocumentMember(document_id=document_id, user_id=data.user_id, role=data.role)
     db.add(grant)
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError:
+        # Two concurrent POSTs for the same (document_id, user_id) can both
+        # pass the `existing is None` check above before either commits --
+        # the second one's insert then trips the UniqueConstraint. Fall back
+        # to the same update-in-place outcome the upsert branch already
+        # produces, rather than surfacing a 500 on a grant route.
+        await db.rollback()
+        existing = (
+            await db.execute(
+                select(LatexDocumentMember).where(
+                    LatexDocumentMember.document_id == document_id,
+                    LatexDocumentMember.user_id == data.user_id,
+                )
+            )
+        ).scalar_one()
+        existing.role = data.role
+        await db.commit()
+        return await _out(db, existing)
     await db.refresh(grant)
     return await _out(db, grant)
 
