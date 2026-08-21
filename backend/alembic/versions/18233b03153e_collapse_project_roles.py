@@ -28,4 +28,10 @@ def downgrade() -> None:
     # ONE-WAY. Which members had non-viewer roles is not recoverable from the
     # collapsed data, so this restores the LEAST granting role rather than guessing.
     # A downgrade here is lossy, not a round trip.
+    #
+    # This restores the DATA but not the CODE: 'viewer' is not in the
+    # post-collapse Python ROLE_RANK (app/core/permissions.py), so running
+    # this downgrade without also reverting the application code leaves
+    # every non-owner ranked -1 -- locked out of their own projects, not
+    # merely downgraded to viewer.
     op.execute("UPDATE project_members SET role = 'viewer' WHERE role = 'member'")

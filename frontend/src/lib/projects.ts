@@ -45,14 +45,6 @@ export async function addMember(
   return (await apiSend<Member>("POST", `/projects/${id}/members`, body)) as Member;
 }
 
-export async function updateMemberRole(
-  id: string,
-  userId: string,
-  body: { role: Role }
-): Promise<Member> {
-  return (await apiSend<Member>("PATCH", `/projects/${id}/members/${userId}`, body)) as Member;
-}
-
 export async function removeMember(id: string, userId: string): Promise<void> {
   await apiSend<void>("DELETE", `/projects/${id}/members/${userId}`);
 }

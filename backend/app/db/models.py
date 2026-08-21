@@ -97,11 +97,6 @@ class Role(StrEnum):
     MEMBER = "member"
 
 
-class LatexAccess(StrEnum):
-    EDITOR = "editor"
-    VIEWER = "viewer"
-
-
 class PaperSource(StrEnum):
     UPLOAD = "upload"
     LINK = "link"

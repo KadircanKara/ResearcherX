@@ -42,8 +42,8 @@ export function ShareDialog({ project, initialMembers }: ShareDialogProps) {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  // Add collaborator form state. Sharing is binary now (owner/member) --
-  // there is no role to pick, so Task 10 owns whatever replaces this row.
+  // Add collaborator form state. Sharing is binary now (owner/member), so
+  // this row is just a user picker -- there is no role to select.
   const [addUserId, setAddUserId] = useState("")
   const [adding, setAdding] = useState(false)
 

@@ -6,7 +6,7 @@ Run order: write these first (red), then implement (green).
 import pytest
 from fastapi import HTTPException
 
-from app.db.models import Role, User
+from app.db.models import LatexDocument, LatexDocumentMember, Role, User
 from app.schemas.project import ProjectCreate, ProjectUpdate
 from app.services.project_service import (
     add_member,
@@ -14,6 +14,7 @@ from app.services.project_service import (
     get_project,
     list_projects,
     remove_member,
+    update_member_role,
     update_project,
 )
 
@@ -167,3 +168,71 @@ async def test_counts_members_correct(db_session):
     assert listing[0]["counts"]["members"] == 2
     assert listing[0]["counts"]["papers"] == 0
     assert listing[0]["counts"]["chats"] == 0
+
+
+async def test_sole_owner_cannot_demote_themselves(db_session):
+    """update_member_role → 400 when the target is the last remaining owner."""
+    owner = await _seed_user(db_session, "owner@x.io")
+
+    project = await create_project(db_session, owner, ProjectCreate(title="P"))
+
+    with pytest.raises(HTTPException) as exc_info:
+        await update_member_role(db_session, owner, project.id, owner.id, "member")
+    assert exc_info.value.status_code == 400
+
+
+async def test_demotion_succeeds_with_two_owners(db_session):
+    """With a second owner present, demoting one of them is allowed."""
+    owner = await _seed_user(db_session, "owner@x.io")
+    other = await _seed_user(db_session, "other@x.io")
+
+    project = await create_project(db_session, owner, ProjectCreate(title="P"))
+    # add_member only ever assigns "member" -- seed a second owner directly,
+    # the same way create_project seeds the first.
+    from app.db.models import ProjectMember
+
+    db_session.add(ProjectMember(project_id=project.id, user_id=other.id, role="owner"))
+    await db_session.commit()
+
+    membership = await update_member_role(db_session, owner, project.id, other.id, "member")
+    assert membership.role == "member"
+
+
+async def test_remove_member_only_deletes_grants_in_that_project(db_session):
+    """remove_member's grant cleanup subquery is scoped by project, not global."""
+    owner = await _seed_user(db_session, "owner@x.io")
+    member = await _seed_user(db_session, "member@x.io")
+
+    project_a = await create_project(db_session, owner, ProjectCreate(title="A"))
+    project_b = await create_project(db_session, owner, ProjectCreate(title="B"))
+    await add_member(db_session, owner, project_a.id, member.id, "member")
+    await add_member(db_session, owner, project_b.id, member.id, "member")
+
+    doc_a = LatexDocument(project_id=project_a.id, name="doc-a", created_by=owner.id)
+    doc_b = LatexDocument(project_id=project_b.id, name="doc-b", created_by=owner.id)
+    db_session.add_all([doc_a, doc_b])
+    await db_session.flush()
+
+    grant_a = LatexDocumentMember(document_id=doc_a.id, user_id=member.id, role="editor")
+    grant_b = LatexDocumentMember(document_id=doc_b.id, user_id=member.id, role="editor")
+    db_session.add_all([grant_a, grant_b])
+    await db_session.commit()
+
+    await remove_member(db_session, owner, project_a.id, member.id)
+
+    from sqlalchemy import select
+
+    remaining = (
+        await db_session.execute(
+            select(LatexDocumentMember).where(LatexDocumentMember.document_id == doc_b.id)
+        )
+    ).scalar_one_or_none()
+    assert remaining is not None
+    assert remaining.user_id == member.id
+
+    removed = (
+        await db_session.execute(
+            select(LatexDocumentMember).where(LatexDocumentMember.document_id == doc_a.id)
+        )
+    ).scalar_one_or_none()
+    assert removed is None

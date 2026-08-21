@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { Download, FileCode2, Plus, Trash2 } from "lucide-react";
@@ -54,21 +54,31 @@ export default function LatexIndexPage() {
   const [importCandidates, setImportCandidates] = useState<string[]>([]);
   const [importError, setImportError] = useState<string | null>(null);
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const [rows, detail] = await Promise.all([
-        listDocuments(projectId),
-        getProject(projectId),
-      ]);
-      setDocs(rows);
-      setRole(detail.my_role);
-    } catch (err) {
-      setError(errorText(err));
-    } finally {
-      setLoading(false);
-    }
+  // `silent` skips the full-page loading skeleton. The skeleton branch below
+  // unmounts the whole page -- including any error banner just set by a bulk
+  // delete -- so a non-silent reload right after a partial failure destroys
+  // the message telling the user it happened. Mirrors the papers page.
+  //
+  // `loadSeq` guards against out-of-order resolution the same way.
+  const loadSeq = useRef(0);
+
+  const load = useCallback((opts: { silent?: boolean } = {}) => {
+    const seq = ++loadSeq.current;
+    if (!opts.silent) setLoading(true);
+    if (!opts.silent) setError(null);
+    Promise.all([listDocuments(projectId), getProject(projectId)])
+      .then(([rows, detail]) => {
+        if (seq !== loadSeq.current) return; // a newer load already won
+        setDocs(rows);
+        setRole(detail.my_role);
+      })
+      .catch((err) => {
+        if (seq !== loadSeq.current) return;
+        setError(errorText(err));
+      })
+      .finally(() => {
+        if (seq === loadSeq.current) setLoading(false);
+      });
   }, [projectId]);
 
   useEffect(() => {
@@ -76,6 +86,13 @@ export default function LatexIndexPage() {
   }, [load]);
 
   const canEdit = role !== null && CAN_EDIT.includes(role);
+
+  // "Select all" means every row the user can actually act on -- which is
+  // what the disabled checkboxes on view-only rows already say on screen.
+  // Handing selectAll/isAllSelected the full doc list would select rows the
+  // checkbox itself refuses to let the user check, guaranteeing a partial-
+  // failure banner and making "all selected" unreachable by clicking.
+  const deletableIds = docs.filter((d) => d.my_access === "editor").map((d) => d.id);
 
   async function handleCreate(name: string) {
     setError(null);
@@ -101,7 +118,7 @@ export default function LatexIndexPage() {
       setDocs((prev) => prev.filter((d) => d.id !== doc.id));
     } catch (err) {
       setError(errorText(err));
-      void load();
+      load({ silent: true });
     } finally {
       setBusyId(null);
     }
@@ -124,8 +141,12 @@ export default function LatexIndexPage() {
     }
     setBulkBusy(false);
     // Re-fetched unconditionally: what just proved unreliable is precisely
-    // this client's idea of what exists.
-    void load();
+    // this client's idea of what exists. Silent: a non-silent load flips
+    // `loading` true, and the skeleton branch below unmounts the whole page
+    // -- including the bulkError banner just set above -- which would erase
+    // the failure message on exactly the page where a partial failure is
+    // most likely (some rows are view-only and never eligible to delete).
+    load({ silent: true });
   }
 
   async function handleExport(doc: LatexDocument) {
@@ -184,11 +205,11 @@ export default function LatexIndexPage() {
           <BulkEditBar
             active={editingMode}
             count={selected.size}
-            total={docs.length}
-            allSelected={isAllSelected(selected, docs.map((d) => d.id))}
+            total={deletableIds.length}
+            allSelected={isAllSelected(selected, deletableIds)}
             busy={bulkBusy}
             onEnter={() => setEditingMode(true)}
-            onSelectAll={() => setSelected(selectAll(selected, docs.map((d) => d.id)))}
+            onSelectAll={() => setSelected(selectAll(selected, deletableIds))}
             onClear={() => setSelected(clear())}
             onDelete={() => void handleBulkDelete()}
             onDone={() => {

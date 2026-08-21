@@ -186,7 +186,7 @@ async def update_member_role(
     target_user_id: str,
     role: str,
 ) -> ProjectMember:
-    """Change a member's role — requires owner."""
+    """Change a member's role — requires owner; refuses if it would demote the last owner."""
     await _require_member(db, project_id, user.id, "owner")
     if role not in ASSIGNABLE_ROLES:
         raise HTTPException(status_code=422, detail="Invalid role")
@@ -194,6 +194,13 @@ async def update_member_role(
     membership = await _get_membership(db, project_id, target_user_id)
     if membership is None:
         raise HTTPException(status_code=404, detail="Member not found")
+
+    if membership.role == "owner":
+        # Count remaining owners
+        members = await _get_members(db, project_id)
+        owner_count = sum(1 for m in members if m.role == "owner")
+        if owner_count <= 1:
+            raise HTTPException(status_code=400, detail="Cannot demote the last owner")
 
     membership.role = role
     await db.commit()
