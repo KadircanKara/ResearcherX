@@ -9,11 +9,9 @@ import { BulkEditBar } from "@/components/bulk-edit-bar";
 import { ImportDropzone } from "@/components/latex/import-dropzone";
 import { NewDocumentDialog } from "@/components/latex/new-document-dialog";
 import {
-  AmbiguousMainError,
   createDocument,
   deleteDocument,
   downloadExport,
-  importArchive,
   listDocuments,
   errorText,
   type LatexDocument,
@@ -49,10 +47,12 @@ export default function LatexIndexPage() {
   const [bulkError, setBulkError] = useState<string | null>(null);
 
   const [newOpen, setNewOpen] = useState(false);
+  // Open state only: the two-step plan/commit conversation, its busy flag
+  // and its own error all live inside `ImportDropzone`. This page passes no
+  // `documentId`, so the dialog can only ever CREATE a document here -- there
+  // is nothing open to merge into -- and the only duplicate it can report is
+  // a duplicate document NAME.
   const [importOpen, setImportOpen] = useState(false);
-  const [importBusy, setImportBusy] = useState(false);
-  const [importCandidates, setImportCandidates] = useState<string[]>([]);
-  const [importError, setImportError] = useState<string | null>(null);
 
   // `silent` skips the full-page loading skeleton. The skeleton branch below
   // unmounts the whole page -- including any error banner just set by a bulk
@@ -159,28 +159,6 @@ export default function LatexIndexPage() {
     } finally {
       setBusyId(null);
     }
-  }
-
-  function handleImport(zip: File, name: string, mainPath?: string) {
-    setImportBusy(true);
-    setImportError(null);
-    setImportCandidates([]);
-    importArchive(projectId, zip, name, mainPath)
-      .then((doc) => {
-        setImportOpen(false);
-        router.push(`/research/${projectId}/latex/${doc.id}`);
-      })
-      .catch((err) => {
-        // Rethrown unchanged by `importArchive` so the dropzone can render
-        // its candidate picker -- this is the only failure that is not an
-        // error message.
-        if (err instanceof AmbiguousMainError) {
-          setImportCandidates(err.candidates);
-          return;
-        }
-        setImportError(errorText(err));
-      })
-      .finally(() => setImportBusy(false));
   }
 
   if (loading) {
@@ -313,24 +291,18 @@ export default function LatexIndexPage() {
         open={newOpen}
         onClose={() => setNewOpen(false)}
         onCreateBlank={(name) => void handleCreate(name)}
-        onChooseImport={() => {
-          setImportCandidates([]);
-          setImportError(null);
-          setImportOpen(true);
-        }}
+        onChooseImport={() => setImportOpen(true)}
       />
 
       <ImportDropzone
         open={importOpen}
-        busy={importBusy}
-        error={importError}
-        candidates={importCandidates}
-        onClose={() => {
+        projectId={projectId}
+        takenNames={docs.map((d) => d.name)}
+        onClose={() => setImportOpen(false)}
+        onDone={(result) => {
           setImportOpen(false);
-          setImportCandidates([]);
-          setImportError(null);
+          router.push(`/research/${projectId}/latex/${result.id}`);
         }}
-        onImport={handleImport}
       />
     </div>
   );

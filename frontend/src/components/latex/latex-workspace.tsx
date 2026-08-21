@@ -19,6 +19,7 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { BinaryPreview } from "@/components/latex/binary-preview";
+import { ConflictDialog } from "@/components/latex/conflict-dialog";
 import { DocumentShareDialog } from "@/components/latex/document-share-dialog";
 import { EditorPane } from "@/components/latex/editor-pane";
 import { FileTree } from "@/components/latex/file-tree";
@@ -29,9 +30,10 @@ import { PdfViewer } from "@/components/latex/pdf-viewer";
 import { useLatexDocument } from "@/hooks/use-latex-document";
 import { useLatexCompile } from "@/hooks/use-latex-compile";
 import {
-  AmbiguousMainError,
+  PathCollisionError,
   downloadExport,
   saveBlob,
+  type LatexCollision,
   type LatexEngine,
 } from "@/lib/latex";
 import { buildTree, isBeneath, isTexPath, parentDir } from "@/lib/latex-tree";
@@ -225,48 +227,64 @@ export function LatexWorkspace({ projectId, documentId, ownerId }: LatexWorkspac
     };
   }, []);
 
-  // Import dialog: open/candidate state only. Everything else about an
-  // import (busy, the archive itself) is transient and lives inside the
-  // handler below or inside `ImportDropzone` itself.
+  // Import dialog: open state only. The two-step plan/commit conversation
+  // (and its own busy/error) lives inside `ImportDropzone`, which the
+  // projects list page shares.
   const [importOpen, setImportOpen] = useState(false);
-  const [importBusy, setImportBusy] = useState(false);
-  const [importCandidates, setImportCandidates] = useState<string[]>([]);
-
-  // Mirrors `doc.error`, read from inside `handleImport`'s async callback
-  // after `importZip` resolves without throwing -- `doc.error` itself would
-  // be the value captured when the callback was BUILT, not the value
-  // `importZip` just set moments ago, since `doc` is a fresh object every
-  // render.
-  const docErrorRef = useRef(doc.error);
-  docErrorRef.current = doc.error;
 
   const [engineOpen, setEngineOpen] = useState(false);
 
-  function handleImport(zip: File, name: string, mainPath?: string) {
-    setImportBusy(true);
-    setImportCandidates([]);
-    doc
-      .importZip(zip, name, mainPath)
-      .then(() => {
-        // `importZip` only rethrows for an ambiguous main file (caught
-        // below); every other failure resolves normally after recording
-        // itself in `doc.error`, which is what this checks to decide
-        // whether the import actually succeeded.
-        if (!docErrorRef.current) {
-          setImportOpen(false);
-          setImportCandidates([]);
-        }
-      })
-      .catch((err) => {
-        if (err instanceof AmbiguousMainError) {
-          setImportCandidates(err.candidates);
-          return;
-        }
-        // Anything else here would be a bug in this call, not a
-        // user-facing case -- `doc.error` (rendered in the dialog below)
-        // covers every real failure.
-      })
-      .finally(() => setImportBusy(false));
+  // The duplicate-name question for the TREE surfaces (new file, upload,
+  // rename). `retry` is the same operation the user already asked for,
+  // re-issued at whatever path they settle on -- never a second, different
+  // call built from the collision.
+  const [conflict, setConflict] = useState<{
+    collisions: LatexCollision[];
+    retry: (path: string) => Promise<void>;
+  } | null>(null);
+  const [conflictBusy, setConflictBusy] = useState(false);
+
+  /**
+   * Runs a tree mutation and turns its 409 into the conflict dialog.
+   *
+   * The hook rethrows `PathCollisionError` UNCHANGED for exactly this: the
+   * dialog is built from the server's own `suggestion`, which a sentence in
+   * `doc.error` could not carry. Every other failure keeps going to the
+   * hook's single error surface.
+   */
+  async function withConflicts(
+    run: (path: string) => Promise<void>,
+    path: string
+  ): Promise<void> {
+    try {
+      await run(path);
+    } catch (err) {
+      if (err instanceof PathCollisionError) {
+        setConflict({ collisions: err.collisions, retry: run });
+        return;
+      }
+      doc.reportError(err);
+    }
+  }
+
+  async function confirmConflict(decisions: { path: string; new_path: string }[]) {
+    const pending = conflict;
+    const target = decisions[0]?.new_path;
+    if (!pending || !target) return;
+    setConflictBusy(true);
+    try {
+      // The retry can collide AGAIN (a second user created that name while
+      // this dialog was open), so it goes back through `withConflicts`
+      // rather than being called bare.
+      await withConflicts(pending.retry, target);
+    } finally {
+      setConflictBusy(false);
+    }
+    // Closed unconditionally: if the retry collided again, `withConflicts`
+    // has already replaced `conflict` with the new collision, and clearing
+    // it here would throw that away. Only the entry this call opened is
+    // dismissed.
+    setConflict((current) => (current === pending ? null : current));
   }
 
   async function handleExport() {
@@ -589,15 +607,14 @@ export function LatexWorkspace({ projectId, documentId, ownerId }: LatexWorkspac
                 maxBytes={doc.maxBytes}
                 error={doc.error}
                 onOpen={(path) => void doc.openFile(path)}
-                onCreate={(path) => void doc.createFile(path)}
+                onCreate={(path) => void withConflicts((p) => doc.createFile(p), path)}
                 onDelete={(path) => void doc.removeFile(path)}
-                onRename={(from, to) => void doc.moveFile(from, to)}
+                onRename={(from, to) => void withConflicts((p) => doc.moveFile(from, p), to)}
                 onSetMain={(path) => void doc.setMainPath(path)}
-                onUpload={(path, data) => void doc.uploadBinary(path, data)}
-                onImportClick={() => {
-                  setImportCandidates([]);
-                  setImportOpen(true);
-                }}
+                onUpload={(path, data) =>
+                  void withConflicts((p) => doc.uploadBinary(p, data), path)
+                }
+                onImportClick={() => setImportOpen(true)}
                 onExport={() => void handleExport()}
                 onCollapse={() => setTreeCollapsed(true)}
               />
@@ -762,14 +779,34 @@ export function LatexWorkspace({ projectId, documentId, ownerId }: LatexWorkspac
 
       <ImportDropzone
         open={importOpen}
-        busy={importBusy}
-        error={doc.error}
-        candidates={importCandidates}
-        onClose={() => {
+        projectId={projectId}
+        documentId={documentId}
+        takenPaths={doc.files.map((f) => f.path)}
+        takenNames={doc.documents.map((d) => d.name)}
+        onClose={() => setImportOpen(false)}
+        onDone={(result, mode) => {
           setImportOpen(false);
-          setImportCandidates([]);
+          if (mode === "merge") {
+            // The files landed in the document already on screen -- refresh
+            // its tree, and stay exactly where the user was. Navigating
+            // would be navigating to the page they are on.
+            void doc.refreshFiles();
+            return;
+          }
+          void doc.adoptDocument(result.id);
+          router.push(`/research/${projectId}/latex/${result.id}`);
         }}
-        onImport={handleImport}
+      />
+
+      <ConflictDialog
+        open={conflict !== null}
+        busy={conflictBusy}
+        title="That name is already taken"
+        description="A file with this name is already in the project. Choose a name to use instead."
+        collisions={conflict?.collisions ?? []}
+        taken={doc.files.map((f) => f.path)}
+        onCancel={() => setConflict(null)}
+        onConfirm={(decisions) => void confirmConflict(decisions)}
       />
     </div>
   );

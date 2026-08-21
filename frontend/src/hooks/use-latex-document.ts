@@ -6,7 +6,6 @@ import {
   deleteDocument,
   deleteFile,
   getDocument,
-  importArchive,
   listDocuments,
   listFiles,
   patchDocument,
@@ -14,7 +13,7 @@ import {
   renameFile,
   writeBinaryFile,
   writeTextFile,
-  AmbiguousMainError,
+  PathCollisionError,
   errorText,
   type LatexDocument,
   type LatexEngine,
@@ -81,7 +80,20 @@ export interface UseLatexDocument {
   setMainPath: (path: string) => Promise<void>;
   createDoc: (name: string, source?: string) => Promise<void>;
   removeDoc: (id: string) => Promise<void>;
-  importZip: (zip: Blob, name: string, mainPath?: string) => Promise<void>;
+  /**
+   * Re-lists the OPEN document's tree. Exposed for the one mutation this
+   * hook does not itself perform: a committed merge import writes files
+   * straight into the open document, so nothing here saw the write and the
+   * tree on screen would otherwise keep describing the pre-import project.
+   */
+  refreshFiles: () => Promise<void>;
+  /**
+   * Takes a document created OUTSIDE this hook (a committed "create" import)
+   * into the list and selects it, so the caller does not have to re-list to
+   * see it. The navigation is the caller's -- the route owns which document
+   * is open (see `documentId`), and this hook does not route.
+   */
+  adoptDocument: (id: string) => Promise<void>;
 }
 
 /**
@@ -303,7 +315,13 @@ export function useLatexDocument(
         // document selected) -- the check is for the type checker, not a
         // runtime case that matters.
         if (docId === null) return;
-        const m = await writeTextFile(projectId, docId, path, text);
+        // The ONLY caller in this file that passes "replace". Autosave knows
+        // the file exists and means to replace it; every other writer is
+        // creating and keeps the server's "fail" default, which is what
+        // makes a duplicate name a 409 the user gets asked about instead of
+        // a silent overwrite. Do not "simplify" this to the default, and do
+        // not give the default to any other caller.
+        const m = await writeTextFile(projectId, docId, path, text, "replace");
         // A later send of THIS PATH that succeeds is proof this file's text
         // is safe -- and it is proof about nothing else. Cleared
         // UNCONDITIONALLY of what is on screen, same as recording one below:
@@ -530,11 +548,19 @@ export function useLatexDocument(
       if (!docId || !canEdit) return;
       setError(null);
       try {
+        // "fail" (the default) on purpose: this is a CREATE, and a path that
+        // already exists must come back as a 409 the caller can offer a
+        // `(n)` name for -- never as a silent overwrite.
         const m = await writeTextFile(projectId, docId, path, "");
         applyMutation(m, docId);
         await refreshTree(docId);
       } catch (err) {
         if (selectedIdRef.current !== docId) return;
+        // Rethrown UNCHANGED so the caller can open the conflict dialog.
+        // Folding it into `error` text here would hide the suggestion the
+        // dialog is built from -- the same reason the import flow carries
+        // its payload as a typed error rather than a sentence.
+        if (err instanceof PathCollisionError) throw err;
         setError(errorText(err));
       }
     },
@@ -656,6 +682,11 @@ export function useLatexDocument(
         await refreshTree(docId);
       } catch (err) {
         if (selectedIdRef.current !== docId) return;
+        // Rethrown UNCHANGED -- see `createFile`. Note this is reached with
+        // the engine NOT yet renamed (the rename above runs only on the
+        // success path), so a caller retrying at a different destination
+        // starts from exactly the state it would have had.
+        if (err instanceof PathCollisionError) throw err;
         setError(errorText(err));
       }
     },
@@ -679,6 +710,8 @@ export function useLatexDocument(
         await refreshTree(docId);
       } catch (err) {
         if (selectedIdRef.current !== docId) return;
+        // Rethrown UNCHANGED -- see `createFile`.
+        if (err instanceof PathCollisionError) throw err;
         setError(errorText(err));
       }
     },
@@ -814,24 +847,31 @@ export function useLatexDocument(
     [projectId]
   );
 
-  const importZip = useCallback(
-    async (zip: Blob, name: string, mainPath?: string) => {
+  // The import itself is NOT performed here. It is a two-step plan/commit
+  // conversation with the user (collisions, a duplicate document name, an
+  // undecidable main file), and it is offered from the projects LIST page
+  // too, which has no hook at all -- so the flow lives in
+  // `import-dropzone.tsx`, the one component both surfaces share. What is
+  // left here is only what a committed import means for state this hook
+  // owns.
+
+  const refreshFiles = useCallback(async () => {
+    const docId = selectedIdRef.current;
+    if (!docId) return;
+    try {
+      await refreshTree(docId);
+    } catch (err) {
+      if (selectedIdRef.current !== docId) return;
+      setError(errorText(err));
+    }
+  }, [refreshTree]);
+
+  const adoptDocument = useCallback(
+    async (id: string) => {
       setError(null);
-      let imported;
       try {
-        imported = await importArchive(projectId, zip, name, mainPath);
-      } catch (err) {
-        // Rethrown UNCHANGED: the dropzone catches this specifically to
-        // render the candidate picker, and turning it into `error` text
-        // here would hide the one piece of information it needs (the
-        // candidate list) behind a generic message.
-        if (err instanceof AmbiguousMainError) throw err;
-        setError(errorText(err));
-        return;
-      }
-      try {
-        const doc = await getDocument(projectId, imported.id);
-        setDocuments((prev) => [...prev, doc]);
+        const doc = await getDocument(projectId, id);
+        setDocuments((prev) => (prev.some((d) => d.id === doc.id) ? prev : [...prev, doc]));
         setSelectedId(doc.id);
       } catch (err) {
         // The import itself succeeded server-side; only the follow-up fetch
@@ -899,6 +939,7 @@ export function useLatexDocument(
     setMainPath,
     createDoc,
     removeDoc,
-    importZip,
+    refreshFiles,
+    adoptDocument,
   };
 }
