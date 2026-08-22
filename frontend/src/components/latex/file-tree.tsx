@@ -16,7 +16,7 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import { formatBytes, joinPath, type TreeNode } from "@/lib/latex-tree";
+import { basename, formatBytes, joinPath, siblingPath, type TreeNode } from "@/lib/latex-tree";
 
 interface FileTreeProps {
   nodes: TreeNode[];
@@ -111,10 +111,15 @@ export function FileTree({
   function submitRename(path: string) {
     const trimmed = renameValue.trim();
     setRenaming(null);
-    if (trimmed && trimmed !== path) {
-      if (renamingKind === "dir") onRenameDir(path, trimmed);
-      else onRename(path, trimmed);
-    }
+    if (!trimmed) return;
+    // Resolved against the row's OWN directory before it leaves this
+    // component, so everything downstream -- the collision dialog's retry,
+    // the backend's `normalize_path` -- keeps seeing a full destination
+    // path and no layer has to guess what a bare name meant.
+    const target = siblingPath(path, trimmed);
+    if (target === path) return;
+    if (renamingKind === "dir") onRenameDir(path, target);
+    else onRename(path, target);
   }
 
   const pctUsed = maxBytes > 0 ? (usedBytes / maxBytes) * 100 : 0;
@@ -219,7 +224,10 @@ export function FileTree({
             onStartRename={(path, kind) => {
               setRenaming(path);
               setRenamingKind(kind);
-              setRenameValue(path);
+              // The LEAF, not the whole path: renaming is not moving, and a
+              // user editing `Figures/genetic_operators/ox.png` should type
+              // `ox2.png` rather than retyping the directories back.
+              setRenameValue(basename(path));
             }}
             onRenameValueChange={setRenameValue}
             onSubmitRename={submitRename}

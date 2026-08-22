@@ -71,6 +71,23 @@ export function basename(path: string): string {
 }
 
 /**
+ * The path `typed` names, read RELATIVE to whatever directory `path` is
+ * already in.
+ *
+ * Renaming is not moving. A user editing `Figures/genetic_operators/ox.png`
+ * types `ox2.png`, not the whole path back again -- and sending the bare
+ * leaf as the destination would move the file to the tree root, which is
+ * the opposite of what a rename means.
+ *
+ * A `typed` value that DOES contain a separator still resolves against the
+ * same parent, so `sub/ox.png` moves it one level down rather than being
+ * refused. That keeps one field able to express both without a mode.
+ */
+export function siblingPath(path: string, typed: string): string {
+  return joinPath(parentDir(path), typed);
+}
+
+/**
  * Flat paths into a nested tree.
  *
  * Directories sort before files, and each group sorts case-insensitively so
