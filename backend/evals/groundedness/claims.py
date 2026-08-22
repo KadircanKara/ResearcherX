@@ -60,6 +60,11 @@ _ABBREVIATIONS = (
     "resp.",
 )
 
+# A list marker on its own line at the end of a piece: "…involves:\n\n1." or
+# "…as follows:\n- ". Anchored to a newline so it can only match a list's
+# opening marker, never a number ending a real sentence.
+_ENUMERATOR_TAIL_RE = re.compile(r"\n[ \t]*(?:\d+[.)]|[-*+])[ \t]*$")
+
 # A "sentence" shorter than this is a fragment, not a claim: a stray "3." left
 # by a numbered list, a bare "Yes.", the tail of an abbreviation this module
 # failed to guard. Judging them wastes a judge call and pollutes the
@@ -188,7 +193,21 @@ def extract_claims(answer: str) -> list[Claim]:
                 len(lowered) - lowered.index(_INLINE_HANDOFF) - len(_INLINE_HANDOFF)
                 >= _INLINE_HANDOFF_CONTENT_CHARS
             )
-            if len(sentence) >= _MIN_CLAIM_CHARS:
+            # A sentence ending in a colon INTRODUCES content, it does not
+            # assert any. "The process involves:" followed by a numbered list
+            # was extracted as a claim on the 2026-08-22 run-3 measurement and
+            # judged unsupported -- a harness artifact counted against the
+            # model. The list items that follow are extracted normally and are
+            # where the assertions actually live.
+            #
+            # The trailing enumerator has to come off first: the colon is not a
+            # sentence terminator, so the splitter carries the list's first
+            # marker onto the introducer ("The process involves:\n\n1.") and
+            # the colon is no longer last. Only an enumerator on its OWN line is
+            # stripped -- an unanchored rule would eat the "12." out of "The
+            # measured value is 12."
+            introduces_only = _ENUMERATOR_TAIL_RE.sub("", sentence).rstrip().endswith(":")
+            if len(sentence) >= _MIN_CLAIM_CHARS and not introduces_only:
                 markers = tuple(int(m.group(1)) for m in _MARKER_RE.finditer(sentence))
                 claims.append(
                     Claim(

@@ -195,8 +195,22 @@ def _rescore(args) -> None:
     """
     payload = json.loads(args.rescore.read_text())
     outcomes: list[CaseOutcome] = []
+    dropped = 0
     for entry in payload["cases"]:
-        claims = {c.index: c for c in extract_claims(entry["answer"])}
+        extracted = extract_claims(entry["answer"])
+        by_index = {c.index: c for c in extracted}
+        by_text = {c.text: c for c in extracted}
+        # A stored verdict is matched to a re-extracted claim BY TEXT where the
+        # dump carries it. Index alignment is the fallback for dumps written
+        # before that field existed, and it CANNOT drop a claim that extraction
+        # no longer produces -- so an artifact judged in the original run keeps
+        # being counted. Text alignment can, and does.
+        has_text = any(raw.get("text") for raw in entry["claims"])
+        if has_text:
+            kept = [raw for raw in entry["claims"] if raw.get("text") in by_text]
+        else:
+            kept = [raw for raw in entry["claims"] if raw["index"] in by_index]
+        dropped += len(entry["claims"]) - len(kept)
         scored = tuple(
             ScoredClaim(
                 index=raw["index"],
@@ -207,9 +221,13 @@ def _rescore(args) -> None:
                 marker_papers=frozenset(raw["marker_papers"]),
                 # Re-derived, not read back: the flag did not exist when this
                 # run was written, which is the whole point of rescoring.
-                disclosed=claims[raw["index"]].disclosed if raw["index"] in claims else False,
+                disclosed=(
+                    by_text[raw["text"]].disclosed
+                    if has_text and raw.get("text") in by_text
+                    else (by_index[raw["index"]].disclosed if raw["index"] in by_index else False)
+                ),
             )
-            for raw in entry["claims"]
+            for raw in kept
         )
         outcomes.append(
             CaseOutcome(
@@ -226,6 +244,17 @@ def _rescore(args) -> None:
         f"RESCORED from {args.rescore.name} — no model calls. "
         f"judge: {payload.get('judge_model')}   answering: {payload.get('answering_model')}"
     )
+    if dropped:
+        print(
+            f"  {dropped} stored verdict(s) dropped: their claim is no longer extracted "
+            "(a claims-policy change). Verdicts are matched by text where the dump "
+            "carries it."
+        )
+    elif not any(raw.get("text") for c in payload["cases"] for raw in c["claims"]):
+        print(
+            "  NOTE: this dump predates per-claim text, so verdicts are aligned by "
+            "INDEX and a claim that extraction no longer produces still counts."
+        )
     _report(outcomes, generations={}, errors=[], per_case=args.per_case)
 
 
@@ -293,10 +322,12 @@ def _report(
     )
     print(
         "`halluc` counts every ungrounded claim; `undisclosed` excludes those standing "
-        "after the prompt's own hand-off to general knowledge, and `disclosed` is how "
-        "much that excluded. On the negatives the two differ by design -- production's "
-        "SYSTEM prompt instructs exactly that hand-off -- so `undisclosed` is the "
-        "hallucination number and `disclosed` is the exposure it does not cover."
+        "after a hand-off to general knowledge, and `disclosed` is how much that "
+        "excluded. Production STOPPED instructing that hand-off on 2026-08-22, so on a "
+        "current run `disclosed` should be 0.00 and any non-zero value is the model "
+        "doing it unprompted -- a defect, not a design. On runs recorded before that "
+        "date the two differ by design; read `undisclosed` as the hallucination number "
+        "in both cases."
     )
     # Off the table for width, but never dropped: a contradicted claim is the
     # model misreading evidence it WAS given, which is the half a better prompt
@@ -498,6 +529,10 @@ async def main() -> None:
         print(f"\nwrote {args.save_generations} ({len(generations)} generations)")
 
     if args.json:
+        claim_texts = {
+            o.case_id: {c.index: c.text for c in extract_claims(generations[o.case_id].answer)}
+            for o in outcomes
+        }
         payload = {
             "judge_model": args.judge_model,
             "answering_model": settings.llm_model,
@@ -511,6 +546,17 @@ async def main() -> None:
                             **asdict(c),
                             "supporting_papers": sorted(c.supporting_papers),
                             "marker_papers": sorted(c.marker_papers),
+                            # The claim's own text, so `--rescore` can align a
+                            # stored verdict with a re-extracted claim BY TEXT.
+                            # Aligning by index cannot survive a change to
+                            # `extract_claims` -- and that is exactly when
+                            # rescoring is wanted: on the 2026-08-22 run-3
+                            # measurement a list introducer ("The process
+                            # involves:") was extracted as a claim and judged
+                            # unsupported, and an index-aligned rescore kept
+                            # counting that artifact against the model because
+                            # the verdict was still sitting at that index.
+                            "text": claim_texts[o.case_id].get(c.index, ""),
                         }
                         for c in o.claims
                     ],

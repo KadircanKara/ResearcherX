@@ -275,6 +275,56 @@ distinguishable from sampling noise in either direction: do NOT read it as
 a regression. It is the same rate with different cases behind it, which is
 what a two-event denominator looks like.
 
+### Measured — 2026-08-22c (adding the figure rule made things worse)
+
+Run 3 differs from run 2 by ONE prompt change: the figures-are-not-visible
+rule. Same corpus, judge, answering model and golden set. Numbers below are
+rescored with the current claims policy (one list-introducer artifact dropped,
+see "the harness was wrong too").
+
+| metric (positives) | run 2 | run 3 |
+|---|---|---|
+| support | 0.99 | **0.96** |
+| hallucinated | 0.01 | **0.04** |
+| clean | 0.93 | **0.87** |
+| citation precision | 0.96 | **0.91** |
+| citation coverage | 0.59 | **0.43** |
+
+Every positive metric moved the wrong way, and **the rule did not even fix the
+thing it was written for**: `mogoa-framework-figure` was clean in run 2 and in
+run 3 produced exactly the failure the rule forbids -- "this visualization
+outlines the flow and interaction between different population components",
+which no sentence states.
+
+Worse, it partly UNDID run 2's gain: `harvested-power-duration-figure` went
+from 6 of 7 supported claims carrying a marker to 1 of 5.
+
+The most likely explanation is prompt dilution -- the citation rule and the
+figure rule compete, and the figure paragraph is long. This codebase already
+carries an ORDER IS DELIBERATE warning on the metadata block for a
+live-verified version of the same effect. A shorter rule placed adjacent to
+the citation rules is worth trying; the paragraph as written is not.
+
+**Do not read run 3 as proof that prompt rules cannot fix figures.** One run,
+five figure cases, two events. What it does establish is that THIS rule, at
+THIS length, in THIS position, costs more than it buys.
+
+### The harness was wrong too
+
+Run 3 surfaced a bug in `claims.extract_claims`: a list introducer ("The
+process involves:" followed by a numbered list) was extracted as a claim and
+judged unsupported -- a harness artifact counted against the model. A colon is
+not a sentence terminator, so the splitter also carried the list's first marker
+onto the introducer ("...involves:\n\n1."), which is why the fix strips a
+trailing enumerator ON ITS OWN LINE before testing for the colon; an unanchored
+rule would eat the "12." out of "The measured value is 12."
+
+`--rescore` now aligns stored verdicts to re-extracted claims BY TEXT, and the
+`--json` dump carries each claim's text so it can. Index alignment -- the only
+option for dumps written before this -- cannot drop a claim that extraction no
+longer produces, so it keeps counting exactly the artifact a claims-policy fix
+was meant to remove. A rescore of an older dump says so in its header.
+
 ## How answers are produced
 
 `generate.py` assembles production's own components rather than calling
