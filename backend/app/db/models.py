@@ -168,6 +168,13 @@ class Paper(Base):
     # re-embed instead of a re-download.
     extracted_text: Mapped[str | None] = mapped_column(Text, default=None)
     pdf_url: Mapped[str | None] = mapped_column(Text, default=None)
+    # The URL that actually SERVED the PDF, when it differs from the one the
+    # user pasted. `paper_fetch_service.fetch_pdf` falls back to Unpaywall or
+    # Semantic Scholar on a 403, so ingestion can succeed while `pdf_url`
+    # still points at a paywall -- sending the reader to the exact wall the
+    # server worked around. Null when the pasted URL served the file itself,
+    # which is the common case.
+    resolved_pdf_url: Mapped[str | None] = mapped_column(Text, default=None)
     source: Mapped[str] = mapped_column(
         String(16), default=PaperSource.MANUAL, server_default="manual"
     )
@@ -343,6 +350,36 @@ class ChatMessage(Base):
     embedding: Mapped["ConversationMessageEmbedding | None"] = relationship(
         back_populates="message", cascade="all, delete-orphan", uselist=False
     )
+
+
+class PaperFile(Base):
+    """The uploaded PDF itself, kept so a user can get their own file back.
+
+    A SIDE TABLE rather than a column on `papers`, deliberately. A
+    `LargeBinary` on `papers` is loaded by every `db.get(Paper, ...)` --
+    including the chat retrieval path, which reads papers on every turn --
+    unless it is deferred, and a deferred column that someone later
+    un-defers is a silent performance cliff no test would catch. A separate
+    table cannot be loaded by accident.
+
+    Only UPLOADED papers get a row. A link-sourced paper has a canonical
+    home on the web and `papers.pdf_url` already points at it; storing a
+    second copy buys nothing the link does not.
+
+    `size_bytes` is stored rather than derived from `length(blob)`, the same
+    reason `latex_files` stores it: computing it detoasts the blob.
+    """
+
+    __tablename__ = "paper_files"
+
+    paper_id: Mapped[str] = mapped_column(
+        ForeignKey("papers.id", ondelete="CASCADE", name="fk_paper_files_paper_id"),
+        primary_key=True,
+    )
+    blob: Mapped[bytes] = mapped_column(LargeBinary)
+    size_bytes: Mapped[int] = mapped_column(Integer())
+    content_type: Mapped[str] = mapped_column(String(128), default="application/pdf")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 
 class PaperChunkEmbedding(Base):

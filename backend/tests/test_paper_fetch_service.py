@@ -33,7 +33,8 @@ async def test_fetch_pdf_direct_success():
         new=AsyncMock(return_value=pdf_bytes),
     ):
         result = await fetch_pdf("https://example.com/open.pdf")
-    assert result == pdf_bytes
+    # The URL the user pasted served the file, so it is also what served it.
+    assert result == (pdf_bytes, "https://example.com/open.pdf")
 
 
 @pytest.mark.asyncio
@@ -52,7 +53,10 @@ async def test_fetch_pdf_paywalled_fallback_via_oa():
         ),
     ):
         result = await fetch_pdf("https://doi.org/10.1234/test")
-    assert result == oa_pdf
+    # The OA mirror served it, not the DOI the user pasted -- and saying so
+    # is the whole point of the second element: the caller records it, so
+    # "open link" never lands on the paywall this call worked around.
+    assert result == (oa_pdf, "https://oa.example.com/paper.pdf")
 
 
 @pytest.mark.asyncio

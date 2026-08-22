@@ -108,7 +108,17 @@ class PaperOut(BaseModel):
     abstract: str | None
     body: str | None
     pdf_url: str | None
+    # The URL that actually served the PDF, when the pasted one 403'd and the
+    # fetch fell back to an open-access mirror. The client prefers it, so a
+    # paper that ingested fine never opens onto the paywall the server
+    # already worked around.
+    resolved_pdf_url: str | None = None
     source: str
+    # Whether an uploaded PDF is stored for this paper. False for every
+    # link-sourced paper (its `pdf_url` is the copy) and for everything
+    # ingested before `paper_files` existed -- those bytes are gone and
+    # nothing can recover them.
+    has_pdf: bool = False
     created_at: datetime
     model_config = {"from_attributes": True}
 

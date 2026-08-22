@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from openai import RateLimitError
 from sqlalchemy import desc, select as sa_select
@@ -11,7 +13,15 @@ from app.core import palette
 from app.core.config import settings
 from app.core.identity import get_current_user
 from app.core.logging import log
-from app.db.models import Paper, PaperChunkEmbedding, PaperSource, ProjectMember, ResearchRun, User
+from app.db.models import (
+    Paper,
+    PaperChunkEmbedding,
+    PaperFile,
+    PaperSource,
+    ProjectMember,
+    ResearchRun,
+    User,
+)
 from app.db.session import get_session
 from app.schemas.project import (
     Counts,
@@ -159,6 +169,24 @@ async def list_project_runs(
 # ── papers ───────────────────────────────────────────────────────────────────
 
 
+async def _stored_pdf_ids(db: AsyncSession, paper_ids: list[str]) -> set[str]:
+    """Which of these papers have a stored PDF.
+
+    Selects the KEY only, never the row: `db.get(PaperFile, id)` would pull
+    the blob across just to answer a boolean, on a list endpoint that runs
+    on every papers-tab render.
+    """
+    if not paper_ids:
+        return set()
+    rows = await db.execute(sa_select(PaperFile.paper_id).where(PaperFile.paper_id.in_(paper_ids)))
+    return set(rows.scalars().all())
+
+
+async def _paper_out(db: AsyncSession, paper: Paper) -> PaperOut:
+    out = PaperOut.model_validate(paper)
+    return out.model_copy(update={"has_pdf": bool(await _stored_pdf_ids(db, [paper.id]))})
+
+
 @router.post("/projects/{project_id}/papers", response_model=PaperOut, status_code=201)
 async def create_paper(
     project_id: str,
@@ -189,7 +217,7 @@ async def create_paper(
         await db.commit()
 
     await db.refresh(paper)
-    return PaperOut.model_validate(paper)
+    return await _paper_out(db, paper)
 
 
 @router.patch("/projects/{project_id}/papers/{paper_id}", response_model=PaperOut)
@@ -232,7 +260,7 @@ async def update_paper(
         await db.commit()
 
     await db.refresh(paper)
-    return PaperOut.model_validate(paper)
+    return await _paper_out(db, paper)
 
 
 @router.delete("/projects/{project_id}/papers/{paper_id}", status_code=204)
@@ -261,7 +289,11 @@ async def list_papers(
     result = await db.execute(
         sa_select(Paper).where(Paper.project_id == project_id).order_by(Paper.created_at)
     )
-    return [PaperOut.model_validate(p) for p in result.scalars().all()]
+    papers = list(result.scalars().all())
+    with_pdf = await _stored_pdf_ids(db, [p.id for p in papers])
+    return [
+        PaperOut.model_validate(p).model_copy(update={"has_pdf": p.id in with_pdf}) for p in papers
+    ]
 
 
 @router.get(
@@ -366,11 +398,73 @@ async def ingest_paper(
     paper = await db.get(Paper, paper_id)
     if paper is None or paper.project_id != project_id:
         raise HTTPException(status_code=404, detail="Paper not found")
-    pdf_bytes = await request.body()
+    # Streamed against a running counter rather than `await request.body()`:
+    # a client can lie in Content-Length, or send chunked with none at all,
+    # and this is now a STORAGE commitment rather than a transient buffer.
+    cap = settings.paper_pdf_max_bytes
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in request.stream():
+        total += len(chunk)
+        if total > cap:
+            raise HTTPException(
+                status_code=413, detail=f"{total} bytes exceeds the {cap} byte limit"
+            )
+        chunks.append(chunk)
+    pdf_bytes = b"".join(chunks)
+
     from app.services.paper_ingest_service import ingest
+
+    # Stored BEFORE extraction, deliberately. Keeping the user's own file is
+    # the whole point of this table, and extraction is the part that fails --
+    # a corrupt or image-only PDF must not take the upload down with it.
+    await db.merge(
+        PaperFile(
+            paper_id=paper_id,
+            blob=pdf_bytes,
+            size_bytes=len(pdf_bytes),
+            content_type="application/pdf",
+        )
+    )
+    await db.commit()
 
     n = await ingest(db, paper_id, pdf_bytes)
     return {"chunks_stored": n}
+
+
+@router.get("/projects/{project_id}/papers/{paper_id}/pdf")
+async def download_paper_pdf(
+    project_id: str,
+    paper_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
+) -> Response:
+    """The uploaded PDF, back verbatim.
+
+    Only an UPLOADED paper has one. A link-sourced paper is served by its
+    own `pdf_url`, which the client opens directly -- re-hosting someone
+    else's copy would buy nothing the link does not already give.
+    """
+    await project_service.require_member(db, project_id, user.id, "member")
+    paper = await db.get(Paper, paper_id)
+    if paper is None or paper.project_id != project_id:
+        raise HTTPException(status_code=404, detail="Paper not found")
+
+    stored = await db.get(PaperFile, paper_id)
+    if stored is None:
+        # A paper ingested before this table existed, or one added by link.
+        # 404 rather than 204: there is no document at this address.
+        raise HTTPException(status_code=404, detail="No PDF stored for this paper")
+
+    # The title, not the id: the file lands in a downloads folder where an
+    # id names nothing. Quoted and stripped of the characters a filesystem
+    # refuses, for the same reason `conversationFilename` does it.
+    safe = re.sub(r'[\\/:*?"<>|]', "-", paper.title).strip()[:80] or "paper"
+    return Response(
+        content=stored.blob,
+        media_type=stored.content_type,
+        headers={"Content-Disposition": f'attachment; filename="{safe}.pdf"'},
+    )
 
 
 @router.post("/projects/{project_id}/papers/{paper_id}/ingest-from-url")
@@ -386,11 +480,19 @@ async def ingest_paper_from_url(
     if paper is None or paper.project_id != project_id:
         raise HTTPException(status_code=404, detail="Paper not found")
 
-    from app.services.paper_fetch_service import fetch_pdf, PaywallError
+    from app.services.paper_fetch_service import UnsafeUrl, fetch_pdf, PaywallError
     from app.services.paper_ingest_service import ingest
 
     try:
-        pdf_bytes = await fetch_pdf(body.url)
+        pdf_bytes, served_by = await fetch_pdf(body.url)
+    except UnsafeUrl as exc:
+        # Named plainly rather than folded into "paywalled": the URL is not
+        # inaccessible, it is refused, and a user who pasted an internal
+        # address by mistake needs to know which of the two happened.
+        raise HTTPException(
+            status_code=422,
+            detail={"error": "unsafe_url", "message": "That URL is not a public web address."},
+        ) from exc
     except PaywallError:
         raise HTTPException(
             status_code=422,
@@ -399,6 +501,11 @@ async def ingest_paper_from_url(
                 "message": "No open-access version found. Upload the PDF directly.",
             },
         )
+    # Recorded only when it DIFFERS: a null means "the URL the user pasted
+    # served the file", which is the common case and needs no second copy.
+    if served_by != body.url:
+        paper.resolved_pdf_url = served_by
+
     try:
         n = await ingest(db, paper_id, pdf_bytes, source_url=body.url)
     except RateLimitError:

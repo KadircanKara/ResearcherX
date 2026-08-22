@@ -80,7 +80,7 @@ async def test_ingest_from_url_success(
     with (
         patch(
             "app.services.paper_fetch_service.fetch_pdf",
-            new=AsyncMock(return_value=_FAKE_PDF),
+            new=AsyncMock(return_value=(_FAKE_PDF, "https://example.com/paper.pdf")),
         ),
         patch(
             "app.services.paper_ingest_service.EmbeddingService.embed_batch",
@@ -130,7 +130,7 @@ async def test_ingest_from_url_embedding_quota_exhausted(
     with (
         patch(
             "app.services.paper_fetch_service.fetch_pdf",
-            new=AsyncMock(return_value=_FAKE_PDF),
+            new=AsyncMock(return_value=(_FAKE_PDF, "https://example.com/paper.pdf")),
         ),
         patch(
             "app.services.paper_ingest_service.EmbeddingService.embed_batch",
