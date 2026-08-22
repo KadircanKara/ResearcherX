@@ -11,7 +11,7 @@ import inspect
 import re
 
 from app.services import chat_service
-from evals.groundedness import generate, run_eval
+from evals.groundedness import generate, judge, run_eval
 
 
 def _post_pass_order(source: str) -> list[str]:
@@ -158,3 +158,31 @@ def test_the_refusal_string_still_matches_the_production_prompt():
     from evals.groundedness.claims import REFUSAL
 
     assert REFUSAL in SYSTEM.lower()
+
+
+def test_the_judge_uses_the_judge_endpoint_not_the_llm_pool():
+    """Two separate reasons, both load-bearing: the pool rotates provider on
+    quota exhaustion (which would average two models into one column), and the
+    dev answering model must not grade its own output."""
+    source = inspect.getsource(judge)
+    assert "resolved_judge_base_url" in source
+    assert "resolved_judge_api_key" in source
+    # The pool's entry point must not be CALLED. It is named in the module
+    # docstring, which explains at length why it is avoided, so the check is
+    # for a call and not for the string.
+    assert "create_chat_completion(" not in source
+
+
+def test_response_format_support_is_remembered_per_model_not_per_endpoint():
+    """One OpenRouter base_url fronts hundreds of models with different
+    capabilities. A per-endpoint memo would disable the parameter for every
+    model behind it after a single refusal."""
+    from evals.groundedness.judge import _RESPONSE_FORMAT_UNSUPPORTED, Judge
+
+    _RESPONSE_FORMAT_UNSUPPORTED.clear()
+    a, b = Judge(model="model-a"), Judge(model="model-b")
+    assert a._supports_response_format()
+    _RESPONSE_FORMAT_UNSUPPORTED.add("model-a")
+    assert not a._supports_response_format()
+    assert b._supports_response_format()
+    _RESPONSE_FORMAT_UNSUPPORTED.clear()

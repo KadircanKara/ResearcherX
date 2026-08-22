@@ -34,7 +34,7 @@ import re
 from dataclasses import dataclass
 from typing import Literal
 
-from openai import AsyncOpenAI, RateLimitError
+from openai import AsyncOpenAI, BadRequestError, RateLimitError
 from pydantic import BaseModel, Field
 
 from app.core.config import settings
@@ -76,6 +76,13 @@ _TERMINAL_QUOTA_MARKERS = ("insufficient_quota", "credit_balance_exhausted", "no
 _RETRY_AFTER_RE = re.compile(r"try again in ([\d.]+)s")
 
 _MAX_RATE_LIMIT_RETRIES = 6
+
+# Models observed to reject `response_format={"type": "json_object"}`. Keyed by
+# MODEL, not by endpoint: one OpenRouter base_url fronts hundreds of models
+# with different capabilities, so a per-endpoint memo (what `structured.py`
+# keeps) would disable the parameter for every model behind it after one
+# refusal. Module state, reset per process, exactly like structured.py's.
+_RESPONSE_FORMAT_UNSUPPORTED: set[str] = set()
 
 
 class QuotaExhausted(RuntimeError):
@@ -234,11 +241,19 @@ class Judge:
     excerpt_chars_per_request: int = _EXCERPT_CHARS_PER_REQUEST
 
     def __post_init__(self) -> None:
+        # JUDGE_BASE_URL / JUDGE_API_KEY, falling back to the LLM's own when
+        # unset. Separate so the judge can sit on a different vendor from the
+        # system under test -- both to screen cheaper judges and because a
+        # model grading its own output is self-preference bias. `config.py`
+        # refuses to lend LLM_API_KEY to a judge pointed at another host.
         self._client = AsyncOpenAI(
-            base_url=settings.llm_base_url,
-            api_key=settings.llm_api_key,
+            base_url=settings.resolved_judge_base_url,
+            api_key=settings.resolved_judge_api_key,
             max_retries=settings.llm_max_retries,
         )
+
+    def _supports_response_format(self) -> bool:
+        return self.model not in _RESPONSE_FORMAT_UNSUPPORTED
 
     async def _structured(self, *, system: str, user: str, model_cls: type[BaseModel]):
         """One JSON-mode call, parsed against `model_cls`.
@@ -254,17 +269,40 @@ class Judge:
             "that matches this JSON schema exactly:\n\n"
             f"{json.dumps(model_cls.model_json_schema(), indent=2)}"
         )
+        messages = [
+            {"role": "system", "content": f"{system}\n\n{schema_block}"},
+            {"role": "user", "content": user},
+        ]
         for attempt in range(1, _MAX_RATE_LIMIT_RETRIES + 1):
+            extra = (
+                {"response_format": {"type": "json_object"}}
+                if self._supports_response_format()
+                else {}
+            )
             try:
                 response = await self._client.chat.completions.create(
                     model=self.model,
                     max_tokens=self.max_tokens,
-                    response_format={"type": "json_object"},
-                    messages=[
-                        {"role": "system", "content": f"{system}\n\n{schema_block}"},
-                        {"role": "user", "content": user},
-                    ],
+                    messages=messages,
+                    **extra,
                 )
+            except BadRequestError as exc:
+                # Many OpenAI-compatible endpoints reject `response_format`
+                # outright -- of the free OpenRouter models screened on
+                # 2026-08-22, several advertise no support for it at all.
+                # Remembered per MODEL rather than per endpoint (unlike
+                # `structured.py`, which is per provider), because one
+                # OpenRouter base_url fronts hundreds of models that differ.
+                # The schema pasted into the system prompt is the real
+                # guarantor of JSON either way; `response_format` only makes
+                # it likelier.
+                if not self._supports_response_format():
+                    raise
+                log_line = str(exc)[:200]
+                print(f"  [judge] {self.model} rejected response_format, retrying without it")
+                print(f"          {log_line}")
+                _RESPONSE_FORMAT_UNSUPPORTED.add(self.model)
+                continue
             except RateLimitError as exc:
                 if _is_terminal_quota(exc):
                     raise QuotaExhausted(str(exc)) from exc

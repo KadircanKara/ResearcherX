@@ -130,3 +130,41 @@ def test_shipped_hybrid_defaults_are_valid():
     assert settings.hybrid_dense_weight == 0.7
     assert settings.hybrid_sparse_weight == 0.3
     assert settings.hybrid_rrf_k == 30
+
+
+def test_judge_settings_default_to_the_llm_provider(monkeypatch):
+    """Empty JUDGE_* keeps the shipped behaviour: the judge shares the LLM's
+    endpoint and key."""
+    from app.core.config import Settings
+
+    s = Settings(llm_base_url="https://api.openai.com/v1", llm_api_key="sk-llm")
+    assert s.resolved_judge_base_url == "https://api.openai.com/v1"
+    assert s.resolved_judge_api_key == "sk-llm"
+
+
+def test_a_judge_on_another_endpoint_must_bring_its_own_key():
+    """Inheriting LLM_API_KEY once JUDGE_BASE_URL points elsewhere would send
+    the OpenAI key to that host — an OpenRouter endpoint, a proxy, a typo."""
+    import pytest
+
+    from app.core.config import Settings
+
+    s = Settings(
+        llm_base_url="https://api.openai.com/v1",
+        llm_api_key="sk-llm",
+        judge_base_url="https://openrouter.ai/api/v1",
+    )
+    assert s.resolved_judge_base_url == "https://openrouter.ai/api/v1"
+    with pytest.raises(RuntimeError, match="JUDGE_API_KEY"):
+        _ = s.resolved_judge_api_key
+
+
+def test_an_explicit_judge_key_is_used_as_given():
+    from app.core.config import Settings
+
+    s = Settings(
+        llm_api_key="sk-llm",
+        judge_base_url="https://openrouter.ai/api/v1",
+        judge_api_key="sk-or",
+    )
+    assert s.resolved_judge_api_key == "sk-or"
