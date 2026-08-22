@@ -6,16 +6,16 @@ import {
   deleteDocument,
   deleteFile,
   getDocument,
-  importArchive,
   listDocuments,
   listFiles,
   patchDocument,
   readTextFile,
   renameFile,
+  renameDir,
   writeBinaryFile,
   writeTextFile,
-  AmbiguousMainError,
-  LatexRequestError,
+  PathCollisionError,
+  errorText,
   type LatexDocument,
   type LatexEngine,
   type LatexFileMeta,
@@ -24,19 +24,6 @@ import {
 import { SaveEngine, type SaveState } from "@/lib/latex-buffers";
 
 const AUTOSAVE_MS = 800;
-
-/**
- * Turned into user-facing text the same way everywhere in this hook: a 4xx
- * carries the server's own message (the user's archive, their quota, their
- * path), a 5xx or a network failure gets the generic line. Never
- * `err.message`, never a status code -- see `LatexRequestError`'s own
- * comment in `lib/latex.ts`.
- */
-function errorText(err: unknown): string {
-  return err instanceof LatexRequestError
-    ? err.userMessage
-    : "Something went wrong. Please try again.";
-}
 
 export interface UseLatexDocument {
   documents: LatexDocument[];
@@ -94,10 +81,52 @@ export interface UseLatexDocument {
   setMainPath: (path: string) => Promise<void>;
   createDoc: (name: string, source?: string) => Promise<void>;
   removeDoc: (id: string) => Promise<void>;
-  importZip: (zip: Blob, name: string, mainPath?: string) => Promise<void>;
+  /**
+   * Rename a project. RETHROWS `NameCollisionError` rather than swallowing
+   * it into `error`, exactly as the write paths rethrow
+   * `PathCollisionError`: the caller needs the suggestion, not a sentence.
+   */
+  renameDoc: (id: string, name: string) => Promise<void>;
+  /**
+   * Move a whole directory. Same rethrow contract as `moveFile`: a
+   * `PathCollisionError` reaches the caller so it can open the conflict
+   * dialog.
+   */
+  moveDir: (from: string, to: string) => Promise<void>;
+  /**
+   * Re-lists the OPEN document's tree. Exposed for the one mutation this
+   * hook does not itself perform: a committed merge import writes files
+   * straight into the open document, so nothing here saw the write and the
+   * tree on screen would otherwise keep describing the pre-import project.
+   *
+   * `revision` is the number the COMMIT response returned and must be passed
+   * whenever the caller has one: a merge bumped `latex_documents.revision`
+   * server-side, and `revision` is this app's only staleness signal (see the
+   * `isStale` call in `use-latex-compile.ts`). Refreshing the tree alone
+   * leaves the pre-import PDF marked CURRENT after N new files landed --
+   * possibly the very chapter a `\input` names.
+   */
+  refreshFiles: (revision?: number) => Promise<void>;
+  /**
+   * Takes a document created OUTSIDE this hook (a committed "create" import)
+   * into the list and selects it, so the caller does not have to re-list to
+   * see it. The navigation is the caller's -- the route owns which document
+   * is open (see `documentId`), and this hook does not route.
+   */
+  adoptDocument: (id: string) => Promise<void>;
 }
 
-export function useLatexDocument(projectId: string, canEdit: boolean): UseLatexDocument {
+/**
+ * @param documentId When given, the ROUTE owns which document is open and this
+ * hook stops choosing one: it neither defaults to the first document nor keeps
+ * a selection the URL has moved away from. Omit it (or pass `undefined`) for
+ * the older behaviour where the hook selects the first document itself.
+ */
+export function useLatexDocument(
+  projectId: string,
+  canEdit: boolean,
+  documentId?: string | null
+): UseLatexDocument {
   const [documents, setDocuments] = useState<LatexDocument[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   // Named `documentState` internally purely to avoid shadowing the DOM
@@ -115,6 +144,11 @@ export function useLatexDocument(projectId: string, canEdit: boolean): UseLatexD
   const [buffers, setBuffers] = useState<Record<string, string>>({});
   const [saveState, setSaveState] = useState<SaveState>("idle");
   const [documentsLoading, setDocumentsLoading] = useState(true);
+  // Read inside the list effect, which must NOT re-run when the route
+  // changes document -- re-listing on every navigation would flash the
+  // whole workspace through its loading state for data it already has.
+  const documentIdRef = useRef(documentId);
+  documentIdRef.current = documentId;
   const [docLoading, setDocLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   /**
@@ -236,7 +270,12 @@ export function useLatexDocument(projectId: string, canEdit: boolean): UseLatexD
       .then((docs) => {
         if (cancelled) return;
         setDocuments(docs);
-        setSelectedId((current) => current ?? docs[0]?.id ?? null);
+        // Only when nothing else owns the selection. With a `documentId`
+        // the URL is the authority, and defaulting to `docs[0]` here
+        // would briefly open a document the user did not navigate to.
+        if (documentIdRef.current === undefined) {
+          setSelectedId((current) => current ?? docs[0]?.id ?? null);
+        }
       })
       .catch(() => {
         // Without this, a failed list left `documents` at its initial `[]`,
@@ -251,6 +290,15 @@ export function useLatexDocument(projectId: string, canEdit: boolean): UseLatexD
       cancelled = true;
     };
   }, [projectId]);
+
+  // The route's document, mirrored into the selection the rest of this hook
+  // already keys off. Doing it this way rather than replacing `selectedId`
+  // wholesale keeps every `selectedIdRef.current !== docId` guard below
+  // working unchanged -- those guards are what stop a late response from
+  // one document writing into another.
+  useEffect(() => {
+    if (documentId !== undefined) setSelectedId(documentId);
+  }, [documentId]);
 
   // ---------------------------------------------------------------------
   // Selected document: metadata, tree, and the per-document SaveEngine
@@ -287,7 +335,13 @@ export function useLatexDocument(projectId: string, canEdit: boolean): UseLatexD
         // document selected) -- the check is for the type checker, not a
         // runtime case that matters.
         if (docId === null) return;
-        const m = await writeTextFile(projectId, docId, path, text);
+        // The ONLY caller in this file that passes "replace". Autosave knows
+        // the file exists and means to replace it; every other writer is
+        // creating and keeps the server's "fail" default, which is what
+        // makes a duplicate name a 409 the user gets asked about instead of
+        // a silent overwrite. Do not "simplify" this to the default, and do
+        // not give the default to any other caller.
+        const m = await writeTextFile(projectId, docId, path, text, "replace");
         // A later send of THIS PATH that succeeds is proof this file's text
         // is safe -- and it is proof about nothing else. Cleared
         // UNCONDITIONALLY of what is on screen, same as recording one below:
@@ -514,11 +568,19 @@ export function useLatexDocument(projectId: string, canEdit: boolean): UseLatexD
       if (!docId || !canEdit) return;
       setError(null);
       try {
+        // "fail" (the default) on purpose: this is a CREATE, and a path that
+        // already exists must come back as a 409 the caller can offer a
+        // `(n)` name for -- never as a silent overwrite.
         const m = await writeTextFile(projectId, docId, path, "");
         applyMutation(m, docId);
         await refreshTree(docId);
       } catch (err) {
         if (selectedIdRef.current !== docId) return;
+        // Rethrown UNCHANGED so the caller can open the conflict dialog.
+        // Folding it into `error` text here would hide the suggestion the
+        // dialog is built from -- the same reason the import flow carries
+        // its payload as a typed error rather than a sentence.
+        if (err instanceof PathCollisionError) throw err;
         setError(errorText(err));
       }
     },
@@ -640,6 +702,65 @@ export function useLatexDocument(projectId: string, canEdit: boolean): UseLatexD
         await refreshTree(docId);
       } catch (err) {
         if (selectedIdRef.current !== docId) return;
+        // Rethrown UNCHANGED -- see `createFile`. Note this is reached with
+        // the engine NOT yet renamed (the rename above runs only on the
+        // success path), so a caller retrying at a different destination
+        // starts from exactly the state it would have had.
+        if (err instanceof PathCollisionError) throw err;
+        setError(errorText(err));
+      }
+    },
+    [projectId, canEdit, applyMutation, refreshTree]
+  );
+
+  const moveDir = useCallback(
+    async (from: string, to: string) => {
+      const docId = selectedIdRef.current;
+      if (!docId || !canEdit) return;
+      setError(null);
+
+      // Every rule `moveFile` establishes applies here N times over, and for
+      // the same reasons -- read its comments before changing any of this.
+      // Flush FIRST, while the old paths are still the ones the server
+      // knows; rename the engine only AFTER the server has agreed, so a
+      // refused move leaves no timer armed against a path that never
+      // existed.
+      const prefix = `${from}/`;
+      const saveEngine = engineRef.current;
+      const dirty = saveEngine?.dirtyPaths().filter((p) => p.startsWith(prefix)) ?? [];
+      for (const path of dirty) {
+        await saveEngine?.flushPath(path);
+        if (selectedIdRef.current !== docId) return;
+      }
+
+      const isInside = (path: string) => path.startsWith(prefix);
+      const moved = (path: string) => `${to}/${path.slice(prefix.length)}`;
+
+      try {
+        const m = await renameDir(projectId, docId, from, to);
+        // The engine captured ABOVE, not `engineRef.current` -- by the time
+        // this resolves the ref may already name another document's engine.
+        for (const path of openPathsRef.current.filter(isInside)) {
+          saveEngine?.rename(path, moved(path));
+        }
+        setSaveFailures((prev) =>
+          prev.map((f) => (f.id === docId && isInside(f.path) ? { ...f, path: moved(f.path) } : f))
+        );
+        applyMutation(m, docId);
+        if (selectedIdRef.current !== docId) return;
+        setOpenPaths((prev) => prev.map((p) => (isInside(p) ? moved(p) : p)));
+        setBuffers((prev) => {
+          const next: Record<string, string> = {};
+          for (const [path, text] of Object.entries(prev)) {
+            next[isInside(path) ? moved(path) : path] = text;
+          }
+          return next;
+        });
+        setActivePath((prev) => (prev !== null && isInside(prev) ? moved(prev) : prev));
+        await refreshTree(docId);
+      } catch (err) {
+        if (selectedIdRef.current !== docId) return;
+        if (err instanceof PathCollisionError) throw err;
         setError(errorText(err));
       }
     },
@@ -663,6 +784,8 @@ export function useLatexDocument(projectId: string, canEdit: boolean): UseLatexD
         await refreshTree(docId);
       } catch (err) {
         if (selectedIdRef.current !== docId) return;
+        // Rethrown UNCHANGED -- see `createFile`.
+        if (err instanceof PathCollisionError) throw err;
         setError(errorText(err));
       }
     },
@@ -760,8 +883,31 @@ export function useLatexDocument(projectId: string, canEdit: boolean): UseLatexD
         setDocuments((prev) => [...prev, doc]);
         setSelectedId(doc.id);
       } catch (err) {
+        // A duplicate NAME (409 `name_collision`) does NOT get the shared
+        // conflict dialog here, unlike the projects list page: this hook has
+        // no dialog host, and nothing in the workspace calls `createDoc` --
+        // the only surface that creates a document is the list page, which
+        // owns its own `ConflictDialog`. Rethrowing instead would hand a
+        // typed error to a caller that does not exist. What this path must
+        // still do is SAY what happened, and `errorText` now names the taken
+        // name and the server's suggestion rather than the generic line.
         setError(errorText(err));
       }
+    },
+    [projectId]
+  );
+
+  const renameDoc = useCallback(
+    async (id: string, name: string) => {
+      setError(null);
+      const updated = await patchDocument(projectId, id, { name });
+      // Both the list and the OPEN document carry the name, and the header
+      // reads the latter -- updating only `documents` would leave the title
+      // the user just changed still showing the old one until a refetch.
+      setDocuments((prev) => prev.map((d) => (d.id === updated.id ? { ...d, ...updated } : d)));
+      setDocumentState((current) =>
+        current && current.id === updated.id ? { ...current, ...updated } : current
+      );
     },
     [projectId]
   );
@@ -798,24 +944,43 @@ export function useLatexDocument(projectId: string, canEdit: boolean): UseLatexD
     [projectId]
   );
 
-  const importZip = useCallback(
-    async (zip: Blob, name: string, mainPath?: string) => {
-      setError(null);
-      let imported;
-      try {
-        imported = await importArchive(projectId, zip, name, mainPath);
-      } catch (err) {
-        // Rethrown UNCHANGED: the dropzone catches this specifically to
-        // render the candidate picker, and turning it into `error` text
-        // here would hide the one piece of information it needs (the
-        // candidate list) behind a generic message.
-        if (err instanceof AmbiguousMainError) throw err;
-        setError(errorText(err));
-        return;
+  // The import itself is NOT performed here. It is a two-step plan/commit
+  // conversation with the user (collisions, a duplicate document name, an
+  // undecidable main file), and it is offered from the projects LIST page
+  // too, which has no hook at all -- so the flow lives in
+  // `import-dropzone.tsx`, the one component both surfaces share. What is
+  // left here is only what a committed import means for state this hook
+  // owns.
+
+  const refreshFiles = useCallback(async (revision?: number) => {
+    const docId = selectedIdRef.current;
+    if (!docId) return;
+    try {
+      await refreshTree(docId);
+      // Taken from the server's own response rather than re-fetched with a
+      // second `getDocument`: this hook's rule is that nothing increments
+      // `revision` itself, every call site uses the number the server
+      // actually returned (see `applyMutation`), and the commit response
+      // already carries it. `used_bytes` is not folded in here because
+      // `refreshTree` just took it from the freshly listed tree.
+      if (revision !== undefined && selectedIdRef.current === docId) {
+        setRevision(revision);
+        setDocumentState((prev) =>
+          prev && prev.id === docId ? { ...prev, revision } : prev
+        );
       }
+    } catch (err) {
+      if (selectedIdRef.current !== docId) return;
+      setError(errorText(err));
+    }
+  }, [refreshTree]);
+
+  const adoptDocument = useCallback(
+    async (id: string) => {
+      setError(null);
       try {
-        const doc = await getDocument(projectId, imported.id);
-        setDocuments((prev) => [...prev, doc]);
+        const doc = await getDocument(projectId, id);
+        setDocuments((prev) => (prev.some((d) => d.id === doc.id) ? prev : [...prev, doc]));
         setSelectedId(doc.id);
       } catch (err) {
         // The import itself succeeded server-side; only the follow-up fetch
@@ -877,12 +1042,15 @@ export function useLatexDocument(projectId: string, canEdit: boolean): UseLatexD
     createFile,
     removeFile,
     moveFile,
+    moveDir,
     uploadBinary,
     setEngine,
     awaitEnginePatch,
     setMainPath,
     createDoc,
     removeDoc,
-    importZip,
+    renameDoc,
+    refreshFiles,
+    adoptDocument,
   };
 }

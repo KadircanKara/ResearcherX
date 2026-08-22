@@ -32,8 +32,8 @@ SEED_PROJECTS = [
         ],
         "members": [
             {"email": "you@researcherx.dev", "role": Role.OWNER},
-            {"email": "amelia@lab.io", "role": Role.EDITOR},
-            {"email": "marco@lab.io", "role": Role.VIEWER},
+            {"email": "amelia@lab.io", "role": Role.MEMBER},
+            {"email": "marco@lab.io", "role": Role.MEMBER},
         ],
     },
     {
@@ -48,7 +48,7 @@ SEED_PROJECTS = [
         ],
         "members": [
             {"email": "you@researcherx.dev", "role": Role.OWNER},
-            {"email": "amelia@lab.io", "role": Role.EDITOR},
+            {"email": "amelia@lab.io", "role": Role.MEMBER},
         ],
     },
     {
@@ -64,8 +64,8 @@ SEED_PROJECTS = [
         ],
         "members": [
             {"email": "you@researcherx.dev", "role": Role.OWNER},
-            {"email": "amelia@lab.io", "role": Role.EDITOR},
-            {"email": "marco@lab.io", "role": Role.VIEWER},
+            {"email": "amelia@lab.io", "role": Role.MEMBER},
+            {"email": "marco@lab.io", "role": Role.MEMBER},
         ],
     },
 ]

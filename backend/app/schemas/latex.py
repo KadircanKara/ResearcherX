@@ -3,6 +3,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from app.schemas.user import UserOut
+
 # The compile service offers exactly these two. lualatex was measured and
 # dropped: luaotfload demands a writable cache path during format load, which
 # a read-only rootfs cannot give it. Pinning the type here rather than taking
@@ -41,6 +43,17 @@ class LatexDocumentOut(BaseModel):
     engine: str
     created_at: datetime
     updated_at: datetime
+    # Reported by the server so nothing downstream re-derives it. A client
+    # that computed access from the project role would be a second copy of
+    # `services/latex_access.py` that drifts. Not a column on the ORM row --
+    # defaulted so `model_validate(row)` doesn't choke on its absence, then
+    # always overwritten via `.model_copy(update=...)` in `_document_out`
+    # before the response leaves the route.
+    my_access: str = ""
+    # Exposed because the share dialog must render the creator with no control
+    # -- a grant naming them is refused (422), so offering one would present an
+    # action that always fails. NULL for documents predating the column.
+    created_by: str | None
     model_config = {"from_attributes": True}
 
 
@@ -161,6 +174,16 @@ class LatexFileRename(BaseModel):
     model_config = {"populate_by_name": True}
 
 
+class LatexDirRename(BaseModel):
+    """A directory move. Same wire names as `LatexFileRename`, because to a
+    caller it is the same gesture -- the difference is only that a directory
+    is a prefix rather than a row."""
+
+    from_path: str = Field(alias="from", min_length=1, max_length=400)
+    to_path: str = Field(alias="to", min_length=1, max_length=400)
+    model_config = {"populate_by_name": True}
+
+
 class LatexImportOut(BaseModel):
     """What an import returns. Deliberately the document's identity plus the
     two things detection decided, so the client can show "we picked main.tex
@@ -172,3 +195,64 @@ class LatexImportOut(BaseModel):
     engine: str
     revision: int
     file_count: int
+
+
+class LatexCollisionOut(BaseModel):
+    """One incoming file that cannot be written as-is, with the `(n)` name it
+    would get. The server computes the suggestion (`latex_dedupe`); the
+    client displays it and never recomputes it."""
+
+    path: str
+    existing: str
+    suggestion: str
+
+
+class LatexNameCollisionOut(BaseModel):
+    name: str
+    suggestion: str
+
+
+class LatexImportPlanOut(BaseModel):
+    """Everything the client must ask the user about, from ONE upload.
+
+    A merge collides by definition -- it is the common path, not the rare
+    one -- so a plan that answered with a 409 would make every merge cost
+    two uploads.
+    """
+
+    staging_id: str
+    mode: Literal["create", "merge"]
+    file_count: int
+    collisions: list[LatexCollisionOut]
+    name_collision: LatexNameCollisionOut | None = None
+    # Detection could not choose. The client must send `main_path` on commit.
+    ambiguous_main: list[str] | None = None
+
+
+class LatexImportDecision(BaseModel):
+    path: str
+    new_path: str = Field(min_length=1, max_length=400)
+
+
+class LatexImportCommit(BaseModel):
+    staging_id: str
+    # Present for a create, ignored for a merge.
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    main_path: str | None = None
+    document_id: str | None = None
+    decisions: list[LatexImportDecision] = Field(default_factory=list, max_length=2000)
+
+
+class LatexMemberCreate(BaseModel):
+    user_id: str
+    role: Literal["editor", "viewer"]
+
+
+class LatexMemberRoleUpdate(BaseModel):
+    role: Literal["editor", "viewer"]
+
+
+class LatexMemberOut(BaseModel):
+    user: UserOut
+    role: str
+    model_config = {"from_attributes": True}

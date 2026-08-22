@@ -3,6 +3,7 @@
 import { Users } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { ShareDialog } from "@/components/share-dialog"
+import { ProjectColorPicker } from "@/components/project-color-picker"
 import type { ProjectDetail } from "@/lib/types"
 
 interface ProjectHeaderProps {
@@ -19,9 +20,16 @@ export function ProjectHeader({ detail }: ProjectHeaderProps) {
         <Badge variant="secondary" className="mb-2 text-xs font-normal">
           Research project
         </Badge>
-        <h1 className="truncate text-2xl font-semibold tracking-tight text-foreground">
-          {project.title}
-        </h1>
+        <div className="flex items-center gap-2.5">
+          <ProjectColorPicker
+            projectId={project.id}
+            color={project.color}
+            canEdit={detail.my_role === "owner"}
+          />
+          <h1 className="truncate text-2xl font-semibold tracking-tight text-foreground">
+            {project.title}
+          </h1>
+        </div>
         {project.description && (
           <p className="mt-1 line-clamp-2 text-sm text-muted-foreground">
             {project.description}

@@ -3,7 +3,8 @@
 from sqlalchemy import select
 import pytest_asyncio
 
-from app.db.models import User
+from app.core.palette import PROJECT_COLORS
+from app.db.models import Project, User
 from app.db.seed import seed_users
 
 
@@ -69,10 +70,12 @@ async def test_other_user_list_excludes_project(client, users):
     assert r.json() == []
 
 
-# ── owner adds viewer; viewer sees it with my_role ───────────────────────────
+# ── owner adds member; member sees it with my_role ───────────────────────────
 
 
-async def test_owner_adds_viewer_sees_project(client, users):
+async def test_owner_adds_member_sees_project(client, users):
+    """Was test_owner_adds_viewer_sees_project: the old `viewer` role is gone,
+    sharing is binary now, so this asserts `role`/`my_role` == "member"."""
     you, amelia, _ = users
 
     # you create
@@ -83,15 +86,15 @@ async def test_owner_adds_viewer_sees_project(client, users):
     )
     project_id = create_r.json()["id"]
 
-    # owner adds amelia as viewer
+    # owner adds amelia as member
     add_r = await client.post(
         f"/v1/projects/{project_id}/members",
-        json={"user_id": amelia.id, "role": "viewer"},
+        json={"user_id": amelia.id, "role": "member"},
         headers={"X-Dev-User-Id": you.id},
     )
     assert add_r.status_code == 201
     member_data = add_r.json()
-    assert member_data["role"] == "viewer"
+    assert member_data["role"] == "member"
     assert member_data["user"]["id"] == amelia.id
 
     # amelia lists — sees the project with all required fields
@@ -100,29 +103,31 @@ async def test_owner_adds_viewer_sees_project(client, users):
     projects = list_r.json()
     assert len(projects) == 1
     assert projects[0]["id"] == project_id
-    assert projects[0]["my_role"] == "viewer"
+    assert projects[0]["my_role"] == "member"
     assert projects[0]["counts"]["members"] == 2
     assert projects[0]["counts"]["papers"] == 0
     assert projects[0]["counts"]["chats"] == 0
     assert "created_at" in projects[0]
     assert "updated_at" in projects[0]
 
-    # amelia gets detail — my_role=viewer
+    # amelia gets detail — my_role=member
     detail_r = await client.get(
         f"/v1/projects/{project_id}",
         headers={"X-Dev-User-Id": amelia.id},
     )
     assert detail_r.status_code == 200
     detail = detail_r.json()
-    assert detail["my_role"] == "viewer"
+    assert detail["my_role"] == "member"
     assert detail["project"]["id"] == project_id
     assert any(m["user"]["id"] == amelia.id for m in detail["members"])
 
 
-# ── viewer PATCH → 403 ───────────────────────────────────────────────────────
+# ── member PATCH → 200 ───────────────────────────────────────────────────────
 
 
-async def test_viewer_patch_returns_403(client, users):
+async def test_member_patch_succeeds(client, users):
+    """Was test_viewer_patch_returns_403: sharing collapsed to binary, so a
+    member -- who under the old model was only a `viewer` -- may now write."""
     you, amelia, _ = users
 
     create_r = await client.post(
@@ -134,16 +139,17 @@ async def test_viewer_patch_returns_403(client, users):
 
     await client.post(
         f"/v1/projects/{project_id}/members",
-        json={"user_id": amelia.id, "role": "viewer"},
+        json={"user_id": amelia.id, "role": "member"},
         headers={"X-Dev-User-Id": you.id},
     )
 
     r = await client.patch(
         f"/v1/projects/{project_id}",
-        json={"title": "Hacked"},
+        json={"title": "Retitled"},
         headers={"X-Dev-User-Id": amelia.id},
     )
-    assert r.status_code == 403
+    assert r.status_code == 200
+    assert r.json()["title"] == "Retitled"
 
 
 # ── non-member GET → 404 ─────────────────────────────────────────────────────
@@ -205,7 +211,7 @@ async def test_members_list(client, users):
 
     await client.post(
         f"/v1/projects/{project_id}/members",
-        json={"user_id": amelia.id, "role": "editor"},
+        json={"user_id": amelia.id, "role": "member"},
         headers={"X-Dev-User-Id": you.id},
     )
 
@@ -224,6 +230,8 @@ async def test_members_list(client, users):
 
 
 async def test_owner_can_update_member_role(client, users):
+    """Sharing is binary now -- "member" is the only assignable role, so this
+    PATCH is idempotent. Was: add as viewer, PATCH to editor, assert 200/editor."""
     you, amelia, _ = users
 
     create_r = await client.post(
@@ -235,7 +243,30 @@ async def test_owner_can_update_member_role(client, users):
 
     await client.post(
         f"/v1/projects/{project_id}/members",
-        json={"user_id": amelia.id, "role": "viewer"},
+        json={"user_id": amelia.id, "role": "member"},
+        headers={"X-Dev-User-Id": you.id},
+    )
+
+    r = await client.patch(
+        f"/v1/projects/{project_id}/members/{amelia.id}",
+        json={"role": "member"},
+        headers={"X-Dev-User-Id": you.id},
+    )
+    assert r.status_code == 200
+    assert r.json()["role"] == "member"
+
+
+async def test_a_retired_role_is_refused_on_update(client, users):
+    you, amelia, _ = users
+    create_r = await client.post(
+        "/v1/projects",
+        json={"title": "Stale client update"},
+        headers={"X-Dev-User-Id": you.id},
+    )
+    project_id = create_r.json()["id"]
+    await client.post(
+        f"/v1/projects/{project_id}/members",
+        json={"user_id": amelia.id, "role": "member"},
         headers={"X-Dev-User-Id": you.id},
     )
 
@@ -244,8 +275,7 @@ async def test_owner_can_update_member_role(client, users):
         json={"role": "editor"},
         headers={"X-Dev-User-Id": you.id},
     )
-    assert r.status_code == 200
-    assert r.json()["role"] == "editor"
+    assert r.status_code == 422
 
 
 # ── DELETE member ────────────────────────────────────────────────────────────
@@ -263,7 +293,7 @@ async def test_owner_can_remove_member(client, users):
 
     await client.post(
         f"/v1/projects/{project_id}/members",
-        json={"user_id": amelia.id, "role": "viewer"},
+        json={"user_id": amelia.id, "role": "member"},
         headers={"X-Dev-User-Id": you.id},
     )
 
@@ -272,3 +302,155 @@ async def test_owner_can_remove_member(client, users):
         headers={"X-Dev-User-Id": you.id},
     )
     assert r.status_code == 204
+
+
+# ── project colour ───────────────────────────────────────────────────────────
+
+
+async def test_a_new_project_is_given_a_palette_colour(client, users):
+    you, _, _ = users
+    r = await client.post(
+        "/v1/projects",
+        json={"title": "Coloured"},
+        headers={"X-Dev-User-Id": you.id},
+    )
+    assert r.status_code == 201
+    assert r.json()["color"] in PROJECT_COLORS
+
+
+async def test_a_colour_outside_the_palette_is_refused(client, users):
+    """The allowlist is the containment for a value that ends up in a `style`
+    attribute -- a syntactically valid hex is not the test."""
+    you, _, _ = users
+    r = await client.post(
+        "/v1/projects",
+        json={"title": "Invisible", "color": "#123456"},
+        headers={"X-Dev-User-Id": you.id},
+    )
+    assert r.status_code == 422
+
+
+async def test_a_colour_that_is_not_a_colour_is_refused(client, users):
+    you, _, _ = users
+    r = await client.post(
+        "/v1/projects",
+        json={"title": "Injected", "color": "red; background: url(x)"},
+        headers={"X-Dev-User-Id": you.id},
+    )
+    assert r.status_code == 422
+
+
+async def test_an_owner_can_change_the_colour(client, users):
+    you, _, _ = users
+    created = await client.post(
+        "/v1/projects",
+        json={"title": "Repaint"},
+        headers={"X-Dev-User-Id": you.id},
+    )
+    project_id = created.json()["id"]
+    target = PROJECT_COLORS[3]
+    r = await client.patch(
+        f"/v1/projects/{project_id}",
+        json={"color": target},
+        headers={"X-Dev-User-Id": you.id},
+    )
+    assert r.status_code == 200
+    assert r.json()["color"] == target
+
+
+async def test_a_project_with_no_stored_colour_still_reports_one(client, users, db_session):
+    """Every project that predates the column reads back as NULL. The column is
+    deliberately not back-filled, so the derivation in `_project_out` is the
+    only thing standing between those rows and a client with no colour."""
+    you, _, _ = users
+    created = await client.post(
+        "/v1/projects",
+        json={"title": "Legacy"},
+        headers={"X-Dev-User-Id": you.id},
+    )
+    project_id = created.json()["id"]
+    project = await db_session.get(Project, project_id)
+    project.color = None
+    await db_session.commit()
+
+    r = await client.get("/v1/projects", headers={"X-Dev-User-Id": you.id})
+    row = next(p for p in r.json() if p["id"] == project_id)
+    assert row["color"] in PROJECT_COLORS
+
+
+# ── the collapsed model ──────────────────────────────────────────────────────
+
+
+async def test_a_member_may_add_a_paper(client, users):
+    """Under the old model this user was a `viewer` and got a 403. Project
+    sharing is binary now: a member writes."""
+    you, amelia, _ = users
+    created = await client.post(
+        "/v1/projects",
+        json={"title": "Shared"},
+        headers={"X-Dev-User-Id": you.id},
+    )
+    project_id = created.json()["id"]
+    await client.post(
+        f"/v1/projects/{project_id}/members",
+        json={"user_id": amelia.id, "role": "member"},
+        headers={"X-Dev-User-Id": you.id},
+    )
+
+    r = await client.post(
+        f"/v1/projects/{project_id}/papers",
+        json={"title": "Amelia's paper", "source": "manual"},
+        headers={"X-Dev-User-Id": amelia.id},
+    )
+    assert r.status_code == 201
+
+
+async def test_a_non_member_still_gets_404(client, users):
+    """Unchanged, and load-bearing: a 403 would confirm the project exists."""
+    you, _, marco = users
+    created = await client.post(
+        "/v1/projects",
+        json={"title": "Private"},
+        headers={"X-Dev-User-Id": you.id},
+    )
+    project_id = created.json()["id"]
+
+    r = await client.get(
+        f"/v1/projects/{project_id}/papers",
+        headers={"X-Dev-User-Id": marco.id},
+    )
+    assert r.status_code == 404
+
+
+async def test_a_member_may_not_add_members(client, users):
+    """Owner-only actions did not collapse."""
+    you, amelia, marco = users
+    created = await client.post(
+        "/v1/projects", json={"title": "Guarded"}, headers={"X-Dev-User-Id": you.id}
+    )
+    project_id = created.json()["id"]
+    await client.post(
+        f"/v1/projects/{project_id}/members",
+        json={"user_id": amelia.id, "role": "member"},
+        headers={"X-Dev-User-Id": you.id},
+    )
+
+    r = await client.post(
+        f"/v1/projects/{project_id}/members",
+        json={"user_id": marco.id, "role": "member"},
+        headers={"X-Dev-User-Id": amelia.id},
+    )
+    assert r.status_code == 403
+
+
+async def test_a_retired_role_is_refused_on_add(client, users):
+    you, amelia, _ = users
+    created = await client.post(
+        "/v1/projects", json={"title": "Stale client"}, headers={"X-Dev-User-Id": you.id}
+    )
+    r = await client.post(
+        f"/v1/projects/{created.json()['id']}/members",
+        json={"user_id": amelia.id, "role": "editor"},
+        headers={"X-Dev-User-Id": you.id},
+    )
+    assert r.status_code == 422

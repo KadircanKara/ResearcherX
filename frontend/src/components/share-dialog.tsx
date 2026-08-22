@@ -17,18 +17,9 @@ import { useIdentity } from "@/lib/identity"
 import {
   listMembers,
   addMember,
-  updateMemberRole,
   removeMember,
 } from "@/lib/projects"
 import type { Member, Role, Project } from "@/lib/types"
-
-const ROLE_LABELS: Record<Exclude<Role, "owner">, string> = {
-  editor: "Can edit",
-  commenter: "Can comment",
-  viewer: "Can view",
-}
-
-const EDITABLE_ROLES: Exclude<Role, "owner">[] = ["editor", "commenter", "viewer"]
 
 function initials(name: string) {
   return name
@@ -51,9 +42,9 @@ export function ShareDialog({ project, initialMembers }: ShareDialogProps) {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  // Add collaborator form state
+  // Add collaborator form state. Sharing is binary now (owner/member), so
+  // this row is just a user picker -- there is no role to select.
   const [addUserId, setAddUserId] = useState("")
-  const [addRole, setAddRole] = useState<Exclude<Role, "owner">>("viewer")
   const [adding, setAdding] = useState(false)
 
   const refresh = useCallback(async () => {
@@ -94,16 +85,6 @@ export function ShareDialog({ project, initialMembers }: ShareDialogProps) {
     if (nonMembers.length === 0) setAddUserId("")
   }, [members]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  async function handleRoleChange(userId: string, role: Role) {
-    setError(null)
-    try {
-      await updateMemberRole(project.id, userId, { role })
-      await refresh()
-    } catch {
-      setError("Failed to update role.")
-    }
-  }
-
   async function handleRemove(userId: string) {
     setError(null)
     try {
@@ -119,8 +100,7 @@ export function ShareDialog({ project, initialMembers }: ShareDialogProps) {
     setAdding(true)
     setError(null)
     try {
-      await addMember(project.id, { user_id: addUserId, role: addRole })
-      setAddRole("viewer")
+      await addMember(project.id, { user_id: addUserId, role: "member" })
       await refresh()
     } catch {
       setError("Failed to add collaborator.")
@@ -144,6 +124,8 @@ export function ShareDialog({ project, initialMembers }: ShareDialogProps) {
           </DialogDescription>
         </DialogHeader>
 
+        {/* Project sharing is binary. Finer access lives on individual LaTeX
+            projects, in each document's own share dialog. */}
         {/* Members list */}
         <div className="flex flex-col gap-1">
           {loading && members.length === 0 && (
@@ -182,35 +164,10 @@ export function ShareDialog({ project, initialMembers }: ShareDialogProps) {
                   </p>
                 </div>
 
-                {/* Role control */}
-                {isThisOwner ? (
-                  <span className="shrink-0 text-xs text-muted-foreground">
-                    Owner
-                  </span>
-                ) : isOwner ? (
-                  <select
-                    aria-label={`Role for ${member.user.name}`}
-                    value={member.role}
-                    onChange={(e) =>
-                      handleRoleChange(member.user.id, e.target.value as Role)
-                    }
-                    className="shrink-0 rounded-md border border-border bg-background px-2.5 py-1 text-xs text-foreground focus:outline-none focus:ring-2 focus:ring-ring/50"
-                  >
-                    {EDITABLE_ROLES.map((r) => (
-                      <option key={r} value={r}>
-                        {ROLE_LABELS[r]}
-                      </option>
-                    ))}
-                  </select>
-                ) : (
-                  <span className="shrink-0 text-xs text-muted-foreground">
-                    {member.role === "editor"
-                      ? ROLE_LABELS.editor
-                      : member.role === "commenter"
-                        ? ROLE_LABELS.commenter
-                        : ROLE_LABELS.viewer}
-                  </span>
-                )}
+                {/* Role display -- binary now, so there is nothing to pick. */}
+                <span className="shrink-0 text-xs text-muted-foreground">
+                  {isThisOwner ? "Owner" : "Member"}
+                </span>
 
                 {/* Remove button — owners only, not for owners */}
                 {canRemove ? (
@@ -246,24 +203,6 @@ export function ShareDialog({ project, initialMembers }: ShareDialogProps) {
               {nonMembers.map((u) => (
                 <option key={u.id} value={u.id}>
                   {u.name} ({u.email})
-                </option>
-              ))}
-            </select>
-
-            <label className="sr-only" htmlFor="pick-role">
-              Role
-            </label>
-            <select
-              id="pick-role"
-              value={addRole}
-              onChange={(e) =>
-                setAddRole(e.target.value as Exclude<Role, "owner">)
-              }
-              className="shrink-0 rounded-md border border-border bg-background px-2 py-1.5 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring/50"
-            >
-              {EDITABLE_ROLES.map((r) => (
-                <option key={r} value={r}>
-                  {ROLE_LABELS[r]}
                 </option>
               ))}
             </select>

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Sequence
+from typing import Literal
 
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -21,6 +22,7 @@ from sqlalchemy.orm import defer
 
 from app.core.config import settings
 from app.db.models import LatexDocument, LatexFile
+from app.services import latex_dedupe
 from app.services.latex_paths import MANIFEST_PATH, InvalidPath, collision_key, normalize_path
 
 
@@ -41,12 +43,18 @@ class TooManyFiles(Exception):
 
 
 class PathCollision(Exception):
-    """The path is taken, or differs from a taken one only by case."""
+    """The path is taken, or differs from a taken one only by case.
 
-    def __init__(self, path: str, existing: str) -> None:
+    Carries `suggestion` -- the `(n)` name the user can accept with one click
+    -- because a refusal with no way forward is what this exception used to
+    be, and a dead-end 409 is why the case-collision rule read as a bug.
+    """
+
+    def __init__(self, path: str, existing: str, suggestion: str) -> None:
         super().__init__(f"{path!r} collides with existing {existing!r}")
         self.path = path
         self.existing = existing
+        self.suggestion = suggestion
 
 
 class FileNotFound(Exception):
@@ -143,7 +151,11 @@ _bump_revision = bump_revision
 
 
 async def _guard_write(
-    db: AsyncSession, document_id: str, path: str, size: int
+    db: AsyncSession,
+    document_id: str,
+    path: str,
+    size: int,
+    if_exists: Literal["fail", "replace"],
 ) -> LatexFile | None:
     """Shared precondition check for both write paths. Returns the row being
     overwritten, or None for a create.
@@ -154,6 +166,11 @@ async def _guard_write(
     it, two overlapping writes can each read the tree under the cap, both
     project themselves as within it, and both commit, taking the document
     over 25MB with neither write individually at fault.
+
+    `if_exists` governs only an EXACT-path collision. A case-only collision
+    -- the incoming path differs from a taken one only by case fold -- is
+    refused regardless of `if_exists`: "replace" means "replace THIS file",
+    and a case-folded neighbour is a different file the caller never named.
     """
     if size > settings.latex_file_max_bytes:
         raise QuotaExceeded(size, settings.latex_file_max_bytes)
@@ -164,22 +181,27 @@ async def _guard_write(
 
     existing = await read_file(db, document_id, path)
 
+    # Every taken path, once. Needed for the collision decision AND for the
+    # suggestion, so the two cannot disagree about what is taken. Column-only
+    # query: `list_files` ships whole rows including blobs, and answering
+    # "is this path free" from that materialises every file's content on
+    # every single write.
+    taken = (
+        (await db.execute(select(LatexFile.path).where(LatexFile.document_id == document_id)))
+        .scalars()
+        .all()
+    )
+
+    if existing is not None and if_exists == "fail":
+        raise PathCollision(path, existing.path, latex_dedupe.suffix_path(path, taken))
+
     if existing is None:
         # Case-fold collision is checked only on CREATE: overwriting the
         # file at its own exact path is not a collision with itself.
-        # Column-only query: `list_files` selects (and, pre-deferral, used
-        # to ship) whole rows including blobs -- answering "does this path
-        # collide" and "how many files" from that materialised every file's
-        # content/blob on every single write.
         key = collision_key(path)
-        taken = (
-            (await db.execute(select(LatexFile.path).where(LatexFile.document_id == document_id)))
-            .scalars()
-            .all()
-        )
         for other in taken:
             if collision_key(other) == key:
-                raise PathCollision(path, other)
+                raise PathCollision(path, other, latex_dedupe.suffix_path(path, taken))
         if len(taken) >= settings.latex_max_files:
             raise TooManyFiles(len(taken) + 1, settings.latex_max_files)
 
@@ -189,11 +211,26 @@ async def _guard_write(
     return existing
 
 
-async def write_text(db: AsyncSession, document_id: str, path: str, content: str) -> LatexFile:
+async def write_text(
+    db: AsyncSession,
+    document_id: str,
+    path: str,
+    content: str,
+    *,
+    if_exists: Literal["fail", "replace"] = "fail",
+) -> LatexFile:
+    """Create or overwrite a text file.
+
+    `if_exists` defaults to FAIL, and that default is load-bearing. Autosave
+    -- the one legitimate overwrite in this system -- passes "replace"
+    explicitly, so a call site that forgets the parameter breaks loudly with
+    a 409 instead of silently blanking a chapter. A default of "replace"
+    would preserve the data-loss bug for every future caller.
+    """
     path = normalize_path(path)
     _reject_reserved(path)
     size = len(content.encode("utf-8"))
-    existing = await _guard_write(db, document_id, path, size)
+    existing = await _guard_write(db, document_id, path, size, if_exists)
 
     # Built complete on construction, not assigned field-by-field after
     # `db.add` -- a row with is_binary's column default (False) and both
@@ -222,10 +259,19 @@ async def write_text(db: AsyncSession, document_id: str, path: str, content: str
     return existing
 
 
-async def write_binary(db: AsyncSession, document_id: str, path: str, data: bytes) -> LatexFile:
+async def write_binary(
+    db: AsyncSession,
+    document_id: str,
+    path: str,
+    data: bytes,
+    *,
+    if_exists: Literal["fail", "replace"] = "fail",
+) -> LatexFile:
+    """Create or overwrite a binary file. See `write_text` for why the
+    default is FAIL."""
     path = normalize_path(path)
     _reject_reserved(path)
-    existing = await _guard_write(db, document_id, path, len(data))
+    existing = await _guard_write(db, document_id, path, len(data), if_exists)
 
     if existing is None:
         existing = LatexFile(
@@ -306,6 +352,85 @@ async def bulk_create(
     return count
 
 
+async def bulk_merge(
+    db: AsyncSession, document_id: str, entries: Sequence[tuple[str, bytes, bool]]
+) -> int:
+    """Insert many files into an EXISTING, non-empty tree in one pass.
+
+    `bulk_create`'s sibling, and deliberately a separate function rather than
+    a flag on it: `bulk_create`'s whole justification is that a freshly
+    created document has nothing to collide with and nothing to add to, so
+    its missing collision scan and missing quota SUM are vacuous. Neither is
+    vacuous here.
+
+    `entries` carry FINAL paths. Every collision has already been resolved by
+    the caller (`latex_dedupe.plan_writes` plus the user's decisions); a path
+    that is still taken when it reaches here is a caller bug and raises
+    rather than overwriting.
+
+    One lock, one taken-paths read, one cap check, one revision bump -- a
+    merge is one change, and doing any of these per file costs O(n) round
+    trips on an import of a real project.
+    """
+    await db.execute(
+        select(LatexDocument.id).where(LatexDocument.id == document_id).with_for_update()
+    )
+
+    taken = (
+        (await db.execute(select(LatexFile.path).where(LatexFile.document_id == document_id)))
+        .scalars()
+        .all()
+    )
+    taken_keys = {collision_key(t): t for t in taken}
+
+    total = await used_bytes(db, document_id)
+    count = len(taken)
+    for path, data, _is_binary in entries:
+        normalized = normalize_path(path)
+        _reject_reserved(normalized)
+        key = collision_key(normalized)
+        if key in taken_keys:
+            raise PathCollision(
+                normalized,
+                taken_keys[key],
+                latex_dedupe.suffix_path(normalized, taken_keys.values()),
+            )
+        taken_keys[key] = normalized
+        if len(data) > settings.latex_file_max_bytes:
+            raise QuotaExceeded(len(data), settings.latex_file_max_bytes)
+        total += len(data)
+        count += 1
+        if total > settings.latex_project_max_bytes:
+            raise QuotaExceeded(total, settings.latex_project_max_bytes)
+        if count > settings.latex_max_files:
+            raise TooManyFiles(count, settings.latex_max_files)
+
+    written = 0
+    for path, data, is_binary in entries:
+        normalized = normalize_path(path)
+        content: str | None = None
+        if not is_binary:
+            try:
+                content = data.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise InvalidEncoding(normalized) from exc
+        db.add(
+            LatexFile(
+                document_id=document_id,
+                path=normalized,
+                is_binary=is_binary,
+                content=content,
+                blob=data if is_binary else None,
+                size_bytes=len(data),
+            )
+        )
+        written += 1
+
+    await db.flush()
+    await _bump_revision(db, document_id)
+    return written
+
+
 async def delete_file(db: AsyncSession, document_id: str, path: str) -> bool:
     """True if a file was removed. A miss is NOT an error -- the caller turns
     it into a 404 with the context it has."""
@@ -334,11 +459,73 @@ async def rename_file(db: AsyncSession, document_id: str, src: str, dst: str) ->
         )
         for other in taken:
             if other != src and collision_key(other) == key:
-                raise PathCollision(dst, other)
+                raise PathCollision(dst, other, latex_dedupe.suffix_path(dst, taken))
     row.path = dst
     await db.flush()
     await _bump_revision(db, document_id)
     return row
+
+
+async def rename_dir(db: AsyncSession, document_id: str, src: str, dst: str) -> int:
+    """Move every file under the `src` prefix to sit under `dst`. Returns the
+    count moved. Caller commits.
+
+    There is no directory ROW to rename -- `latex_files.path` is a flat
+    string and a directory exists only as the shared prefix of the files
+    beneath it. So this is N renames, and it is one route rather than N
+    client calls for the reason the archive parser refuses a partial
+    import: a tree left half-moved is a project silently missing the file
+    its `\\input` names, and nothing tells the user which half moved.
+
+    All-or-nothing in one transaction: every destination is computed and
+    checked BEFORE any row is written, so a collision on the last file
+    leaves the first untouched.
+    """
+    src = normalize_path(src)
+    dst = normalize_path(dst)
+    _reject_reserved(dst)
+    if src == dst:
+        return 0
+
+    await db.execute(
+        select(LatexDocument.id).where(LatexDocument.id == document_id).with_for_update()
+    )
+    rows = (
+        (await db.execute(select(LatexFile).where(LatexFile.document_id == document_id)))
+        .scalars()
+        .all()
+    )
+
+    prefix = f"{src}/"
+    moving = [r for r in rows if r.path.startswith(prefix)]
+    if not moving:
+        raise FileNotFound(src)
+
+    # Refused rather than silently flattened: `chapters` -> `chapters/intro`
+    # would move every file INTO a subdirectory of itself, and the
+    # destination prefix would keep sliding as the source is consumed.
+    if dst.startswith(prefix):
+        raise InvalidPath(dst, "a directory cannot be moved inside itself")
+
+    # Only paths staying put can be collided with. A file moving out of the
+    # way is not an obstacle to the file taking its place, which is what
+    # makes renaming `a` -> `b` work when `b` does not exist yet.
+    staying = {collision_key(r.path): r.path for r in rows if not r.path.startswith(prefix)}
+    planned: list[tuple[LatexFile, str]] = []
+    for row in moving:
+        target = normalize_path(f"{dst}/{row.path[len(prefix) :]}")
+        _reject_reserved(target)
+        key = collision_key(target)
+        if key in staying:
+            raise PathCollision(target, staying[key], latex_dedupe.suffix_path(target, staying))
+        staying[key] = target
+        planned.append((row, target))
+
+    for row, target in planned:
+        row.path = target
+    await db.flush()
+    await _bump_revision(db, document_id)
+    return len(planned)
 
 
 def tree_hash(entries: Sequence[tuple[str, bytes]], engine: str, main_path: str) -> str:

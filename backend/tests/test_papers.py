@@ -312,22 +312,43 @@ async def test_patch_unchanged_body_skips_reindex(client: AsyncClient, you: User
         assert spy.call_count == calls_after_create, "unchanged body must not re-embed"
 
 
-async def test_patch_requires_editor(
+async def test_patch_requires_membership(
     client: AsyncClient, you: User, project: Project, db_session: AsyncSession
 ):
+    """Was test_patch_requires_editor, asserting 403 for a `viewer`. Project
+    sharing is binary now: any member — including who would have been a mere
+    `viewer` under the old model — may write."""
     pid = await _make_paper(client, you, project, source="manual")
-    viewer = (
+    member = (
         await db_session.execute(select(User).where(User.email == "amelia@lab.io"))
     ).scalar_one()
-    db_session.add(ProjectMember(project_id=project.id, user_id=viewer.id, role="viewer"))
+    db_session.add(ProjectMember(project_id=project.id, user_id=member.id, role="member"))
     await db_session.commit()
 
     r = await client.patch(
         f"/v1/projects/{project.id}/papers/{pid}",
-        json={"title": "Nope"},
-        headers={"X-Dev-User-Id": viewer.id},
+        json={"title": "New Title"},
+        headers={"X-Dev-User-Id": member.id},
     )
-    assert r.status_code == 403
+    assert r.status_code == 200
+    assert r.json()["title"] == "New Title"
+
+
+async def test_patch_requires_membership_non_member_gets_404(
+    client: AsyncClient, you: User, project: Project, db_session: AsyncSession
+):
+    """Non-membership is still refused — 404, not 403, so existence isn't leaked."""
+    pid = await _make_paper(client, you, project, source="manual")
+    stranger = (
+        await db_session.execute(select(User).where(User.email == "marco@lab.io"))
+    ).scalar_one()
+
+    r = await client.patch(
+        f"/v1/projects/{project.id}/papers/{pid}",
+        json={"title": "Nope"},
+        headers={"X-Dev-User-Id": stranger.id},
+    )
+    assert r.status_code == 404
 
 
 async def test_patch_body_rolls_back_when_embedding_fails(

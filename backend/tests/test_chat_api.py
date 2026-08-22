@@ -302,3 +302,74 @@ async def test_mentions_are_persisted_on_the_user_message_and_returned(
     last_user = [m for m in detail.json()["messages"] if m["role"] == "user"][-1]
     # Deduped, and ids only — never titles, which go stale on rename.
     assert last_user["mentions"] == [paper.id]
+
+
+async def test_renaming_a_conversation(client: AsyncClient, you: User, project: Project):
+    with patch(
+        "app.services.conversation_service._embed_message",
+        new=AsyncMock(return_value=None),
+    ):
+        created = await client.post(
+            f"/v1/projects/{project.id}/conversations",
+            json={"content": "What are the main findings?"},
+            headers={"X-Dev-User-Id": you.id},
+        )
+
+    resp = await client.patch(
+        f"/v1/projects/{project.id}/conversations/{created.json()['id']}",
+        json={"title": "Findings review"},
+        headers={"X-Dev-User-Id": you.id},
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["title"] == "Findings review"
+    listed = await client.get(
+        f"/v1/projects/{project.id}/conversations", headers={"X-Dev-User-Id": you.id}
+    )
+    assert [c["title"] for c in listed.json()] == ["Findings review"]
+
+
+async def test_two_conversations_may_share_a_title(
+    client: AsyncClient, you: User, project: Project
+):
+    """Unlike a LaTeX project, a conversation is identified by what was said
+    in it -- two chats about the same thing sharing a name is ordinary, not
+    a mistake worth interrupting for."""
+    with patch(
+        "app.services.conversation_service._embed_message",
+        new=AsyncMock(return_value=None),
+    ):
+        first = await client.post(
+            f"/v1/projects/{project.id}/conversations",
+            json={"content": "One"},
+            headers={"X-Dev-User-Id": you.id},
+        )
+        second = await client.post(
+            f"/v1/projects/{project.id}/conversations",
+            json={"content": "Two"},
+            headers={"X-Dev-User-Id": you.id},
+        )
+
+    await client.patch(
+        f"/v1/projects/{project.id}/conversations/{first.json()['id']}",
+        json={"title": "Same"},
+        headers={"X-Dev-User-Id": you.id},
+    )
+    resp = await client.patch(
+        f"/v1/projects/{project.id}/conversations/{second.json()['id']}",
+        json={"title": "Same"},
+        headers={"X-Dev-User-Id": you.id},
+    )
+
+    assert resp.status_code == 200
+
+
+async def test_renaming_a_conversation_in_another_project_is_a_404(
+    client: AsyncClient, you: User, project: Project
+):
+    resp = await client.patch(
+        f"/v1/projects/{project.id}/conversations/does-not-exist",
+        json={"title": "Nope"},
+        headers={"X-Dev-User-Id": you.id},
+    )
+    assert resp.status_code == 404

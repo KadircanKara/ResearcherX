@@ -23,6 +23,8 @@ export async function updateProject(
     title?: string;
     description?: string | null;
     topic_keywords?: string[];
+    /** Must be a `PROJECT_COLORS` entry; the server 422s anything else. */
+    color?: string;
   }
 ): Promise<Project> {
   return (await apiSend<Project>("PATCH", `/projects/${id}`, body)) as Project;
@@ -41,14 +43,6 @@ export async function addMember(
   body: { user_id: string; role: Role }
 ): Promise<Member> {
   return (await apiSend<Member>("POST", `/projects/${id}/members`, body)) as Member;
-}
-
-export async function updateMemberRole(
-  id: string,
-  userId: string,
-  body: { role: Role }
-): Promise<Member> {
-  return (await apiSend<Member>("PATCH", `/projects/${id}/members/${userId}`, body)) as Member;
 }
 
 export async function removeMember(id: string, userId: string): Promise<void> {

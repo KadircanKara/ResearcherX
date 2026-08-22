@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.models import LatexDocument, Project, ProjectMember, User
 from app.db.seed import seed_users
 from app.services.latex_paths import MANIFEST_PATH
+from app.services.latex_staging import staging
 
 DOC = b"\\documentclass{article}\n\\begin{document}\nHi\n\\end{document}"
 
@@ -49,13 +50,63 @@ def _h(user: User) -> dict:
     return {"X-Dev-User-Id": user.id, "Content-Type": "application/zip"}
 
 
+async def _import(
+    client: AsyncClient,
+    user: User,
+    project_id: str,
+    blob,
+    *,
+    name: str | None = None,
+    main_path: str | None = None,
+    document_id: str | None = None,
+):
+    """The two-step import driven as one call.
+
+    Import is `plan` (upload the archive, learn what the user must decide)
+    then `commit` (redeem the token, write the tree). Most tests in this
+    file are about IMPORTING -- what lands in the tree, what is refused,
+    what round-trips -- not about the flow, so they go through this helper.
+    The tests that are about the flow itself drive the two routes directly.
+
+    A plan that refuses is the import refusing, so its response is returned
+    as-is: an archive the plan step rejects never reaches a commit.
+    """
+    params: dict[str, str] = {}
+    if name is not None:
+        params["name"] = name
+    if main_path is not None:
+        params["main_path"] = main_path
+    if document_id is not None:
+        params["document_id"] = document_id
+
+    plan = await client.post(
+        f"/v1/projects/{project_id}/latex/import/plan",
+        params=params,
+        content=blob,
+        headers=_h(user),
+    )
+    if plan.status_code != 200:
+        return plan
+
+    body: dict = {"staging_id": plan.json()["staging_id"]}
+    if name is not None:
+        body["name"] = name
+    if main_path is not None:
+        body["main_path"] = main_path
+    if document_id is not None:
+        body["document_id"] = document_id
+    return await client.post(
+        f"/v1/projects/{project_id}/latex/import/commit",
+        json=body,
+        headers={"X-Dev-User-Id": user.id},
+    )
+
+
 async def test_importing_a_project_creates_a_document_with_its_tree(
     client: AsyncClient, you: User, project: Project
 ):
     blob = _zip({"main.tex": DOC, "chapters/intro.tex": b"\\section{I}", "f.png": b"\x89PNG\x00"})
-    resp = await client.post(
-        f"/v1/projects/{project.id}/latex/import", content=blob, headers=_h(you)
-    )
+    resp = await _import(client, you, project.id, blob)
     assert resp.status_code == 201
     body = resp.json()
     assert body["main_path"] == "main.tex"
@@ -76,9 +127,7 @@ async def test_an_imported_projects_main_file_content_is_readable(
     client: AsyncClient, you: User, project: Project
 ):
     blob = _zip({"main.tex": DOC})
-    created = await client.post(
-        f"/v1/projects/{project.id}/latex/import", content=blob, headers=_h(you)
-    )
+    created = await _import(client, you, project.id, blob)
     doc_id = created.json()["id"]
     assert "source" not in created.json()
 
@@ -94,9 +143,7 @@ async def test_a_fontspec_project_is_created_as_xelatex(
     client: AsyncClient, you: User, project: Project
 ):
     src = b"\\documentclass{article}\n\\usepackage{fontspec}\n\\begin{document}\\end{document}"
-    resp = await client.post(
-        f"/v1/projects/{project.id}/latex/import", content=_zip({"main.tex": src}), headers=_h(you)
-    )
+    resp = await _import(client, you, project.id, _zip({"main.tex": src}))
     assert resp.json()["engine"] == "xelatex"
 
 
@@ -104,9 +151,7 @@ async def test_an_ambiguous_main_file_is_a_422_listing_the_candidates(
     client: AsyncClient, you: User, project: Project, db_session: AsyncSession
 ):
     blob = _zip({"a.tex": DOC, "b.tex": DOC})
-    resp = await client.post(
-        f"/v1/projects/{project.id}/latex/import", content=blob, headers=_h(you)
-    )
+    resp = await _import(client, you, project.id, blob)
     assert resp.status_code == 422
     assert sorted(resp.json()["detail"]["candidates"]) == ["a.tex", "b.tex"]
     assert (await db_session.execute(select(LatexDocument))).scalars().all() == []
@@ -116,9 +161,7 @@ async def test_reposting_with_an_explicit_main_path_resolves_the_ambiguity(
     client: AsyncClient, you: User, project: Project
 ):
     blob = _zip({"a.tex": DOC, "b.tex": DOC})
-    resp = await client.post(
-        f"/v1/projects/{project.id}/latex/import?main_path=b.tex", content=blob, headers=_h(you)
-    )
+    resp = await _import(client, you, project.id, blob, main_path="b.tex")
     assert resp.status_code == 201
     assert resp.json()["main_path"] == "b.tex"
 
@@ -126,21 +169,15 @@ async def test_reposting_with_an_explicit_main_path_resolves_the_ambiguity(
 async def test_an_explicit_main_path_not_in_the_archive_is_a_422(
     client: AsyncClient, you: User, project: Project
 ):
-    resp = await client.post(
-        f"/v1/projects/{project.id}/latex/import?main_path=ghost.tex",
-        content=_zip({"main.tex": DOC}),
-        headers=_h(you),
-    )
+    resp = await _import(client, you, project.id, _zip({"main.tex": DOC}), main_path="ghost.tex")
     assert resp.status_code == 422
 
 
 async def test_an_explicit_main_path_pointing_at_a_binary_is_a_422(
     client: AsyncClient, you: User, project: Project
 ):
-    resp = await client.post(
-        f"/v1/projects/{project.id}/latex/import?main_path=f.png",
-        content=_zip({"main.tex": DOC, "f.png": b"\x89PNG\x00"}),
-        headers=_h(you),
+    resp = await _import(
+        client, you, project.id, _zip({"main.tex": DOC, "f.png": b"\x89PNG\x00"}), main_path="f.png"
     )
     assert resp.status_code == 422
 
@@ -148,10 +185,12 @@ async def test_an_explicit_main_path_pointing_at_a_binary_is_a_422(
 async def test_an_explicit_main_path_pointing_at_a_non_tex_file_is_a_422(
     client: AsyncClient, you: User, project: Project
 ):
-    resp = await client.post(
-        f"/v1/projects/{project.id}/latex/import?main_path=notes.txt",
-        content=_zip({"main.tex": DOC, "notes.txt": b"hello"}),
-        headers=_h(you),
+    resp = await _import(
+        client,
+        you,
+        project.id,
+        _zip({"main.tex": DOC, "notes.txt": b"hello"}),
+        main_path="notes.txt",
     )
     assert resp.status_code == 422
 
@@ -159,11 +198,7 @@ async def test_an_explicit_main_path_pointing_at_a_non_tex_file_is_a_422(
 async def test_an_archive_with_no_main_file_is_a_422_and_creates_nothing(
     client: AsyncClient, you: User, project: Project, db_session: AsyncSession
 ):
-    resp = await client.post(
-        f"/v1/projects/{project.id}/latex/import",
-        content=_zip({"notes.txt": b"hello"}),
-        headers=_h(you),
-    )
+    resp = await _import(client, you, project.id, _zip({"notes.txt": b"hello"}))
     assert resp.status_code == 422
     assert (await db_session.execute(select(LatexDocument))).scalars().all() == []
 
@@ -172,18 +207,14 @@ async def test_a_traversal_entry_is_a_422_naming_it_and_creates_nothing(
     client: AsyncClient, you: User, project: Project, db_session: AsyncSession
 ):
     blob = _zip({"main.tex": DOC, "../../etc/passwd": b"pwned"})
-    resp = await client.post(
-        f"/v1/projects/{project.id}/latex/import", content=blob, headers=_h(you)
-    )
+    resp = await _import(client, you, project.id, blob)
     assert resp.status_code == 422
     assert "passwd" in str(resp.json()["detail"])
     assert (await db_session.execute(select(LatexDocument))).scalars().all() == []
 
 
 async def test_a_corrupt_archive_is_a_422(client: AsyncClient, you: User, project: Project):
-    resp = await client.post(
-        f"/v1/projects/{project.id}/latex/import", content=b"not a zip", headers=_h(you)
-    )
+    resp = await _import(client, you, project.id, b"not a zip")
     assert resp.status_code == 422
 
 
@@ -194,9 +225,7 @@ async def test_an_archive_that_expands_past_the_cap_is_a_413_and_creates_nothing
 
     monkeypatch.setattr(settings, "latex_project_max_bytes", 1024)
     blob = _zip({"main.tex": DOC, "big.tex": b"A" * 8192})
-    resp = await client.post(
-        f"/v1/projects/{project.id}/latex/import", content=blob, headers=_h(you)
-    )
+    resp = await _import(client, you, project.id, blob)
     assert resp.status_code == 413
     assert (await db_session.execute(select(LatexDocument))).scalars().all() == []
 
@@ -215,9 +244,7 @@ async def test_an_upload_body_over_the_cap_is_a_413_before_it_is_all_buffered(
             pulled += 1
             yield b"x" * 32
 
-    resp = await client.post(
-        f"/v1/projects/{project.id}/latex/import", content=body(), headers=_h(you)
-    )
+    resp = await _import(client, you, project.id, body())
     assert resp.status_code == 413
     assert pulled < 64  # the server stopped consuming before the end
 
@@ -236,28 +263,27 @@ async def test_a_chunked_upload_with_no_content_length_is_still_capped(
             pulled += 1
             yield b"x" * 32
 
-    resp = await client.post(
-        f"/v1/projects/{project.id}/latex/import", content=body(), headers=_h(you)
-    )
+    resp = await _import(client, you, project.id, body())
     assert resp.status_code == 413
     assert pulled < 16  # the server stopped consuming before the end
 
 
-async def test_a_viewer_cannot_import(
+async def test_any_member_may_import(
     client: AsyncClient, db_session: AsyncSession, project: Project, you: User
 ):
-    viewer = (
+    """Import creates a NEW document and is project-scoped -- any project
+    member may start one (`created_by` then makes them its editor), the same
+    rule `create_document` follows. Project membership is binary
+    (owner/member) now; there is no project-level "viewer" that could be
+    refused here."""
+    member = (
         await db_session.execute(select(User).where(User.email == "amelia@lab.io"))
     ).scalar_one()
-    db_session.add(ProjectMember(project_id=project.id, user_id=viewer.id, role="viewer"))
+    db_session.add(ProjectMember(project_id=project.id, user_id=member.id, role="member"))
     await db_session.commit()
 
-    resp = await client.post(
-        f"/v1/projects/{project.id}/latex/import",
-        content=_zip({"main.tex": DOC}),
-        headers=_h(viewer),
-    )
-    assert resp.status_code == 403
+    resp = await _import(client, member, project.id, _zip({"main.tex": DOC}))
+    assert resp.status_code == 201
 
 
 async def test_a_non_member_gets_404_on_import(
@@ -266,11 +292,7 @@ async def test_a_non_member_gets_404_on_import(
     stranger = (
         await db_session.execute(select(User).where(User.email == "marco@lab.io"))
     ).scalar_one()
-    resp = await client.post(
-        f"/v1/projects/{project.id}/latex/import",
-        content=_zip({"main.tex": DOC}),
-        headers=_h(stranger),
-    )
+    resp = await _import(client, stranger, project.id, _zip({"main.tex": DOC}))
     assert resp.status_code == 404
 
 
@@ -278,11 +300,7 @@ async def test_import_never_overwrites_an_existing_document(
     client: AsyncClient, you: User, project: Project, db_session: AsyncSession
 ):
     for _ in range(2):
-        await client.post(
-            f"/v1/projects/{project.id}/latex/import",
-            content=_zip({"main.tex": DOC}),
-            headers=_h(you),
-        )
+        await _import(client, you, project.id, _zip({"main.tex": DOC}))
     rows = (await db_session.execute(select(LatexDocument))).scalars().all()
     assert len(rows) == 2
 
@@ -290,11 +308,7 @@ async def test_import_never_overwrites_an_existing_document(
 async def test_an_over_long_name_is_a_422(
     client: AsyncClient, you: User, project: Project, db_session: AsyncSession
 ):
-    resp = await client.post(
-        f"/v1/projects/{project.id}/latex/import?name={'x' * 201}",
-        content=_zip({"main.tex": DOC}),
-        headers=_h(you),
-    )
+    resp = await _import(client, you, project.id, _zip({"main.tex": DOC}), name=f"{'x' * 201}")
     assert resp.status_code == 422
     assert (await db_session.execute(select(LatexDocument))).scalars().all() == []
 
@@ -303,9 +317,7 @@ async def test_exporting_returns_every_file_in_the_tree(
     client: AsyncClient, you: User, project: Project
 ):
     blob = _zip({"main.tex": DOC, "chapters/intro.tex": b"\\section{I}", "f.png": b"\x89PNG\x00"})
-    created = await client.post(
-        f"/v1/projects/{project.id}/latex/import", content=blob, headers=_h(you)
-    )
+    created = await _import(client, you, project.id, blob)
     doc_id = created.json()["id"]
 
     resp = await client.get(
@@ -342,16 +354,12 @@ async def test_an_exported_archive_reimports_to_an_identical_tree(
     """
     intro = b"\\section{I}\nSome body text that must survive the round trip."
     original = _zip({"main.tex": DOC, "chapters/intro.tex": intro})
-    first = await client.post(
-        f"/v1/projects/{project.id}/latex/import", content=original, headers=_h(you)
-    )
+    first = await _import(client, you, project.id, original)
     exported = await client.get(
         f"/v1/projects/{project.id}/latex/{first.json()['id']}/export",
         headers={"X-Dev-User-Id": you.id},
     )
-    second = await client.post(
-        f"/v1/projects/{project.id}/latex/import", content=exported.content, headers=_h(you)
-    )
+    second = await _import(client, you, project.id, exported.content)
     assert second.status_code == 201
     assert second.json()["main_path"] == first.json()["main_path"]
     assert second.json()["file_count"] == first.json()["file_count"]
@@ -381,11 +389,7 @@ async def test_an_exported_archive_reimports_to_an_identical_tree(
 async def test_a_non_member_gets_404_on_export(
     client: AsyncClient, db_session: AsyncSession, project: Project, you: User
 ):
-    created = await client.post(
-        f"/v1/projects/{project.id}/latex/import",
-        content=_zip({"main.tex": DOC}),
-        headers=_h(you),
-    )
+    created = await _import(client, you, project.id, _zip({"main.tex": DOC}))
     stranger = (
         await db_session.execute(select(User).where(User.email == "marco@lab.io"))
     ).scalar_one()
@@ -400,11 +404,7 @@ async def test_a_non_member_gets_404_on_export(
 async def test_exporting_a_document_whose_name_contains_a_newline_still_returns_a_zip(
     client: AsyncClient, you: User, project: Project
 ):
-    created = await client.post(
-        f"/v1/projects/{project.id}/latex/import",
-        content=_zip({"main.tex": DOC}),
-        headers=_h(you),
-    )
+    created = await _import(client, you, project.id, _zip({"main.tex": DOC}))
     doc_id = created.json()["id"]
     patched = await client.patch(
         f"/v1/projects/{project.id}/latex/{doc_id}",
@@ -434,11 +434,7 @@ async def test_exporting_a_document_whose_name_contains_a_newline_still_returns_
 async def test_exporting_a_document_with_a_non_ascii_name_sets_an_rfc6266_filename(
     client: AsyncClient, you: User, project: Project
 ):
-    created = await client.post(
-        f"/v1/projects/{project.id}/latex/import",
-        content=_zip({"main.tex": DOC}),
-        headers=_h(you),
-    )
+    created = await _import(client, you, project.id, _zip({"main.tex": DOC}))
     doc_id = created.json()["id"]
     patched = await client.patch(
         f"/v1/projects/{project.id}/latex/{doc_id}",
@@ -462,16 +458,18 @@ async def test_exporting_a_document_with_a_non_ascii_name_sets_an_rfc6266_filena
 async def test_a_viewer_can_export(
     client: AsyncClient, db_session: AsyncSession, project: Project, you: User
 ):
+    # Project membership is binary (owner/member) -- a project "member" who
+    # did not import this document and holds no grant on it resolves to
+    # document-level "viewer" (services/latex_access.py), and export is a
+    # read.
     viewer = (
         await db_session.execute(select(User).where(User.email == "amelia@lab.io"))
     ).scalar_one()
-    db_session.add(ProjectMember(project_id=project.id, user_id=viewer.id, role="viewer"))
+    db_session.add(ProjectMember(project_id=project.id, user_id=viewer.id, role="member"))
     await db_session.commit()
 
-    created = await client.post(
-        f"/v1/projects/{project.id}/latex/import",
-        content=_zip({"main.tex": DOC, "chapters/intro.tex": b"\\section{I}"}),
-        headers=_h(you),
+    created = await _import(
+        client, you, project.id, _zip({"main.tex": DOC, "chapters/intro.tex": b"\\section{I}"})
     )
     doc_id = created.json()["id"]
 
@@ -491,11 +489,7 @@ async def test_a_binary_tex_file_is_never_chosen_as_the_main_file(
     (classify_binary's tell). detect_main must never see it as a candidate --
     every other writer of main_path already blocks a binary target."""
     poisoned = b"\\documentclass{article}\x00\\begin{document}\\end{document}"
-    resp = await client.post(
-        f"/v1/projects/{project.id}/latex/import",
-        content=_zip({"main.tex": poisoned}),
-        headers=_h(you),
-    )
+    resp = await _import(client, you, project.id, _zip({"main.tex": poisoned}))
     assert resp.status_code == 422
     assert (await db_session.execute(select(LatexDocument))).scalars().all() == []
 
@@ -504,18 +498,14 @@ async def test_an_ambiguous_main_document_round_trips_without_a_422(
     client: AsyncClient, you: User, project: Project
 ):
     blob = _zip({"a.tex": DOC, "b.tex": DOC})
-    first = await client.post(
-        f"/v1/projects/{project.id}/latex/import?main_path=b.tex", content=blob, headers=_h(you)
-    )
+    first = await _import(client, you, project.id, blob, main_path="b.tex")
     assert first.json()["main_path"] == "b.tex"
 
     exported = await client.get(
         f"/v1/projects/{project.id}/latex/{first.json()['id']}/export",
         headers={"X-Dev-User-Id": you.id},
     )
-    second = await client.post(
-        f"/v1/projects/{project.id}/latex/import", content=exported.content, headers=_h(you)
-    )
+    second = await _import(client, you, project.id, exported.content)
     assert second.status_code == 201
     assert second.json()["main_path"] == "b.tex"
 
@@ -524,19 +514,13 @@ async def test_a_xelatex_document_round_trips_as_xelatex(
     client: AsyncClient, you: User, project: Project
 ):
     src = b"\\documentclass{article}\n\\usepackage{fontspec}\n\\begin{document}\\end{document}"
-    first = await client.post(
-        f"/v1/projects/{project.id}/latex/import", content=_zip({"main.tex": src}), headers=_h(you)
-    )
+    first = await _import(client, you, project.id, _zip({"main.tex": src}))
     assert first.json()["engine"] == "xelatex"
 
     # PATCH to xelatex without a triggering package -- detection alone would
     # come back pdflatex on re-import; the manifest is what preserves it.
     plain = b"\\documentclass{article}\n\\begin{document}\\end{document}"
-    plain_doc = await client.post(
-        f"/v1/projects/{project.id}/latex/import",
-        content=_zip({"main.tex": plain}),
-        headers=_h(you),
-    )
+    plain_doc = await _import(client, you, project.id, _zip({"main.tex": plain}))
     patched = await client.patch(
         f"/v1/projects/{project.id}/latex/{plain_doc.json()['id']}",
         json={"engine": "xelatex"},
@@ -548,9 +532,7 @@ async def test_a_xelatex_document_round_trips_as_xelatex(
         f"/v1/projects/{project.id}/latex/{plain_doc.json()['id']}/export",
         headers={"X-Dev-User-Id": you.id},
     )
-    reimported = await client.post(
-        f"/v1/projects/{project.id}/latex/import", content=exported.content, headers=_h(you)
-    )
+    reimported = await _import(client, you, project.id, exported.content)
     assert reimported.status_code == 201
     assert reimported.json()["engine"] == "xelatex"
 
@@ -566,9 +548,7 @@ async def test_an_all_under_src_tree_round_trips_with_paths_unchanged(
     directory name. Built here by renaming/writing into an already-imported
     document instead, the same way a user's editor session would arrive at
     an all-under-src/ tree."""
-    first = await client.post(
-        f"/v1/projects/{project.id}/latex/import", content=_zip({"main.tex": DOC}), headers=_h(you)
-    )
+    first = await _import(client, you, project.id, _zip({"main.tex": DOC}))
     doc_id = first.json()["id"]
     renamed = await client.post(
         f"/v1/projects/{project.id}/latex/{doc_id}/file/rename",
@@ -595,9 +575,7 @@ async def test_an_all_under_src_tree_round_trips_with_paths_unchanged(
             "src/main.tex",
         ]
 
-    second = await client.post(
-        f"/v1/projects/{project.id}/latex/import", content=exported.content, headers=_h(you)
-    )
+    second = await _import(client, you, project.id, exported.content)
     assert second.status_code == 201
     assert second.json()["main_path"] == "src/main.tex"
 
@@ -619,9 +597,7 @@ async def test_a_manifest_naming_a_binary_main_path_falls_back_to_detection(
     the same guard as the explicit query override."""
     manifest = json.dumps({"main_path": "f.png", "engine": "pdflatex"}).encode()
     blob = _zip({"main.tex": DOC, "f.png": b"\x89PNG\x00", MANIFEST_PATH: manifest})
-    resp = await client.post(
-        f"/v1/projects/{project.id}/latex/import", content=blob, headers=_h(you)
-    )
+    resp = await _import(client, you, project.id, blob)
     assert resp.status_code == 201
     assert resp.json()["main_path"] == "main.tex"
 
@@ -631,9 +607,7 @@ async def test_a_manifest_naming_a_non_tex_main_path_falls_back_to_detection(
 ):
     manifest = json.dumps({"main_path": "notes.txt", "engine": "pdflatex"}).encode()
     blob = _zip({"main.tex": DOC, "notes.txt": b"hello", MANIFEST_PATH: manifest})
-    resp = await client.post(
-        f"/v1/projects/{project.id}/latex/import", content=blob, headers=_h(you)
-    )
+    resp = await _import(client, you, project.id, blob)
     assert resp.status_code == 201
     assert resp.json()["main_path"] == "main.tex"
 
@@ -642,9 +616,7 @@ async def test_a_malformed_manifest_is_ignored_not_fatal(
     client: AsyncClient, you: User, project: Project
 ):
     blob = _zip({"main.tex": DOC, MANIFEST_PATH: b"{not valid json"})
-    resp = await client.post(
-        f"/v1/projects/{project.id}/latex/import", content=blob, headers=_h(you)
-    )
+    resp = await _import(client, you, project.id, blob)
     assert resp.status_code == 201
     assert resp.json()["main_path"] == "main.tex"
     assert resp.json()["engine"] == "pdflatex"
@@ -655,9 +627,7 @@ async def test_a_manifest_with_an_invalid_engine_falls_back_to_detection(
 ):
     manifest = json.dumps({"main_path": "main.tex", "engine": "not-a-real-engine"}).encode()
     blob = _zip({"main.tex": DOC, MANIFEST_PATH: manifest})
-    resp = await client.post(
-        f"/v1/projects/{project.id}/latex/import", content=blob, headers=_h(you)
-    )
+    resp = await _import(client, you, project.id, blob)
     assert resp.status_code == 201
     assert resp.json()["engine"] == "pdflatex"
 
@@ -667,9 +637,7 @@ async def test_the_manifest_never_appears_in_the_imported_tree_or_file_count(
 ):
     manifest = json.dumps({"main_path": "main.tex", "engine": "pdflatex"}).encode()
     blob = _zip({"main.tex": DOC, MANIFEST_PATH: manifest})
-    resp = await client.post(
-        f"/v1/projects/{project.id}/latex/import", content=blob, headers=_h(you)
-    )
+    resp = await _import(client, you, project.id, blob)
     assert resp.status_code == 201
     assert resp.json()["file_count"] == 1
 
@@ -685,9 +653,7 @@ async def test_an_explicit_main_path_query_param_overrides_the_manifest(
 ):
     manifest = json.dumps({"main_path": "a.tex", "engine": "pdflatex"}).encode()
     blob = _zip({"a.tex": DOC, "b.tex": DOC, MANIFEST_PATH: manifest})
-    resp = await client.post(
-        f"/v1/projects/{project.id}/latex/import?main_path=b.tex", content=blob, headers=_h(you)
-    )
+    resp = await _import(client, you, project.id, blob, main_path="b.tex")
     assert resp.status_code == 201
     assert resp.json()["main_path"] == "b.tex"
 
@@ -700,8 +666,9 @@ async def test_concurrent_imports_are_bounded_by_the_semaphore(
     asyncio.Semaphore binds to the event loop that first contends it, and
     pytest hands each test a fresh loop, so the production object cannot be
     contended directly here. Without the semaphore gating `read_archive` in
-    the import route, all four requests below would enter it immediately and
-    `max_entered` would reach 4, not 2."""
+    the plan route -- the only route that parses an archive now -- all four
+    requests below would enter it immediately and `max_entered` would reach
+    4, not 2."""
     import asyncio
     import threading
     from unittest.mock import patch
@@ -735,7 +702,7 @@ async def test_concurrent_imports_are_bounded_by_the_semaphore(
         tasks = [
             asyncio.create_task(
                 client.post(
-                    f"/v1/projects/{project.id}/latex/import?name=doc{i}",
+                    f"/v1/projects/{project.id}/latex/import/plan?name=doc{i}",
                     content=b"irrelevant -- read_archive is faked",
                     headers=_h(you),
                 )
@@ -755,7 +722,7 @@ async def test_concurrent_imports_are_bounded_by_the_semaphore(
 
     assert max_entered == 2
     for r in responses:
-        assert r.status_code == 201
+        assert r.status_code == 200
 
 
 # --- Corrective fix: regressions introduced by the manifest surface itself ---
@@ -769,9 +736,7 @@ async def test_a_manifest_engine_that_is_a_list_falls_back_to_detected_engine(
     check un-type-checked. Must degrade to detection, not 500."""
     manifest = json.dumps({"main_path": "main.tex", "engine": ["xelatex"]}).encode()
     blob = _zip({"main.tex": DOC, MANIFEST_PATH: manifest})
-    resp = await client.post(
-        f"/v1/projects/{project.id}/latex/import", content=blob, headers=_h(you)
-    )
+    resp = await _import(client, you, project.id, blob)
     assert resp.status_code == 201
     assert resp.json()["engine"] == "pdflatex"
 
@@ -781,9 +746,7 @@ async def test_a_manifest_engine_that_is_a_dict_falls_back_to_detected_engine(
 ):
     manifest = json.dumps({"main_path": "main.tex", "engine": {}}).encode()
     blob = _zip({"main.tex": DOC, MANIFEST_PATH: manifest})
-    resp = await client.post(
-        f"/v1/projects/{project.id}/latex/import", content=blob, headers=_h(you)
-    )
+    resp = await _import(client, you, project.id, blob)
     assert resp.status_code == 201
     assert resp.json()["engine"] == "pdflatex"
 
@@ -796,9 +759,7 @@ async def test_a_deeply_nested_manifest_body_imports_rather_than_500ing(
     recursion limit with a bare RecursionError."""
     manifest = b"[" * 200_000
     blob = _zip({"main.tex": DOC, MANIFEST_PATH: manifest})
-    resp = await client.post(
-        f"/v1/projects/{project.id}/latex/import", content=blob, headers=_h(you)
-    )
+    resp = await _import(client, you, project.id, blob)
     assert resp.status_code == 201
     assert resp.json()["main_path"] == "main.tex"
 
@@ -806,11 +767,7 @@ async def test_a_deeply_nested_manifest_body_imports_rather_than_500ing(
 async def test_writing_a_file_at_the_manifest_path_is_a_422(
     client: AsyncClient, you: User, project: Project
 ):
-    created = await client.post(
-        f"/v1/projects/{project.id}/latex/import",
-        content=_zip({"main.tex": DOC}),
-        headers=_h(you),
-    )
+    created = await _import(client, you, project.id, _zip({"main.tex": DOC}))
     doc_id = created.json()["id"]
     resp = await client.put(
         f"/v1/projects/{project.id}/latex/{doc_id}/file",
@@ -824,11 +781,7 @@ async def test_writing_a_file_at_the_manifest_path_is_a_422(
 async def test_writing_a_binary_file_at_the_manifest_path_is_a_422(
     client: AsyncClient, you: User, project: Project
 ):
-    created = await client.post(
-        f"/v1/projects/{project.id}/latex/import",
-        content=_zip({"main.tex": DOC}),
-        headers=_h(you),
-    )
+    created = await _import(client, you, project.id, _zip({"main.tex": DOC}))
     doc_id = created.json()["id"]
     resp = await client.post(
         f"/v1/projects/{project.id}/latex/{doc_id}/file/binary",
@@ -842,11 +795,7 @@ async def test_writing_a_binary_file_at_the_manifest_path_is_a_422(
 async def test_renaming_a_file_onto_the_manifest_path_is_a_422(
     client: AsyncClient, you: User, project: Project
 ):
-    created = await client.post(
-        f"/v1/projects/{project.id}/latex/import",
-        content=_zip({"main.tex": DOC, "notes.txt": b"hi"}),
-        headers=_h(you),
-    )
+    created = await _import(client, you, project.id, _zip({"main.tex": DOC, "notes.txt": b"hi"}))
     doc_id = created.json()["id"]
     resp = await client.post(
         f"/v1/projects/{project.id}/latex/{doc_id}/file/rename",
@@ -865,11 +814,7 @@ async def test_a_reserved_path_document_can_no_longer_be_built_so_export_never_d
     with itself. Since a real file can no longer land at that path, this now
     just proves the tree stays at one member of that name -- the manifest --
     and the round trip stays clean."""
-    created = await client.post(
-        f"/v1/projects/{project.id}/latex/import",
-        content=_zip({"main.tex": DOC}),
-        headers=_h(you),
-    )
+    created = await _import(client, you, project.id, _zip({"main.tex": DOC}))
     doc_id = created.json()["id"]
     blocked = await client.put(
         f"/v1/projects/{project.id}/latex/{doc_id}/file",
@@ -886,9 +831,7 @@ async def test_a_reserved_path_document_can_no_longer_be_built_so_export_never_d
     with zipfile.ZipFile(io.BytesIO(exported.content)) as z:
         assert z.namelist().count(MANIFEST_PATH) == 1
 
-    reimported = await client.post(
-        f"/v1/projects/{project.id}/latex/import", content=exported.content, headers=_h(you)
-    )
+    reimported = await _import(client, you, project.id, exported.content)
     assert reimported.status_code == 201
 
 
@@ -899,9 +842,7 @@ async def test_a_user_authored_manifest_named_file_that_is_not_valid_json_is_dro
     still contain a real file at the reserved path. Import must not break --
     and must not let that entry land in the tree, valid manifest or not."""
     blob = _zip({"main.tex": DOC, MANIFEST_PATH: b"this is not JSON at all"})
-    resp = await client.post(
-        f"/v1/projects/{project.id}/latex/import", content=blob, headers=_h(you)
-    )
+    resp = await _import(client, you, project.id, blob)
     assert resp.status_code == 201
     assert resp.json()["file_count"] == 1
 
@@ -910,3 +851,634 @@ async def test_a_user_authored_manifest_named_file_that_is_not_valid_json_is_dro
         headers={"X-Dev-User-Id": you.id},
     )
     assert [f["path"] for f in tree.json()["files"]] == ["main.tex"]
+
+
+# --- The two-step flow itself: plan, then commit against a staging token ---
+
+
+async def test_plan_reports_no_collisions_for_a_fresh_document(
+    client: AsyncClient, you: User, project: Project
+):
+    resp = await client.post(
+        f"/v1/projects/{project.id}/latex/import/plan?name=Paper",
+        content=_zip({"main.tex": DOC}),
+        headers=_h(you),
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["mode"] == "create"
+    assert body["collisions"] == []
+    assert body["file_count"] == 1
+    assert body["staging_id"]
+
+
+async def test_planning_creates_nothing(
+    client: AsyncClient, you: User, project: Project, db_session: AsyncSession
+):
+    """The whole point of a plan step: the user is told what will happen
+    BEFORE anything happens."""
+    resp = await client.post(
+        f"/v1/projects/{project.id}/latex/import/plan?name=Paper",
+        content=_zip({"main.tex": DOC}),
+        headers=_h(you),
+    )
+    assert resp.status_code == 200
+    assert (await db_session.execute(select(LatexDocument))).scalars().all() == []
+
+
+async def test_plan_reports_collisions_for_a_merge(
+    client: AsyncClient, you: User, project: Project
+):
+    created = await _import(client, you, project.id, _zip({"main.tex": DOC}))
+    doc_id = created.json()["id"]
+
+    resp = await client.post(
+        f"/v1/projects/{project.id}/latex/import/plan?document_id={doc_id}",
+        content=_zip({"main.tex": b"incoming", "extra.tex": b"new"}),
+        headers=_h(you),
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["mode"] == "merge"
+    assert body["collisions"] == [
+        {"path": "main.tex", "existing": "main.tex", "suggestion": "main (1).tex"}
+    ]
+
+
+async def test_commit_applies_the_decisions_and_leaves_the_original(
+    client: AsyncClient, you: User, project: Project
+):
+    created = await _import(client, you, project.id, _zip({"main.tex": DOC}))
+    doc_id = created.json()["id"]
+    plan = await client.post(
+        f"/v1/projects/{project.id}/latex/import/plan?document_id={doc_id}",
+        content=_zip({"main.tex": b"incoming"}),
+        headers=_h(you),
+    )
+
+    resp = await client.post(
+        f"/v1/projects/{project.id}/latex/import/commit",
+        json={
+            "staging_id": plan.json()["staging_id"],
+            "document_id": doc_id,
+            "decisions": [{"path": "main.tex", "new_path": "main (1).tex"}],
+        },
+        headers={"X-Dev-User-Id": you.id},
+    )
+
+    assert resp.status_code == 201
+    tree = await client.get(
+        f"/v1/projects/{project.id}/latex/{doc_id}/files",
+        headers={"X-Dev-User-Id": you.id},
+    )
+    assert sorted(f["path"] for f in tree.json()["files"]) == ["main (1).tex", "main.tex"]
+    kept = await client.get(
+        f"/v1/projects/{project.id}/latex/{doc_id}/file",
+        params={"path": "main.tex"},
+        headers={"X-Dev-User-Id": you.id},
+    )
+    assert kept.json()["content"] == DOC.decode()
+
+
+async def test_a_merge_leaves_the_documents_own_main_path_alone(
+    client: AsyncClient, you: User, project: Project
+):
+    """A merge adds files. The archive's idea of which file is main has no
+    authority over a document that already compiles."""
+    created = await _import(client, you, project.id, _zip({"main.tex": DOC}))
+    doc_id = created.json()["id"]
+    plan = await client.post(
+        f"/v1/projects/{project.id}/latex/import/plan?document_id={doc_id}",
+        content=_zip({"other.tex": DOC}),
+        headers=_h(you),
+    )
+    resp = await client.post(
+        f"/v1/projects/{project.id}/latex/import/commit",
+        json={"staging_id": plan.json()["staging_id"], "document_id": doc_id},
+        headers={"X-Dev-User-Id": you.id},
+    )
+    assert resp.status_code == 201
+    assert resp.json()["main_path"] == "main.tex"
+
+
+async def test_committing_a_merge_whose_collision_was_not_resolved_is_a_409(
+    client: AsyncClient, you: User, project: Project
+):
+    """The plan said what collides; a commit that ignores it must not
+    overwrite. The 409 carries the same structured suggestion every other
+    collision does."""
+    created = await _import(client, you, project.id, _zip({"main.tex": DOC}))
+    doc_id = created.json()["id"]
+    plan = await client.post(
+        f"/v1/projects/{project.id}/latex/import/plan?document_id={doc_id}",
+        content=_zip({"main.tex": b"incoming"}),
+        headers=_h(you),
+    )
+
+    resp = await client.post(
+        f"/v1/projects/{project.id}/latex/import/commit",
+        json={"staging_id": plan.json()["staging_id"], "document_id": doc_id},
+        headers={"X-Dev-User-Id": you.id},
+    )
+
+    assert resp.status_code == 409
+    assert resp.json()["detail"]["error"] == "path_collision"
+
+
+async def test_a_staging_token_is_single_use(client: AsyncClient, you: User, project: Project):
+    created = await _import(client, you, project.id, _zip({"main.tex": DOC}))
+    doc_id = created.json()["id"]
+    plan = await client.post(
+        f"/v1/projects/{project.id}/latex/import/plan?document_id={doc_id}",
+        content=_zip({"a.tex": b"a"}),
+        headers=_h(you),
+    )
+    body = {"staging_id": plan.json()["staging_id"], "document_id": doc_id}
+    first = await client.post(
+        f"/v1/projects/{project.id}/latex/import/commit",
+        json=body,
+        headers={"X-Dev-User-Id": you.id},
+    )
+    assert first.status_code == 201
+
+    resp = await client.post(
+        f"/v1/projects/{project.id}/latex/import/commit",
+        json=body,
+        headers={"X-Dev-User-Id": you.id},
+    )
+
+    assert resp.status_code == 404
+
+
+async def test_an_expired_staging_token_is_a_410_not_a_404(
+    client: AsyncClient, you: User, project: Project, monkeypatch
+):
+    """Distinguishable on purpose: an expired upload needs a different
+    sentence from an unknown one -- press Import to try again, rather than
+    something went wrong."""
+    plan = await client.post(
+        f"/v1/projects/{project.id}/latex/import/plan?name=Paper",
+        content=_zip({"main.tex": DOC}),
+        headers=_h(you),
+    )
+    # The TTL is read once, at construction, so the live singleton is what
+    # has to be aged. Time itself is a parameter of `take`, so nothing here
+    # sleeps.
+    monkeypatch.setattr(staging, "_ttl_s", -1)
+
+    resp = await client.post(
+        f"/v1/projects/{project.id}/latex/import/commit",
+        json={"staging_id": plan.json()["staging_id"]},
+        headers={"X-Dev-User-Id": you.id},
+    )
+
+    assert resp.status_code == 410
+
+
+async def test_another_user_cannot_redeem_a_staging_token(
+    client: AsyncClient, db_session: AsyncSession, you: User, project: Project
+):
+    member = (
+        await db_session.execute(select(User).where(User.email == "amelia@lab.io"))
+    ).scalar_one()
+    db_session.add(ProjectMember(project_id=project.id, user_id=member.id, role="member"))
+    await db_session.commit()
+    plan = await client.post(
+        f"/v1/projects/{project.id}/latex/import/plan?name=Paper",
+        content=_zip({"main.tex": DOC}),
+        headers=_h(you),
+    )
+
+    resp = await client.post(
+        f"/v1/projects/{project.id}/latex/import/commit",
+        json={"staging_id": plan.json()["staging_id"]},
+        headers={"X-Dev-User-Id": member.id},
+    )
+
+    assert resp.status_code == 404
+
+
+async def test_a_decision_naming_a_path_not_in_the_archive_is_refused(
+    client: AsyncClient, you: User, project: Project
+):
+    plan = await client.post(
+        f"/v1/projects/{project.id}/latex/import/plan?name=Paper",
+        content=_zip({"main.tex": DOC}),
+        headers=_h(you),
+    )
+
+    resp = await client.post(
+        f"/v1/projects/{project.id}/latex/import/commit",
+        json={
+            "staging_id": plan.json()["staging_id"],
+            "decisions": [{"path": "../escape.tex", "new_path": "x.tex"}],
+        },
+        headers={"X-Dev-User-Id": you.id},
+    )
+
+    assert resp.status_code == 422
+
+
+async def test_a_decision_new_path_goes_through_the_traversal_guard(
+    client: AsyncClient, you: User, project: Project, db_session: AsyncSession
+):
+    # A decision is user input from the same untrusted surface as any other
+    # write. `normalize_path` is the one guard and it applies here too.
+    plan = await client.post(
+        f"/v1/projects/{project.id}/latex/import/plan?name=Paper",
+        content=_zip({"main.tex": DOC}),
+        headers=_h(you),
+    )
+
+    resp = await client.post(
+        f"/v1/projects/{project.id}/latex/import/commit",
+        json={
+            "staging_id": plan.json()["staging_id"],
+            "decisions": [{"path": "main.tex", "new_path": "../../etc/passwd"}],
+        },
+        headers={"X-Dev-User-Id": you.id},
+    )
+
+    assert resp.status_code == 422
+    assert (await db_session.execute(select(LatexDocument))).scalars().all() == []
+
+
+async def test_a_decision_naming_the_reserved_manifest_path_is_a_422(
+    client: AsyncClient, you: User, project: Project
+):
+    plan = await client.post(
+        f"/v1/projects/{project.id}/latex/import/plan?name=Paper",
+        content=_zip({"main.tex": DOC}),
+        headers=_h(you),
+    )
+
+    resp = await client.post(
+        f"/v1/projects/{project.id}/latex/import/commit",
+        json={
+            "staging_id": plan.json()["staging_id"],
+            "decisions": [{"path": "main.tex", "new_path": MANIFEST_PATH}],
+        },
+        headers={"X-Dev-User-Id": you.id},
+    )
+
+    assert resp.status_code == 422
+
+
+async def test_a_create_decision_carries_the_main_file_with_it(
+    client: AsyncClient, you: User, project: Project
+):
+    """A renamed main file must still be the document's main file -- the
+    alternative is a document whose main_path names nothing."""
+    plan = await client.post(
+        f"/v1/projects/{project.id}/latex/import/plan?name=Paper",
+        content=_zip({"main.tex": DOC}),
+        headers=_h(you),
+    )
+
+    resp = await client.post(
+        f"/v1/projects/{project.id}/latex/import/commit",
+        json={
+            "staging_id": plan.json()["staging_id"],
+            "name": "Paper",
+            "decisions": [{"path": "main.tex", "new_path": "main (1).tex"}],
+        },
+        headers={"X-Dev-User-Id": you.id},
+    )
+
+    assert resp.status_code == 201
+    assert resp.json()["main_path"] == "main (1).tex"
+
+
+async def test_plan_reports_a_duplicate_document_name(
+    client: AsyncClient, you: User, project: Project
+):
+    await _import(client, you, project.id, _zip({"main.tex": DOC}), name="paper")
+
+    resp = await client.post(
+        f"/v1/projects/{project.id}/latex/import/plan?name=paper",
+        content=_zip({"main.tex": DOC}),
+        headers=_h(you),
+    )
+
+    assert resp.json()["name_collision"] == {"name": "paper", "suggestion": "paper (1)"}
+
+
+async def test_a_merge_is_not_asked_about_a_document_name(
+    client: AsyncClient, you: User, project: Project
+):
+    """A merge writes into a document that already has a name; there is
+    nothing to name and nothing to ask."""
+    created = await _import(client, you, project.id, _zip({"main.tex": DOC}), name="paper")
+
+    resp = await client.post(
+        f"/v1/projects/{project.id}/latex/import/plan"
+        f"?document_id={created.json()['id']}&name=paper",
+        content=_zip({"a.tex": b"a"}),
+        headers=_h(you),
+    )
+
+    assert resp.json()["name_collision"] is None
+
+
+async def test_plan_reports_ambiguous_main_instead_of_a_422(
+    client: AsyncClient, you: User, project: Project
+):
+    # The plan step is where the client learns everything it must ask the
+    # user about; asking twice in two different shapes is worse.
+    resp = await client.post(
+        f"/v1/projects/{project.id}/latex/import/plan?name=Paper",
+        content=_zip({"a.tex": DOC, "b.tex": DOC}),
+        headers=_h(you),
+    )
+
+    assert resp.status_code == 200
+    assert sorted(resp.json()["ambiguous_main"]) == ["a.tex", "b.tex"]
+
+
+async def test_an_ambiguity_answered_on_commit_needs_no_second_upload(
+    client: AsyncClient, you: User, project: Project
+):
+    plan = await client.post(
+        f"/v1/projects/{project.id}/latex/import/plan?name=Paper",
+        content=_zip({"a.tex": DOC, "b.tex": DOC}),
+        headers=_h(you),
+    )
+
+    resp = await client.post(
+        f"/v1/projects/{project.id}/latex/import/commit",
+        json={
+            "staging_id": plan.json()["staging_id"],
+            "name": "Paper",
+            "main_path": "b.tex",
+        },
+        headers={"X-Dev-User-Id": you.id},
+    )
+
+    assert resp.status_code == 201
+    assert resp.json()["main_path"] == "b.tex"
+
+
+async def test_a_non_member_gets_404_on_plan(
+    client: AsyncClient, db_session: AsyncSession, project: Project
+):
+    stranger = (
+        await db_session.execute(select(User).where(User.email == "marco@lab.io"))
+    ).scalar_one()
+    resp = await client.post(
+        f"/v1/projects/{project.id}/latex/import/plan?name=Paper",
+        content=_zip({"main.tex": DOC}),
+        headers=_h(stranger),
+    )
+    assert resp.status_code == 404
+
+
+async def test_planning_a_merge_into_a_document_in_another_project_is_a_404(
+    client: AsyncClient, you: User, project: Project, db_session: AsyncSession
+):
+    other = Project(owner_id=you.id, title="Other", topic_keywords=[])
+    db_session.add(other)
+    await db_session.flush()
+    db_session.add(ProjectMember(project_id=other.id, user_id=you.id, role="owner"))
+    await db_session.commit()
+    created = await _import(client, you, other.id, _zip({"main.tex": DOC}))
+
+    resp = await client.post(
+        f"/v1/projects/{project.id}/latex/import/plan?document_id={created.json()['id']}",
+        content=_zip({"a.tex": b"a"}),
+        headers=_h(you),
+    )
+
+    assert resp.status_code == 404
+
+
+# --- Fix round 1: decisions can collide with each other, and a token's
+# --- planned target is part of what the user consented to.
+
+
+async def test_two_create_decisions_targeting_one_path_is_not_a_500(
+    client: AsyncClient, you: User, project: Project, db_session: AsyncSession
+):
+    """`bulk_create` runs NO collision scan -- it is only ever used on an
+    empty tree. The decisions are what can break that: two naming one target
+    would hit the unique index and surface as a 500."""
+    plan = await client.post(
+        f"/v1/projects/{project.id}/latex/import/plan?name=Paper",
+        content=_zip({"main.tex": DOC, "a.tex": b"a", "b.tex": b"b"}),
+        headers=_h(you),
+    )
+
+    resp = await client.post(
+        f"/v1/projects/{project.id}/latex/import/commit",
+        json={
+            "staging_id": plan.json()["staging_id"],
+            "name": "Paper",
+            "decisions": [
+                {"path": "a.tex", "new_path": "same.tex"},
+                {"path": "b.tex", "new_path": "same.tex"},
+            ],
+        },
+        headers={"X-Dev-User-Id": you.id},
+    )
+
+    assert resp.status_code == 409
+    assert resp.json()["detail"]["error"] == "path_collision"
+    assert (await db_session.execute(select(LatexDocument))).scalars().all() == []
+
+
+async def test_two_create_decisions_differing_only_in_case_are_refused(
+    client: AsyncClient, you: User, project: Project, db_session: AsyncSession
+):
+    """Case-only targets INSERT cleanly -- no unique-index violation -- and
+    leave a tree that breaks the `collision_key` invariant this whole plan
+    exists to enforce: export then emits two members and `read_archive`
+    refuses the re-import."""
+    plan = await client.post(
+        f"/v1/projects/{project.id}/latex/import/plan?name=Paper",
+        content=_zip({"main.tex": DOC, "a.tex": b"a", "b.tex": b"b"}),
+        headers=_h(you),
+    )
+
+    resp = await client.post(
+        f"/v1/projects/{project.id}/latex/import/commit",
+        json={
+            "staging_id": plan.json()["staging_id"],
+            "name": "Paper",
+            "decisions": [
+                {"path": "a.tex", "new_path": "Same.tex"},
+                {"path": "b.tex", "new_path": "same.tex"},
+            ],
+        },
+        headers={"X-Dev-User-Id": you.id},
+    )
+
+    assert resp.status_code == 409
+    assert (await db_session.execute(select(LatexDocument))).scalars().all() == []
+
+
+async def test_a_decision_colliding_with_an_untouched_archive_entry_is_refused(
+    client: AsyncClient, you: User, project: Project
+):
+    plan = await client.post(
+        f"/v1/projects/{project.id}/latex/import/plan?name=Paper",
+        content=_zip({"main.tex": DOC, "a.tex": b"a"}),
+        headers=_h(you),
+    )
+
+    resp = await client.post(
+        f"/v1/projects/{project.id}/latex/import/commit",
+        json={
+            "staging_id": plan.json()["staging_id"],
+            "name": "Paper",
+            "decisions": [{"path": "a.tex", "new_path": "main.tex"}],
+        },
+        headers={"X-Dev-User-Id": you.id},
+    )
+
+    assert resp.status_code == 409
+
+
+async def test_a_plan_made_as_a_create_cannot_be_committed_as_a_merge(
+    client: AsyncClient, you: User, project: Project
+):
+    """The collision list the user approved was computed for one target. A
+    create plan carries no merge collisions at all, so committing it against
+    a document would apply decisions nobody was shown."""
+    created = await _import(client, you, project.id, _zip({"main.tex": DOC}))
+    doc_id = created.json()["id"]
+    plan = await client.post(
+        f"/v1/projects/{project.id}/latex/import/plan?name=Paper",
+        content=_zip({"other.tex": DOC}),
+        headers=_h(you),
+    )
+
+    resp = await client.post(
+        f"/v1/projects/{project.id}/latex/import/commit",
+        json={"staging_id": plan.json()["staging_id"], "document_id": doc_id},
+        headers={"X-Dev-User-Id": you.id},
+    )
+
+    assert resp.status_code == 422
+
+
+async def test_a_plan_made_as_a_merge_cannot_be_committed_as_a_create(
+    client: AsyncClient, you: User, project: Project, db_session: AsyncSession
+):
+    created = await _import(client, you, project.id, _zip({"main.tex": DOC}))
+    plan = await client.post(
+        f"/v1/projects/{project.id}/latex/import/plan?document_id={created.json()['id']}",
+        content=_zip({"other.tex": DOC}),
+        headers=_h(you),
+    )
+
+    resp = await client.post(
+        f"/v1/projects/{project.id}/latex/import/commit",
+        json={"staging_id": plan.json()["staging_id"], "name": "Paper"},
+        headers={"X-Dev-User-Id": you.id},
+    )
+
+    assert resp.status_code == 422
+    assert len((await db_session.execute(select(LatexDocument))).scalars().all()) == 1
+
+
+async def test_a_merge_plan_cannot_be_redirected_at_another_document(
+    client: AsyncClient, you: User, project: Project
+):
+    first = await _import(client, you, project.id, _zip({"main.tex": DOC}), name="One")
+    second = await _import(client, you, project.id, _zip({"main.tex": DOC}), name="Two")
+    plan = await client.post(
+        f"/v1/projects/{project.id}/latex/import/plan?document_id={first.json()['id']}",
+        content=_zip({"other.tex": DOC}),
+        headers=_h(you),
+    )
+
+    resp = await client.post(
+        f"/v1/projects/{project.id}/latex/import/commit",
+        json={"staging_id": plan.json()["staging_id"], "document_id": second.json()["id"]},
+        headers={"X-Dev-User-Id": you.id},
+    )
+
+    assert resp.status_code == 422
+
+
+async def test_plan_file_count_excludes_the_manifest(
+    client: AsyncClient, you: User, project: Project
+):
+    """`file_count` is the "N files" the user is shown, and the manifest is
+    consumed rather than written -- it must not be counted."""
+    manifest = json.dumps({"main_path": "main.tex", "engine": "pdflatex"}).encode()
+    resp = await client.post(
+        f"/v1/projects/{project.id}/latex/import/plan?name=Paper",
+        content=_zip({"main.tex": DOC, MANIFEST_PATH: manifest}),
+        headers=_h(you),
+    )
+
+    assert resp.json()["file_count"] == 1
+
+
+async def test_a_merge_plan_ignores_a_bad_main_path(
+    client: AsyncClient, you: User, project: Project
+):
+    """A merge never touches the document's main file, so refusing a
+    `main_path` it ignores would reject an otherwise fine request."""
+    created = await _import(client, you, project.id, _zip({"main.tex": DOC}))
+
+    resp = await client.post(
+        f"/v1/projects/{project.id}/latex/import/plan"
+        f"?document_id={created.json()['id']}&main_path=ghost.tex",
+        content=_zip({"other.tex": DOC}),
+        headers=_h(you),
+    )
+
+    assert resp.status_code == 200
+
+
+async def test_a_document_viewer_is_refused_on_a_merge_plan(
+    client: AsyncClient, db_session: AsyncSession, you: User, project: Project
+):
+    """A project member who did not create the document and holds no grant
+    resolves to document-level viewer. Merging writes files, so this is the
+    editor line, and it is a new surface."""
+    created = await _import(client, you, project.id, _zip({"main.tex": DOC}))
+    viewer = (
+        await db_session.execute(select(User).where(User.email == "amelia@lab.io"))
+    ).scalar_one()
+    db_session.add(ProjectMember(project_id=project.id, user_id=viewer.id, role="member"))
+    await db_session.commit()
+
+    resp = await client.post(
+        f"/v1/projects/{project.id}/latex/import/plan?document_id={created.json()['id']}",
+        content=_zip({"other.tex": DOC}),
+        headers=_h(viewer),
+    )
+
+    assert resp.status_code == 403
+
+
+async def test_a_document_viewer_is_refused_on_a_merge_commit(
+    client: AsyncClient, db_session: AsyncSession, you: User, project: Project
+):
+    """Authorized on the document the request NAMES, before anything about
+    the token is considered -- a viewer must not learn whether their token
+    was planned for that document."""
+    created = await _import(client, you, project.id, _zip({"main.tex": DOC}))
+    viewer = (
+        await db_session.execute(select(User).where(User.email == "amelia@lab.io"))
+    ).scalar_one()
+    db_session.add(ProjectMember(project_id=project.id, user_id=viewer.id, role="member"))
+    await db_session.commit()
+    # A create plan is all a viewer can obtain; the merge plan above is
+    # already refused.
+    plan = await client.post(
+        f"/v1/projects/{project.id}/latex/import/plan?name=Paper",
+        content=_zip({"other.tex": DOC}),
+        headers=_h(viewer),
+    )
+
+    resp = await client.post(
+        f"/v1/projects/{project.id}/latex/import/commit",
+        json={"staging_id": plan.json()["staging_id"], "document_id": created.json()["id"]},
+        headers={"X-Dev-User-Id": viewer.id},
+    )
+
+    assert resp.status_code == 403

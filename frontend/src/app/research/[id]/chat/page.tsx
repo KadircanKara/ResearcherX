@@ -2,16 +2,28 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
-import { MessageSquarePlus, Plus, Trash2 } from "lucide-react";
+import { Download, MessageSquarePlus, Pencil, Plus, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { BulkEditBar } from "@/components/bulk-edit-bar";
+import { ConfirmDialog } from "@/components/ui/confirm-dialog";
+import { RenameDialog } from "@/components/ui/rename-dialog";
 import { MentionTextarea } from "@/components/mention-textarea";
-import { createConversation, deleteConversation, listConversations } from "@/lib/chat";
+import {
+  createConversation,
+  deleteConversation,
+  getConversation,
+  listConversations,
+  renameConversation,
+} from "@/lib/chat";
+import { conversationFilename, conversationToMarkdown } from "@/lib/chat-export";
+import { saveBlob } from "@/lib/download";
 import type { Mention } from "@/lib/mentions";
 import { getProject, listPapers } from "@/lib/projects";
+import { clear, isAllSelected, selectAll, toggle } from "@/lib/selection";
 import type { ChatConversation, Paper, Role } from "@/lib/types";
 
-// Matches the backend: delete_conversation requires require_member(..., "editor").
-const CAN_DELETE: Role[] = ["owner", "editor"];
+// Project sharing is binary now: any member may delete a conversation.
+const CAN_DELETE: Role[] = ["owner", "member"];
 
 function fmtDate(iso: string): string {
   return new Date(iso).toLocaleDateString("en-GB", {
@@ -33,6 +45,11 @@ export default function ChatPage() {
   const [papers, setPapers] = useState<Paper[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
+
+  const [editingMode, setEditingMode] = useState(false);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const [bulkError, setBulkError] = useState<string | null>(null);
 
   // `silent` skips the loading skeleton — used by handleDelete's error path to
   // resync without flashing the whole list away under the user.
@@ -70,6 +87,75 @@ export default function ChatPage() {
     }
   }
 
+  const [renaming, setRenaming] = useState<ChatConversation | null>(null);
+  const [renameBusy, setRenameBusy] = useState(false);
+  const [renameError, setRenameError] = useState<string | null>(null);
+  const [downloading, setDownloading] = useState<string | null>(null);
+
+  async function handleRename(title: string) {
+    const target = renaming;
+    if (!target) return;
+    setRenameBusy(true);
+    setRenameError(null);
+    try {
+      const updated = await renameConversation(projectId, target.id, title);
+      setConversations((prev) =>
+        prev.map((c) => (c.id === updated.id ? { ...c, ...updated } : c))
+      );
+      setRenaming(null);
+    } catch {
+      // Generic on purpose: a rename fails only on a request the user
+      // cannot act on, and the server's text for those is an
+      // implementation detail.
+      setRenameError("Could not rename this conversation. Please try again.");
+    } finally {
+      setRenameBusy(false);
+    }
+  }
+
+  async function handleDownload(conv: ChatConversation) {
+    setDownloading(conv.id);
+    try {
+      // Fetched fresh rather than exported from the list: the list carries
+      // titles and dates only, and a transcript without its messages is not
+      // a transcript.
+      const detail = await getConversation(projectId, conv.id);
+      saveBlob(
+        new Blob([conversationToMarkdown(detail)], { type: "text/markdown;charset=utf-8" }),
+        conversationFilename(detail.title)
+      );
+    } catch {
+      setBulkError("Could not download this conversation. Please try again.");
+    } finally {
+      setDownloading(null);
+    }
+  }
+
+  // Asked through a real dialog, never `window.confirm` -- see
+  // `ConfirmDialog`: a page that fires several native dialogs gets them
+  // SUPPRESSED by Chrome, after which `confirm()` returns false without
+  // opening anything and the delete silently does nothing.
+  const [pendingBulkDelete, setPendingBulkDelete] = useState(false);
+
+  async function handleBulkDelete() {
+    setPendingBulkDelete(false);
+    setBulkBusy(true);
+    setBulkError(null);
+    const ids = [...selected];
+    const results = await Promise.allSettled(
+      ids.map((id) => deleteConversation(projectId, id))
+    );
+    const failed = ids.filter((_, i) => results[i].status === "rejected");
+    setSelected(new Set(failed));
+    if (failed.length > 0) {
+      setBulkError(`${failed.length} of ${ids.length} could not be deleted.`);
+    }
+    setBulkBusy(false);
+    // Re-fetched unconditionally: what just proved unreliable is precisely
+    // this client's idea of what exists.
+    load({ silent: true });
+  }
+
   async function handleStart() {
     const q = content.trim();
     if (!q || submitting) return;
@@ -105,13 +191,40 @@ export default function ChatPage() {
             ? "No conversations yet"
             : `${conversations.length} conversation${conversations.length !== 1 ? "s" : ""}`}
         </p>
-        {!showForm && (
-          <Button size="sm" onClick={() => setShowForm(true)}>
-            <Plus className="mr-1.5 size-3.5" />
-            New Chat
-          </Button>
-        )}
+        <div className="flex items-center gap-2">
+          <BulkEditBar
+            active={editingMode}
+            count={selected.size}
+            total={conversations.length}
+            allSelected={isAllSelected(selected, conversations.map((c) => c.id))}
+            busy={bulkBusy}
+            onEnter={() => setEditingMode(true)}
+            onSelectAll={() =>
+              setSelected(selectAll(selected, conversations.map((c) => c.id)))
+            }
+            onClear={() => setSelected(clear())}
+            onDelete={() => setPendingBulkDelete(true)}
+            onDone={() => {
+              setEditingMode(false);
+              // A selection that survives invisibly is a delete waiting to
+              // hit the wrong rows.
+              setSelected(clear());
+            }}
+          />
+          {!showForm && (
+            <Button size="sm" onClick={() => setShowForm(true)}>
+              <Plus className="mr-1.5 size-3.5" />
+              New Chat
+            </Button>
+          )}
+        </div>
       </div>
+
+      {bulkError && (
+        <p className="mb-3 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+          {bulkError}
+        </p>
+      )}
 
       {showForm && (
         <div className="mb-4 rounded-xl border border-border bg-card p-4">
@@ -159,6 +272,15 @@ export default function ChatPage() {
             key={conv.id}
             className="group flex w-full items-start gap-2 rounded-xl border border-border bg-card px-4 py-3 transition-colors hover:bg-muted"
           >
+            {editingMode && (
+              <input
+                type="checkbox"
+                checked={selected.has(conv.id)}
+                onChange={() => setSelected(toggle(selected, conv.id))}
+                aria-label={`Select ${conv.title}`}
+                className="mt-1 size-4 shrink-0"
+              />
+            )}
             <button
               type="button"
               onClick={() => router.push(`/research/${projectId}/chat/${conv.id}`)}
@@ -171,6 +293,30 @@ export default function ChatPage() {
                 {fmtDate(conv.updated_at)}
               </p>
             </button>
+            <button
+              type="button"
+              onClick={() => void handleDownload(conv)}
+              disabled={downloading === conv.id}
+              className="mt-0.5 shrink-0 rounded p-1 text-muted-foreground/50 transition-colors hover:bg-muted hover:text-foreground disabled:opacity-40"
+              aria-label={`Download conversation as Markdown: ${conv.title}`}
+              title="Download as .md"
+            >
+              <Download className="size-3.5" />
+            </button>
+            {myRole && CAN_DELETE.includes(myRole) && (
+              <button
+                type="button"
+                onClick={() => {
+                  setRenameError(null);
+                  setRenaming(conv);
+                }}
+                className="mt-0.5 shrink-0 rounded p-1 text-muted-foreground/50 transition-colors hover:bg-muted hover:text-foreground"
+                aria-label={`Rename conversation: ${conv.title}`}
+                title="Rename"
+              >
+                <Pencil className="size-3.5" />
+              </button>
+            )}
             {myRole && CAN_DELETE.includes(myRole) && (
               <button
                 type="button"
@@ -185,6 +331,30 @@ export default function ChatPage() {
           </div>
         ))}
       </div>
+
+      <RenameDialog
+        open={renaming !== null}
+        title="Rename conversation"
+        label="Title"
+        initialValue={renaming?.title ?? ""}
+        busy={renameBusy}
+        error={renameError}
+        onCancel={() => {
+          setRenaming(null);
+          setRenameError(null);
+        }}
+        onSubmit={(value) => void handleRename(value)}
+      />
+
+      <ConfirmDialog
+        open={pendingBulkDelete}
+        title={`Delete ${selected.size} conversation${selected.size !== 1 ? "s" : ""}?`}
+        description="This cannot be undone."
+        confirmLabel="Delete"
+        busy={bulkBusy}
+        onCancel={() => setPendingBulkDelete(false)}
+        onConfirm={() => void handleBulkDelete()}
+      />
     </div>
   );
 }

@@ -372,6 +372,22 @@ class Settings(BaseSettings):
     # cannot make the tree endpoint or the editor sidebar the slow part.
     latex_max_files: int = 2000
 
+    # The plan/commit parking spot for an import (services/latex_staging.py).
+    # Bounded three ways because it holds whole archives in memory: 8 pending
+    # imports, 100MB total, 30 minutes each. In-process, so single-worker
+    # only -- see that module's docstring.
+    #
+    # The TTL is the time a user has between clicking Import and confirming
+    # the conflict dialog, NOT a machine-to-machine timeout. It was 600s and
+    # that measured too short in real use: reading a conflict list and typing
+    # replacement names for a real project ran past it, and the reward for
+    # deliberating was having to pick the file again. The cost of the longer
+    # window is memory (bounded by the other two settings), so it buys
+    # patience cheaply.
+    latex_staging_ttl_s: int = 1800
+    latex_staging_entries: int = 8
+    latex_staging_bytes: int = 100 * 1024 * 1024
+
     @field_validator("cors_origins", mode="before")
     @classmethod
     def _split_cors(cls, v: object) -> object:

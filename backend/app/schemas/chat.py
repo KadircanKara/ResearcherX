@@ -31,6 +31,10 @@ class MessageOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class ConversationUpdate(BaseModel):
+    title: str = Field(min_length=1, max_length=200)
+
+
 class ConversationOut(BaseModel):
     id: str
     project_id: str

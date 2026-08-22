@@ -1,0 +1,110 @@
+import type { LatexCollision } from "@/lib/latex";
+
+/**
+ * The conflict dialog's decisions, as data.
+ *
+ * PURE -- no React, no fetch. vitest here runs in the node environment with
+ * no jsdom, so anything worth a test lives in `src/lib/`; and every silent
+ * data-loss bug in the LaTeX editor has come from logic that lived as refs
+ * inside a component.
+ *
+ * This module never computes a `(n)` name. `suggestion` comes from the
+ * server (`latex_dedupe.suffix_path`), which is the single implementation of
+ * that rule -- the same reason path validation lives only in
+ * `latex_paths.normalize_path` and never in the browser.
+ *
+ * `ConflictState.defaultAction` is read by the DIALOG, not by this module --
+ * see the field's own comment below.
+ */
+
+export type ConflictAction = "keep_both" | "rename";
+
+export interface ConflictState {
+  /**
+   * The batch choice, consumed by the DIALOG only -- never read inside this
+   * module. It decides how a row with no override of its own RENDERS: static
+   * resolved text for `keep_both`, an editable field seeded with the
+   * server's suggestion for `rename`. It deliberately does not change what
+   * `resolvedPath`/`decisions` return -- a row the user has not typed into
+   * has no typed value to fall back to either way, so it resolves to the
+   * server's suggestion under either action. Branching on it here would be a
+   * distinction without a difference.
+   */
+  defaultAction: ConflictAction;
+  overrides: Record<string, { action: ConflictAction; newPath: string }>;
+}
+
+export function initialState(): ConflictState {
+  return { defaultAction: "keep_both", overrides: {} };
+}
+
+export function setDefault(state: ConflictState, action: ConflictAction): ConflictState {
+  return { ...state, defaultAction: action };
+}
+
+export function setOverride(
+  state: ConflictState,
+  path: string,
+  action: ConflictAction,
+  newPath: string
+): ConflictState {
+  return { ...state, overrides: { ...state.overrides, [path]: { action, newPath } } };
+}
+
+export function clearOverride(state: ConflictState, path: string): ConflictState {
+  const overrides = { ...state.overrides };
+  delete overrides[path];
+  return { ...state, overrides };
+}
+
+export function resolvedPath(state: ConflictState, collision: LatexCollision): string {
+  const override = state.overrides[collision.path];
+  if (override?.action === "rename") return override.newPath.trim();
+  return collision.suggestion;
+}
+
+export function decisions(
+  state: ConflictState,
+  collisions: LatexCollision[]
+): { path: string; new_path: string }[] {
+  return collisions.map((c) => ({ path: c.path, new_path: resolvedPath(state, c) }));
+}
+
+/**
+ * ADVISORY ONLY -- an approximation of the backend's fold
+ * (`latex_paths.collision_key`) that exists to grey out Confirm before a
+ * doomed round trip. It is NOT a validator and must never be promoted into
+ * one: the browser is never a second implementation of a server rule (the
+ * same line `latex_paths.normalize_path` and `latex_dedupe.suffix_path`
+ * hold), and the server re-checks every decision it is sent regardless. If
+ * this ever disagrees with the server, the server wins and the user sees the
+ * conflict dialog again -- which is exactly the intended failure mode.
+ */
+function advisoryKey(path: string): string {
+  return path.toLowerCase();
+}
+
+export function problems(
+  state: ConflictState,
+  collisions: LatexCollision[],
+  taken: string[]
+): Record<string, string> {
+  const found: Record<string, string> = {};
+  const seen = new Map<string, string>();
+  for (const t of taken) seen.set(advisoryKey(t), t);
+
+  for (const c of collisions) {
+    const resolved = resolvedPath(state, c);
+    if (!resolved) {
+      found[c.path] = "Enter a name.";
+      continue;
+    }
+    const k = advisoryKey(resolved);
+    if (seen.has(k)) {
+      found[c.path] = `${seen.get(k)} is already taken.`;
+      continue;
+    }
+    seen.set(k, resolved);
+  }
+  return found;
+}

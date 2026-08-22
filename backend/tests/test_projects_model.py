@@ -28,6 +28,6 @@ async def test_member_unique(db_session):
     await db_session.flush()
     db_session.add(ProjectMember(project_id=p.id, user_id=u.id, role=Role.OWNER))
     await db_session.commit()
-    db_session.add(ProjectMember(project_id=p.id, user_id=u.id, role=Role.VIEWER))
+    db_session.add(ProjectMember(project_id=p.id, user_id=u.id, role=Role.MEMBER))
     with pytest.raises(IntegrityError):
         await db_session.commit()

@@ -8,6 +8,7 @@ import {
   isTexPath,
   joinPath,
   parentDir,
+  siblingPath,
 } from "./latex-tree";
 
 const meta = (path: string, size = 10, binary = false) => ({
@@ -126,5 +127,28 @@ describe("formatBytes", () => {
   it("drops a trailing .0 that only rounding produced", () => {
     expect(formatBytes(1025)).toBe("1 KB");
     expect(formatBytes(10239)).toBe("10 KB");
+  });
+});
+
+describe("siblingPath", () => {
+  it("keeps a nested file in its own directory", () => {
+    // The bug this exists to prevent: sending the bare leaf as the
+    // destination moved the file to the tree root.
+    expect(siblingPath("Figures/genetic_operators/ox.png", "ox2.png")).toBe(
+      "Figures/genetic_operators/ox2.png"
+    );
+  });
+
+  it("leaves a root file at the root", () => {
+    expect(siblingPath("main.tex", "paper.tex")).toBe("paper.tex");
+  });
+
+  it("resolves a typed separator against the same parent", () => {
+    // One field expresses both a rename and a shallow move, with no mode.
+    expect(siblingPath("Figures/ox.png", "raw/ox.png")).toBe("Figures/raw/ox.png");
+  });
+
+  it("works for a directory path, which has no extension to reason about", () => {
+    expect(siblingPath("Figures/genetic_operators", "operators")).toBe("Figures/operators");
   });
 });

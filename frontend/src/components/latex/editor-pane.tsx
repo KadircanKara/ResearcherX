@@ -4,9 +4,40 @@ import { useEffect, useRef } from "react";
 import { Compartment, EditorState, type Extension } from "@codemirror/state";
 import { EditorView, keymap, lineNumbers, highlightActiveLine } from "@codemirror/view";
 import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
-import { StreamLanguage, bracketMatching } from "@codemirror/language";
+import { bracketMatching, syntaxHighlighting } from "@codemirror/language";
 import { closeBrackets } from "@codemirror/autocomplete";
-import { stex } from "@codemirror/legacy-modes/mode/stex";
+import { latexHighlightStyle, texLanguage } from "@/lib/latex-syntax";
+
+/**
+ * The editor's own chrome -- gutter, active line, caret, selection.
+ *
+ * CodeMirror's base theme hardcodes a light gutter and a light selection
+ * whatever the page is doing, so without this the editor stayed light-themed
+ * inside a dark app. Every colour comes from the app's semantic tokens,
+ * which is why they are wrapped in `oklch(...)` here: those tokens hold bare
+ * channels for Tailwind's `oklch(var(--token) / <alpha>)` form. Defined once
+ * at module scope, not per render -- CodeMirror compiles a theme into a
+ * stylesheet, and a fresh object each render would mount a new one.
+ */
+const editorTheme = EditorView.theme({
+  "&": { height: "100%", backgroundColor: "transparent", color: "oklch(var(--foreground))" },
+  "&.cm-focused": { outline: "none" },
+  ".cm-scroller": { fontFamily: "var(--font-mono)", lineHeight: "1.6" },
+  ".cm-content": { caretColor: "oklch(var(--foreground))" },
+  ".cm-gutters": {
+    backgroundColor: "transparent",
+    color: "oklch(var(--muted-foreground))",
+    border: "none",
+  },
+  ".cm-activeLine": { backgroundColor: "oklch(var(--muted) / 0.45)" },
+  ".cm-activeLineGutter": {
+    backgroundColor: "transparent",
+    color: "oklch(var(--foreground))",
+  },
+  ".cm-selectionBackground, &.cm-focused .cm-selectionBackground": {
+    backgroundColor: "oklch(var(--accent))",
+  },
+});
 
 interface EditorPaneProps {
   /** Which buffer is showing. Null when no file is open. */
@@ -86,7 +117,13 @@ export function EditorPane({
       bracketMatching(),
       closeBrackets(),
       keymap.of([...defaultKeymap, ...historyKeymap]),
-      StreamLanguage.define(stex),
+      texLanguage,
+      // Without this the editor has NO syntax colouring at all: a stream
+      // language only assigns highlight tags, and `basicSetup` -- which is
+      // where a default `syntaxHighlighting` would otherwise come from --
+      // is deliberately not used here.
+      syntaxHighlighting(latexHighlightStyle),
+      editorTheme,
       EditorView.lineWrapping,
       EditorView.updateListener.of((update) => {
         if (update.docChanged) handlers.current.onChange(update.state.doc.toString());

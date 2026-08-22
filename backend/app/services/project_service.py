@@ -7,12 +7,13 @@ Gates:
 
 from __future__ import annotations
 
-from sqlalchemy import select
+from sqlalchemy import delete as sa_delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi import HTTPException
 
 from app.core.permissions import can
-from app.db.models import Project, ProjectMember, User
+from app.core import palette
+from app.db.models import LatexDocument, LatexDocumentMember, Project, ProjectMember, User
 from app.schemas.project import ProjectCreate, ProjectUpdate
 
 
@@ -30,7 +31,7 @@ async def _get_membership(db: AsyncSession, project_id: str, user_id: str) -> Pr
 
 
 async def _require_member(
-    db: AsyncSession, project_id: str, user_id: str, need: str = "viewer"
+    db: AsyncSession, project_id: str, user_id: str, need: str = "member"
 ) -> ProjectMember:
     """Return the membership or raise 404 (not-a-member) / 403 (under-ranked)."""
     membership = await _get_membership(db, project_id, user_id)
@@ -42,7 +43,7 @@ async def _require_member(
 
 
 async def require_member(
-    db: AsyncSession, project_id: str, user_id: str, need: str = "viewer"
+    db: AsyncSession, project_id: str, user_id: str, need: str = "member"
 ) -> ProjectMember:
     """Public wrapper around _require_member for use outside this module."""
     return await _require_member(db, project_id, user_id, need)
@@ -98,6 +99,10 @@ async def create_project(db: AsyncSession, user: User, data: ProjectCreate) -> P
         title=data.title,
         description=data.description,
         topic_keywords=data.topic_keywords,
+        # Assigned here rather than left NULL so a new project's colour is
+        # a stored fact the user can then change, not a derivation that
+        # would shift if the palette were ever reordered.
+        color=data.color or palette.color_for(user.id + data.title),
     )
     db.add(project)
     await db.flush()
@@ -113,7 +118,7 @@ async def get_project(
     db: AsyncSession, user: User, project_id: str
 ) -> tuple[Project, list[ProjectMember], str]:
     """Return (project, members, my_role) for any member, else 404."""
-    membership = await _require_member(db, project_id, user.id, "viewer")
+    membership = await _require_member(db, project_id, user.id, "member")
     project = await _get_project_or_404(db, project_id)
     members = await _get_members(db, project_id)
     return project, members, membership.role
@@ -122,8 +127,8 @@ async def get_project(
 async def update_project(
     db: AsyncSession, user: User, project_id: str, data: ProjectUpdate
 ) -> Project:
-    """Update project fields — requires editor or above."""
-    await _require_member(db, project_id, user.id, "editor")
+    """Update project fields — requires membership."""
+    await _require_member(db, project_id, user.id, "member")
     project = await _get_project_or_404(db, project_id)
 
     if data.title is not None:
@@ -132,6 +137,8 @@ async def update_project(
         project.description = data.description
     if data.topic_keywords is not None:
         project.topic_keywords = data.topic_keywords
+    if data.color is not None:
+        project.color = data.color
 
     await db.commit()
     await db.refresh(project)
@@ -146,7 +153,7 @@ async def delete_project(db: AsyncSession, user: User, project_id: str) -> None:
     await db.commit()
 
 
-ASSIGNABLE_ROLES = ("editor", "commenter", "viewer")
+ASSIGNABLE_ROLES = ("member",)
 
 
 async def add_member(
@@ -156,7 +163,7 @@ async def add_member(
     target_user_id: str,
     role: str,
 ) -> ProjectMember:
-    """Add a member (editor/commenter/viewer) — requires owner."""
+    """Add a member — requires owner."""
     await _require_member(db, project_id, user.id, "owner")
     if role not in ASSIGNABLE_ROLES:
         raise HTTPException(status_code=422, detail="Invalid role")
@@ -179,7 +186,7 @@ async def update_member_role(
     target_user_id: str,
     role: str,
 ) -> ProjectMember:
-    """Change a member's role — requires owner."""
+    """Change a member's role — requires owner; refuses if it would demote the last owner."""
     await _require_member(db, project_id, user.id, "owner")
     if role not in ASSIGNABLE_ROLES:
         raise HTTPException(status_code=422, detail="Invalid role")
@@ -187,6 +194,13 @@ async def update_member_role(
     membership = await _get_membership(db, project_id, target_user_id)
     if membership is None:
         raise HTTPException(status_code=404, detail="Member not found")
+
+    if membership.role == "owner":
+        # Count remaining owners
+        members = await _get_members(db, project_id)
+        owner_count = sum(1 for m in members if m.role == "owner")
+        if owner_count <= 1:
+            raise HTTPException(status_code=400, detail="Cannot demote the last owner")
 
     membership.role = role
     await db.commit()
@@ -213,6 +227,18 @@ async def remove_member(
         owner_count = sum(1 for m in members if m.role == "owner")
         if owner_count <= 1:
             raise HTTPException(status_code=400, detail="Cannot remove the last owner")
+
+    # In the SAME transaction as the membership removal, not a cleanup job: a
+    # document grant that outlives project membership is an access path the
+    # project's share dialog does not show.
+    await db.execute(
+        sa_delete(LatexDocumentMember).where(
+            LatexDocumentMember.user_id == target_user_id,
+            LatexDocumentMember.document_id.in_(
+                select(LatexDocument.id).where(LatexDocument.project_id == project_id)
+            ),
+        )
+    )
 
     await db.delete(target)
     await db.commit()

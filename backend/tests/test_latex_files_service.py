@@ -82,7 +82,7 @@ async def test_writing_over_a_file_replaces_it_rather_than_adding_a_second_row(
 ):
     await svc.write_text(db_session, document.id, "main.tex", "old")
     await db_session.commit()
-    await svc.write_text(db_session, document.id, "main.tex", "new")
+    await svc.write_text(db_session, document.id, "main.tex", "new", if_exists="replace")
     await db_session.commit()
 
     rows = (
@@ -121,7 +121,7 @@ async def test_overwriting_a_text_file_with_binary_clears_the_text_column(
 ):
     await svc.write_text(db_session, document.id, "f.dat", "text")
     await db_session.commit()
-    row = await svc.write_binary(db_session, document.id, "f.dat", b"\x00\x01")
+    row = await svc.write_binary(db_session, document.id, "f.dat", b"\x00\x01", if_exists="replace")
     await db_session.commit()
 
     assert row.is_binary is True
@@ -135,7 +135,7 @@ async def test_overwriting_a_binary_file_with_text_clears_the_blob_column(
 ):
     await svc.write_binary(db_session, document.id, "f.dat", b"\x00\x01")
     await db_session.commit()
-    row = await svc.write_text(db_session, document.id, "f.dat", "café")
+    row = await svc.write_text(db_session, document.id, "f.dat", "café", if_exists="replace")
     await db_session.commit()
 
     assert row.is_binary is False
@@ -172,7 +172,7 @@ async def test_overwriting_a_file_does_not_count_its_old_size_against_the_cap(
     await svc.write_text(db_session, document.id, "a.tex", "x" * 20)
     await db_session.commit()
 
-    row = await svc.write_text(db_session, document.id, "a.tex", "y" * 20)
+    row = await svc.write_text(db_session, document.id, "a.tex", "y" * 20, if_exists="replace")
     await db_session.commit()
 
     assert row.content == "y" * 20
@@ -298,3 +298,227 @@ def test_tree_hash_cannot_be_forged_by_moving_bytes_between_path_and_content():
     a = svc.tree_hash([("ab.tex", b"")], "pdflatex", "m.tex")
     b = svc.tree_hash([("a.tex", b"b")], "pdflatex", "m.tex")
     assert a != b
+
+
+async def test_creating_a_file_at_a_taken_path_refuses_instead_of_blanking_it(
+    db_session: AsyncSession, document: LatexDocument
+):
+    # The live data-loss bug this whole feature exists to close: the "New
+    # file" box PUT an empty string, and the write silently replaced the
+    # file's contents with it.
+    doc_id = document.id  # captured before the rollback below expires it
+    await svc.write_text(db_session, doc_id, "main.tex", "\\documentclass{article}")
+    await db_session.commit()
+
+    with pytest.raises(svc.PathCollision) as excinfo:
+        await svc.write_text(db_session, doc_id, "main.tex", "")
+
+    assert excinfo.value.suggestion == "main (1).tex"
+    await db_session.rollback()
+    row = await svc.read_file(db_session, doc_id, "main.tex")
+    assert row.content == "\\documentclass{article}"
+
+
+async def test_an_explicit_replace_still_overwrites(
+    db_session: AsyncSession, document: LatexDocument
+):
+    # Autosave's path. It knows the file exists and means to replace it.
+    await svc.write_text(db_session, document.id, "main.tex", "one")
+    row = await svc.write_text(db_session, document.id, "main.tex", "two", if_exists="replace")
+    await db_session.commit()
+    assert row.content == "two"
+
+
+async def test_a_binary_upload_refuses_a_taken_path(
+    db_session: AsyncSession, document: LatexDocument
+):
+    await svc.write_binary(db_session, document.id, "figures/plot.png", b"\x89PNG")
+    await db_session.commit()
+
+    with pytest.raises(svc.PathCollision) as excinfo:
+        await svc.write_binary(db_session, document.id, "figures/plot.png", b"\x89PNG2")
+
+    assert excinfo.value.suggestion == "figures/plot (1).png"
+
+
+async def test_a_case_only_collision_now_carries_a_suggestion(
+    db_session: AsyncSession, document: LatexDocument
+):
+    # Previously a dead-end 409. The user is now offered a way forward.
+    await svc.write_binary(db_session, document.id, "figures/fig.png", b"\x89PNG")
+    await db_session.commit()
+
+    with pytest.raises(svc.PathCollision) as excinfo:
+        await svc.write_binary(db_session, document.id, "figures/Fig.PNG", b"\x89PNG")
+
+    assert excinfo.value.existing == "figures/fig.png"
+    assert excinfo.value.suggestion == "figures/Fig (1).PNG"
+
+
+async def test_a_rename_onto_a_taken_path_carries_a_suggestion(
+    db_session: AsyncSession, document: LatexDocument
+):
+    await svc.write_text(db_session, document.id, "a.tex", "a")
+    await svc.write_text(db_session, document.id, "b.tex", "b")
+    await db_session.commit()
+
+    with pytest.raises(svc.PathCollision) as excinfo:
+        await svc.rename_file(db_session, document.id, "a.tex", "b.tex")
+
+    assert excinfo.value.suggestion == "b (1).tex"
+
+
+async def test_bulk_merge_adds_to_an_existing_tree(
+    db_session: AsyncSession, document: LatexDocument
+):
+    await svc.write_text(db_session, document.id, "main.tex", "existing")
+    await db_session.commit()
+
+    count = await svc.bulk_merge(db_session, document.id, [("chapters/intro.tex", b"intro", False)])
+    await db_session.commit()
+
+    assert count == 1
+    paths = [f.path for f in await svc.list_files(db_session, document.id)]
+    assert paths == ["chapters/intro.tex", "main.tex"]
+
+
+async def test_bulk_merge_bumps_the_revision_exactly_once(
+    db_session: AsyncSession, document: LatexDocument
+):
+    # A merge is ONE change. Bumping per file would make every merged file
+    # look like a separate edit to the compile-staleness check.
+    await svc.write_text(db_session, document.id, "main.tex", "x")
+    await db_session.commit()
+    before = (await db_session.get(LatexDocument, document.id)).revision
+
+    await svc.bulk_merge(
+        db_session,
+        document.id,
+        [("a.tex", b"a", False), ("b.tex", b"b", False), ("c.tex", b"c", False)],
+    )
+    await db_session.commit()
+
+    after = (await db_session.get(LatexDocument, document.id)).revision
+    assert after == before + 1
+
+
+async def test_bulk_merge_refuses_a_path_that_is_already_taken(
+    db_session: AsyncSession, document: LatexDocument
+):
+    # The caller resolves collisions BEFORE calling. Reaching here with a
+    # taken path is a bug in the caller, and it must not overwrite.
+    await svc.write_text(db_session, document.id, "main.tex", "existing")
+    await db_session.commit()
+
+    with pytest.raises(svc.PathCollision):
+        await svc.bulk_merge(db_session, document.id, [("main.tex", b"new", False)])
+
+
+async def test_bulk_merge_counts_the_existing_tree_against_the_byte_cap(
+    db_session: AsyncSession, document: LatexDocument, monkeypatch
+):
+    monkeypatch.setattr(settings, "latex_project_max_bytes", 100)
+    await svc.write_text(db_session, document.id, "main.tex", "x" * 60)
+    await db_session.commit()
+
+    with pytest.raises(svc.QuotaExceeded):
+        await svc.bulk_merge(db_session, document.id, [("big.tex", b"y" * 60, False)])
+
+
+async def test_renaming_a_directory_moves_every_file_beneath_it(
+    db_session: AsyncSession, document: LatexDocument
+):
+    await svc.write_text(db_session, document.id, "chapters/intro.tex", "one")
+    await svc.write_text(db_session, document.id, "chapters/deep/two.tex", "two")
+    await svc.write_text(db_session, document.id, "main.tex", "root")
+    await db_session.commit()
+
+    moved = await svc.rename_dir(db_session, document.id, "chapters", "parts")
+    await db_session.commit()
+
+    assert moved == 2
+    assert [f.path for f in await svc.list_files(db_session, document.id)] == [
+        "main.tex",
+        "parts/deep/two.tex",
+        "parts/intro.tex",
+    ]
+
+
+async def test_renaming_a_directory_bumps_the_revision_exactly_once(
+    db_session: AsyncSession, document: LatexDocument
+):
+    # A move is ONE change. Bumping per file would make a three-file
+    # directory look like three separate edits to the staleness check.
+    await svc.write_text(db_session, document.id, "figs/a.tex", "a")
+    await svc.write_text(db_session, document.id, "figs/b.tex", "b")
+    await svc.write_text(db_session, document.id, "figs/c.tex", "c")
+    await db_session.commit()
+    before = (await db_session.get(LatexDocument, document.id)).revision
+
+    await svc.rename_dir(db_session, document.id, "figs", "images")
+    await db_session.commit()
+
+    after = (await db_session.get(LatexDocument, document.id)).revision
+    assert after == before + 1
+
+
+async def test_a_directory_rename_moves_nothing_when_any_file_would_collide(
+    db_session: AsyncSession, document: LatexDocument
+):
+    # All-or-nothing: a collision on the SECOND file must leave the first
+    # where it was. A half-moved tree is a project silently missing the file
+    # its \input names.
+    doc_id = document.id
+    await svc.write_text(db_session, doc_id, "a/one.tex", "one")
+    await svc.write_text(db_session, doc_id, "a/two.tex", "two")
+    await svc.write_text(db_session, doc_id, "b/two.tex", "occupied")
+    await db_session.commit()
+
+    with pytest.raises(svc.PathCollision):
+        await svc.rename_dir(db_session, doc_id, "a", "b")
+
+    await db_session.rollback()
+    assert [f.path for f in await svc.list_files(db_session, doc_id)] == [
+        "a/one.tex",
+        "a/two.tex",
+        "b/two.tex",
+    ]
+
+
+async def test_a_directory_cannot_be_moved_inside_itself(
+    db_session: AsyncSession, document: LatexDocument
+):
+    # The destination prefix would slide as the source is consumed.
+    await svc.write_text(db_session, document.id, "src/main.tex", "x")
+    await db_session.commit()
+
+    with pytest.raises(InvalidPath):
+        await svc.rename_dir(db_session, document.id, "src", "src/nested")
+
+
+async def test_renaming_a_directory_that_holds_no_files_is_a_miss(
+    db_session: AsyncSession, document: LatexDocument
+):
+    await svc.write_text(db_session, document.id, "main.tex", "x")
+    await db_session.commit()
+
+    with pytest.raises(svc.FileNotFound):
+        await svc.rename_dir(db_session, document.id, "nope", "elsewhere")
+
+
+async def test_a_directory_rename_does_not_touch_a_file_whose_name_merely_starts_the_same(
+    db_session: AsyncSession, document: LatexDocument
+):
+    # `chapters-old.tex` shares the prefix `chapters` but is not INSIDE it;
+    # matching on the bare prefix rather than `chapters/` would move it.
+    await svc.write_text(db_session, document.id, "chapters/intro.tex", "in")
+    await svc.write_text(db_session, document.id, "chapters-old.tex", "out")
+    await db_session.commit()
+
+    await svc.rename_dir(db_session, document.id, "chapters", "parts")
+    await db_session.commit()
+
+    assert [f.path for f in await svc.list_files(db_session, document.id)] == [
+        "chapters-old.tex",
+        "parts/intro.tex",
+    ]

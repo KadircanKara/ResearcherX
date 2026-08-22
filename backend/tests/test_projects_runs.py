@@ -235,11 +235,13 @@ async def test_list_project_runs_non_member(client, amelia: User, project: Proje
     assert r.status_code == 404
 
 
-async def test_viewer_can_list_runs(
+async def test_member_can_list_runs(
     client, amelia: User, project: Project, db_session: AsyncSession
 ):
-    db_session.add(ProjectMember(project_id=project.id, user_id=amelia.id, role="viewer"))
-    db_session.add(ResearchRun(question="viewer can see this run", project_id=project.id))
+    """Was test_viewer_can_list_runs: `viewer` is a retired role and no
+    longer ranks (see test_permissions.py) — a project member does now."""
+    db_session.add(ProjectMember(project_id=project.id, user_id=amelia.id, role="member"))
+    db_session.add(ResearchRun(question="member can see this run", project_id=project.id))
     await db_session.commit()
 
     r = await client.get(

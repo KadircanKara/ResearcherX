@@ -94,9 +94,7 @@ class User(Base):
 
 class Role(StrEnum):
     OWNER = "owner"
-    EDITOR = "editor"
-    COMMENTER = "commenter"
-    VIEWER = "viewer"
+    MEMBER = "member"
 
 
 class PaperSource(StrEnum):
@@ -113,6 +111,10 @@ class Project(Base):
     title: Mapped[str] = mapped_column(String(255))
     description: Mapped[str | None] = mapped_column(Text, default=None)
     topic_keywords: Mapped[list] = mapped_column(JSON, default=list)
+    # Nullable because every project that predates this column has no colour
+    # and must not be back-filled: `palette.color_for` derives a stable one
+    # from the id, so a NULL is a working default rather than a gap.
+    color: Mapped[str | None] = mapped_column(String(7), default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now, onupdate=_now
@@ -217,6 +219,37 @@ class LatexDocument(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now, onupdate=_now
     )
+
+
+class LatexDocumentMember(Base):
+    """An explicit editor/viewer grant on ONE LaTeX document.
+
+    Project membership answers whether someone may see a project at all; this
+    table answers whether they may change a particular document in it. There
+    is no row here for the project owner or the document creator: both
+    short-circuit ahead of this lookup in `services/latex_access.py`, so such
+    a row could never take effect, and the grant routes refuse to create one.
+    """
+
+    __tablename__ = "latex_document_members"
+    __table_args__ = (UniqueConstraint("document_id", "user_id"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    document_id: Mapped[str] = mapped_column(
+        ForeignKey(
+            "latex_documents.id",
+            ondelete="CASCADE",
+            name="fk_latex_document_members_document_id",
+        ),
+        index=True,
+    )
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE", name="fk_latex_document_members_user_id"),
+    )
+    # String(16) over a Python-side StrEnum, like StepKind and RunStatus:
+    # adding a level later needs no migration.
+    role: Mapped[str] = mapped_column(String(16))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 
 class LatexFile(Base):

@@ -81,7 +81,7 @@ async def test_writing_the_main_file_saves_its_content(
 
     resp = await client.put(
         f"/v1/projects/{project.id}/latex/{doc_id}/file",
-        params={"path": "main.tex"},
+        params={"path": "main.tex", "if_exists": "replace"},
         json={"content": "new"},
         headers={"X-Dev-User-Id": you.id},
     )
@@ -875,7 +875,7 @@ async def test_writing_the_main_file_bumps_the_revision(
 
     written = await client.put(
         f"/v1/projects/{project.id}/latex/{doc_id}/file",
-        params={"path": "main.tex"},
+        params={"path": "main.tex", "if_exists": "replace"},
         json={"content": "new"},
         headers={"X-Dev-User-Id": you.id},
     )
@@ -1144,7 +1144,7 @@ async def test_editing_a_chapter_changes_the_tree_hash_and_triggers_a_real_recom
 
         await client.put(
             f"/v1/projects/{project.id}/latex/{doc_id}/file",
-            params={"path": "chapters/intro.tex"},
+            params={"path": "chapters/intro.tex", "if_exists": "replace"},
             json={"content": "Version two -- the main file never changed."},
             headers={"X-Dev-User-Id": you.id},
         )
@@ -1284,3 +1284,77 @@ async def test_creating_a_document_that_would_exceed_the_project_quota_is_a_413_
 
     listed = await client.get(f"/v1/projects/{project.id}/latex", headers={"X-Dev-User-Id": you.id})
     assert listed.json() == []
+
+
+async def test_creating_a_document_with_a_taken_name_answers_a_suggestion(
+    client: AsyncClient, you: User, project: Project
+):
+    """Warned, never forbidden: there is no unique constraint on the name.
+    The 409 lets the client offer a one-click "Keep both" with the
+    suggestion, exactly like the import path's colliding-file check."""
+    body = {"name": "paper", "engine": "pdflatex", "source": ""}
+    await client.post(
+        f"/v1/projects/{project.id}/latex", json=body, headers={"X-Dev-User-Id": you.id}
+    )
+
+    r = await client.post(
+        f"/v1/projects/{project.id}/latex", json=body, headers={"X-Dev-User-Id": you.id}
+    )
+
+    assert r.status_code == 409
+    assert r.json()["detail"] == {
+        "error": "name_collision",
+        "name": "paper",
+        "suggestion": "paper (1)",
+    }
+
+
+async def test_renaming_a_document_into_a_taken_name_answers_a_suggestion(
+    client: AsyncClient, you: User, project: Project
+):
+    """Without this, a name you cannot CREATE is still reachable by renaming
+    into it -- a rule that only looks enforced."""
+    body = {"name": "Paper", "engine": "pdflatex", "source": ""}
+    first = await client.post(
+        f"/v1/projects/{project.id}/latex", json=body, headers={"X-Dev-User-Id": you.id}
+    )
+    second = await client.post(
+        f"/v1/projects/{project.id}/latex",
+        json={**body, "name": "Notes"},
+        headers={"X-Dev-User-Id": you.id},
+    )
+    assert first.status_code == 201 and second.status_code == 201
+
+    resp = await client.patch(
+        f"/v1/projects/{project.id}/latex/{second.json()['id']}",
+        json={"name": "Paper"},
+        headers={"X-Dev-User-Id": you.id},
+    )
+
+    assert resp.status_code == 409
+    assert resp.json()["detail"] == {
+        "error": "name_collision",
+        "name": "Paper",
+        "suggestion": "Paper (1)",
+    }
+
+
+async def test_renaming_a_document_to_its_own_name_is_not_a_collision(
+    client: AsyncClient, you: User, project: Project
+):
+    # The document's own row is excluded, so re-submitting the same name --
+    # or changing only its case -- is not a collision with itself.
+    created = await client.post(
+        f"/v1/projects/{project.id}/latex",
+        json={"name": "Paper", "engine": "pdflatex", "source": ""},
+        headers={"X-Dev-User-Id": you.id},
+    )
+
+    resp = await client.patch(
+        f"/v1/projects/{project.id}/latex/{created.json()['id']}",
+        json={"name": "PAPER"},
+        headers={"X-Dev-User-Id": you.id},
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["name"] == "PAPER"

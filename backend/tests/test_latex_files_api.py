@@ -232,10 +232,15 @@ async def test_a_viewer_cannot_write_but_can_read(
     # Named explicitly rather than "any user that is not you": seed_users
     # creates three, and `.first()` without an ORDER BY is whichever row the
     # database hands back.
+    #
+    # Project membership is binary now (owner/member) -- the editor/viewer
+    # distinction lives per-document (`services/latex_access.py`). A project
+    # "member" with no grant on this document, and who did not create it,
+    # resolves to document-level "viewer".
     viewer = (
         await db_session.execute(select(User).where(User.email == "amelia@lab.io"))
     ).scalar_one()
-    db_session.add(ProjectMember(project_id=project.id, user_id=viewer.id, role="viewer"))
+    db_session.add(ProjectMember(project_id=project.id, user_id=viewer.id, role="member"))
     await db_session.commit()
 
     base = f"/v1/projects/{project.id}/latex/{document.id}"
@@ -427,11 +432,16 @@ async def test_a_viewer_gets_403_only_on_routes_that_require_editor(
 ):
     """Pins the REQUIRED LEVEL of each route, not merely that some check ran:
     a viewer must be refused on every editor route and let through
-    (not-403) on every viewer route."""
+    (not-403) on every viewer route.
+
+    "Viewer" here means document-level access: a project "member" who did
+    not create the document and holds no grant on it resolves to "viewer"
+    per `services/latex_access.py`. Project membership itself is binary
+    (owner/member)."""
     viewer = (
         await db_session.execute(select(User).where(User.email == "amelia@lab.io"))
     ).scalar_one()
-    db_session.add(ProjectMember(project_id=project.id, user_id=viewer.id, role="viewer"))
+    db_session.add(ProjectMember(project_id=project.id, user_id=viewer.id, role="member"))
     await db_session.commit()
 
     base = f"/v1/projects/{project.id}/latex/{document.id}"
@@ -602,3 +612,121 @@ async def test_a_chunked_binary_upload_with_no_content_length_is_still_capped(
 
     tree = await client.get(f"{base}/files", headers=_h(you))
     assert tree.json()["files"] == []
+
+
+async def test_creating_a_file_at_a_taken_path_answers_a_structured_409(
+    client: AsyncClient, you: User, project: Project, document: LatexDocument
+):
+    base = f"/v1/projects/{project.id}/latex/{document.id}"
+    await client.put(
+        f"{base}/file", params={"path": "main.tex"}, json={"content": "hello"}, headers=_h(you)
+    )
+
+    r = await client.put(
+        f"{base}/file", params={"path": "main.tex"}, json={"content": ""}, headers=_h(you)
+    )
+
+    assert r.status_code == 409
+    detail = r.json()["detail"]
+    assert detail["error"] == "path_collision"
+    assert detail["collisions"] == [
+        {"path": "main.tex", "existing": "main.tex", "suggestion": "main (1).tex"}
+    ]
+
+
+async def test_the_autosave_query_parameter_still_overwrites(
+    client: AsyncClient, you: User, project: Project, document: LatexDocument
+):
+    base = f"/v1/projects/{project.id}/latex/{document.id}"
+    await client.put(
+        f"{base}/file", params={"path": "main.tex"}, json={"content": "one"}, headers=_h(you)
+    )
+
+    r = await client.put(
+        f"{base}/file",
+        params={"path": "main.tex", "if_exists": "replace"},
+        json={"content": "two"},
+        headers=_h(you),
+    )
+
+    assert r.status_code == 200
+    read = await client.get(f"{base}/file", params={"path": "main.tex"}, headers=_h(you))
+    assert read.json()["content"] == "two"
+
+
+async def test_renaming_a_directory_moves_its_files_and_carries_the_main_file(
+    client: AsyncClient, you: User, project: Project, document: LatexDocument
+):
+    base = f"/v1/projects/{project.id}/latex/{document.id}"
+    await client.put(
+        f"{base}/file", params={"path": "src/main.tex"}, json={"content": "x"}, headers=_h(you)
+    )
+    await client.put(
+        f"{base}/file", params={"path": "src/intro.tex"}, json={"content": "y"}, headers=_h(you)
+    )
+    await client.patch(
+        f"/v1/projects/{project.id}/latex/{document.id}",
+        json={"main_path": "src/main.tex"},
+        headers=_h(you),
+    )
+
+    resp = await client.post(
+        f"{base}/dir/rename", json={"from": "src", "to": "paper"}, headers=_h(you)
+    )
+
+    assert resp.status_code == 200
+    tree = await client.get(f"{base}/files", headers=_h(you))
+    assert sorted(f["path"] for f in tree.json()["files"]) == [
+        "paper/intro.tex",
+        "paper/main.tex",
+    ]
+    # The main file follows its own directory, or the document points at
+    # nothing and no compile can recover it.
+    doc = await client.get(f"/v1/projects/{project.id}/latex/{document.id}", headers=_h(you))
+    assert doc.json()["main_path"] == "paper/main.tex"
+
+
+async def test_renaming_a_directory_onto_an_occupied_path_is_a_409_and_moves_nothing(
+    client: AsyncClient, you: User, project: Project, document: LatexDocument
+):
+    base = f"/v1/projects/{project.id}/latex/{document.id}"
+    await client.put(
+        f"{base}/file", params={"path": "a/one.tex"}, json={"content": "1"}, headers=_h(you)
+    )
+    await client.put(
+        f"{base}/file", params={"path": "b/one.tex"}, json={"content": "2"}, headers=_h(you)
+    )
+
+    resp = await client.post(f"{base}/dir/rename", json={"from": "a", "to": "b"}, headers=_h(you))
+
+    assert resp.status_code == 409
+    assert resp.json()["detail"]["error"] == "path_collision"
+    tree = await client.get(f"{base}/files", headers=_h(you))
+    assert sorted(f["path"] for f in tree.json()["files"]) == ["a/one.tex", "b/one.tex"]
+
+
+async def test_a_document_viewer_cannot_rename_a_directory(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    you: User,
+    project: Project,
+    document: LatexDocument,
+):
+    """A project member who did not create the document and holds no grant
+    resolves to document-level viewer. Moving files is the editor line, and
+    this route is a new surface on it."""
+    base = f"/v1/projects/{project.id}/latex/{document.id}"
+    await client.put(
+        f"{base}/file", params={"path": "a/one.tex"}, json={"content": "1"}, headers=_h(you)
+    )
+    viewer = (
+        await db_session.execute(select(User).where(User.email == "amelia@lab.io"))
+    ).scalar_one()
+    db_session.add(ProjectMember(project_id=project.id, user_id=viewer.id, role="member"))
+    await db_session.commit()
+
+    resp = await client.post(
+        f"{base}/dir/rename", json={"from": "a", "to": "b"}, headers=_h(viewer)
+    )
+
+    assert resp.status_code == 403
