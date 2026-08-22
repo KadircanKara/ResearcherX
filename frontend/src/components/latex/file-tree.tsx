@@ -80,7 +80,10 @@ export function FileTree({
   // opened, so a directory freshly created by a new file's path still shows
   // its contents without this state knowing it exists yet.
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
-  const [creating, setCreating] = useState(false);
+  // The directory a new file is being created IN -- "" is the tree root,
+  // null is "not creating". A boolean could only ever mean the root, which
+  // is what made every new file in a subdirectory a retyped path.
+  const [creatingIn, setCreatingIn] = useState<string | null>(null);
   const [newPath, setNewPath] = useState("");
   // The path being renamed, and whether it names a file or a directory --
   // the two go to different routes, and the row that opened the field is
@@ -100,12 +103,16 @@ export function FileTree({
 
   function submitCreate() {
     const trimmed = newPath.trim();
-    setCreating(false);
+    const dir = creatingIn ?? "";
+    setCreatingIn(null);
     setNewPath("");
     // Sent VERBATIM, not sanitized here: `latex_paths.normalize_path` on the
     // backend is the one traversal guard, and a browser-side copy of its
     // rules would drift from it silently -- see this component's brief.
-    if (trimmed) onCreate(trimmed);
+    // Resolved against the directory the "+" was clicked in, the same way a
+    // rename resolves against the row's own directory -- so creating a file
+    // inside `chapters/` means typing `intro.tex`, not the path back again.
+    if (trimmed) onCreate(joinPath(dir, trimmed));
   }
 
   function submitRename(path: string) {
@@ -174,7 +181,10 @@ export function FileTree({
             variant="ghost"
             disabled={!canEdit}
             title={canEdit ? "New file" : "You need editor access to add a file"}
-            onClick={() => setCreating(true)}
+            onClick={() => {
+              setCreatingIn("");
+              setNewPath("");
+            }}
           >
             <Plus className="size-3.5" />
           </Button>
@@ -183,7 +193,7 @@ export function FileTree({
 
       {error && <p className="px-3 pb-1 text-xs text-destructive">{error}</p>}
 
-      {creating && (
+      {creatingIn === "" && (
         <input
           autoFocus
           value={newPath}
@@ -191,7 +201,7 @@ export function FileTree({
           onKeyDown={(e) => {
             if (e.key === "Enter") submitCreate();
             if (e.key === "Escape") {
-              setCreating(false);
+              setCreatingIn(null);
               setNewPath("");
             }
           }}
@@ -202,7 +212,7 @@ export function FileTree({
       )}
 
       <div className="flex-1 overflow-auto px-1.5 pb-2">
-        {nodes.length === 0 && !creating && (
+        {nodes.length === 0 && creatingIn === null && (
           <p className="px-1.5 py-2 text-sm text-muted-foreground">No files yet.</p>
         )}
         {nodes.map((node) => (
@@ -215,12 +225,32 @@ export function FileTree({
             canEdit={canEdit}
             collapsed={collapsed}
             renaming={renaming}
+            creatingIn={creatingIn}
+            newPath={newPath}
             renameValue={renameValue}
             onToggle={toggle}
             onOpen={onOpen}
             onDelete={onDelete}
             onSetMain={onSetMain}
             onUpload={onUpload}
+            onStartCreate={(dir) => {
+              // Creating inside a collapsed folder would put the field
+              // somewhere the user cannot see, so opening it opens the
+              // folder too.
+              setCollapsed((prev) => {
+                const next = new Set(prev);
+                next.delete(dir);
+                return next;
+              });
+              setCreatingIn(dir);
+              setNewPath("");
+            }}
+            onNewPathChange={setNewPath}
+            onSubmitCreate={submitCreate}
+            onCancelCreate={() => {
+              setCreatingIn(null);
+              setNewPath("");
+            }}
             onStartRename={(path, kind) => {
               setRenaming(path);
               setRenamingKind(kind);
@@ -272,6 +302,9 @@ interface TreeRowProps {
   canEdit: boolean;
   collapsed: Set<string>;
   renaming: string | null;
+  /** The directory whose inline "new file" field is open, if any. */
+  creatingIn: string | null;
+  newPath: string;
   renameValue: string;
   onToggle: (path: string) => void;
   onOpen: (path: string) => void;
@@ -279,6 +312,10 @@ interface TreeRowProps {
   onSetMain: (path: string) => void;
   onUpload: (path: string, data: Blob) => void;
   onStartRename: (path: string, kind: "file" | "dir") => void;
+  onStartCreate: (dir: string) => void;
+  onNewPathChange: (value: string) => void;
+  onSubmitCreate: () => void;
+  onCancelCreate: () => void;
   onRenameValueChange: (value: string) => void;
   onSubmitRename: (path: string) => void;
   onCancelRename: () => void;
@@ -292,6 +329,8 @@ function TreeRow({
   canEdit,
   collapsed,
   renaming,
+  creatingIn,
+  newPath,
   renameValue,
   onToggle,
   onOpen,
@@ -299,6 +338,10 @@ function TreeRow({
   onSetMain,
   onUpload,
   onStartRename,
+  onStartCreate,
+  onNewPathChange,
+  onSubmitCreate,
+  onCancelCreate,
   onRenameValueChange,
   onSubmitRename,
   onCancelRename,
@@ -333,6 +376,17 @@ function TreeRow({
           <button
             className="flex min-w-0 flex-1 items-center gap-1 text-left"
             onClick={() => onToggle(node.path)}
+            onKeyDown={(e) => {
+              // Same binding as a file row -- a folder is renameable too,
+              // and having Enter mean two different things depending on the
+              // row type is the kind of inconsistency that makes a
+              // keyboard user stop trusting the key. Space still toggles.
+              if (!canEdit) return;
+              if (e.key === "Enter" || e.key === "F2") {
+                e.preventDefault();
+                onStartRename(node.path, "dir");
+              }
+            }}
           >
             {isCollapsed ? (
               <ChevronRight className="size-3.5 shrink-0" />
@@ -342,6 +396,16 @@ function TreeRow({
             <Folder className="size-3.5 shrink-0" />
             <span className="truncate">{node.name}</span>
           </button>
+          {canEdit && (
+            <button
+              className="invisible shrink-0 text-muted-foreground hover:text-foreground group-hover:visible"
+              title="New file in this folder"
+              aria-label={`New file in ${node.name}`}
+              onClick={() => onStartCreate(node.path)}
+            >
+              <Plus className="size-3.5" />
+            </button>
+          )}
           {canEdit && (
             <button
               className="invisible shrink-0 text-muted-foreground hover:text-foreground group-hover:visible"
@@ -370,6 +434,22 @@ function TreeRow({
             </label>
           )}
         </div>
+        {!isCollapsed && creatingIn === node.path && (
+          <div style={{ paddingLeft: `${(depth + 1) * 14 + 6}px` }} className="py-0.5 pr-1.5">
+            <input
+              autoFocus
+              value={newPath}
+              onChange={(e) => onNewPathChange(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") onSubmitCreate();
+                if (e.key === "Escape") onCancelCreate();
+              }}
+              onBlur={onSubmitCreate}
+              placeholder="intro.tex"
+              className="w-full rounded-md border border-input bg-background px-1.5 py-0.5 text-sm"
+            />
+          </div>
+        )}
         {!isCollapsed &&
           node.children.map((child) => (
             <TreeRow
@@ -381,12 +461,18 @@ function TreeRow({
               canEdit={canEdit}
               collapsed={collapsed}
               renaming={renaming}
+              creatingIn={creatingIn}
+              newPath={newPath}
               renameValue={renameValue}
               onToggle={onToggle}
               onOpen={onOpen}
               onDelete={onDelete}
               onSetMain={onSetMain}
               onUpload={onUpload}
+              onStartCreate={onStartCreate}
+              onNewPathChange={onNewPathChange}
+              onSubmitCreate={onSubmitCreate}
+              onCancelCreate={onCancelCreate}
               onStartRename={onStartRename}
               onRenameValueChange={onRenameValueChange}
               onSubmitRename={onSubmitRename}
@@ -430,6 +516,19 @@ function TreeRow({
       <button
         className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
         onClick={() => onOpen(node.path)}
+        onKeyDown={(e) => {
+          // Enter renames, the way Finder and VS Code's explorer do. It has
+          // to preventDefault because Enter on a focused <button> would
+          // otherwise fire its click and re-open a file that is already
+          // open. F2 does the same for anyone who learned the Windows
+          // binding, and Space still activates the button, so the row keeps
+          // a keyboard route to its primary action.
+          if (!canEdit) return;
+          if (e.key === "Enter" || e.key === "F2") {
+            e.preventDefault();
+            onStartRename(node.path, "file");
+          }
+        }}
       >
         <FileCode className="size-3.5 shrink-0" />
         <span className="truncate">{node.name}</span>
