@@ -133,6 +133,56 @@ A malformed judge response **raises**; the case is recorded in `ERRORS` and
 excluded from every denominator. A fail-open judge would report a groundedness
 number it never measured, which is worse than no number.
 
+## Cost, and choosing a judge
+
+Measured 2026-08-22 on this corpus (54.5 chunks/case, ~1762 chars/chunk, so a
+~24k-token catalog per case):
+
+| judge | judge cost, 42 cases | full run |
+|---|---|---|
+| `gpt-4.1` | $2.30 | $2.82 |
+| `gpt-4.1-mini` | $0.46 | $0.98 |
+| `gpt-4.1-nano` | $0.11 | $0.64 |
+
+Answer generation is a fixed ~$0.52 of that, so **the judge is ~82% of the
+bill** and the catalog is nearly all of the judge's input.
+
+Whether a cheaper judge suffices is an EMPIRICAL question, and the harness
+answers it about itself rather than assuming:
+
+    # once: the expensive reference run, saving its answers
+    ... run_eval --project-id <uuid> --judge-model gpt-4.1 \
+        --save-generations /tmp/generations.json --json /tmp/reference.json
+
+    # then, for judge tokens only, on byte-identical input
+    ... run_eval --project-id <uuid> --replay /tmp/generations.json \
+        --judge-model gpt-4.1 --compare-judge gpt-4.1-mini
+
+`--replay` matters for more than the money: two judges run against freshly
+generated answers are grading different text, because generation is sampled,
+and a disagreement would be inseparable from the models having answered
+differently. The cache refuses a version mismatch rather than parsing
+best-effort — a replay judging against a catalog that is not the one the model
+saw would be wrong in a way nothing reports.
+
+Read the agreement block in this order:
+
+1. **MISSED problems** (`false_clean`) — claims the reference called a problem
+   and the candidate called fine. Every one is a hallucination the cheaper
+   judge would let through. This is the number that decides it; false alarms
+   only cost an engineer some reading.
+2. **kappa, with `claims compared`** — never raw agreement alone. These
+   verdicts are heavily skewed toward `supported`, so a judge that answered
+   "supported" to everything would score ~0.95 raw while being worth nothing.
+   Kappa is what exposes that; `test_kappa_exposes_a_judge_that_stopped_
+   discriminating` pins the case.
+3. **the confusion matrix**, for whether disagreements are a real split or one
+   label leaking into another.
+
+`unsupported` and `contradicted` are the same side of the shippability line, so
+a candidate swapping one for the other disagrees on detail, not on decisions —
+that is what the `on problem/not-a-problem` column separates out.
+
 ## How answers are produced
 
 `generate.py` assembles production's own components rather than calling

@@ -34,9 +34,11 @@ import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from evals.groundedness.agreement import pair_verdicts, verdict_shift
 from evals.groundedness.claims import extract_claims, marker_count
 from evals.groundedness.generate import AnswerGenerator, Generated
 from evals.groundedness.judge import DEFAULT_JUDGE_MODEL, Judge, QuotaExhausted
+from evals.groundedness.replay import load_generations, save_generations
 from evals.groundedness.metrics import (
     CaseOutcome,
     ScoredClaim,
@@ -103,19 +105,24 @@ async def _run_case(
     judge: Judge,
     semaphore: asyncio.Semaphore,
     abort: asyncio.Event,
-) -> tuple[CaseOutcome, Generated] | CaseError:
+    replayed: Generated | None = None,
+    second_judge: Judge | None = None,
+) -> tuple[CaseOutcome, Generated, dict[int, str]] | CaseError:
     if abort.is_set():
         return CaseError(case.id, "skipped", "aborted: the account ran out of credits")
     async with semaphore:
         if abort.is_set():
             return CaseError(case.id, "skipped", "aborted: the account ran out of credits")
-        try:
-            generated = await generator.generate(project_id=project_id, question=case.question)
-        except Exception as exc:  # noqa: BLE001 - reported, never silently dropped
-            if _is_out_of_credits(exc):
-                abort.set()
-                return CaseError(case.id, "generate", "aborted: the account ran out of credits")
-            return CaseError(case.id, "generate", f"{type(exc).__name__}: {exc}")
+        if replayed is not None:
+            generated = replayed
+        else:
+            try:
+                generated = await generator.generate(project_id=project_id, question=case.question)
+            except Exception as exc:  # noqa: BLE001 - reported, never silently dropped
+                if _is_out_of_credits(exc):
+                    abort.set()
+                    return CaseError(case.id, "generate", "aborted: the account ran out of credits")
+                return CaseError(case.id, "generate", f"{type(exc).__name__}: {exc}")
 
         claims = extract_claims(generated.answer)
         paper_of = {c.n: c.paper_id for c in generated.chunks}
@@ -127,6 +134,18 @@ async def _run_case(
                 excerpts=[(c.n, c.title, c.text) for c in generated.chunks],
             )
             stance = await judge.judge_stance(question=case.question, answer=generated.answer)
+            # The candidate judge sees BYTE-IDENTICAL input -- same answer, same
+            # catalog, same claim list. Judging freshly generated answers
+            # instead would make a disagreement inseparable from the two runs
+            # having answered differently.
+            second_verdicts: dict[int, str] = {}
+            if second_judge is not None:
+                other = await second_judge.judge_claims(
+                    question=case.question,
+                    claims=[(c.index, c.text) for c in claims],
+                    excerpts=[(c.n, c.title, c.text) for c in generated.chunks],
+                )
+                second_verdicts = {index: v.verdict for index, v in other.items()}
         except QuotaExhausted:
             abort.set()
             return CaseError(case.id, "judge", "aborted: the account ran out of credits")
@@ -157,7 +176,7 @@ async def _run_case(
             evidence_present=_evidence_present(case, generated),
             marker_total=marker_count(generated.answer),
         )
-        return outcome, generated
+        return outcome, generated, second_verdicts
 
 
 def _fmt(value: float | None) -> str:
@@ -196,6 +215,30 @@ async def main() -> None:
         ),
     )
     parser.add_argument("--json", type=Path, default=None)
+    parser.add_argument(
+        "--save-generations",
+        type=Path,
+        default=None,
+        help="write the answers and their excerpt catalogs here, for --replay",
+    )
+    parser.add_argument(
+        "--replay",
+        type=Path,
+        default=None,
+        help=(
+            "judge the answers in this generation cache instead of producing new ones. "
+            "Makes a judge comparison controlled (identical input) and cheap (no generation)"
+        ),
+    )
+    parser.add_argument(
+        "--compare-judge",
+        default=None,
+        metavar="MODEL",
+        help=(
+            "also judge every claim with MODEL and report agreement against --judge-model. "
+            "Use with --replay to answer 'is a cheaper judge good enough' for judge tokens only"
+        ),
+    )
     parser.add_argument("--per-case", action="store_true", help="print the per-case table")
     parser.add_argument(
         "--limit", type=int, default=None, help="first N cases only, for a smoke run"
@@ -208,6 +251,21 @@ async def main() -> None:
 
     generator = AnswerGenerator()
     judge = Judge(model=args.judge_model)
+    second_judge = Judge(model=args.compare_judge) if args.compare_judge else None
+
+    replayed: dict[str, Generated] = {}
+    replay_model = None
+    if args.replay:
+        replayed, replay_model = load_generations(args.replay)
+        # A cache is keyed by case id, so a set the cache does not cover would
+        # silently generate fresh answers for the missing cases -- which is
+        # exactly the uncontrolled comparison --replay exists to prevent.
+        missing = [c.id for c in cases if c.id not in replayed]
+        if missing:
+            raise SystemExit(
+                f"{args.replay}: no saved generation for {len(missing)} case(s): "
+                f"{', '.join(missing[:5])}{' ...' if len(missing) > 5 else ''}"
+            )
     semaphore = asyncio.Semaphore(args.concurrency)
     # Set by the first case to see a credit-exhaustion error. Every case still
     # queued then short-circuits instead of spending a request on a failure
@@ -223,6 +281,8 @@ async def main() -> None:
                 judge=judge,
                 semaphore=semaphore,
                 abort=abort,
+                replayed=replayed.get(case.id),
+                second_judge=second_judge,
             )
             for case in cases
         )
@@ -231,13 +291,16 @@ async def main() -> None:
     outcomes: list[CaseOutcome] = []
     generations: dict[str, Generated] = {}
     errors: list[CaseError] = []
+    candidate_verdicts: dict[str, dict[int, str]] = {}
     for result in results:
         if isinstance(result, CaseError):
             errors.append(result)
             continue
-        outcome, generated = result
+        outcome, generated, second = result
         outcomes.append(outcome)
         generations[outcome.case_id] = generated
+        if second:
+            candidate_verdicts[outcome.case_id] = second
 
     positives = [o for o in outcomes if o.kind != "off_topic"]
     negatives = [o for o in outcomes if o.kind == "off_topic"]
@@ -245,8 +308,10 @@ async def main() -> None:
 
     from app.core.config import settings
 
+    answering = replay_model if args.replay else settings.llm_model
+    replay_note = f" (replayed from {args.replay.name})" if args.replay else ""
     print(
-        f"judge: {args.judge_model}   answering model: {settings.llm_model}   "
+        f"judge: {args.judge_model}   answering model: {answering}{replay_note}   "
         f"project: {args.project_id}"
     )
     print(f"cases: {len(outcomes)} scored, {len(errors)} errored   set: {args.set.name}")
@@ -287,6 +352,33 @@ async def main() -> None:
                 f"{len(outcome.checkable):>7}{bad:>5}{outcome.stance:>10}"
             )
 
+    if candidate_verdicts:
+        reference = {
+            o.case_id: {c.index: c.verdict for c in o.claims}
+            for o in outcomes
+            if o.case_id in candidate_verdicts
+        }
+        agreement = pair_verdicts(reference, candidate_verdicts)
+        print()
+        print(f"JUDGE AGREEMENT — {args.judge_model} (reference) vs {args.compare_judge}")
+        print(
+            f"  claims compared: {agreement.n}   raw: {_fmt(agreement.raw)}   "
+            f"on problem/not-a-problem: {_fmt(agreement.binary)}   "
+            f"kappa: {_fmt(agreement.kappa)}"
+        )
+        print(f"  the candidate is {verdict_shift(agreement.pairs)}")
+        print(
+            f"  MISSED problems (candidate said fine, reference did not): "
+            f"{len(agreement.false_clean)}   false alarms: {len(agreement.false_alarm)}"
+        )
+        for pair in agreement.false_clean:
+            print(f"    {pair.case_id} claim {pair.index}: {pair.reference} -> {pair.candidate}")
+        print(
+            "  Read `kappa` with `claims compared`, never alone: these verdicts are "
+            "heavily skewed toward supported, so a judge that stopped discriminating "
+            "still scores high raw agreement."
+        )
+
     if abort.is_set():
         print()
         print(
@@ -299,6 +391,15 @@ async def main() -> None:
         print("ERRORS (excluded from every denominator above)")
         for err in errors:
             print(f"  {err.case_id:<34}{err.stage:<10}{err.error}")
+
+    if args.save_generations and generations:
+        save_generations(
+            args.save_generations,
+            generations,
+            answering_model=answering,
+            project_id=args.project_id,
+        )
+        print(f"\nwrote {args.save_generations} ({len(generations)} generations)")
 
     if args.json:
         payload = {
