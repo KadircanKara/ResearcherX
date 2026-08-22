@@ -231,6 +231,50 @@ harness's 4 blocked positives, because this harness runs the shipped hybrid
 path with the per-paper candidate guarantee, and `evals/retrieval`'s
 closed-form section reports the dense-arm figure.
 
+### Measured — 2026-08-22b (after the prompt changes)
+
+Same corpus, same judge (`gpt-4.1`), same answering model (`gpt-4.1-mini`),
+same golden set. Three prompt changes were in effect: no general knowledge,
+a marker in the sentence that makes the claim, and (NOT in this run -- it
+landed after the process started) the figure rule.
+
+| group | cases | claims | support | halluc | undisclosed | disclosed | clean | cite-P | cite-cov |
+|---|---|---|---|---|---|---|---|---|---|
+| positives (pooled) | 30 | 149 | 0.99 | 0.01 | 0.01 | 0.00 | 0.93 | 0.96 | **0.59** |
+| evidence reached the model | 28 | 137 | 0.99 | 0.01 | 0.01 | 0.00 | 0.93 | 0.96 | **0.62** |
+| evidence did NOT reach | 2 | 12 | 1.00 | 0.00 | 0.00 | 0.00 | 1.00 | 1.00 | 0.17 |
+| off_topic negatives | 12 | 12 | **1.00** | **0.00** | 0.00 | **0.00** | **1.00** | — | 0.00 |
+
+Against the reference run:
+
+| | reference | after | |
+|---|---|---|---|
+| negatives, abstention | 0.36 | **1.00** | every off-topic question now answered "The ingested documents do not cover this." |
+| negatives, disclosed | 0.72 | **0.00** | the hand-off is gone from the prompt, and the model stopped doing it |
+| negatives, clean | 0.18 | **1.00** | |
+| positives, cite-cov | 0.39 | **0.59** | +0.20; on the evidence-reached rows 0.40 -> 0.62 |
+| positives, abstention | 0.00 | 0.00 | the refusal rule did NOT leak into questions the corpus answers |
+| positives, clean | 0.93 | 0.93 | unchanged -- see below |
+| cases scored | 40/42 | **42/42** | the judge's missing-index retry recovered both lost cases |
+
+**The refusal did not over-fire.** The risk of a blanket no-fallback rule is
+that it starts declining questions the corpus does answer; positive abstention
+stayed at 0.00, so it did not.
+
+**Citation coverage improved but is not solved at 0.59.** Four of ten supported
+claims still carry no marker. The trailing-summary anti-pattern the rule names
+did stop -- `handover-figure` went 1/5 to 5/5 markers, `harvested-power-
+duration-figure` 1/7 to 6/7.
+
+**Hallucination on positives did not move, and the failures MOVED.** Both
+reference failures (`harvested-power-duration-figure`, `brkga-convergence-
+figure`) are clean; two different cases now fail (`ruav-cluster-count`,
+`nemo-mobility`), one claim each. At n=2 out of ~150 claims this is not
+distinguishable from sampling noise in either direction: do NOT read it as
+"the figure problem is fixed" (the figure rule was not even in this run) or as
+a regression. It is the same rate with different cases behind it, which is
+what a two-event denominator looks like.
+
 ## How answers are produced
 
 `generate.py` assembles production's own components rather than calling
