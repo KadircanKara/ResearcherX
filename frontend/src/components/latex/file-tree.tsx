@@ -5,7 +5,6 @@ import {
   ChevronDown,
   ChevronRight,
   CloudUpload,
-  Download,
   FileCode,
   Folder,
   PanelLeftClose,
@@ -46,7 +45,6 @@ interface FileTreeProps {
    * tree is policy, and policy lives with the caller that owns both paths.
    */
   onAddFile: (file: File) => void;
-  onExport: () => void;
   onCollapse: () => void;
 }
 
@@ -66,7 +64,6 @@ export function FileTree({
   onSetMain,
   onUpload,
   onAddFile,
-  onExport,
   onCollapse,
 }: FileTreeProps) {
   // Every directory starts expanded -- a LaTeX project is small (a handful
@@ -153,9 +150,6 @@ export function FileTree({
               />
             </label>
           )}
-          <Button size="icon-sm" variant="ghost" title="Export .zip" onClick={onExport}>
-            <Download className="size-3.5" />
-          </Button>
           <Button
             size="icon-sm"
             variant="ghost"

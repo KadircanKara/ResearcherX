@@ -642,7 +642,6 @@ export function LatexWorkspace({ projectId, documentId, ownerId }: LatexWorkspac
                   void withConflicts((p) => doc.uploadBinary(p, data), path)
                 }
                 onAddFile={handleAddFile}
-                onExport={() => void handleExport()}
                 onCollapse={() => setTreeCollapsed(true)}
               />
               {/* Sits OUTSIDE the tree so its drag maths reads the row's own
