@@ -111,8 +111,8 @@ export function ShareDialog({ project, initialMembers }: ShareDialogProps) {
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
-      <DialogTrigger render={<Button variant="outline" size="sm" />}>
-        <Share2 className="size-3.5" />
+      <DialogTrigger render={<Button variant="outline" />}>
+        <Share2 className="size-4" />
         Share
       </DialogTrigger>
 
@@ -208,7 +208,6 @@ export function ShareDialog({ project, initialMembers }: ShareDialogProps) {
             </select>
 
             <Button
-              size="sm"
               disabled={!addUserId || adding}
               onClick={handleAdd}
             >

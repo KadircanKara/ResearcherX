@@ -354,8 +354,8 @@ export default function LatexIndexPage() {
               }}
             />
             {canEdit && (
-              <Button size="sm" onClick={() => setNewOpen(true)}>
-                <Plus className="mr-1.5 size-3.5" />
+              <Button onClick={() => setNewOpen(true)}>
+                <Plus className="size-4" />
                 New project
               </Button>
             )}

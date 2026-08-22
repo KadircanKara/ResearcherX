@@ -1,13 +1,20 @@
 "use client";
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { Network, Brain, Compass, PanelLeftClose, PanelLeftOpen } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { listProjects } from "@/lib/projects";
 import { colorFor } from "@/lib/project-colors";
+import { subscribeProjectColor } from "@/lib/project-store";
 import { useIdentity } from "@/lib/identity";
 import type { Project } from "@/lib/types";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { UserMenu } from "@/components/user-menu";
 
@@ -79,6 +86,18 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     };
   }, [me?.id]);
 
+  // The rail's copy of the project list is fetched once, so an edit made on
+  // the project page has no other way to reach it.
+  useEffect(
+    () =>
+      subscribeProjectColor(({ id, color }) => {
+        setProjects((prev) =>
+          prev.map((p) => (p.id === id ? { ...p, color } : p))
+        );
+      }),
+    []
+  );
+
   return (
     <div className="flex min-h-screen font-sans">
       {/* Sidebar */}
@@ -139,47 +158,74 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             Projects
           </div>
         )}
-        <div className="flex min-h-0 flex-col gap-0.5 overflow-y-auto px-2">
-          {projects.length === 0 ? (
-            collapsed ? null : (
-              <span className="px-2.5 py-1.5 text-[13px] text-muted-foreground">
-                No projects yet
-              </span>
-            )
-          ) : (
-            projects.slice(0, 8).map((p) => {
-              const href = `/research/${p.id}`;
-              const active = pathname.startsWith(href);
-              return (
-                <Link
-                  key={p.id}
-                  href={href}
-                  // The title is the ONLY thing naming a project in the
-                  // collapsed rail, where the link is a bare coloured dot.
-                  title={p.title}
-                  aria-label={collapsed ? p.title : undefined}
-                  className={cn(
-                    "flex items-center gap-2.5 rounded-md py-1.5 text-[13px] transition-colors",
-                    collapsed ? "justify-center px-0" : "px-2.5",
-                    active
-                      ? "bg-accent font-medium text-accent-foreground"
-                      : "text-muted-foreground hover:bg-muted hover:text-foreground"
-                  )}
-                >
-                  {/* The project's own colour, not the brand gradient:
-                      telling projects apart is the dot's entire job once the
-                      labels are gone. `colorFor` guarantees a palette entry
-                      even for a response that predates the field. */}
-                  <span
-                    className={cn("shrink-0 rounded-full", collapsed ? "size-2.5" : "size-1.5")}
-                    style={{ backgroundColor: colorFor(p) }}
-                  />
-                  {!collapsed && <span className="truncate">{p.title}</span>}
-                </Link>
-              );
-            })
-          )}
-        </div>
+        {/* `delay={0}`: in the collapsed rail a project's name is not
+            supplementary detail, so a hover-intent delay would read as the
+            tooltip being broken. */}
+        <TooltipProvider delay={0}>
+          <div className="flex min-h-0 flex-col gap-0.5 overflow-y-auto px-2">
+            {projects.length === 0 ? (
+              collapsed ? null : (
+                <span className="px-2.5 py-1.5 text-[13px] text-muted-foreground">
+                  No projects yet
+                </span>
+              )
+            ) : (
+              projects.slice(0, 8).map((p) => {
+                const href = `/research/${p.id}`;
+                const active = pathname.startsWith(href);
+                const link = (
+                  <Link
+                    href={href}
+                    // Expanded, the label is on screen and the native tooltip
+                    // is all a truncated one needs. Collapsed, the link is a
+                    // bare coloured dot, so the name moves to the hover card
+                    // below -- `title` would still fire on top of it.
+                    title={collapsed ? undefined : p.title}
+                    aria-label={collapsed ? p.title : undefined}
+                    className={cn(
+                      "flex items-center gap-2.5 rounded-md py-1.5 text-[13px] transition-colors",
+                      collapsed ? "justify-center px-0" : "px-2.5",
+                      active
+                        ? "bg-accent font-medium text-accent-foreground"
+                        : "text-muted-foreground hover:bg-muted hover:text-foreground"
+                    )}
+                  >
+                    {/* The project's own colour, not the brand gradient:
+                        telling projects apart is the dot's entire job once the
+                        labels are gone. `colorFor` guarantees a palette entry
+                        even for a response that predates the field. */}
+                    <span
+                      className={cn("shrink-0 rounded-full", collapsed ? "size-2.5" : "size-1.5")}
+                      style={{ backgroundColor: colorFor(p) }}
+                    />
+                    {!collapsed && <span className="truncate">{p.title}</span>}
+                  </Link>
+                );
+
+                // A keyed Fragment so the expanded rail gains no wrapper
+                // element: the list is a flex column and an extra div would
+                // absorb the gap between rows.
+                //
+                // The hover card is not the browser's own `title`: that waits
+                // about a second before it appears, and in the collapsed rail
+                // the name is not supplementary detail -- it is the only way
+                // to tell one dot from another.
+                return (
+                  <Fragment key={p.id}>
+                    {collapsed ? (
+                      <Tooltip>
+                        <TooltipTrigger render={link} />
+                        <TooltipContent side="right">{p.title}</TooltipContent>
+                      </Tooltip>
+                    ) : (
+                      link
+                    )}
+                  </Fragment>
+                );
+              })
+            )}
+          </div>
+        </TooltipProvider>
 
         {/* Identity footer */}
         <div

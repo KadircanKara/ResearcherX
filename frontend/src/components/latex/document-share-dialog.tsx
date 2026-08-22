@@ -91,8 +91,8 @@ export function DocumentShareDialog({
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
-      <DialogTrigger render={<Button size="sm" variant="outline" className="h-7 gap-1 px-2 text-[11px]" />}>
-        <Share2 className="size-3" />
+      <DialogTrigger render={<Button variant="outline" className="shrink-0 gap-1.5" />}>
+        <Share2 className="size-4" />
         Share
       </DialogTrigger>
       <DialogContent className="sm:max-w-md">

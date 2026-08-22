@@ -2,20 +2,9 @@
 
 import Link from "next/link"
 import { ArrowRight, FileText, MessageSquare, Users } from "lucide-react"
+import { colorFor } from "@/lib/project-colors"
+import { relativeTime } from "@/lib/relative-time"
 import type { Project } from "@/lib/types"
-
-function relativeTime(iso: string): string {
-  const diff = Date.now() - new Date(iso).getTime()
-  const days = Math.floor(diff / 86_400_000)
-  if (days === 0) return "Today"
-  if (days === 1) return "1 day ago"
-  if (days < 30) return `${days} days ago`
-  const months = Math.floor(days / 30)
-  if (months === 1) return "1 month ago"
-  if (months < 12) return `${months} months ago`
-  const years = Math.floor(months / 12)
-  return years === 1 ? "1 year ago" : `${years} years ago`
-}
 
 const MAX_CHIPS = 3
 
@@ -33,8 +22,17 @@ export function ProjectCard({ project }: ProjectCardProps) {
         <span className="pointer-events-none absolute inset-x-0 top-0 h-[3px] gradient-edge opacity-0 transition-opacity duration-300 group-hover:opacity-100" />
 
         <div className="flex items-start justify-between gap-3">
-          <h3 className="line-clamp-2 text-base font-semibold leading-snug tracking-tight transition-colors group-hover:text-accent-foreground">
-            {project.title}
+          <h3 className="flex min-w-0 items-baseline gap-2 text-base font-semibold leading-snug tracking-tight transition-colors group-hover:text-accent-foreground">
+            {/* The same dot the sidebar and the project header paint, so a
+                project is recognised by colour in all three places.
+                `translate-y` because a round dot on a text baseline sits
+                visually low. */}
+            <span
+              aria-hidden
+              className="size-2 shrink-0 translate-y-[1px] rounded-full"
+              style={{ backgroundColor: colorFor(project) }}
+            />
+            <span className="line-clamp-2">{project.title}</span>
           </h3>
           <span className="shrink-0 rounded-full border border-border px-2 py-0.5 text-[11px] font-normal text-muted-foreground">
             {relativeTime(project.updated_at)}
