@@ -631,17 +631,20 @@ export function LatexWorkspace({ projectId, documentId, ownerId }: LatexWorkspac
             )}
           </div>
 
+          {/* Default size and variant, exactly like "New project" on the
+              research page: this is the primary action of the whole
+              workspace, and it was the only primary button in the app
+              shrunk to the size of the icon-only controls beside it. */}
           <Button
-            size="sm"
-            className="h-7 gap-1 px-2 text-[11px]"
+            className="shrink-0 gap-1.5"
             disabled={!canEdit || compile.compiling}
             title={canEdit ? "Compile (Cmd/Ctrl+S)" : "You need editor access to compile"}
             onClick={() => void compile.compile()}
           >
             {compile.compiling ? (
-              <Loader2 className="size-3 animate-spin" />
+              <Loader2 className="size-4 animate-spin" />
             ) : (
-              <Play className="size-3" />
+              <Play className="size-4" />
             )}
             Compile
           </Button>

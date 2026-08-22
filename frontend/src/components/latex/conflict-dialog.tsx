@@ -225,7 +225,6 @@ export function ConflictDialog({
             <Button
               type="button"
               variant="ghost"
-              size="sm"
               className="self-start"
               onClick={() => setExpanded((e) => !e)}
               // Collapsing again would re-hide the row the user has to fix.

@@ -5,9 +5,17 @@ import { SearchIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { ProjectCard } from "@/components/project-card"
+import { ProjectRow } from "@/components/project-row"
+import { ProjectViewToggle } from "@/components/project-view-toggle"
 import { NewProjectDialog } from "@/components/new-project-dialog"
 import { listProjects } from "@/lib/projects"
 import { useIdentity } from "@/lib/identity"
+import {
+  DEFAULT_PROJECT_VIEW,
+  PROJECT_VIEW_KEY,
+  parseProjectView,
+  type ProjectView,
+} from "@/lib/project-view"
 import type { Project } from "@/lib/types"
 
 export default function ResearchPage() {
@@ -16,6 +24,20 @@ export default function ResearchPage() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [query, setQuery] = useState("")
+  // Seeded in an effect rather than from a `useState` initializer: the server
+  // render has no localStorage, so reading it during the first render would
+  // produce markup the client immediately contradicts -- a hydration
+  // mismatch. Same trade the sidebar's collapsed state makes in `AppShell`.
+  const [view, setView] = useState<ProjectView>(DEFAULT_PROJECT_VIEW)
+
+  useEffect(() => {
+    setView(parseProjectView(window.localStorage.getItem(PROJECT_VIEW_KEY)))
+  }, [])
+
+  function chooseView(next: ProjectView) {
+    setView(next)
+    window.localStorage.setItem(PROJECT_VIEW_KEY, next)
+  }
 
   async function load() {
     setLoading(true)
@@ -57,7 +79,10 @@ export default function ResearchPage() {
             Organise your research into focused workspaces.
           </p>
         </div>
-        <NewProjectDialog />
+        <div className="flex shrink-0 items-center gap-2">
+          <ProjectViewToggle value={view} onChange={chooseView} />
+          <NewProjectDialog />
+        </div>
       </div>
 
       {/* Search */}
@@ -74,18 +99,29 @@ export default function ResearchPage() {
       {/* Content */}
       <div className="mt-6">
         {loading ? (
-          <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3">
-            {Array.from({ length: 3 }).map((_, i) => (
-              <div
-                key={i}
-                className="h-56 animate-pulse rounded-xl bg-muted"
-              />
-            ))}
-          </div>
+          view === "card" ? (
+            <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3">
+              {Array.from({ length: 3 }).map((_, i) => (
+                <div
+                  key={i}
+                  className="h-56 animate-pulse rounded-xl bg-muted"
+                />
+              ))}
+            </div>
+          ) : (
+            <div className="overflow-hidden rounded-xl border border-border">
+              {Array.from({ length: 6 }).map((_, i) => (
+                <div
+                  key={i}
+                  className="h-12 animate-pulse border-b border-border bg-muted last:border-b-0"
+                />
+              ))}
+            </div>
+          )
         ) : error ? (
           <div className="flex flex-col items-center gap-3 py-20 text-center">
             <p className="text-sm text-muted-foreground">{error}</p>
-            <Button variant="outline" size="sm" onClick={load}>
+            <Button variant="outline" onClick={load}>
               Retry
             </Button>
           </div>
@@ -106,10 +142,16 @@ export default function ResearchPage() {
               </p>
             )}
           </div>
-        ) : (
+        ) : view === "card" ? (
           <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3">
             {filtered.map((project) => (
               <ProjectCard key={project.id} project={project} />
+            ))}
+          </div>
+        ) : (
+          <div className="overflow-hidden rounded-xl border border-border">
+            {filtered.map((project) => (
+              <ProjectRow key={project.id} project={project} />
             ))}
           </div>
         )}

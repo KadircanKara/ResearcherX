@@ -95,8 +95,8 @@ export function BinaryPreview({ projectId, documentId, path, sizeBytes }: Binary
         <FileIcon className="size-8 text-muted-foreground" />
         <span className="font-medium text-foreground">{basename(path)}</span>
         <span className="text-xs text-muted-foreground">{formatBytes(sizeBytes)}</span>
-        <Button size="sm" variant="outline" onClick={() => void download()} disabled={downloading}>
-          {downloading ? <Loader2 className="size-3.5 animate-spin" /> : <Download className="size-3.5" />}
+        <Button variant="outline" onClick={() => void download()} disabled={downloading}>
+          {downloading ? <Loader2 className="size-4 animate-spin" /> : <Download className="size-4" />}
           Download
         </Button>
       </div>

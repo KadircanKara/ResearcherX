@@ -35,7 +35,7 @@ export function BulkEditBar({
 }: BulkEditBarProps) {
   if (!active) {
     return (
-      <Button size="sm" variant="outline" disabled={total === 0} onClick={onEnter}>
+      <Button variant="outline" disabled={total === 0} onClick={onEnter}>
         Edit
       </Button>
     );
@@ -45,18 +45,17 @@ export function BulkEditBar({
     <div className="flex items-center gap-2">
       <span className="text-sm text-muted-foreground">{count} selected</span>
       <Button
-        size="sm"
         variant="ghost"
         onClick={allSelected ? onClear : onSelectAll}
         disabled={total === 0}
       >
         {allSelected ? "Clear" : "Select all"}
       </Button>
-      <Button size="sm" variant="destructive" disabled={count === 0 || busy} onClick={onDelete}>
-        {busy ? <Loader2 className="mr-1.5 size-3.5 animate-spin" /> : <Trash2 className="mr-1.5 size-3.5" />}
+      <Button variant="destructive" disabled={count === 0 || busy} onClick={onDelete}>
+        {busy ? <Loader2 className="size-4 animate-spin" /> : <Trash2 className="size-4" />}
         Delete
       </Button>
-      <Button size="sm" variant="outline" onClick={onDone} disabled={busy}>
+      <Button variant="outline" onClick={onDone} disabled={busy}>
         Done
       </Button>
     </div>

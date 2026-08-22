@@ -257,8 +257,8 @@ export default function ChatPage() {
               }}
             />
             {!showForm && (
-              <Button size="sm" onClick={() => setShowForm(true)}>
-                <Plus className="mr-1.5 size-3.5" />
+              <Button onClick={() => setShowForm(true)}>
+                <Plus className="size-4" />
                 New Chat
               </Button>
             )}
@@ -296,15 +296,13 @@ export default function ChatPage() {
           )}
           <div className="mt-3 flex gap-2">
             <Button
-              size="sm"
               onClick={handleStart}
               disabled={!content.trim() || submitting}
             >
-              <MessageSquarePlus className="mr-1.5 size-3.5" />
+              <MessageSquarePlus className="size-4" />
               {submitting ? "Starting…" : "Start Chat"}
             </Button>
             <Button
-              size="sm"
               variant="ghost"
               onClick={() => {
                 setShowForm(false);

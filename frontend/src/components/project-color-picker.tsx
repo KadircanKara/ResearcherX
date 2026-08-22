@@ -5,6 +5,7 @@ import { Check } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { colorFor, PROJECT_COLORS, type ProjectColor } from "@/lib/project-colors";
 import { updateProject } from "@/lib/projects";
+import { publishProjectColor } from "@/lib/project-store";
 
 interface ProjectColorPickerProps {
   projectId: string;
@@ -42,7 +43,14 @@ export function ProjectColorPicker({ projectId, color, canEdit }: ProjectColorPi
     const previous = current;
     setCurrent(next);
     setOpen(false);
-    updateProject(projectId, { color: next }).catch(() => setCurrent(previous));
+    // Published as well as set locally: the sidebar dot is a separate
+    // component with its own copy of the project list, and it would otherwise
+    // keep painting the old colour until the next full load.
+    publishProjectColor({ id: projectId, color: next });
+    updateProject(projectId, { color: next }).catch(() => {
+      setCurrent(previous);
+      publishProjectColor({ id: projectId, color: previous });
+    });
   }
 
   return (

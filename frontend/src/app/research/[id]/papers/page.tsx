@@ -214,8 +214,8 @@ export default function PapersPage() {
                 projectId={projectId}
                 onSaved={() => load({ silent: true })}
               >
-                <Button size="sm">
-                  <Plus className="mr-1.5 size-3.5" />
+                <Button>
+                  <Plus className="size-4" />
                   Add Paper
                 </Button>
               </PaperDialog>

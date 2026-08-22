@@ -116,12 +116,11 @@ export default function ConversationPage() {
           onSubmit={handleSend}
         />
         <Button
-          size="sm"
           onClick={handleSend}
           disabled={!input.trim() || !!pendingContent}
           className="self-end"
         >
-          <Send className="size-3.5" />
+          <Send className="size-4" />
         </Button>
       </div>
     </div>
