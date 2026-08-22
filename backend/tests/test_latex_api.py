@@ -1307,3 +1307,54 @@ async def test_creating_a_document_with_a_taken_name_answers_a_suggestion(
         "name": "paper",
         "suggestion": "paper (1)",
     }
+
+
+async def test_renaming_a_document_into_a_taken_name_answers_a_suggestion(
+    client: AsyncClient, you: User, project: Project
+):
+    """Without this, a name you cannot CREATE is still reachable by renaming
+    into it -- a rule that only looks enforced."""
+    body = {"name": "Paper", "engine": "pdflatex", "source": ""}
+    first = await client.post(
+        f"/v1/projects/{project.id}/latex", json=body, headers={"X-Dev-User-Id": you.id}
+    )
+    second = await client.post(
+        f"/v1/projects/{project.id}/latex",
+        json={**body, "name": "Notes"},
+        headers={"X-Dev-User-Id": you.id},
+    )
+    assert first.status_code == 201 and second.status_code == 201
+
+    resp = await client.patch(
+        f"/v1/projects/{project.id}/latex/{second.json()['id']}",
+        json={"name": "Paper"},
+        headers={"X-Dev-User-Id": you.id},
+    )
+
+    assert resp.status_code == 409
+    assert resp.json()["detail"] == {
+        "error": "name_collision",
+        "name": "Paper",
+        "suggestion": "Paper (1)",
+    }
+
+
+async def test_renaming_a_document_to_its_own_name_is_not_a_collision(
+    client: AsyncClient, you: User, project: Project
+):
+    # The document's own row is excluded, so re-submitting the same name --
+    # or changing only its case -- is not a collision with itself.
+    created = await client.post(
+        f"/v1/projects/{project.id}/latex",
+        json={"name": "Paper", "engine": "pdflatex", "source": ""},
+        headers={"X-Dev-User-Id": you.id},
+    )
+
+    resp = await client.patch(
+        f"/v1/projects/{project.id}/latex/{created.json()['id']}",
+        json={"name": "PAPER"},
+        headers={"X-Dev-User-Id": you.id},
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["name"] == "PAPER"

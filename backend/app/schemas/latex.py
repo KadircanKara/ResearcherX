@@ -174,6 +174,16 @@ class LatexFileRename(BaseModel):
     model_config = {"populate_by_name": True}
 
 
+class LatexDirRename(BaseModel):
+    """A directory move. Same wire names as `LatexFileRename`, because to a
+    caller it is the same gesture -- the difference is only that a directory
+    is a prefix rather than a row."""
+
+    from_path: str = Field(alias="from", min_length=1, max_length=400)
+    to_path: str = Field(alias="to", min_length=1, max_length=400)
+    model_config = {"populate_by_name": True}
+
+
 class LatexImportOut(BaseModel):
     """What an import returns. Deliberately the document's identity plus the
     two things detection decided, so the client can show "we picked main.tex

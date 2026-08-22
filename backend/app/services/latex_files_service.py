@@ -466,6 +466,68 @@ async def rename_file(db: AsyncSession, document_id: str, src: str, dst: str) ->
     return row
 
 
+async def rename_dir(db: AsyncSession, document_id: str, src: str, dst: str) -> int:
+    """Move every file under the `src` prefix to sit under `dst`. Returns the
+    count moved. Caller commits.
+
+    There is no directory ROW to rename -- `latex_files.path` is a flat
+    string and a directory exists only as the shared prefix of the files
+    beneath it. So this is N renames, and it is one route rather than N
+    client calls for the reason the archive parser refuses a partial
+    import: a tree left half-moved is a project silently missing the file
+    its `\\input` names, and nothing tells the user which half moved.
+
+    All-or-nothing in one transaction: every destination is computed and
+    checked BEFORE any row is written, so a collision on the last file
+    leaves the first untouched.
+    """
+    src = normalize_path(src)
+    dst = normalize_path(dst)
+    _reject_reserved(dst)
+    if src == dst:
+        return 0
+
+    await db.execute(
+        select(LatexDocument.id).where(LatexDocument.id == document_id).with_for_update()
+    )
+    rows = (
+        (await db.execute(select(LatexFile).where(LatexFile.document_id == document_id)))
+        .scalars()
+        .all()
+    )
+
+    prefix = f"{src}/"
+    moving = [r for r in rows if r.path.startswith(prefix)]
+    if not moving:
+        raise FileNotFound(src)
+
+    # Refused rather than silently flattened: `chapters` -> `chapters/intro`
+    # would move every file INTO a subdirectory of itself, and the
+    # destination prefix would keep sliding as the source is consumed.
+    if dst.startswith(prefix):
+        raise InvalidPath(dst, "a directory cannot be moved inside itself")
+
+    # Only paths staying put can be collided with. A file moving out of the
+    # way is not an obstacle to the file taking its place, which is what
+    # makes renaming `a` -> `b` work when `b` does not exist yet.
+    staying = {collision_key(r.path): r.path for r in rows if not r.path.startswith(prefix)}
+    planned: list[tuple[LatexFile, str]] = []
+    for row in moving:
+        target = normalize_path(f"{dst}/{row.path[len(prefix) :]}")
+        _reject_reserved(target)
+        key = collision_key(target)
+        if key in staying:
+            raise PathCollision(target, staying[key], latex_dedupe.suffix_path(target, staying))
+        staying[key] = target
+        planned.append((row, target))
+
+    for row, target in planned:
+        row.path = target
+    await db.flush()
+    await _bump_revision(db, document_id)
+    return len(planned)
+
+
 def tree_hash(entries: Sequence[tuple[str, bytes]], engine: str, main_path: str) -> str:
     """Cache key for a compiled tree.
 

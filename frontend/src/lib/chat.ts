@@ -29,6 +29,20 @@ export async function getConversation(
   );
 }
 
+export async function renameConversation(
+  projectId: string,
+  conversationId: string,
+  title: string
+): Promise<ChatConversation> {
+  const conv = await apiSend<ChatConversation>(
+    "PATCH",
+    `/projects/${projectId}/conversations/${conversationId}`,
+    { title }
+  );
+  if (!conv) throw new Error("rename conversation failed: no body");
+  return conv;
+}
+
 export async function deleteConversation(
   projectId: string,
   conversationId: string

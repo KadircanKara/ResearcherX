@@ -2,12 +2,21 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
-import { MessageSquarePlus, Plus, Trash2 } from "lucide-react";
+import { Download, MessageSquarePlus, Pencil, Plus, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { BulkEditBar } from "@/components/bulk-edit-bar";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
+import { RenameDialog } from "@/components/ui/rename-dialog";
 import { MentionTextarea } from "@/components/mention-textarea";
-import { createConversation, deleteConversation, listConversations } from "@/lib/chat";
+import {
+  createConversation,
+  deleteConversation,
+  getConversation,
+  listConversations,
+  renameConversation,
+} from "@/lib/chat";
+import { conversationFilename, conversationToMarkdown } from "@/lib/chat-export";
+import { saveBlob } from "@/lib/download";
 import type { Mention } from "@/lib/mentions";
 import { getProject, listPapers } from "@/lib/projects";
 import { clear, isAllSelected, selectAll, toggle } from "@/lib/selection";
@@ -75,6 +84,50 @@ export default function ChatPage() {
       load({ silent: true });
     } finally {
       setDeleting(null);
+    }
+  }
+
+  const [renaming, setRenaming] = useState<ChatConversation | null>(null);
+  const [renameBusy, setRenameBusy] = useState(false);
+  const [renameError, setRenameError] = useState<string | null>(null);
+  const [downloading, setDownloading] = useState<string | null>(null);
+
+  async function handleRename(title: string) {
+    const target = renaming;
+    if (!target) return;
+    setRenameBusy(true);
+    setRenameError(null);
+    try {
+      const updated = await renameConversation(projectId, target.id, title);
+      setConversations((prev) =>
+        prev.map((c) => (c.id === updated.id ? { ...c, ...updated } : c))
+      );
+      setRenaming(null);
+    } catch {
+      // Generic on purpose: a rename fails only on a request the user
+      // cannot act on, and the server's text for those is an
+      // implementation detail.
+      setRenameError("Could not rename this conversation. Please try again.");
+    } finally {
+      setRenameBusy(false);
+    }
+  }
+
+  async function handleDownload(conv: ChatConversation) {
+    setDownloading(conv.id);
+    try {
+      // Fetched fresh rather than exported from the list: the list carries
+      // titles and dates only, and a transcript without its messages is not
+      // a transcript.
+      const detail = await getConversation(projectId, conv.id);
+      saveBlob(
+        new Blob([conversationToMarkdown(detail)], { type: "text/markdown;charset=utf-8" }),
+        conversationFilename(detail.title)
+      );
+    } catch {
+      setBulkError("Could not download this conversation. Please try again.");
+    } finally {
+      setDownloading(null);
     }
   }
 
@@ -240,6 +293,30 @@ export default function ChatPage() {
                 {fmtDate(conv.updated_at)}
               </p>
             </button>
+            <button
+              type="button"
+              onClick={() => void handleDownload(conv)}
+              disabled={downloading === conv.id}
+              className="mt-0.5 shrink-0 rounded p-1 text-muted-foreground/50 transition-colors hover:bg-muted hover:text-foreground disabled:opacity-40"
+              aria-label={`Download conversation as Markdown: ${conv.title}`}
+              title="Download as .md"
+            >
+              <Download className="size-3.5" />
+            </button>
+            {myRole && CAN_DELETE.includes(myRole) && (
+              <button
+                type="button"
+                onClick={() => {
+                  setRenameError(null);
+                  setRenaming(conv);
+                }}
+                className="mt-0.5 shrink-0 rounded p-1 text-muted-foreground/50 transition-colors hover:bg-muted hover:text-foreground"
+                aria-label={`Rename conversation: ${conv.title}`}
+                title="Rename"
+              >
+                <Pencil className="size-3.5" />
+              </button>
+            )}
             {myRole && CAN_DELETE.includes(myRole) && (
               <button
                 type="button"
@@ -254,6 +331,20 @@ export default function ChatPage() {
           </div>
         ))}
       </div>
+
+      <RenameDialog
+        open={renaming !== null}
+        title="Rename conversation"
+        label="Title"
+        initialValue={renaming?.title ?? ""}
+        busy={renameBusy}
+        error={renameError}
+        onCancel={() => {
+          setRenaming(null);
+          setRenameError(null);
+        }}
+        onSubmit={(value) => void handleRename(value)}
+      />
 
       <ConfirmDialog
         open={pendingBulkDelete}

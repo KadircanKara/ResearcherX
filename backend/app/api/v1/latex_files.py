@@ -33,6 +33,7 @@ from app.schemas.latex import (
     LatexCollisionOut,
     LatexFileContentOut,
     LatexFileOut,
+    LatexDirRename,
     LatexFileRename,
     LatexFileWrite,
     LatexImportCommit,
@@ -652,6 +653,47 @@ async def delete_file(
         )
     if not await files.delete_file(db, document_id, normalized):
         raise HTTPException(status_code=404, detail=f"{path} is not in this document")
+    out = await _mutation_out(db, document_id, None)
+    await db.commit()
+    return out
+
+
+@router.post(f"{_BASE}/dir/rename", response_model=LatexMutationOut)
+async def rename_dir(
+    project_id: str,
+    document_id: str,
+    payload: LatexDirRename,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
+) -> LatexMutationOut:
+    """Move a whole directory. One request, one transaction, one revision.
+
+    A directory is not a row -- it is the shared prefix of the files under
+    it -- so this is N renames. It is a ROUTE rather than N calls from the
+    browser because a half-moved tree is a project silently missing the file
+    its `\\input` names, which is the same failure the archive parser refuses
+    to produce.
+    """
+    await latex_access.require(db, project_id, document_id, user.id, need="editor")
+    document = await _document_or_404(db, project_id, document_id)
+    try:
+        src = normalize_path(payload.from_path)
+        dst = normalize_path(payload.to_path)
+    except InvalidPath as exc:
+        raise _translate(exc) from exc
+
+    try:
+        await files.rename_dir(db, document_id, src, dst)
+        # The main file follows its own directory, exactly as it follows its
+        # own rename: the alternative is a document whose `main_path` points
+        # at nothing. Its extension cannot change here, so the `.tex` guard
+        # the file-rename route needs has nothing to check.
+        if document.main_path.startswith(f"{src}/"):
+            document.main_path = f"{dst}/{document.main_path[len(src) + 1 :]}"
+    except Exception as exc:
+        await db.rollback()
+        raise _translate(exc) from exc
+
     out = await _mutation_out(db, document_id, None)
     await db.commit()
     return out

@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 import {
   ArrowLeft,
+  Pencil,
   Code,
   Cog,
   Columns2,
@@ -25,14 +26,17 @@ import { EditorPane } from "@/components/latex/editor-pane";
 import { FileTree } from "@/components/latex/file-tree";
 import { ImportDropzone } from "@/components/latex/import-dropzone";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
+import { RenameDialog } from "@/components/ui/rename-dialog";
 import { LogPanel } from "@/components/latex/log-panel";
 import { OpenTabs } from "@/components/latex/open-tabs";
 import { PdfViewer } from "@/components/latex/pdf-viewer";
 import { useLatexDocument } from "@/hooks/use-latex-document";
 import { useLatexCompile } from "@/hooks/use-latex-compile";
 import {
+  NameCollisionError,
   PathCollisionError,
   downloadExport,
+  errorText,
   saveBlob,
   type LatexCollision,
   type LatexEngine,
@@ -346,6 +350,36 @@ export function LatexWorkspace({ projectId, documentId, ownerId }: LatexWorkspac
   // asks through a real dialog, never `window.confirm`: see `ConfirmDialog`
   // for why a native confirm can silently return false without opening.
   const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [renamingDoc, setRenamingDoc] = useState(false);
+  const [renameBusy, setRenameBusy] = useState(false);
+  const [renameError, setRenameError] = useState<string | null>(null);
+
+  /**
+   * Rename the open project from its own header.
+   *
+   * A collision is reported INLINE here rather than handed to
+   * `ConflictDialog`: there is exactly one name in question and the field
+   * to fix it is already on screen, so swapping in a second dialog to ask
+   * the same question would take the field away in order to offer it back.
+   */
+  async function handleRenameDocument(name: string) {
+    const docId = doc.selectedId;
+    if (!docId) return;
+    setRenameBusy(true);
+    setRenameError(null);
+    try {
+      await doc.renameDoc(docId, name);
+      setRenamingDoc(false);
+    } catch (err) {
+      if (err instanceof NameCollisionError) {
+        setRenameError(`"${err.takenName}" is taken. Try "${err.suggestion}".`);
+        return;
+      }
+      setRenameError(errorText(err));
+    } finally {
+      setRenameBusy(false);
+    }
+  }
 
   async function handleDeleteDocument() {
     const docId = doc.selectedId;
@@ -471,6 +505,19 @@ export function LatexWorkspace({ projectId, documentId, ownerId }: LatexWorkspac
           <span className="truncate text-sm font-medium" title={doc.document?.name}>
             {doc.document?.name ?? "…"}
           </span>
+          {canEdit && (
+            <button
+              onClick={() => {
+                setRenameError(null);
+                setRenamingDoc(true);
+              }}
+              title="Rename project"
+              aria-label="Rename project"
+              className="shrink-0 rounded-md p-1 text-muted-foreground/60 transition-colors hover:bg-muted hover:text-foreground"
+            >
+              <Pencil className="size-3.5" />
+            </button>
+          )}
           {doc.error && (
             <span className="truncate text-xs text-destructive" title={doc.error}>
               {doc.error}
@@ -637,6 +684,7 @@ export function LatexWorkspace({ projectId, documentId, ownerId }: LatexWorkspac
                 onCreate={(path) => void withConflicts((p) => doc.createFile(p), path)}
                 onDelete={(path) => void doc.removeFile(path)}
                 onRename={(from, to) => void withConflicts((p) => doc.moveFile(from, p), to)}
+                onRenameDir={(from, to) => void withConflicts((p) => doc.moveDir(from, p), to)}
                 onSetMain={(path) => void doc.setMainPath(path)}
                 onUpload={(path, data) =>
                   void withConflicts((p) => doc.uploadBinary(p, data), path)
@@ -840,6 +888,20 @@ export function LatexWorkspace({ projectId, documentId, ownerId }: LatexWorkspac
         taken={doc.files.map((f) => f.path)}
         onCancel={() => setConflict(null)}
         onConfirm={(decisions) => void confirmConflict(decisions)}
+      />
+
+      <RenameDialog
+        open={renamingDoc}
+        title="Rename LaTeX project"
+        label="Name"
+        initialValue={doc.document?.name ?? ""}
+        busy={renameBusy}
+        error={renameError}
+        onCancel={() => {
+          setRenamingDoc(false);
+          setRenameError(null);
+        }}
+        onSubmit={(value) => void handleRenameDocument(value)}
       />
 
       <ConfirmDialog

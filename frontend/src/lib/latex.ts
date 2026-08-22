@@ -1,4 +1,5 @@
 import { API_BASE, getDevUserId } from "./api";
+import { saveBlob } from "./download";
 
 export type LatexEngine = "pdflatex" | "xelatex";
 
@@ -466,6 +467,24 @@ export async function deleteFile(
   });
 }
 
+export async function renameDir(
+  projectId: string,
+  documentId: string,
+  from: string,
+  to: string
+): Promise<LatexMutation> {
+  return send<LatexMutation>(
+    `${API_BASE}/v1/projects/${projectId}/latex/${documentId}/dir/rename`,
+    {
+      method: "POST",
+      headers: headers({ "Content-Type": "application/json" }),
+      // Same two wire names as `renameFile` -- to a caller it is the same
+      // gesture, and the backend aliases `from` for the same reason.
+      body: JSON.stringify({ from, to }),
+    }
+  );
+}
+
 export async function renameFile(
   projectId: string,
   documentId: string,
@@ -581,22 +600,9 @@ export async function downloadExport(
   saveBlob(blob, `${name}.zip`);
 }
 
-/**
- * Hand a blob to the browser as a download.
- *
- * The `revokeObjectURL` is DEFERRED, never synchronous after `click()`:
- * Safari can cancel a download that is still being handed to the OS if its
- * `blob:` URL is revoked in the same tick. See `binary-preview.tsx`, which
- * hit exactly this.
- */
-export function saveBlob(blob: Blob, filename: string): void {
-  const url = URL.createObjectURL(blob);
-  const a = window.document.createElement("a");
-  a.href = url;
-  a.download = filename;
-  a.click();
-  setTimeout(() => URL.revokeObjectURL(url), 0);
-}
+// Re-exported, not redefined: it moved to `lib/download.ts` once the chat
+// transcript needed it too, and every existing caller imports it from here.
+export { saveBlob };
 
 /**
  * Turn a failed request into user-facing text, the same way everywhere: a 4xx

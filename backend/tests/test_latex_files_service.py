@@ -423,3 +423,102 @@ async def test_bulk_merge_counts_the_existing_tree_against_the_byte_cap(
 
     with pytest.raises(svc.QuotaExceeded):
         await svc.bulk_merge(db_session, document.id, [("big.tex", b"y" * 60, False)])
+
+
+async def test_renaming_a_directory_moves_every_file_beneath_it(
+    db_session: AsyncSession, document: LatexDocument
+):
+    await svc.write_text(db_session, document.id, "chapters/intro.tex", "one")
+    await svc.write_text(db_session, document.id, "chapters/deep/two.tex", "two")
+    await svc.write_text(db_session, document.id, "main.tex", "root")
+    await db_session.commit()
+
+    moved = await svc.rename_dir(db_session, document.id, "chapters", "parts")
+    await db_session.commit()
+
+    assert moved == 2
+    assert [f.path for f in await svc.list_files(db_session, document.id)] == [
+        "main.tex",
+        "parts/deep/two.tex",
+        "parts/intro.tex",
+    ]
+
+
+async def test_renaming_a_directory_bumps_the_revision_exactly_once(
+    db_session: AsyncSession, document: LatexDocument
+):
+    # A move is ONE change. Bumping per file would make a three-file
+    # directory look like three separate edits to the staleness check.
+    await svc.write_text(db_session, document.id, "figs/a.tex", "a")
+    await svc.write_text(db_session, document.id, "figs/b.tex", "b")
+    await svc.write_text(db_session, document.id, "figs/c.tex", "c")
+    await db_session.commit()
+    before = (await db_session.get(LatexDocument, document.id)).revision
+
+    await svc.rename_dir(db_session, document.id, "figs", "images")
+    await db_session.commit()
+
+    after = (await db_session.get(LatexDocument, document.id)).revision
+    assert after == before + 1
+
+
+async def test_a_directory_rename_moves_nothing_when_any_file_would_collide(
+    db_session: AsyncSession, document: LatexDocument
+):
+    # All-or-nothing: a collision on the SECOND file must leave the first
+    # where it was. A half-moved tree is a project silently missing the file
+    # its \input names.
+    doc_id = document.id
+    await svc.write_text(db_session, doc_id, "a/one.tex", "one")
+    await svc.write_text(db_session, doc_id, "a/two.tex", "two")
+    await svc.write_text(db_session, doc_id, "b/two.tex", "occupied")
+    await db_session.commit()
+
+    with pytest.raises(svc.PathCollision):
+        await svc.rename_dir(db_session, doc_id, "a", "b")
+
+    await db_session.rollback()
+    assert [f.path for f in await svc.list_files(db_session, doc_id)] == [
+        "a/one.tex",
+        "a/two.tex",
+        "b/two.tex",
+    ]
+
+
+async def test_a_directory_cannot_be_moved_inside_itself(
+    db_session: AsyncSession, document: LatexDocument
+):
+    # The destination prefix would slide as the source is consumed.
+    await svc.write_text(db_session, document.id, "src/main.tex", "x")
+    await db_session.commit()
+
+    with pytest.raises(InvalidPath):
+        await svc.rename_dir(db_session, document.id, "src", "src/nested")
+
+
+async def test_renaming_a_directory_that_holds_no_files_is_a_miss(
+    db_session: AsyncSession, document: LatexDocument
+):
+    await svc.write_text(db_session, document.id, "main.tex", "x")
+    await db_session.commit()
+
+    with pytest.raises(svc.FileNotFound):
+        await svc.rename_dir(db_session, document.id, "nope", "elsewhere")
+
+
+async def test_a_directory_rename_does_not_touch_a_file_whose_name_merely_starts_the_same(
+    db_session: AsyncSession, document: LatexDocument
+):
+    # `chapters-old.tex` shares the prefix `chapters` but is not INSIDE it;
+    # matching on the bare prefix rather than `chapters/` would move it.
+    await svc.write_text(db_session, document.id, "chapters/intro.tex", "in")
+    await svc.write_text(db_session, document.id, "chapters-old.tex", "out")
+    await db_session.commit()
+
+    await svc.rename_dir(db_session, document.id, "chapters", "parts")
+    await db_session.commit()
+
+    assert [f.path for f in await svc.list_files(db_session, document.id)] == [
+        "chapters-old.tex",
+        "parts/intro.tex",
+    ]

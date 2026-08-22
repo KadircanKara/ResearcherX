@@ -35,6 +35,12 @@ interface FileTreeProps {
   onCreate: (path: string) => void;
   onDelete: (path: string) => void;
   onRename: (from: string, to: string) => void;
+  /**
+   * Move a whole directory. Separate from `onRename` because a directory is
+   * not a row -- it is the shared prefix of the files under it -- so the
+   * backend moves it with a different, all-or-nothing route.
+   */
+  onRenameDir: (from: string, to: string) => void;
   onSetMain: (path: string) => void;
   onUpload: (path: string, data: Blob) => void;
   /**
@@ -61,6 +67,7 @@ export function FileTree({
   onCreate,
   onDelete,
   onRename,
+  onRenameDir,
   onSetMain,
   onUpload,
   onAddFile,
@@ -75,7 +82,11 @@ export function FileTree({
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [creating, setCreating] = useState(false);
   const [newPath, setNewPath] = useState("");
+  // The path being renamed, and whether it names a file or a directory --
+  // the two go to different routes, and the row that opened the field is
+  // the only thing that knows which.
   const [renaming, setRenaming] = useState<string | null>(null);
+  const [renamingKind, setRenamingKind] = useState<"file" | "dir">("file");
   const [renameValue, setRenameValue] = useState("");
 
   function toggle(path: string) {
@@ -100,7 +111,10 @@ export function FileTree({
   function submitRename(path: string) {
     const trimmed = renameValue.trim();
     setRenaming(null);
-    if (trimmed && trimmed !== path) onRename(path, trimmed);
+    if (trimmed && trimmed !== path) {
+      if (renamingKind === "dir") onRenameDir(path, trimmed);
+      else onRename(path, trimmed);
+    }
   }
 
   const pctUsed = maxBytes > 0 ? (usedBytes / maxBytes) * 100 : 0;
@@ -202,8 +216,9 @@ export function FileTree({
             onDelete={onDelete}
             onSetMain={onSetMain}
             onUpload={onUpload}
-            onStartRename={(path) => {
+            onStartRename={(path, kind) => {
               setRenaming(path);
+              setRenamingKind(kind);
               setRenameValue(path);
             }}
             onRenameValueChange={setRenameValue}
@@ -255,7 +270,7 @@ interface TreeRowProps {
   onDelete: (path: string) => void;
   onSetMain: (path: string) => void;
   onUpload: (path: string, data: Blob) => void;
-  onStartRename: (path: string) => void;
+  onStartRename: (path: string, kind: "file" | "dir") => void;
   onRenameValueChange: (value: string) => void;
   onSubmitRename: (path: string) => void;
   onCancelRename: () => void;
@@ -284,6 +299,23 @@ function TreeRow({
 
   if (node.kind === "dir") {
     const isCollapsed = collapsed.has(node.path);
+    if (renaming === node.path) {
+      return (
+        <div style={indent} className="py-0.5 pr-1.5">
+          <input
+            autoFocus
+            value={renameValue}
+            onChange={(e) => onRenameValueChange(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") onSubmitRename(node.path);
+              if (e.key === "Escape") onCancelRename();
+            }}
+            onBlur={() => onSubmitRename(node.path)}
+            className="w-full rounded-md border border-input bg-background px-1.5 py-0.5 text-sm"
+          />
+        </div>
+      );
+    }
     return (
       <div>
         <div
@@ -302,6 +334,16 @@ function TreeRow({
             <Folder className="size-3.5 shrink-0" />
             <span className="truncate">{node.name}</span>
           </button>
+          {canEdit && (
+            <button
+              className="invisible shrink-0 text-muted-foreground hover:text-foreground group-hover:visible"
+              title="Rename folder"
+              aria-label={`Rename folder ${node.name}`}
+              onClick={() => onStartRename(node.path, "dir")}
+            >
+              <Pencil className="size-3.5" />
+            </button>
+          )}
           {canEdit && (
             <label
               className="invisible shrink-0 cursor-pointer text-muted-foreground hover:text-foreground group-hover:visible"
@@ -403,7 +445,7 @@ function TreeRow({
           <button
             title="Rename"
             className="text-muted-foreground hover:text-foreground"
-            onClick={() => onStartRename(node.path)}
+            onClick={() => onStartRename(node.path, "file")}
           >
             <Pencil className="size-3.5" />
           </button>

@@ -3,10 +3,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
-import { Download, FileCode2, Plus, Trash2 } from "lucide-react";
+import { Download, FileCode2, Pencil, Plus, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { BulkEditBar } from "@/components/bulk-edit-bar";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
+import { RenameDialog } from "@/components/ui/rename-dialog";
 import { ConflictDialog } from "@/components/latex/conflict-dialog";
 import { ImportDropzone } from "@/components/latex/import-dropzone";
 import { NewDocumentDialog } from "@/components/latex/new-document-dialog";
@@ -15,6 +16,7 @@ import {
   deleteDocument,
   downloadExport,
   listDocuments,
+  patchDocument,
   errorText,
   NameCollisionError,
   type LatexCollision,
@@ -60,7 +62,14 @@ export default function LatexIndexPage() {
 
   // The duplicate document-NAME question, rendered through the same shared
   // dialog every other duplicate on this branch uses.
-  const [nameConflict, setNameConflict] = useState<{ collisions: LatexCollision[] } | null>(null);
+  // Carries the action to RETRY with the chosen name, not just the rows:
+  // creating and renaming collide identically and answer the same dialog,
+  // and hardwiring it to one of them would mean a second dialog for the
+  // other.
+  const [nameConflict, setNameConflict] = useState<{
+    collisions: LatexCollision[];
+    retry: (name: string) => Promise<void>;
+  } | null>(null);
   const [nameBusy, setNameBusy] = useState(false);
 
   // `silent` skips the full-page loading skeleton. The skeleton branch below
@@ -71,24 +80,27 @@ export default function LatexIndexPage() {
   // `loadSeq` guards against out-of-order resolution the same way.
   const loadSeq = useRef(0);
 
-  const load = useCallback((opts: { silent?: boolean } = {}) => {
-    const seq = ++loadSeq.current;
-    if (!opts.silent) setLoading(true);
-    if (!opts.silent) setError(null);
-    Promise.all([listDocuments(projectId), getProject(projectId)])
-      .then(([rows, detail]) => {
-        if (seq !== loadSeq.current) return; // a newer load already won
-        setDocs(rows);
-        setRole(detail.my_role);
-      })
-      .catch((err) => {
-        if (seq !== loadSeq.current) return;
-        setError(errorText(err));
-      })
-      .finally(() => {
-        if (seq === loadSeq.current) setLoading(false);
-      });
-  }, [projectId]);
+  const load = useCallback(
+    (opts: { silent?: boolean } = {}) => {
+      const seq = ++loadSeq.current;
+      if (!opts.silent) setLoading(true);
+      if (!opts.silent) setError(null);
+      Promise.all([listDocuments(projectId), getProject(projectId)])
+        .then(([rows, detail]) => {
+          if (seq !== loadSeq.current) return; // a newer load already won
+          setDocs(rows);
+          setRole(detail.my_role);
+        })
+        .catch((err) => {
+          if (seq !== loadSeq.current) return;
+          setError(errorText(err));
+        })
+        .finally(() => {
+          if (seq === loadSeq.current) setLoading(false);
+        });
+    },
+    [projectId],
+  );
 
   useEffect(() => {
     void load();
@@ -101,7 +113,9 @@ export default function LatexIndexPage() {
   // Handing selectAll/isAllSelected the full doc list would select rows the
   // checkbox itself refuses to let the user check, guaranteeing a partial-
   // failure banner and making "all selected" unreachable by clicking.
-  const deletableIds = docs.filter((d) => d.my_access === "editor").map((d) => d.id);
+  const deletableIds = docs
+    .filter((d) => d.my_access === "editor")
+    .map((d) => d.id);
 
   /**
    * Create, and turn a duplicate NAME into the same Keep both / Rename /
@@ -125,8 +139,13 @@ export default function LatexIndexPage() {
         // suggestion, so the same control rather than a second dialog.
         setNameConflict({
           collisions: [
-            { path: err.takenName, existing: err.takenName, suggestion: err.suggestion },
+            {
+              path: err.takenName,
+              existing: err.takenName,
+              suggestion: err.suggestion,
+            },
           ],
+          retry: createNamed,
         });
         return;
       }
@@ -134,21 +153,66 @@ export default function LatexIndexPage() {
     }
   }
 
-  async function confirmNameConflict(decisions: { path: string; new_path: string }[]) {
+  const [renaming, setRenaming] = useState<LatexDocument | null>(null);
+  const [renameBusy, setRenameBusy] = useState(false);
+
+  async function renameTo(name: string) {
+    const target = renaming;
+    if (!target) return;
+    setError(null);
+    try {
+      await renameDocument(target, name);
+      setRenaming(null);
+    } catch (err) {
+      if (err instanceof NameCollisionError) {
+        // The rename dialog closes and the conflict dialog takes over --
+        // one question at a time, and the conflict dialog already asks
+        // exactly this one with the server's suggestion in hand.
+        setRenaming(null);
+        setNameConflict({
+          collisions: [
+            {
+              path: err.takenName,
+              existing: err.takenName,
+              suggestion: err.suggestion,
+            },
+          ],
+          // Bound to THIS document, not to whatever `renaming` holds by the
+          // time the user answers -- the dialog above has already cleared it.
+          retry: (chosen) => renameDocument(target, chosen),
+        });
+        return;
+      }
+      setError(errorText(err));
+    }
+  }
+
+  /** The retry path, free of the `renaming` state the dialog has released. */
+  async function renameDocument(target: LatexDocument, name: string) {
+    const updated = await patchDocument(projectId, target.id, { name });
+    setDocs((prev) =>
+      prev.map((d) => (d.id === updated.id ? { ...d, ...updated } : d)),
+    );
+  }
+
+  async function confirmNameConflict(
+    decisions: { path: string; new_path: string }[],
+  ) {
     const pending = nameConflict;
     const chosen = decisions[0]?.new_path;
     if (!pending || !chosen) return;
     setNameBusy(true);
     try {
-      // Straight back through `createNamed`: the retry can collide AGAIN
-      // (another member took that name while the dialog was open), and
-      // `createNamed` replaces the dialog's row with the new collision.
-      await createNamed(chosen);
+      // Straight back through the action that collided: the retry can
+      // collide AGAIN (another member took that name while the dialog was
+      // open), and that action replaces the dialog's row with the newer
+      // collision.
+      await pending.retry(chosen);
     } finally {
       setNameBusy(false);
     }
     // Only dismiss the entry this call opened -- if the retry collided
-    // again, `createNamed` has already installed the newer one.
+    // again, the action has already installed the newer one.
     setNameConflict((current) => (current === pending ? null : current));
   }
 
@@ -158,7 +222,9 @@ export default function LatexIndexPage() {
   // `ConfirmDialog`: a page that fires several native dialogs gets them
   // SUPPRESSED by Chrome, after which `confirm()` returns false without
   // opening anything and the delete silently does nothing.
-  const [pendingDelete, setPendingDelete] = useState<LatexDocument | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<LatexDocument | null>(
+    null,
+  );
   const [pendingBulkDelete, setPendingBulkDelete] = useState(false);
 
   async function handleDelete(doc: LatexDocument) {
@@ -182,7 +248,7 @@ export default function LatexIndexPage() {
     setBulkError(null);
     const ids = [...selected];
     const results = await Promise.allSettled(
-      ids.map((id) => deleteDocument(projectId, id))
+      ids.map((id) => deleteDocument(projectId, id)),
     );
     const failed = ids.filter((_, i) => results[i].status === "rejected");
     setSelected(new Set(failed));
@@ -291,7 +357,11 @@ export default function LatexIndexPage() {
                   disabled={doc.my_access !== "editor"}
                   onChange={() => setSelected(toggle(selected, doc.id))}
                   aria-label={`Select ${doc.name}`}
-                  title={doc.my_access === "editor" ? undefined : "You need edit access to delete this project"}
+                  title={
+                    doc.my_access === "editor"
+                      ? undefined
+                      : "You need edit access to delete this project"
+                  }
                   className="mt-1 size-4 shrink-0 disabled:opacity-40"
                 />
               )}
@@ -302,7 +372,9 @@ export default function LatexIndexPage() {
                 href={`/research/${projectId}/latex/${doc.id}`}
                 className="min-w-0 flex-1"
               >
-                <p className="line-clamp-1 text-sm font-medium text-foreground">{doc.name}</p>
+                <p className="line-clamp-1 text-sm font-medium text-foreground">
+                  {doc.name}
+                </p>
                 <p className="mt-1 truncate font-mono text-xs text-muted-foreground">
                   {doc.main_path}
                 </p>
@@ -322,15 +394,26 @@ export default function LatexIndexPage() {
               </button>
 
               {doc.my_access === "editor" && (
-                <button
-                  onClick={() => setPendingDelete(doc)}
-                  disabled={busyId === doc.id}
-                  title="Delete project"
-                  aria-label={`Delete ${doc.name}`}
-                  className="shrink-0 rounded p-1 text-muted-foreground/50 transition-colors hover:bg-destructive/10 hover:text-destructive disabled:opacity-40"
-                >
-                  <Trash2 className="size-4" />
-                </button>
+                <>
+                  <button
+                    onClick={() => setRenaming(doc)}
+                    className="shrink-0 rounded p-1 text-muted-foreground/50 transition-colors hover:bg-muted hover:text-foreground"
+                    aria-label={`Rename project: ${doc.name}`}
+                    title="Rename"
+                  >
+                    <Pencil className="size-3.5" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setPendingDelete(doc)}
+                    disabled={busyId === doc.id}
+                    title="Delete project"
+                    aria-label={`Delete ${doc.name}`}
+                    className="shrink-0 rounded p-1 text-muted-foreground/50 transition-colors hover:bg-destructive/10 hover:text-destructive disabled:opacity-40"
+                  >
+                    <Trash2 className="size-4" />
+                  </button>
+                </>
               )}
             </div>
           ))}
@@ -364,6 +447,19 @@ export default function LatexIndexPage() {
         taken={docs.map((d) => d.name)}
         onCancel={() => setNameConflict(null)}
         onConfirm={(decisions) => void confirmNameConflict(decisions)}
+      />
+
+      <RenameDialog
+        open={renaming !== null}
+        title="Rename LaTeX project"
+        label="Name"
+        initialValue={renaming?.name ?? ""}
+        busy={renameBusy}
+        onCancel={() => setRenaming(null)}
+        onSubmit={(value) => {
+          setRenameBusy(true);
+          void renameTo(value).finally(() => setRenameBusy(false));
+        }}
       />
 
       <ConfirmDialog

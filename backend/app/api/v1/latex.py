@@ -183,7 +183,34 @@ async def update_document(
 ) -> LatexDocumentOut:
     access = await latex_access.require(db, project_id, document_id, user.id, need="editor")
     document = await _get_document_or_404(db, project_id, document_id)
-    if payload.name is not None:
+    if payload.name is not None and payload.name != document.name:
+        # The same warning `create_document` gives, and for the same reason:
+        # without it a name you cannot CREATE is still reachable by renaming
+        # into it, which is a rule that only looks enforced. Excludes this
+        # document's own row -- a rename that only changes case is not a
+        # collision with itself.
+        taken = (
+            (
+                await db.execute(
+                    select(LatexDocument.name).where(
+                        LatexDocument.project_id == project_id,
+                        LatexDocument.id != document_id,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        suggestion = latex_dedupe.suffix_name(payload.name, taken)
+        if suggestion != payload.name:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "name_collision",
+                    "name": payload.name,
+                    "suggestion": suggestion,
+                },
+            )
         document.name = payload.name
     if payload.main_path is not None:
         # Normalized ONCE, then that one value is what gets looked up AND

@@ -11,6 +11,7 @@ import {
   patchDocument,
   readTextFile,
   renameFile,
+  renameDir,
   writeBinaryFile,
   writeTextFile,
   PathCollisionError,
@@ -80,6 +81,18 @@ export interface UseLatexDocument {
   setMainPath: (path: string) => Promise<void>;
   createDoc: (name: string, source?: string) => Promise<void>;
   removeDoc: (id: string) => Promise<void>;
+  /**
+   * Rename a project. RETHROWS `NameCollisionError` rather than swallowing
+   * it into `error`, exactly as the write paths rethrow
+   * `PathCollisionError`: the caller needs the suggestion, not a sentence.
+   */
+  renameDoc: (id: string, name: string) => Promise<void>;
+  /**
+   * Move a whole directory. Same rethrow contract as `moveFile`: a
+   * `PathCollisionError` reaches the caller so it can open the conflict
+   * dialog.
+   */
+  moveDir: (from: string, to: string) => Promise<void>;
   /**
    * Re-lists the OPEN document's tree. Exposed for the one mutation this
    * hook does not itself perform: a committed merge import writes files
@@ -700,6 +713,60 @@ export function useLatexDocument(
     [projectId, canEdit, applyMutation, refreshTree]
   );
 
+  const moveDir = useCallback(
+    async (from: string, to: string) => {
+      const docId = selectedIdRef.current;
+      if (!docId || !canEdit) return;
+      setError(null);
+
+      // Every rule `moveFile` establishes applies here N times over, and for
+      // the same reasons -- read its comments before changing any of this.
+      // Flush FIRST, while the old paths are still the ones the server
+      // knows; rename the engine only AFTER the server has agreed, so a
+      // refused move leaves no timer armed against a path that never
+      // existed.
+      const prefix = `${from}/`;
+      const saveEngine = engineRef.current;
+      const dirty = saveEngine?.dirtyPaths().filter((p) => p.startsWith(prefix)) ?? [];
+      for (const path of dirty) {
+        await saveEngine?.flushPath(path);
+        if (selectedIdRef.current !== docId) return;
+      }
+
+      const isInside = (path: string) => path.startsWith(prefix);
+      const moved = (path: string) => `${to}/${path.slice(prefix.length)}`;
+
+      try {
+        const m = await renameDir(projectId, docId, from, to);
+        // The engine captured ABOVE, not `engineRef.current` -- by the time
+        // this resolves the ref may already name another document's engine.
+        for (const path of openPathsRef.current.filter(isInside)) {
+          saveEngine?.rename(path, moved(path));
+        }
+        setSaveFailures((prev) =>
+          prev.map((f) => (f.id === docId && isInside(f.path) ? { ...f, path: moved(f.path) } : f))
+        );
+        applyMutation(m, docId);
+        if (selectedIdRef.current !== docId) return;
+        setOpenPaths((prev) => prev.map((p) => (isInside(p) ? moved(p) : p)));
+        setBuffers((prev) => {
+          const next: Record<string, string> = {};
+          for (const [path, text] of Object.entries(prev)) {
+            next[isInside(path) ? moved(path) : path] = text;
+          }
+          return next;
+        });
+        setActivePath((prev) => (prev !== null && isInside(prev) ? moved(prev) : prev));
+        await refreshTree(docId);
+      } catch (err) {
+        if (selectedIdRef.current !== docId) return;
+        if (err instanceof PathCollisionError) throw err;
+        setError(errorText(err));
+      }
+    },
+    [projectId, canEdit, applyMutation, refreshTree]
+  );
+
   const uploadBinary = useCallback(
     async (path: string, data: Blob) => {
       const docId = selectedIdRef.current;
@@ -826,6 +893,21 @@ export function useLatexDocument(
         // name and the server's suggestion rather than the generic line.
         setError(errorText(err));
       }
+    },
+    [projectId]
+  );
+
+  const renameDoc = useCallback(
+    async (id: string, name: string) => {
+      setError(null);
+      const updated = await patchDocument(projectId, id, { name });
+      // Both the list and the OPEN document carry the name, and the header
+      // reads the latter -- updating only `documents` would leave the title
+      // the user just changed still showing the old one until a refetch.
+      setDocuments((prev) => prev.map((d) => (d.id === updated.id ? { ...d, ...updated } : d)));
+      setDocumentState((current) =>
+        current && current.id === updated.id ? { ...current, ...updated } : current
+      );
     },
     [projectId]
   );
@@ -960,12 +1042,14 @@ export function useLatexDocument(
     createFile,
     removeFile,
     moveFile,
+    moveDir,
     uploadBinary,
     setEngine,
     awaitEnginePatch,
     setMainPath,
     createDoc,
     removeDoc,
+    renameDoc,
     refreshFiles,
     adoptDocument,
   };

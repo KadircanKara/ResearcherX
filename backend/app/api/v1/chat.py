@@ -11,7 +11,12 @@ from sse_starlette.sse import EventSourceResponse
 from app.core.identity import get_current_user
 from app.db.models import User
 from app.db.session import get_session
-from app.schemas.chat import ChatRequest, ConversationDetailOut, ConversationOut
+from app.schemas.chat import (
+    ChatRequest,
+    ConversationDetailOut,
+    ConversationOut,
+    ConversationUpdate,
+)
 from app.services import project_service
 from app.services.chat_service import ChatService
 from app.services.conversation_service import ConversationService, retitle_citations
@@ -74,6 +79,33 @@ async def get_conversation(
     for message in detail.messages:
         message.citations = retitle_citations(message.citations, titles)
     return detail
+
+
+@router.patch(
+    "/projects/{project_id}/conversations/{conversation_id}", response_model=ConversationOut
+)
+async def rename_conversation(
+    project_id: str,
+    conversation_id: str,
+    payload: ConversationUpdate,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
+) -> ConversationOut:
+    """Rename a conversation.
+
+    Titles are NOT unique and no collision is reported: unlike a LaTeX
+    project, a conversation is identified by what was said in it, and two
+    chats about the same thing sharing a name is ordinary rather than a
+    mistake worth interrupting for.
+    """
+    await project_service.require_member(db, project_id, user.id, "member")
+    conv = await _conv_svc.get_conversation(db, conversation_id)
+    if conv is None or conv.project_id != project_id:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    conv.title = payload.title
+    await db.commit()
+    await db.refresh(conv)
+    return ConversationOut.model_validate(conv, from_attributes=True)
 
 
 @router.delete("/projects/{project_id}/conversations/{conversation_id}", status_code=204)
