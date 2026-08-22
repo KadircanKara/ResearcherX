@@ -24,6 +24,7 @@ import { DocumentShareDialog } from "@/components/latex/document-share-dialog";
 import { EditorPane } from "@/components/latex/editor-pane";
 import { FileTree } from "@/components/latex/file-tree";
 import { ImportDropzone } from "@/components/latex/import-dropzone";
+import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { LogPanel } from "@/components/latex/log-panel";
 import { OpenTabs } from "@/components/latex/open-tabs";
 import { PdfViewer } from "@/components/latex/pdf-viewer";
@@ -231,6 +232,31 @@ export function LatexWorkspace({ projectId, documentId, ownerId }: LatexWorkspac
   // (and its own busy/error) lives inside `ImportDropzone`, which the
   // projects list page shares.
   const [importOpen, setImportOpen] = useState(false);
+  // The archive the tree's "Add files" control handed over, so the import
+  // dialog opens with it already chosen. Cleared with the dialog.
+  const [importFile, setImportFile] = useState<File | null>(null);
+
+  /**
+   * One file picked from the tree header, routed by what it IS.
+   *
+   * A `.zip` goes through the merge-import flow so it lands as real files:
+   * LaTeX resolves `\input` and `\includegraphics` against paths on disk
+   * and cannot read inside an archive, and the compiler runs with
+   * `-no-shell-escape` so a `\write18` unzip is blocked too. Stored as-is
+   * a `.zip` would be unreferenceable dead weight counting against the
+   * project's byte cap.
+   *
+   * Everything else is written straight into the tree root, through the
+   * same collision path as every other write.
+   */
+  function handleAddFile(file: File) {
+    if (/\.zip$/i.test(file.name)) {
+      setImportFile(file);
+      setImportOpen(true);
+      return;
+    }
+    void withConflicts((p) => doc.uploadBinary(p, file), file.name);
+  }
 
   const [engineOpen, setEngineOpen] = useState(false);
 
@@ -315,15 +341,16 @@ export function LatexWorkspace({ projectId, documentId, ownerId }: LatexWorkspac
     saveBlob(new Blob([compile.pdfBytes.slice()], { type: "application/pdf" }), `${name}.pdf`);
   }
 
+  // The only irreversible control on this screen -- everything else here is
+  // a save, a compile or a download -- so it is the only one that asks. It
+  // asks through a real dialog, never `window.confirm`: see `ConfirmDialog`
+  // for why a native confirm can silently return false without opening.
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+
   async function handleDeleteDocument() {
     const docId = doc.selectedId;
+    setConfirmingDelete(false);
     if (!docId) return;
-    const name = doc.document?.name ?? "this project";
-    // The only irreversible control on this screen. Everything else here is
-    // a save, a compile or a download.
-    if (!window.confirm(`Delete "${name}" and all of its files? This cannot be undone.`)) {
-      return;
-    }
     await doc.removeDoc(docId);
     router.push(`/research/${projectId}/latex`);
   }
@@ -482,7 +509,7 @@ export function LatexWorkspace({ projectId, documentId, ownerId }: LatexWorkspac
 
           {canEdit && (
             <button
-              onClick={() => void handleDeleteDocument()}
+              onClick={() => setConfirmingDelete(true)}
               title="Delete project"
               aria-label="Delete project"
               className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive"
@@ -614,7 +641,7 @@ export function LatexWorkspace({ projectId, documentId, ownerId }: LatexWorkspac
                 onUpload={(path, data) =>
                   void withConflicts((p) => doc.uploadBinary(p, data), path)
                 }
-                onImportClick={() => setImportOpen(true)}
+                onAddFile={handleAddFile}
                 onExport={() => void handleExport()}
                 onCollapse={() => setTreeCollapsed(true)}
               />
@@ -783,9 +810,14 @@ export function LatexWorkspace({ projectId, documentId, ownerId }: LatexWorkspac
         documentId={documentId}
         takenPaths={doc.files.map((f) => f.path)}
         takenNames={doc.documents.map((d) => d.name)}
-        onClose={() => setImportOpen(false)}
+        initialFile={importFile}
+        onClose={() => {
+          setImportOpen(false);
+          setImportFile(null);
+        }}
         onDone={(result, mode) => {
           setImportOpen(false);
+          setImportFile(null);
           if (mode === "merge") {
             // The files landed in the document already on screen -- refresh
             // its tree, and stay exactly where the user was. Navigating
@@ -809,6 +841,15 @@ export function LatexWorkspace({ projectId, documentId, ownerId }: LatexWorkspac
         taken={doc.files.map((f) => f.path)}
         onCancel={() => setConflict(null)}
         onConfirm={(decisions) => void confirmConflict(decisions)}
+      />
+
+      <ConfirmDialog
+        open={confirmingDelete}
+        title="Delete this LaTeX project?"
+        description={`"${doc.document?.name ?? "This project"}" and all of its files will be deleted. This cannot be undone.`}
+        confirmLabel="Delete"
+        onCancel={() => setConfirmingDelete(false)}
+        onConfirm={() => void handleDeleteDocument()}
       />
     </div>
   );

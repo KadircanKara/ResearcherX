@@ -4,6 +4,7 @@ import { useState } from "react";
 import {
   ChevronDown,
   ChevronRight,
+  CloudUpload,
   Download,
   FileCode,
   Folder,
@@ -37,7 +38,14 @@ interface FileTreeProps {
   onRename: (from: string, to: string) => void;
   onSetMain: (path: string) => void;
   onUpload: (path: string, data: Blob) => void;
-  onImportClick: () => void;
+  /**
+   * One file the user picked from the header's "Add files" control.
+   *
+   * The tree reports the File and decides nothing: whether a `.zip` is
+   * unpacked into this project or a `.png` is written straight into the
+   * tree is policy, and policy lives with the caller that owns both paths.
+   */
+  onAddFile: (file: File) => void;
   onExport: () => void;
   onCollapse: () => void;
 }
@@ -57,7 +65,7 @@ export function FileTree({
   onRename,
   onSetMain,
   onUpload,
-  onImportClick,
+  onAddFile,
   onExport,
   onCollapse,
 }: FileTreeProps) {
@@ -119,14 +127,32 @@ export function FileTree({
           >
             <PanelLeftClose className="size-3.5" />
           </Button>
-          <Button
-            size="icon-sm"
-            variant="ghost"
-            title="Import .zip"
-            onClick={onImportClick}
-          >
-            <Upload className="size-3.5" />
-          </Button>
+          {/* A label wrapping a hidden input, not a Button that opens a
+              dialog: the dialog's only job would be to show a "browse"
+              link, so it stood between the user and the file picker for
+              nothing. Accepts ANY type -- a project needs figures, .bib,
+              .sty and .cls at least as often as it needs an archive. */}
+          {canEdit && (
+            <label
+              className="inline-flex size-7 cursor-pointer items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+              title="Add files (a .zip is unpacked into this project)"
+            >
+              <CloudUpload className="size-3.5" />
+              <input
+                type="file"
+                className="hidden"
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  // Cleared so picking the SAME file twice still fires
+                  // `change` -- re-uploading a figure you just fixed is the
+                  // common case, and without this the second pick is
+                  // silently ignored.
+                  e.target.value = "";
+                  if (file) onAddFile(file);
+                }}
+              />
+            </label>
+          )}
           <Button size="icon-sm" variant="ghost" title="Export .zip" onClick={onExport}>
             <Download className="size-3.5" />
           </Button>

@@ -33,6 +33,14 @@ interface ImportDropzoneProps {
    * so the dialog can only create one.
    */
   documentId?: string;
+  /**
+   * An archive the caller already has, so the dialog opens with it chosen.
+   *
+   * The tree's "Add files" control routes a `.zip` here rather than opening
+   * an empty dialog the user would have to browse from again -- they picked
+   * the file once already.
+   */
+  initialFile?: File | null;
   /** The open document's file paths -- what a MERGE's decisions must not
    * collide with. Empty from the list page, which never merges. */
   takenPaths?: string[];
@@ -71,6 +79,7 @@ export function ImportDropzone({
   open,
   projectId,
   documentId,
+  initialFile = null,
   takenPaths = [],
   takenNames = [],
   onClose,
@@ -79,9 +88,6 @@ export function ImportDropzone({
   const [file, setFile] = useState<File | null>(null);
   const [name, setName] = useState("");
   const [dragOver, setDragOver] = useState(false);
-  // "merge" only means anything with a `documentId`; without one the choice
-  // is not offered and this stays at its "create" default.
-  const [target, setTarget] = useState<"merge" | "create">("merge");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // The staged plan, held between the two calls. Cleared whenever the token
@@ -97,6 +103,16 @@ export function ImportDropzone({
   // dialog losing the user's choice.
   const [mainConfirmed, setMainConfirmed] = useState(false);
 
+  // Seeded from the caller's file, and keyed on `open` as well as the file
+  // itself: reopening the dialog with the SAME archive must re-seed it,
+  // which a dependency on the file alone would skip.
+  useEffect(() => {
+    if (open && initialFile) {
+      setFile(initialFile);
+      setName(stripExtension(initialFile.name));
+    }
+  }, [open, initialFile]);
+
   // Reset only when the dialog actually closes -- NOT when a plan arrives.
   // The picker and the conflict dialog are further renders of the SAME open
   // dialog, and they resubmit against the File the user already dropped, so
@@ -106,7 +122,6 @@ export function ImportDropzone({
       setFile(null);
       setName("");
       setDragOver(false);
-      setTarget("merge");
       setBusy(false);
       setError(null);
       setPlan(null);
@@ -115,7 +130,13 @@ export function ImportDropzone({
     }
   }, [open]);
 
-  const mergeChosen = Boolean(documentId) && target === "merge";
+  // Where this dialog is MOUNTED decides what it does, and the user is not
+  // asked. Inside a workspace it can only merge into the open project;
+  // creating a project belongs to the projects list, which is the page that
+  // shows the resulting project. Offering "create a new project" from
+  // inside one meant the user could land on a document the surrounding
+  // editor was not showing.
+  const mergeChosen = Boolean(documentId);
   const showPicker = plan !== null && plan.ambiguous_main !== null && !mainConfirmed;
   const conflictRows: LatexCollision[] = plan
     ? [
@@ -255,11 +276,23 @@ export function ImportDropzone({
           of the viewport with no way to reach it. */}
         <DialogContent className="flex max-h-[90vh] flex-col sm:max-w-md">
           <DialogHeader>
-            <DialogTitle>Import a .zip</DialogTitle>
+            {/* The title states which of the two things this dialog is
+                about to do, because the answer is no longer a choice the
+                user makes here -- it follows from where the dialog was
+                opened. */}
+            <DialogTitle>
+              {mergeChosen ? "Add a .zip to this project" : "Import a .zip"}
+            </DialogTitle>
             {showPicker ? (
               <DialogDescription>
                 That archive has more than one main file. Which one should be
                 compiled?
+              </DialogDescription>
+            ) : mergeChosen ? (
+              <DialogDescription>
+                Its files are unpacked into this project. LaTeX cannot read
+                inside an archive, so a .zip left whole could never be
+                referenced.
               </DialogDescription>
             ) : (
               <DialogDescription>
@@ -335,40 +368,6 @@ export function ImportDropzone({
                     />
                   </label>
                 </div>
-
-                {/* Offered ONLY inside a workspace. From the projects list
-                    there is no open document to add to, and a choice with
-                    one real option is not a choice. */}
-                {file && documentId && (
-                  <div className="flex flex-col gap-1.5">
-                    <label className="flex items-center gap-2 rounded-md border border-input px-2.5 py-1.5 text-sm hover:bg-muted/60">
-                      <input
-                        type="radio"
-                        name="import-target"
-                        checked={target === "merge"}
-                        onChange={() => {
-                          setTarget("merge");
-                          setPlan(null);
-                          setMainConfirmed(false);
-                        }}
-                      />
-                      <span>Add to this project</span>
-                    </label>
-                    <label className="flex items-center gap-2 rounded-md border border-input px-2.5 py-1.5 text-sm hover:bg-muted/60">
-                      <input
-                        type="radio"
-                        name="import-target"
-                        checked={target === "create"}
-                        onChange={() => {
-                          setTarget("create");
-                          setPlan(null);
-                          setMainConfirmed(false);
-                        }}
-                      />
-                      <span>Create a new project</span>
-                    </label>
-                  </div>
-                )}
 
                 {/* A merge writes into a document that already has a name. */}
                 {file && !mergeChosen && (

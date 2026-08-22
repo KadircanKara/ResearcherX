@@ -5,6 +5,7 @@ import { useParams, useRouter } from "next/navigation";
 import { MessageSquarePlus, Plus, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { BulkEditBar } from "@/components/bulk-edit-bar";
+import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { MentionTextarea } from "@/components/mention-textarea";
 import { createConversation, deleteConversation, listConversations } from "@/lib/chat";
 import type { Mention } from "@/lib/mentions";
@@ -77,10 +78,14 @@ export default function ChatPage() {
     }
   }
 
+  // Asked through a real dialog, never `window.confirm` -- see
+  // `ConfirmDialog`: a page that fires several native dialogs gets them
+  // SUPPRESSED by Chrome, after which `confirm()` returns false without
+  // opening anything and the delete silently does nothing.
+  const [pendingBulkDelete, setPendingBulkDelete] = useState(false);
+
   async function handleBulkDelete() {
-    if (!window.confirm(`Delete ${selected.size} conversation${selected.size !== 1 ? "s" : ""}? This cannot be undone.`)) {
-      return;
-    }
+    setPendingBulkDelete(false);
     setBulkBusy(true);
     setBulkError(null);
     const ids = [...selected];
@@ -145,7 +150,7 @@ export default function ChatPage() {
               setSelected(selectAll(selected, conversations.map((c) => c.id)))
             }
             onClear={() => setSelected(clear())}
-            onDelete={() => void handleBulkDelete()}
+            onDelete={() => setPendingBulkDelete(true)}
             onDone={() => {
               setEditingMode(false);
               // A selection that survives invisibly is a delete waiting to
@@ -249,6 +254,16 @@ export default function ChatPage() {
           </div>
         ))}
       </div>
+
+      <ConfirmDialog
+        open={pendingBulkDelete}
+        title={`Delete ${selected.size} conversation${selected.size !== 1 ? "s" : ""}?`}
+        description="This cannot be undone."
+        confirmLabel="Delete"
+        busy={bulkBusy}
+        onCancel={() => setPendingBulkDelete(false)}
+        onConfirm={() => void handleBulkDelete()}
+      />
     </div>
   );
 }

@@ -6,6 +6,7 @@ import Link from "next/link";
 import { Download, FileCode2, Plus, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { BulkEditBar } from "@/components/bulk-edit-bar";
+import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { ConflictDialog } from "@/components/latex/conflict-dialog";
 import { ImportDropzone } from "@/components/latex/import-dropzone";
 import { NewDocumentDialog } from "@/components/latex/new-document-dialog";
@@ -151,13 +152,17 @@ export default function LatexIndexPage() {
     setNameConflict((current) => (current === pending ? null : current));
   }
 
+  // A LaTeX project is a whole file tree and there is no undo, so the two
+  // actions on this page that cannot be taken back are the only ones that
+  // ask -- and they ask through a real dialog, never `window.confirm`. See
+  // `ConfirmDialog`: a page that fires several native dialogs gets them
+  // SUPPRESSED by Chrome, after which `confirm()` returns false without
+  // opening anything and the delete silently does nothing.
+  const [pendingDelete, setPendingDelete] = useState<LatexDocument | null>(null);
+  const [pendingBulkDelete, setPendingBulkDelete] = useState(false);
+
   async function handleDelete(doc: LatexDocument) {
-    // A LaTeX project is a whole file tree and there is no undo -- the one
-    // action on this page that cannot be taken back gets an explicit
-    // confirmation, unlike export.
-    if (!window.confirm(`Delete "${doc.name}" and all of its files? This cannot be undone.`)) {
-      return;
-    }
+    setPendingDelete(null);
     setBusyId(doc.id);
     setError(null);
     try {
@@ -172,9 +177,7 @@ export default function LatexIndexPage() {
   }
 
   async function handleBulkDelete() {
-    if (!window.confirm(`Delete ${selected.size} project${selected.size !== 1 ? "s" : ""} and all of their files? This cannot be undone.`)) {
-      return;
-    }
+    setPendingBulkDelete(false);
     setBulkBusy(true);
     setBulkError(null);
     const ids = [...selected];
@@ -320,7 +323,7 @@ export default function LatexIndexPage() {
 
               {doc.my_access === "editor" && (
                 <button
-                  onClick={() => void handleDelete(doc)}
+                  onClick={() => setPendingDelete(doc)}
                   disabled={busyId === doc.id}
                   title="Delete project"
                   aria-label={`Delete ${doc.name}`}
@@ -361,6 +364,28 @@ export default function LatexIndexPage() {
         taken={docs.map((d) => d.name)}
         onCancel={() => setNameConflict(null)}
         onConfirm={(decisions) => void confirmNameConflict(decisions)}
+      />
+
+      <ConfirmDialog
+        open={pendingDelete !== null}
+        title="Delete this LaTeX project?"
+        description={`"${pendingDelete?.name ?? ""}" and all of its files will be deleted. This cannot be undone.`}
+        confirmLabel="Delete"
+        busy={busyId === pendingDelete?.id}
+        onCancel={() => setPendingDelete(null)}
+        onConfirm={() => {
+          if (pendingDelete) void handleDelete(pendingDelete);
+        }}
+      />
+
+      <ConfirmDialog
+        open={pendingBulkDelete}
+        title={`Delete ${selected.size} LaTeX project${selected.size !== 1 ? "s" : ""}?`}
+        description="Every selected project and all of its files will be deleted. This cannot be undone."
+        confirmLabel="Delete"
+        busy={bulkBusy}
+        onCancel={() => setPendingBulkDelete(false)}
+        onConfirm={() => void handleBulkDelete()}
       />
     </div>
   );

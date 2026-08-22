@@ -1015,7 +1015,7 @@ async def test_an_expired_staging_token_is_a_410_not_a_404(
     client: AsyncClient, you: User, project: Project, monkeypatch
 ):
     """Distinguishable on purpose: an expired upload needs a different
-    sentence from an unknown one -- choose the .zip again, rather than
+    sentence from an unknown one -- press Import to try again, rather than
     something went wrong."""
     plan = await client.post(
         f"/v1/projects/{project.id}/latex/import/plan?name=Paper",

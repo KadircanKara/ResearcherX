@@ -287,7 +287,12 @@ async def import_commit_route(
     except StagingExpired as exc:
         raise HTTPException(
             status_code=410,
-            detail="That upload expired. Please choose the .zip again.",
+            # Names the ACTION the user has to take, not the internal
+            # fact. The dropzone still holds the file they picked, so
+            # pressing Import re-uploads and re-plans it -- telling them to
+            # "choose the .zip again" sent them to the file picker for no
+            # reason.
+            detail="This import timed out. Press Import to try again.",
         ) from exc
     except StagingNotFound as exc:
         raise HTTPException(status_code=404, detail="Unknown upload.") from exc
