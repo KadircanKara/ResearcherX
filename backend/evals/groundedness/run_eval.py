@@ -36,7 +36,7 @@ from pathlib import Path
 
 from evals.groundedness.claims import extract_claims, marker_count
 from evals.groundedness.generate import AnswerGenerator, Generated
-from evals.groundedness.judge import DEFAULT_JUDGE_MODEL, Judge
+from evals.groundedness.judge import DEFAULT_JUDGE_MODEL, Judge, QuotaExhausted
 from evals.groundedness.metrics import (
     CaseOutcome,
     ScoredClaim,
@@ -57,7 +57,10 @@ _DEFAULT_SET = Path(__file__).resolve().parents[1] / "retrieval" / "golden_set.j
 # Concurrency across cases. Each case is 3 model calls (answer, claim judge,
 # stance) plus one embedding; the ceiling is politeness to the provider, not a
 # correctness bound -- nothing in a case touches another case's state.
-_DEFAULT_CONCURRENCY = 4
+# Cases in flight. One, not four: a judge call is ~12k tokens against a 30k
+# TPM cap, so two cases in flight spend most of their time in rate-limit
+# backoff, and four spent the first real run's budget on 429s.
+_DEFAULT_CONCURRENCY = 1
 
 
 @dataclass
@@ -65,6 +68,18 @@ class CaseError:
     case_id: str
     stage: str
     error: str
+
+
+def _is_out_of_credits(exc: BaseException) -> bool:
+    """Answer generation goes through the PRODUCTION client, which raises the
+    provider's own `RateLimitError` rather than the judge's `QuotaExhausted`.
+
+    Both have to abort the run: on 2026-08-22 the credits ran out mid-run and
+    every one of the 20 remaining cases spent a request to produce an identical
+    error row.
+    """
+    text = str(exc).lower()
+    return "insufficient_quota" in text or "no credits remaining" in text
 
 
 def _evidence_present(case: Case, generated: Generated) -> bool | None:
@@ -87,11 +102,19 @@ async def _run_case(
     generator: AnswerGenerator,
     judge: Judge,
     semaphore: asyncio.Semaphore,
+    abort: asyncio.Event,
 ) -> tuple[CaseOutcome, Generated] | CaseError:
+    if abort.is_set():
+        return CaseError(case.id, "skipped", "aborted: the account ran out of credits")
     async with semaphore:
+        if abort.is_set():
+            return CaseError(case.id, "skipped", "aborted: the account ran out of credits")
         try:
             generated = await generator.generate(project_id=project_id, question=case.question)
         except Exception as exc:  # noqa: BLE001 - reported, never silently dropped
+            if _is_out_of_credits(exc):
+                abort.set()
+                return CaseError(case.id, "generate", "aborted: the account ran out of credits")
             return CaseError(case.id, "generate", f"{type(exc).__name__}: {exc}")
 
         claims = extract_claims(generated.answer)
@@ -104,7 +127,13 @@ async def _run_case(
                 excerpts=[(c.n, c.title, c.text) for c in generated.chunks],
             )
             stance = await judge.judge_stance(question=case.question, answer=generated.answer)
+        except QuotaExhausted:
+            abort.set()
+            return CaseError(case.id, "judge", "aborted: the account ran out of credits")
         except Exception as exc:  # noqa: BLE001
+            if _is_out_of_credits(exc):
+                abort.set()
+                return CaseError(case.id, "judge", "aborted: the account ran out of credits")
             return CaseError(case.id, "judge", f"{type(exc).__name__}: {exc}")
 
         scored = tuple(
@@ -157,7 +186,15 @@ async def main() -> None:
     parser.add_argument("--project-id", required=True)
     parser.add_argument("--set", type=Path, default=_DEFAULT_SET)
     parser.add_argument("--judge-model", default=DEFAULT_JUDGE_MODEL)
-    parser.add_argument("--concurrency", type=int, default=_DEFAULT_CONCURRENCY)
+    parser.add_argument(
+        "--concurrency",
+        type=int,
+        default=_DEFAULT_CONCURRENCY,
+        help=(
+            "cases in flight. The judge's TPM cap, not this, is the real throughput "
+            "bound -- raising it mostly buys 429s the judge then has to sleep off"
+        ),
+    )
     parser.add_argument("--json", type=Path, default=None)
     parser.add_argument("--per-case", action="store_true", help="print the per-case table")
     parser.add_argument(
@@ -172,6 +209,10 @@ async def main() -> None:
     generator = AnswerGenerator()
     judge = Judge(model=args.judge_model)
     semaphore = asyncio.Semaphore(args.concurrency)
+    # Set by the first case to see a credit-exhaustion error. Every case still
+    # queued then short-circuits instead of spending a request on a failure
+    # already known to be terminal.
+    abort = asyncio.Event()
 
     results = await asyncio.gather(
         *(
@@ -181,6 +222,7 @@ async def main() -> None:
                 generator=generator,
                 judge=judge,
                 semaphore=semaphore,
+                abort=abort,
             )
             for case in cases
         )
@@ -244,6 +286,13 @@ async def main() -> None:
                 f"{outcome.case_id:<34}{outcome.kind:<11}{evidence:<4}"
                 f"{len(outcome.checkable):>7}{bad:>5}{outcome.stance:>10}"
             )
+
+    if abort.is_set():
+        print()
+        print(
+            "RUN ABORTED — the account ran out of credits. Every number above is "
+            "measured on the cases that completed; the rest were never attempted."
+        )
 
     if errors:
         print()

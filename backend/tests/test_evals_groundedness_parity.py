@@ -11,7 +11,7 @@ import inspect
 import re
 
 from app.services import chat_service
-from evals.groundedness import generate
+from evals.groundedness import generate, run_eval
 
 
 def _post_pass_order(source: str) -> list[str]:
@@ -81,3 +81,35 @@ def test_the_scope_ladder_matches_production_minus_the_rung_needing_a_click():
     source = inspect.getsource(generate.AnswerGenerator.generate)
     assert "resolve_papers_with_evidence" in source
     assert "ScopeWidener" in inspect.getsource(generate) or "_widener" in source
+
+
+def test_credit_exhaustion_is_told_apart_from_a_throughput_limit():
+    """A 429 means two different things on this endpoint. Treating them the
+    same is what turned the first real run into 20 identical error rows: the
+    credits ran out, and every remaining case spent a request to rediscover it.
+    """
+    from evals.groundedness.judge import _is_terminal_quota, _retry_after_seconds
+
+    terminal = Exception(
+        "Error code: 429 - You have no credits remaining. code: credit_balance_exhausted"
+    )
+    throughput = Exception(
+        "Error code: 429 - Rate limit reached for gpt-4.1 ... Limit 30000, Used 29575, "
+        "Requested 12533. Please try again in 24.216s."
+    )
+    assert _is_terminal_quota(terminal)
+    assert not _is_terminal_quota(throughput)
+    # The server's own hint wins, plus a second of slack -- a retry landing
+    # exactly on the boundary is refused again.
+    assert _retry_after_seconds(throughput, 1) == 25.216
+    # No hint: back off far enough to clear a whole TPM minute.
+    assert _retry_after_seconds(Exception("429"), 3) == 15.0
+
+
+def test_the_runner_aborts_the_whole_run_when_credits_run_out():
+    """Terminal for BOTH paths: the judge raises QuotaExhausted, but answer
+    generation goes through the production client and raises the provider's own
+    RateLimitError, so the runner has to recognise the text too."""
+    source = inspect.getsource(run_eval)
+    assert "abort.set()" in source
+    assert "aborted: the account ran out of credits" in source

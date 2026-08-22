@@ -11,8 +11,9 @@ The `-m` form is required for the same reason every other harness documents:
 `pyproject.toml` packages only `app*`, so `evals` is not installed and
 file-path invocation fails with `ModuleNotFoundError: No module named 'app'`.
 
-Flags: `--judge-model` (default `gpt-4.1`), `--concurrency` (default 4 — but
-see "Rate limits"), `--set` (default: the retrieval harness's own
+Flags: `--judge-model` (default `gpt-4.1`), `--concurrency` (default 1 — the
+judge's TPM cap, not this, is the throughput bound; raising it mostly buys
+429s the judge then sleeps off), `--set` (default: the retrieval harness's own
 `golden_set.json`), `--limit N` for a smoke run, `--per-case`, `--json`.
 
 ## What this measures that `evals/retrieval` does not
@@ -105,6 +106,28 @@ The TPM cap also bounds throughput: ~60k tokens per case against 30k TPM is
 roughly two minutes per case, so a full 42-case run takes well over an hour
 regardless of `--concurrency`. Raise concurrency only if the account's limit
 rises.
+
+### A 429 means two different things
+
+Both arrive as `RateLimitError` and they need opposite handling:
+
+| body | meaning | handling |
+|---|---|---|
+| `Rate limit reached ... Limit 30000, Used 29575 ... try again in 24.216s` | throughput | sleep the hinted interval (+1s slack) and retry, up to 6 times |
+| `You have no credits remaining` / `credit_balance_exhausted` | terminal | abort the WHOLE run |
+
+The first real run (2026-08-22) treated them the same and paid for it: after
+the account's credits ran out, the remaining 20 cases each spent a request to
+produce an identical error row. `judge.QuotaExhausted` and the runner's
+`abort` event exist so the first credit error stops everything still queued,
+and the report says so instead of quietly reporting rates over whatever
+finished. Answer generation goes through the PRODUCTION client, so it raises
+the provider's own error rather than `QuotaExhausted` — the runner matches on
+the text for that path.
+
+The SDK's own backoff is not enough for the throughput case: it is shorter
+than the window the server names, so its retries are spent before the TPM
+minute rolls over.
 
 A malformed judge response **raises**; the case is recorded in `ERRORS` and
 excluded from every denominator. A fail-open judge would report a groundedness

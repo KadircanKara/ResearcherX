@@ -28,11 +28,13 @@ verdict while a judged one is not.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import re
 from dataclasses import dataclass
 from typing import Literal
 
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, RateLimitError
 from pydantic import BaseModel, Field
 
 from app.core.config import settings
@@ -53,6 +55,51 @@ DEFAULT_JUDGE_MODEL = "gpt-4.1"
 # so 45k chars is ~11k tokens, leaving room for the claims, the schema block
 # and the answer.
 _EXCERPT_CHARS_PER_REQUEST = 45_000
+
+# A 429 means two completely different things on this endpoint, and treating
+# them the same wasted most of the first real run:
+#
+#   TPM      "Rate limit reached ... Limit 30000, Used 29575, Requested 12533.
+#             Please try again in 24.216s."   -> transient, wait and retry
+#   CREDITS  "You have no credits remaining." (code: credit_balance_exhausted)
+#             -> terminal, and every remaining case will fail identically
+#
+# On 2026-08-22 the run marched through 20 more cases after the credits ran
+# out, producing 20 identical error rows and one unusable report. `QuotaExhausted`
+# is raised for the second kind so `run_eval` can abort the whole run at the
+# first occurrence instead.
+_TERMINAL_QUOTA_MARKERS = ("insufficient_quota", "credit_balance_exhausted", "no credits")
+
+# The retry hint the TPM error carries ("try again in 24.216s"). Honoured
+# directly: the SDK's own exponential backoff is shorter than the window the
+# server names, so its retries are spent before the minute rolls over.
+_RETRY_AFTER_RE = re.compile(r"try again in ([\d.]+)s")
+
+_MAX_RATE_LIMIT_RETRIES = 6
+
+
+class QuotaExhausted(RuntimeError):
+    """The account is out of credits. Nothing later in the run can succeed."""
+
+
+def _is_terminal_quota(exc: RateLimitError) -> bool:
+    text = str(exc).lower()
+    return any(marker in text for marker in _TERMINAL_QUOTA_MARKERS)
+
+
+def _retry_after_seconds(exc: RateLimitError, attempt: int) -> float:
+    """Seconds to wait before retrying a TPM 429.
+
+    Prefers the server's own hint; falls back to a per-attempt back-off that
+    always clears a full TPM minute, since the window is what has to roll over.
+    """
+    match = _RETRY_AFTER_RE.search(str(exc))
+    if match:
+        # A second of slack: the hint is computed server-side and a retry that
+        # lands on the boundary is refused again.
+        return float(match.group(1)) + 1.0
+    return min(60.0, 5.0 * attempt)
+
 
 Verdict = Literal["supported", "unsupported", "contradicted", "no_claim"]
 
@@ -207,17 +254,27 @@ class Judge:
             "that matches this JSON schema exactly:\n\n"
             f"{json.dumps(model_cls.model_json_schema(), indent=2)}"
         )
-        response = await self._client.chat.completions.create(
-            model=self.model,
-            max_tokens=self.max_tokens,
-            response_format={"type": "json_object"},
-            messages=[
-                {"role": "system", "content": f"{system}\n\n{schema_block}"},
-                {"role": "user", "content": user},
-            ],
-        )
-        content = response.choices[0].message.content or ""
-        return model_cls.model_validate_json(content)
+        for attempt in range(1, _MAX_RATE_LIMIT_RETRIES + 1):
+            try:
+                response = await self._client.chat.completions.create(
+                    model=self.model,
+                    max_tokens=self.max_tokens,
+                    response_format={"type": "json_object"},
+                    messages=[
+                        {"role": "system", "content": f"{system}\n\n{schema_block}"},
+                        {"role": "user", "content": user},
+                    ],
+                )
+            except RateLimitError as exc:
+                if _is_terminal_quota(exc):
+                    raise QuotaExhausted(str(exc)) from exc
+                if attempt == _MAX_RATE_LIMIT_RETRIES:
+                    raise
+                await asyncio.sleep(_retry_after_seconds(exc, attempt))
+                continue
+            content = response.choices[0].message.content or ""
+            return model_cls.model_validate_json(content)
+        raise AssertionError("unreachable: the loop either returns or raises")
 
     async def judge_claims(
         self,
