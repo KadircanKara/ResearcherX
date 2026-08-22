@@ -375,6 +375,49 @@ signal. Agreement reporting filters stored verdicts through the CURRENT claims
 policy for the same reason: comparing verdicts about text that is no longer a
 claim blames the models for a harness decision.
 
+### Measured — 2026-08-22e (gpt-4.1-nano is not usable as a judge)
+
+Same stored generations again, so the input is byte-identical to both runs
+above. Cost $0.11.
+
+| | gpt-4.1 | gpt-4.1-mini | gpt-4.1-nano |
+|---|---|---|---|
+| agreement with the reference | — | raw 0.99, **kappa 0.49** | raw 0.93, **kappa -0.02** |
+| missed problems / false alarms | — | 1 / 1 | **2 / 8** |
+| cases scored | 42 | 42 | **40** |
+| positives: support / clean | 0.99 / 0.93 | 0.99 / 0.93 | 0.94 / **0.75** |
+
+**Kappa -0.02 is the whole verdict: nano agrees with the reference no better
+than chance would.** It missed BOTH problems gpt-4.1 found and invented eight
+that are not there.
+
+The failure mode is not the one predicted. A cheap judge was expected to
+rubber-stamp -- to answer `supported` to everything and score high raw
+agreement on a population that is 99% supported. Nano instead judges NOISILY:
+it is stricter than the reference on balance, so its numbers look like a
+harsher grader rather than a broken one.
+
+**That is what makes it dangerous, and what the agreement check is for.**
+Nano's standalone report is entirely plausible -- support 0.94, clean 0.75,
+citation precision 0.92 -- and a reader without a reference would accept it as
+a slightly stricter measurement. Only the per-claim comparison shows there is
+no signal in it. Raw agreement 0.93 would have been reassuring on its own too;
+kappa is what exposes it.
+
+It also cannot hold the output contract. Two cases failed outright, one with:
+
+    ValidationError: 1 validation error for JudgeResponse
+    verdicts: Input should be a valid array
+    [type=list_type, input_value={'0': 'unsupported', '1': ...}]
+
+-- it returned an object keyed by claim index where the schema demands an
+array, after the schema was pasted into its prompt and after the missing-index
+retry. Silently accepting that shape would be easy and wrong: a judge that
+cannot follow the output contract is not a judge whose verdicts should be
+trusted.
+
+**Use gpt-4.1-mini for iteration and gpt-4.1 for decisions. Do not use nano.**
+
 ## How answers are produced
 
 `generate.py` assembles production's own components rather than calling
