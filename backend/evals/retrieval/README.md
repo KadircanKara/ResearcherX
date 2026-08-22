@@ -525,6 +525,56 @@ measured N times. The weights must sum to exactly 1.0 or `Settings` refuses
 to start. One run is ~one embedding call per case plus one per targeted
 positive (~72 calls on this set), so a full grid is not free.
 
+### Measured — 2026-08-22 (fresh baseline, k=30 hybrid RRF in place)
+
+The first full re-baseline since `hybrid_rrf_k` moved 60 → 30 on 2026-08-15.
+Command: `--targeted --hybrid`, no env overrides, shipped constants.
+
+- corpus: **4594 chunks / 102 papers** (project `fa2ab869…52922`) — the same
+  project as every block above, two papers larger
+- model: `text-embedding-3-small`; answering model `gpt-4.1-mini`
+- golden set unchanged: 30 positives, 12 negatives, no `ERRORS` block
+
+| arm | recall@60 | MRR | rescued |
+|---|---|---|---|
+| dense-only | 0.87 (26/30) | 0.527 | — |
+| **hybrid** | **0.93 (28/30)** | 0.528 | **2/30 — 2 of the 4 cases dense actually missed** |
+
+**The `rrf_k` change is confirmed live, and it is the whole story of this
+run.** On 2026-08-15 the sparse arm measured `rescued = 0` at k=60 and the
+README recorded why: with the dense arm saturating the pool, a sparse-only
+chunk could only enter the budget if
+`w_sparse·(k + max_context_chunks) > w_dense·(k + 1)`, which is false at k=60.
+At k=30 it is true, and the arm now rescues 2 of the 4 positives dense misses
+outright — recall 0.87 → 0.93 for one constant, with MRR unmoved (0.527 →
+0.528, i.e. the rescues land near the budget edge, which is exactly where a
+rescued chunk should land).
+
+Unchanged and still the two open problems:
+
+- `similarity_threshold = 0.75` accepts **75%** of off-topic questions (9 of
+  12). Better than the 100% recorded on the 4-paper corpus, but not a guard
+  rail. The closed form still reports `NO SEPARATION POSSIBLE AT THIS k`,
+  blocked by the same four positives (`ground-control-station`,
+  `drl-subagent-decomposition`, `demand-algorithm-baselines`,
+  `epec-stackelberg`) — all four of which survive the single-paper cut.
+- targeted mode: survival **1.00 (30/30)**, mean kept 27.6 chunks / ~12.1k
+  tokens, worst off-topic kept **52** — the ceiling is still the loose
+  constant, exactly as the 2026-08-12 block predicted. Hybrid targeted:
+  survival 1.00, mean kept 28.4.
+
+Companion harnesses on the same corpus, same day:
+
+- `resolver_eval`: **4/4 resolved, 4/4 fell through** — the safety property
+  holds on a corpus two papers larger than the one it was authored against.
+- `mention_eval`, production arm: representation **1.00** (nearest pairing) /
+  **0.97** (seeded), both-sides **1.00** / **0.93**, real comparisons **1.00**
+  both-sides with zero shut-outs. The production arm reads 0.97/0.93 where the
+  `mirror-0.75` arm reads 0.93/0.87 — that gap is the per-paper candidate
+  guarantee, which the mirror cannot see, and it is the reason the production
+  arm exists.
+- `evals/metadata`: 5/6 correct, 1 wrong (authors), **0 hallucinated**.
+
 ## Multi-mention mode
 
     docker compose exec -T backend python -m evals.retrieval.mention_eval \
