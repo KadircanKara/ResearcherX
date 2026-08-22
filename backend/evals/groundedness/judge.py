@@ -317,6 +317,30 @@ class Judge:
         merged = _merge(per_slice)
         missing = [index for index, _ in claims if index not in merged]
         if missing:
+            # Retried once, with ONLY the missing claims, before failing the
+            # case. Measured 2026-08-22: two of forty cases came back with
+            # verdicts for the first two claims and nothing else -- the model
+            # simply stopped early -- and losing a whole case to that is worse
+            # than one extra call. A second failure still raises: a fail-open
+            # judge reports a groundedness number it never measured.
+            retry_claims = [(index, text) for index, text in claims if index in set(missing)]
+            for excerpt_slice in slices:
+                excerpt_block = "\n\n".join(
+                    f"[{n}] (from: {title})\n{text}" for n, title, text in excerpt_slice
+                )
+                parsed = await self._structured(
+                    system=_SUPPORT_SYSTEM,
+                    user=(
+                        f"QUESTION\n{question}\n\n"
+                        f"EXCERPTS\n{excerpt_block or '(none were retrieved)'}\n\n"
+                        "CLAIMS\n" + "\n".join(f"{index}. {text}" for index, text in retry_claims)
+                    ),
+                    model_cls=JudgeResponse,
+                )
+                per_slice.append({v.index: v for v in parsed.verdicts})
+            merged = _merge(per_slice)
+            missing = [index for index, _ in claims if index not in merged]
+        if missing:
             raise ValueError(f"judge returned no verdict for claim index(es) {missing}")
         return merged
 

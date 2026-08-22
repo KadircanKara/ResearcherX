@@ -37,6 +37,11 @@ class ScoredClaim:
     # the excerpt catalog.
     supporting_papers: frozenset[str]
     marker_papers: frozenset[str]
+    # Stands after the prompt-sanctioned hand-off to general knowledge (see
+    # `claims._HANDOFF_MARKERS`). Ungrounded by design, so it is counted apart
+    # from hallucination rather than with it -- and never dropped, because it
+    # is still ungrounded text on a reader's screen.
+    disclosed: bool = False
 
     @property
     def is_checkable(self) -> bool:
@@ -82,6 +87,10 @@ class CaseOutcome:
         return tuple(c for c in self.claims if c.is_checkable)
 
     @property
+    def undisclosed(self) -> tuple[ScoredClaim, ...]:
+        return tuple(c for c in self.checkable if not c.disclosed)
+
+    @property
     def is_clean(self) -> bool:
         """No unsupported and no contradicted claim.
 
@@ -91,6 +100,17 @@ class CaseOutcome:
         refused is clean AND useless, and only the two numbers together say so.
         """
         return all(c.is_grounded for c in self.checkable)
+
+    @property
+    def is_clean_undisclosed(self) -> bool:
+        """No unsupported or contradicted claim OUTSIDE a hand-off.
+
+        The per-case counterpart of `undisclosed_hallucination_rate`: an
+        off_topic answer that declined and then answered from general knowledge
+        is clean by this measure and dirty by `is_clean`, and the pair is what
+        separates "the prompt told it to" from "it made something up".
+        """
+        return all(c.is_grounded for c in self.undisclosed)
 
 
 def _rate(numerator: int, denominator: int) -> float | None:
@@ -114,6 +134,32 @@ def hallucinated_claim_rate(outcomes: Sequence[CaseOutcome]) -> float | None:
     decides whether the system is shippable."""
     claims = [c for o in outcomes for c in o.checkable]
     return _rate(sum(1 for c in claims if not c.is_grounded), len(claims))
+
+
+def undisclosed_hallucination_rate(outcomes: Sequence[CaseOutcome]) -> float | None:
+    """(unsupported + contradicted) claims NOT covered by the hand-off, over
+    checkable claims that are likewise not covered by it.
+
+    THE REAL HALLUCINATION NUMBER. Production's own system prompt tells the
+    model to decline and then answer from general knowledge when the corpus
+    does not cover a question, so on the off_topic negatives most unsupported
+    claims are the prompt working exactly as written. Pooling the two reports a
+    design decision as a defect; this rate excludes it, and
+    `disclosed_claim_rate` reports how much was excluded so nothing is hidden.
+    """
+    claims = [c for o in outcomes for c in o.checkable if not c.disclosed]
+    return _rate(sum(1 for c in claims if not c.is_grounded), len(claims))
+
+
+def disclosed_claim_rate(outcomes: Sequence[CaseOutcome]) -> float | None:
+    """Share of checkable claims standing after a hand-off to general knowledge.
+
+    Read as EXPOSURE, not as an error rate: these are sentences the reader sees
+    presented as an answer, carrying no citation and no support, after a single
+    disclaiming sentence they may not connect to what follows.
+    """
+    claims = [c for o in outcomes for c in o.checkable]
+    return _rate(sum(1 for c in claims if c.disclosed), len(claims))
 
 
 def contradiction_rate(outcomes: Sequence[CaseOutcome]) -> float | None:

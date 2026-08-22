@@ -6,11 +6,14 @@ from evals.groundedness.metrics import (
     CaseOutcome,
     ScoredClaim,
     abstention_rate,
+    disclosed_claim_rate,
+    undisclosed_hallucination_rate,
     citation_coverage,
     citation_precision,
     claim_support_rate,
     clean_answer_rate,
     contradiction_rate,
+    hallucinated_claim_rate,
     regressions,
     split_by_evidence,
     unjudged_markers,
@@ -142,3 +145,43 @@ def test_regressions_are_reported_per_case_not_per_rate():
         "b": case(claim("supported"), case_id="b"),
     }
     assert regressions(before, after) == ["a"]
+
+
+def test_disclosed_claims_leave_the_hallucination_rate_but_stay_visible():
+    """A split, never an exemption: production's prompt sanctions the ungrounded
+    text, so it is not a hallucination — but it is still ungrounded text on a
+    reader's screen, and `disclosed_claim_rate` is what keeps it reported."""
+    outcome = case(
+        claim("supported"),
+        claim("unsupported", index=1, markers=(), supporting=()),
+        ScoredClaim(
+            index=2,
+            verdict="unsupported",
+            markers=(),
+            supporting_excerpts=(),
+            supporting_papers=frozenset(),
+            marker_papers=frozenset(),
+            disclosed=True,
+        ),
+    )
+    assert hallucinated_claim_rate([outcome]) == pytest.approx(2 / 3)
+    assert undisclosed_hallucination_rate([outcome]) == 0.5
+    assert disclosed_claim_rate([outcome]) == pytest.approx(1 / 3)
+
+
+def test_an_answer_that_only_hallucinates_under_a_disclaimer_is_clean_undisclosed():
+    """The pair of flags is what separates 'the prompt told it to' from 'it made
+    something up'."""
+    outcome = case(
+        ScoredClaim(
+            index=0,
+            verdict="unsupported",
+            markers=(),
+            supporting_excerpts=(),
+            supporting_papers=frozenset(),
+            marker_papers=frozenset(),
+            disclosed=True,
+        )
+    )
+    assert not outcome.is_clean
+    assert outcome.is_clean_undisclosed

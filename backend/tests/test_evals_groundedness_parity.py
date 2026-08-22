@@ -113,3 +113,19 @@ def test_the_runner_aborts_the_whole_run_when_credits_run_out():
     source = inspect.getsource(run_eval)
     assert "abort.set()" in source
     assert "aborted: the account ran out of credits" in source
+
+
+def test_the_hand_off_markers_still_match_the_production_prompt():
+    """The disclosed/undisclosed split rests entirely on recognising the
+    hand-off production instructs. If SYSTEM's wording changes and
+    `_HANDOFF_MARKERS` does not, every general-knowledge answer silently
+    becomes a hallucination and the negatives' number jumps with no code
+    change to explain it."""
+    from app.agents.chat_agent import SYSTEM
+    from evals.groundedness.claims import _HANDOFF_MARKERS
+
+    prompt = SYSTEM.lower()
+    assert any(marker in prompt for marker in _HANDOFF_MARKERS)
+    # The specific sentence the prompt tells the model to write.
+    assert "based on general knowledge" in prompt
+    assert "do not appear to cover" in prompt

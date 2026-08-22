@@ -87,3 +87,40 @@ def test_an_answer_with_no_markers_still_yields_claims():
     )
     assert len(claims) == 2
     assert all(c.markers == () for c in claims)
+
+
+def test_claims_after_the_prompts_own_hand_off_are_marked_disclosed():
+    """Production's SYSTEM prompt instructs exactly this: decline, then answer
+    from general knowledge. Everything after the hand-off is unsupported by
+    construction, so scoring it as hallucination would report the prompt
+    working as designed as a defect."""
+    answer = (
+        "The assigned papers do not appear to cover this. "
+        "Based on general knowledge: FPV goggles include the Fat Shark Dominator series. "
+        "Video transmitters should have adjustable power output."
+    )
+    claims = extract_claims(answer)
+    # The disclaiming sentence is itself a checkable claim ABOUT the corpus.
+    assert claims[0].disclosed is False
+    assert all(c.disclosed for c in claims[1:])
+
+
+def test_a_hand_off_that_shares_its_sentence_with_the_content_is_disclosed():
+    """The model writes it this way whenever the disclaimer ends in a colon.
+    Measured on the reference run: offtopic-spray-nozzle scored as an
+    undisclosed hallucination purely because of that colon."""
+    claims = extract_claims(
+        "Based on general knowledge: nozzle size and boom pressure depend on droplet "
+        "size, flight speed and canopy density."
+    )
+    assert claims[0].disclosed is True
+
+
+def test_a_bare_mention_of_general_knowledge_does_not_disclose_the_whole_answer():
+    """A hand-off announced but not taken leaves the following claims checkable
+    — otherwise one stray phrase would exempt an entire grounded answer."""
+    claims = extract_claims(
+        "The papers describe a multi-objective formulation [1]. "
+        "The revisit time constraint improves update frequency [2]."
+    )
+    assert not any(c.disclosed for c in claims)

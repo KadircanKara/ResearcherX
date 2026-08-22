@@ -67,6 +67,47 @@ _ABBREVIATIONS = (
 _MIN_CLAIM_CHARS = 25
 
 
+# The hand-off production's own system prompt instructs the model to make when
+# the corpus does not cover a question (`app/agents/chat_agent.py::SYSTEM`):
+#
+#   "If the answer cannot be found in the excerpts or the PAPERS block, say:
+#    'The assigned papers do not appear to cover this. Based on general
+#    knowledge: ...'"
+#
+# Everything after that sentence is UNSUPPORTED by construction -- it is not
+# in the excerpts, and it is not meant to be. Scoring it as hallucination
+# would report the prompt working as designed as a defect, so claims standing
+# after the hand-off are marked `disclosed` and counted apart.
+#
+# THIS IS A SPLIT, NOT AN EXEMPTION. A disclosed claim is still ungrounded
+# text a reader can mistake for grounded text -- one disclaimer sentence
+# followed by six confident sentences about FAA certification is exactly how
+# it reads on screen. `metrics` reports both rates, and the undisclosed one is
+# the hallucination number.
+#
+# `tests/test_evals_groundedness_parity.py` pins these phrases against the
+# production prompt: if the prompt's wording changes and this list does not,
+# every general-knowledge answer silently becomes a hallucination.
+_HANDOFF_MARKERS = (
+    "based on general knowledge",
+    "do not appear to cover",
+    "does not appear to cover",
+)
+
+# The phrase that hands off WITHIN a sentence. "The assigned papers do not
+# appear to cover this." is a claim about the corpus and stays checkable, but
+# "Based on general knowledge: nozzle size depends on droplet size ..." is one
+# sentence whose content half is already general knowledge -- the model writes
+# it that way whenever the disclaimer ends in a colon rather than a period.
+# Measured on the 2026-08-22 reference run: `offtopic-spray-nozzle` scored as
+# an undisclosed hallucination purely because of that colon.
+_INLINE_HANDOFF = "based on general knowledge"
+
+# Characters of content after the inline hand-off before the sentence counts as
+# carrying general knowledge rather than merely announcing it.
+_INLINE_HANDOFF_CONTENT_CHARS = 40
+
+
 @dataclass(frozen=True)
 class Claim:
     """One sentence of an answer, with the citation markers standing in it.
@@ -79,6 +120,11 @@ class Claim:
     index: int
     text: str
     markers: tuple[int, ...]
+    # This claim stands after the prompt-sanctioned hand-off to general
+    # knowledge, so being unsupported by the excerpts is expected rather than
+    # a failure. The disclaiming sentence itself is NOT disclosed -- it is a
+    # claim about the corpus, and it is checkable.
+    disclosed: bool = False
 
 
 def _ends_with_abbreviation(text: str) -> bool:
@@ -127,14 +173,36 @@ def extract_claims(answer: str) -> list[Claim]:
     same thing, which it is.
     """
     claims: list[Claim] = []
+    # Latches on: everything after the hand-off is general knowledge, not just
+    # the sentence immediately following it.
+    handed_off = False
     for segment, is_code in split_prose_segments(answer):
         if is_code:
             continue
         for sentence in _split_sentences(segment):
-            if len(sentence) < _MIN_CLAIM_CHARS:
-                continue
-            markers = tuple(int(m.group(1)) for m in _MARKER_RE.finditer(sentence))
-            claims.append(Claim(index=len(claims), text=sentence, markers=markers))
+            lowered = sentence.lower()
+            is_handoff = any(marker in lowered for marker in _HANDOFF_MARKERS)
+            # A sentence that hands off AND then keeps going is already general
+            # knowledge, not an announcement of it.
+            inline = _INLINE_HANDOFF in lowered and (
+                len(lowered) - lowered.index(_INLINE_HANDOFF) - len(_INLINE_HANDOFF)
+                >= _INLINE_HANDOFF_CONTENT_CHARS
+            )
+            if len(sentence) >= _MIN_CLAIM_CHARS:
+                markers = tuple(int(m.group(1)) for m in _MARKER_RE.finditer(sentence))
+                claims.append(
+                    Claim(
+                        index=len(claims),
+                        text=sentence,
+                        markers=markers,
+                        # The disclaiming sentence is itself checkable -- "the
+                        # papers do not cover this" is a claim about the corpus
+                        # -- so the flag starts applying at the NEXT sentence.
+                        disclosed=handed_off or inline,
+                    )
+                )
+            if is_handoff:
+                handed_off = True
     return claims
 
 

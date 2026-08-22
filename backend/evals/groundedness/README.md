@@ -183,6 +183,54 @@ Read the agreement block in this order:
 a candidate swapping one for the other disagrees on detail, not on decisions —
 that is what the `on problem/not-a-problem` column separates out.
 
+## Measured — 2026-08-22 (first reference run)
+
+- corpus 4594 chunks / 102 papers (project `fa2ab869…52922`), the same project
+  every `evals/retrieval` block uses
+- answering model `gpt-4.1-mini`, judge `gpt-4.1`, 40 of 42 cases scored
+- cost ~$2.80; the two lost cases are recorded below
+
+| group | cases | claims | support | halluc | undisclosed | disclosed | clean | cite-P | cite-cov |
+|---|---|---|---|---|---|---|---|---|---|
+| positives (pooled) | 29 | 159 | 0.99 | 0.01 | **0.01** | 0.00 | 0.93 | 0.96 | 0.39 |
+| evidence reached the model | 27 | 141 | 0.99 | 0.01 | 0.01 | 0.00 | 0.93 | 0.96 | 0.40 |
+| evidence did NOT reach | 2 | 18 | 1.00 | 0.00 | 0.00 | 0.00 | 1.00 | 1.00 | 0.28 |
+| off_topic negatives | 11 | 39 | 0.36 | 0.64 | **0.00** | 0.72 | 0.18 | — | 0.00 |
+
+**Generation is not the weak link.** Two ungrounded claims in 159, no
+contradictions anywhere, citation precision 0.96. Both failures are `figure`
+cases -- `harvested-power-duration-figure` ("these observations are summarized
+in excerpts [1]..[5], which include related figures") and
+`brkga-convergence-figure` -- which is a coherent finding rather than two
+one-offs: a figure question retrieves the caption's surrounding TEXT, and the
+model then describes what the figure shows, which the text does not state.
+
+**The negatives' 0.64 is the prompt, not the model.** Undisclosed
+hallucination on the off_topic set is **0.00**: every ungrounded claim stands
+after the hand-off production's own SYSTEM prompt instructs. What the split
+exposes instead is `disclosed = 0.72` and `abstention = 0.36` -- on 7 of 11
+off-topic questions the assistant declined and then answered anyway, with
+uncited FAA certification requirements, LiPo chemistry and specific FPV
+product recommendations. That is a product decision to revisit, not a bug to
+fix: the model is obeying its instructions exactly.
+
+**Citation coverage is the real gap: 0.39.** Six of every ten SUPPORTED claims
+carry no marker at all. The pattern is consistent across cases -- the model
+writes uncited bullets and then dumps every marker into one trailing sentence
+("These observations are summarized in excerpts [1], [2], [3], [4], [5]"),
+which is also how the worst positive failure happened. The claims are
+grounded; the reader simply cannot tell which paper any one of them came from.
+
+**Two cases lost to the judge**, both with the same signature -- verdicts for
+the first two claims and then nothing: `frontier-mesh-clustering` and
+`offtopic-cake`. The judge now retries the missing indices once before failing
+a case.
+
+The `evidence did NOT reach` row is 2 cases here against the retrieval
+harness's 4 blocked positives, because this harness runs the shipped hybrid
+path with the per-paper candidate guarantee, and `evals/retrieval`'s
+closed-form section reports the dense-arm figure.
+
 ## How answers are produced
 
 `generate.py` assembles production's own components rather than calling
@@ -205,6 +253,49 @@ module writes nothing.
 Not reproduced, because the golden set is single-turn: conversation-history
 retrieval, query reformulation (production skips it on a first turn anyway),
 persistence, and SSE emission.
+
+## Disclosed general knowledge is not hallucination
+
+Production's own system prompt (`app/agents/chat_agent.py::SYSTEM`) instructs
+the hand-off:
+
+    "If the answer cannot be found in the excerpts or the PAPERS block, say:
+     'The assigned papers do not appear to cover this. Based on general
+      knowledge: ...'"
+
+Everything after that sentence is unsupported by construction. Pooling it into
+the hallucination rate reports the prompt working exactly as written as a
+defect -- on the 2026-08-22 reference run it turned an 0.00 undisclosed
+hallucination rate on the negatives into an alarming 0.64.
+
+So claims standing after a hand-off are marked `disclosed` and counted apart:
+
+- **`undisclosed`** is the hallucination number -- ungrounded claims with no
+  disclaimer in front of them.
+- **`disclosed`** is the exposure that number does not cover, and it is
+  reported next to it precisely so the split cannot be used to hide anything.
+  A disclosed claim is still ungrounded text a reader can mistake for grounded
+  text: one disclaiming sentence followed by six confident sentences about FAA
+  certification requirements is exactly how it reads on screen.
+
+`claims._HANDOFF_MARKERS` is pinned against the production prompt by
+`tests/test_evals_groundedness_parity.py`. If that wording changes and the
+marker list does not, every general-knowledge answer silently becomes a
+hallucination.
+
+## Rescoring without re-judging
+
+A SCORING-POLICY change is not a measurement change. The disclosed/undisclosed
+split was added *after* the reference run had already spent $2.30 of judge
+tokens, and every verdict it needed was already in that run's `--json` dump:
+
+    ... run_eval --project-id <uuid> --rescore /tmp/groundedness_ref.json
+
+No model calls. `claims.extract_claims` is deterministic over the stored
+answer, so claim flags re-derive exactly; judge verdicts are read back as
+recorded. Re-judging instead would have re-bought the same answers with fresh
+sampling noise on top, and any change in the numbers would have been
+inseparable from the policy change being measured.
 
 ## Reading the output
 

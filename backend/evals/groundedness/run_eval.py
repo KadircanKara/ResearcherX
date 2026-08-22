@@ -48,8 +48,10 @@ from evals.groundedness.metrics import (
     claim_support_rate,
     clean_answer_rate,
     contradiction_rate,
+    disclosed_claim_rate,
     hallucinated_claim_rate,
     split_by_evidence,
+    undisclosed_hallucination_rate,
     unjudged_markers,
 )
 from evals.retrieval.golden_set import Case, chunk_satisfies, load_golden_set
@@ -165,6 +167,7 @@ async def _run_case(
                     paper_of[n] for n in verdicts[claim.index].supporting_excerpts if n in paper_of
                 ),
                 marker_papers=frozenset(paper_of[n] for n in claim.markers if n in paper_of),
+                disclosed=claim.disclosed,
             )
             for claim in claims
         )
@@ -179,6 +182,53 @@ async def _run_case(
         return outcome, generated, second_verdicts
 
 
+def _rescore(args) -> None:
+    """Re-derive the report from a stored run, making no model calls.
+
+    Exists because a SCORING-POLICY change is not a measurement change. The
+    disclosed/undisclosed split was added after the 2026-08-22 reference run
+    had already cost $2.30 of judge tokens; the verdicts it needed were all in
+    that run's `--json` dump, and re-judging them would have re-bought the same
+    answers with fresh sampling noise on top. `claims.extract_claims` is
+    deterministic over the stored answer, so the claim flags are re-derived
+    exactly, and the judge verdicts are read back as recorded.
+    """
+    payload = json.loads(args.rescore.read_text())
+    outcomes: list[CaseOutcome] = []
+    for entry in payload["cases"]:
+        claims = {c.index: c for c in extract_claims(entry["answer"])}
+        scored = tuple(
+            ScoredClaim(
+                index=raw["index"],
+                verdict=raw["verdict"],
+                markers=tuple(raw["markers"]),
+                supporting_excerpts=tuple(raw["supporting_excerpts"]),
+                supporting_papers=frozenset(raw["supporting_papers"]),
+                marker_papers=frozenset(raw["marker_papers"]),
+                # Re-derived, not read back: the flag did not exist when this
+                # run was written, which is the whole point of rescoring.
+                disclosed=claims[raw["index"]].disclosed if raw["index"] in claims else False,
+            )
+            for raw in entry["claims"]
+        )
+        outcomes.append(
+            CaseOutcome(
+                case_id=entry["case_id"],
+                kind=entry["kind"],
+                claims=scored,
+                stance=entry["stance"],
+                evidence_present=entry["evidence_present"],
+                marker_total=entry["marker_total"],
+            )
+        )
+
+    print(
+        f"RESCORED from {args.rescore.name} — no model calls. "
+        f"judge: {payload.get('judge_model')}   answering: {payload.get('answering_model')}"
+    )
+    _report(outcomes, generations={}, errors=[], per_case=args.per_case)
+
+
 def _fmt(value: float | None) -> str:
     return "  -  " if value is None else f"{value:.2f}"
 
@@ -191,11 +241,83 @@ def _summary_block(label: str, outcomes: list[CaseOutcome]) -> str:
         f"{label:<34}{len(outcomes):>5}{claims:>8}"
         f"{_fmt(claim_support_rate(outcomes)):>10}"
         f"{_fmt(hallucinated_claim_rate(outcomes)):>10}"
-        f"{_fmt(contradiction_rate(outcomes)):>10}"
+        f"{_fmt(undisclosed_hallucination_rate(outcomes)):>12}"
+        f"{_fmt(disclosed_claim_rate(outcomes)):>11}"
         f"{_fmt(clean_answer_rate(outcomes)):>10}"
         f"{_fmt(citation_precision(outcomes)):>10}"
         f"{_fmt(citation_coverage(outcomes)):>10}"
     )
+
+
+def _report(
+    outcomes: list[CaseOutcome],
+    *,
+    generations: dict[str, Generated],
+    errors: list[CaseError],
+    per_case: bool,
+) -> None:
+    """The report body, shared by a live run and by `--rescore`.
+
+    Shared rather than duplicated for the reason every mirrored policy in this
+    repo eventually is: a second copy drifts, and a rescored report that
+    computed its rates differently from a live one would silently compare two
+    definitions of the same metric.
+    """
+    positives = [o for o in outcomes if o.kind != "off_topic"]
+    negatives = [o for o in outcomes if o.kind == "off_topic"]
+    with_evidence, without_evidence = split_by_evidence(positives)
+
+    print(f"cases: {len(outcomes)} scored, {len(errors)} errored")
+    print(
+        "(claims are SENTENCES; no_claim sentences -- headings, refusals -- are excluded "
+        "from every rate)"
+    )
+    print()
+    header = (
+        f"{'group':<34}{'cases':>5}{'claims':>8}{'support':>10}{'halluc':>10}"
+        f"{'undisclosed':>12}{'disclosed':>11}{'clean':>10}{'cite-P':>10}{'cite-cov':>10}"
+    )
+    print(header)
+    print(_summary_block("positives (pooled)", positives))
+    print(_summary_block("  evidence reached the model", with_evidence))
+    print(_summary_block("  evidence did NOT reach", without_evidence))
+    print(_summary_block("off_topic negatives", negatives))
+    print()
+    print(
+        f"abstention  positives: {_fmt(abstention_rate(positives))} (lower is better)   "
+        f"negatives: {_fmt(abstention_rate(negatives))} (1.00 is the target)"
+    )
+    print(
+        f"markers shown but unjudgeable (sentences too short to be claims): "
+        f"{unjudged_markers(outcomes)}"
+    )
+    print(
+        "`halluc` counts every ungrounded claim; `undisclosed` excludes those standing "
+        "after the prompt's own hand-off to general knowledge, and `disclosed` is how "
+        "much that excluded. On the negatives the two differ by design -- production's "
+        "SYSTEM prompt instructs exactly that hand-off -- so `undisclosed` is the "
+        "hallucination number and `disclosed` is the exposure it does not cover."
+    )
+    # Off the table for width, but never dropped: a contradicted claim is the
+    # model misreading evidence it WAS given, which is the half a better prompt
+    # can fix, and it is invisible once pooled into `halluc`.
+    print(
+        f"contradicted claims (the model misreading evidence it was given): "
+        f"{_fmt(contradiction_rate(outcomes))} of checkable"
+    )
+    stripped = sum(g.stripped_markers for g in generations.values())
+    print(f"markers removed by strip_misattributed_citations before scoring: {stripped}")
+
+    if per_case:
+        print()
+        print(f"{'case':<34}{'kind':<11}{'ev':<4}{'claims':>7}{'bad':>5}{'stance':>10}")
+        for outcome in outcomes:
+            evidence = {True: "yes", False: "NO", None: "-"}[outcome.evidence_present]
+            bad = sum(1 for c in outcome.checkable if not c.is_grounded)
+            print(
+                f"{outcome.case_id:<34}{outcome.kind:<11}{evidence:<4}"
+                f"{len(outcome.checkable):>7}{bad:>5}{outcome.stance:>10}"
+            )
 
 
 async def main() -> None:
@@ -231,6 +353,16 @@ async def main() -> None:
         ),
     )
     parser.add_argument(
+        "--rescore",
+        type=Path,
+        default=None,
+        help=(
+            "recompute the report from a previous --json dump, with NO model calls. "
+            "For a scoring-policy change (which claims count, how they are grouped) -- "
+            "the verdicts are already stored, so re-judging them would only add noise"
+        ),
+    )
+    parser.add_argument(
         "--compare-judge",
         default=None,
         metavar="MODEL",
@@ -248,6 +380,10 @@ async def main() -> None:
     cases = load_golden_set(args.set)
     if args.limit:
         cases = cases[: args.limit]
+
+    if args.rescore:
+        _rescore(args)
+        return
 
     generator = AnswerGenerator()
     judge = Judge(model=args.judge_model)
@@ -302,55 +438,15 @@ async def main() -> None:
         if second:
             candidate_verdicts[outcome.case_id] = second
 
-    positives = [o for o in outcomes if o.kind != "off_topic"]
-    negatives = [o for o in outcomes if o.kind == "off_topic"]
-    with_evidence, without_evidence = split_by_evidence(positives)
-
     from app.core.config import settings
 
     answering = replay_model if args.replay else settings.llm_model
     replay_note = f" (replayed from {args.replay.name})" if args.replay else ""
     print(
         f"judge: {args.judge_model}   answering model: {answering}{replay_note}   "
-        f"project: {args.project_id}"
+        f"project: {args.project_id}   set: {args.set.name}"
     )
-    print(f"cases: {len(outcomes)} scored, {len(errors)} errored   set: {args.set.name}")
-    print(
-        "(claims are SENTENCES; no_claim sentences -- headings, refusals -- are excluded "
-        "from every rate)"
-    )
-    print()
-    header = (
-        f"{'group':<34}{'cases':>5}{'claims':>8}{'support':>10}{'halluc':>10}"
-        f"{'contra':>10}{'clean':>10}{'cite-P':>10}{'cite-cov':>10}"
-    )
-    print(header)
-    print(_summary_block("positives (pooled)", positives))
-    print(_summary_block("  evidence reached the model", with_evidence))
-    print(_summary_block("  evidence did NOT reach", without_evidence))
-    print(_summary_block("off_topic negatives", negatives))
-    print()
-    print(
-        f"abstention  positives: {_fmt(abstention_rate(positives))} (lower is better)   "
-        f"negatives: {_fmt(abstention_rate(negatives))} (1.00 is the target)"
-    )
-    print(
-        f"markers shown but unjudgeable (sentences too short to be claims): "
-        f"{unjudged_markers(outcomes)}"
-    )
-    stripped = sum(g.stripped_markers for g in generations.values())
-    print(f"markers removed by strip_misattributed_citations before scoring: {stripped}")
-
-    if args.per_case:
-        print()
-        print(f"{'case':<34}{'kind':<11}{'ev':<4}{'claims':>7}{'bad':>5}{'stance':>10}")
-        for outcome in outcomes:
-            evidence = {True: "yes", False: "NO", None: "-"}[outcome.evidence_present]
-            bad = sum(1 for c in outcome.checkable if not c.is_grounded)
-            print(
-                f"{outcome.case_id:<34}{outcome.kind:<11}{evidence:<4}"
-                f"{len(outcome.checkable):>7}{bad:>5}{outcome.stance:>10}"
-            )
+    _report(outcomes, generations=generations, errors=errors, per_case=args.per_case)
 
     if candidate_verdicts:
         reference = {
