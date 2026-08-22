@@ -248,23 +248,24 @@ def test_system_prompt_demands_a_marker_in_the_sentence_that_makes_the_claim():
     assert "summarized in excerpts" in SYSTEM
 
 
-def test_system_prompt_forbids_describing_a_figure_the_text_does_not_describe():
-    """Measured 2026-08-22: all five figure cases had their describing text
-    retrieved and two still produced an ungrounded claim, so the failure is
-    over-claiming, not retrieval. The model quoted a caption correctly and then
-    added what the plot "demonstrates" — reading an image it cannot see."""
-    assert "you cannot see them" in SYSTEM
-    assert "reading the image, not the text" in SYSTEM
-    assert "do not describe it and stop there" in SYSTEM
+def test_the_prompt_carries_no_figure_paragraph():
+    """A figures-are-not-visible rule was added on 2026-08-22 and reverted the
+    same day: measured against the otherwise identical prompt it moved every
+    positive metric the wrong way (citation coverage 0.59 -> 0.43, clean 0.93
+    -> 0.87, citation precision 0.96 -> 0.91) AND still produced the exact
+    over-claim it forbade, on a case that had been clean without it.
 
+    The reading is prompt dilution -- a long paragraph competing with the
+    citation rules, which the metadata block's own ORDER IS DELIBERATE warning
+    records a live-verified version of. Figure over-claiming remains a known
+    ~1-in-150-claims failure; the next attempt is retrieval-side (anchor a
+    figure's caption to the paragraphs that discuss it), not more prompt text.
 
-def test_the_figure_rule_sits_outside_the_metadata_sequence():
-    """That sequence carries an ORDER IS DELIBERATE warning and two
-    live-verified regressions; inserting into it re-opens both."""
-    figures = SYSTEM.index("Figures and tables")
-    assert SYSTEM.index("Exception — authors, year, venue") < figures
-    assert SYSTEM.index("ask which paper") < figures
-    assert figures < SYSTEM.index("Formatting —")
+    This test exists so the paragraph is not re-added without re-measuring:
+    see evals/groundedness/README.md, "Measured — 2026-08-22c".
+    """
+    assert "Figures and tables" not in SYSTEM
+    assert "reading the image, not the text" not in SYSTEM
 
 
 def test_system_prompt_asks_which_paper_when_metadata_question_is_ambiguous():

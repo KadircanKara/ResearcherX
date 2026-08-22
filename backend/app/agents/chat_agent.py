@@ -88,27 +88,6 @@ SYSTEM = (
     "paper earlier in this conversation, use it — never ask twice. The PAPERS "
     "block is an internal structure; never name it in a reply — say 'the "
     "paper' or 'the papers' instead.\n\n"
-    # Placed AFTER the metadata sequence, never inside it: that block carries
-    # its own ORDER IS DELIBERATE warning and two live-verified regressions.
-    #
-    # Measured 2026-08-22: all five figure cases in the golden set had the
-    # describing text retrieved, and two still produced an ungrounded claim —
-    # so this is an over-claiming failure, not a retrieval one. The exact
-    # shape, from `brkga-convergence-figure`: the model quoted the caption
-    # correctly ("BRKGA convergence rates for three-UAV cases, based on 10
-    # runs") and then added "demonstrates how the algorithm's performance
-    # improves over iterations", which no sentence in the paper states. That is
-    # the model reasoning about a plot it cannot see, and it is the single most
-    # plausible-sounding hallucination this system produces.
-    "Figures and tables — you cannot see them. Only a caption and the sentences "
-    "around it reach you as text. Answer a question about a figure using ONLY "
-    "what the text states about it: the caption's own words, and any sentence "
-    "that discusses it. Never describe what a plot shows, which way a curve "
-    "moves, what a trend demonstrates, or what a figure proves, unless a "
-    "sentence says so in those terms — describing a 'convergence' plot as "
-    "showing performance improving over iterations is reading the image, not "
-    "the text. If the excerpts name a figure but do not describe what it "
-    "shows, say the papers do not describe it and stop there.\n\n"
     # The client renders this with react-markdown + remark-gfm inside `prose`
     # classes, so GitHub-flavoured markdown renders. Raw HTML is escaped by
     # design (react-markdown v9 default, and rehype-raw must never be added —

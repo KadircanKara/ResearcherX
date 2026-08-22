@@ -309,6 +309,13 @@ the citation rules is worth trying; the paragraph as written is not.
 five figure cases, two events. What it does establish is that THIS rule, at
 THIS length, in THIS position, costs more than it buys.
 
+**The rule was reverted the same day**, so the shipped prompt is run 2's.
+`tests/test_chat_agents.py::test_the_prompt_carries_no_figure_paragraph` pins
+the absence and points here, so it cannot be re-added without re-measuring.
+Figure over-claiming stays a known ~1-in-150-claims failure; the next attempt
+is retrieval-side -- anchor a figure's caption to the paragraphs that discuss
+it -- rather than more prompt text.
+
 ### The harness was wrong too
 
 Run 3 surfaced a bug in `claims.extract_claims`: a list introducer ("The
