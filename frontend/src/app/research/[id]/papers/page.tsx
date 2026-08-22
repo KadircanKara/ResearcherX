@@ -2,12 +2,13 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams } from "next/navigation";
-import { FileText, Pencil, Plus, Trash2 } from "lucide-react";
+import { Download, ExternalLink, FileText, Pencil, Plus, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { BulkEditBar } from "@/components/bulk-edit-bar";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { PaperDialog } from "@/components/paper-dialog";
-import { getProject, listPapers, deletePaper } from "@/lib/projects";
+import { getProject, listPapers, deletePaper, fetchPaperPdf } from "@/lib/projects";
+import { saveBlob } from "@/lib/download";
 import { clear, isAllSelected, selectAll, toggle } from "@/lib/selection";
 import type { Paper, Role } from "@/lib/types";
 
@@ -27,6 +28,23 @@ export default function PapersPage() {
   const [myRole, setMyRole] = useState<Role | null>(null);
   const [loading, setLoading] = useState(true);
   const [deleting, setDeleting] = useState<string | null>(null);
+  const [downloading, setDownloading] = useState<string | null>(null);
+
+  async function handleDownloadPdf(paper: Paper) {
+    setDownloading(paper.id);
+    try {
+      const blob = await fetchPaperPdf(projectId, paper.id);
+      // Named for the paper, not its id: the file lands in a downloads
+      // folder where an id names nothing. Same character rules as the chat
+      // transcript export, for the same filesystems.
+      const safe = paper.title.replace(/[\\/:*?"<>|]/g, "-").trim().slice(0, 80) || "paper";
+      saveBlob(blob, `${safe}.pdf`);
+    } catch {
+      setBulkError("Could not download that PDF. Please try again.");
+    } finally {
+      setDownloading(null);
+    }
+  }
   const [editing, setEditing] = useState<Paper | null>(null);
 
   const [editingMode, setEditingMode] = useState(false);
@@ -197,6 +215,41 @@ export default function PapersPage() {
                 {fmtDate(paper.created_at)}
               </p>
             </div>
+            {/* Three states, one slot. A paper we hold the PDF for is
+                downloadable; a link-sourced one opens where it lives; and a
+                paper with neither -- every row ingested before PDFs were
+                kept -- says so rather than leaving an unexplained gap where
+                its neighbours have a control. */}
+            {paper.has_pdf ? (
+              <button
+                onClick={() => void handleDownloadPdf(paper)}
+                disabled={downloading === paper.id}
+                title="Download PDF"
+                aria-label={`Download PDF: ${paper.title}`}
+                className="mt-0.5 shrink-0 rounded p-1 text-muted-foreground/50 transition-colors hover:bg-accent hover:text-foreground disabled:opacity-40"
+              >
+                <Download className="size-3.5" />
+              </button>
+            ) : paper.resolved_pdf_url || paper.pdf_url ? (
+              <a
+                href={paper.resolved_pdf_url ?? paper.pdf_url ?? undefined}
+                target="_blank"
+                rel="noopener noreferrer"
+                title="Open the paper's link"
+                aria-label={`Open link: ${paper.title}`}
+                className="mt-0.5 shrink-0 rounded p-1 text-muted-foreground/50 transition-colors hover:bg-accent hover:text-foreground"
+              >
+                <ExternalLink className="size-3.5" />
+              </a>
+            ) : (
+              <span
+                title="No PDF stored — this paper was added before PDFs were kept."
+                className="mt-0.5 shrink-0 cursor-default rounded p-1 text-muted-foreground/25"
+                aria-label="No PDF stored"
+              >
+                <Download className="size-3.5" />
+              </span>
+            )}
             {canAdd && (
               <button
                 onClick={() => setEditing(paper)}

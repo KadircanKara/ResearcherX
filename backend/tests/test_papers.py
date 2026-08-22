@@ -408,3 +408,162 @@ async def test_patch_paper_from_another_project_404s(
         headers={"X-Dev-User-Id": you.id},
     )
     assert r.status_code == 404
+
+
+# ── stored PDFs ──────────────────────────────────────────────────────────────
+
+
+async def _upload(client: AsyncClient, you: User, project: Project, pdf: bytes) -> str:
+    """Create a paper and ingest `pdf` into it. Returns the paper id."""
+    created = await client.post(
+        f"/v1/projects/{project.id}/papers",
+        json={"title": "Uploaded paper", "source": "upload"},
+        headers={"X-Dev-User-Id": you.id},
+    )
+    paper_id = created.json()["id"]
+    with patch(
+        "app.services.paper_ingest_service.index_chunks",
+        new=AsyncMock(return_value=0),
+    ):
+        await client.post(
+            f"/v1/projects/{project.id}/papers/{paper_id}/ingest",
+            content=pdf,
+            headers={"X-Dev-User-Id": you.id},
+        )
+    return paper_id
+
+
+async def test_an_uploaded_pdf_comes_back_verbatim(
+    client: AsyncClient, you: User, project: Project
+):
+    pdf = b"%PDF-1.4 stored bytes"
+    paper_id = await _upload(client, you, project, pdf)
+
+    resp = await client.get(
+        f"/v1/projects/{project.id}/papers/{paper_id}/pdf",
+        headers={"X-Dev-User-Id": you.id},
+    )
+
+    assert resp.status_code == 200
+    assert resp.content == pdf
+    assert resp.headers["content-type"] == "application/pdf"
+    assert "attachment" in resp.headers["content-disposition"]
+
+
+async def test_the_stored_pdf_survives_a_failed_extraction(
+    client: AsyncClient, you: User, project: Project
+):
+    """Keeping the user's own file is the point of the table, and extraction
+    is the part that fails -- a corrupt or image-only PDF must not take the
+    upload down with it."""
+    created = await client.post(
+        f"/v1/projects/{project.id}/papers",
+        json={"title": "Corrupt", "source": "upload"},
+        headers={"X-Dev-User-Id": you.id},
+    )
+    paper_id = created.json()["id"]
+    pdf = b"%PDF-1.4 unparseable"
+
+    with patch(
+        "app.services.paper_ingest_service._extract_markdown",
+        side_effect=RuntimeError("cannot parse"),
+    ):
+        # However the failure surfaces -- a raised exception or a 500 -- is
+        # not what this test is about. What matters is the file afterwards.
+        try:
+            await client.post(
+                f"/v1/projects/{project.id}/papers/{paper_id}/ingest",
+                content=pdf,
+                headers={"X-Dev-User-Id": you.id},
+            )
+        except Exception:
+            pass
+
+    resp = await client.get(
+        f"/v1/projects/{project.id}/papers/{paper_id}/pdf",
+        headers={"X-Dev-User-Id": you.id},
+    )
+    assert resp.status_code == 200
+    assert resp.content == pdf
+
+
+async def test_a_paper_with_no_stored_pdf_is_a_404(
+    client: AsyncClient, you: User, project: Project
+):
+    # Every paper ingested before `paper_files` existed, and every
+    # link-sourced paper, looks like this.
+    created = await client.post(
+        f"/v1/projects/{project.id}/papers",
+        json={"title": "Linked", "source": "link", "pdf_url": "https://example.com/p.pdf"},
+        headers={"X-Dev-User-Id": you.id},
+    )
+
+    resp = await client.get(
+        f"/v1/projects/{project.id}/papers/{created.json()['id']}/pdf",
+        headers={"X-Dev-User-Id": you.id},
+    )
+    assert resp.status_code == 404
+
+
+async def test_an_upload_over_the_cap_is_refused_and_stores_nothing(
+    client: AsyncClient, you: User, project: Project, monkeypatch
+):
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "paper_pdf_max_bytes", 16)
+    created = await client.post(
+        f"/v1/projects/{project.id}/papers",
+        json={"title": "Too big", "source": "upload"},
+        headers={"X-Dev-User-Id": you.id},
+    )
+    paper_id = created.json()["id"]
+
+    resp = await client.post(
+        f"/v1/projects/{project.id}/papers/{paper_id}/ingest",
+        content=b"%PDF-1.4" + b"x" * 100,
+        headers={"X-Dev-User-Id": you.id},
+    )
+
+    assert resp.status_code == 413
+    stored = await client.get(
+        f"/v1/projects/{project.id}/papers/{paper_id}/pdf",
+        headers={"X-Dev-User-Id": you.id},
+    )
+    assert stored.status_code == 404
+
+
+async def test_has_pdf_distinguishes_stored_from_not(
+    client: AsyncClient, you: User, project: Project
+):
+    uploaded = await _upload(client, you, project, b"%PDF-1.4 x")
+    await client.post(
+        f"/v1/projects/{project.id}/papers",
+        json={"title": "Linked", "source": "link", "pdf_url": "https://example.com/p.pdf"},
+        headers={"X-Dev-User-Id": you.id},
+    )
+
+    listed = await client.get(
+        f"/v1/projects/{project.id}/papers", headers={"X-Dev-User-Id": you.id}
+    )
+
+    by_id = {p["id"]: p for p in listed.json()}
+    assert by_id[uploaded]["has_pdf"] is True
+    assert [p["has_pdf"] for p in listed.json() if p["id"] != uploaded] == [False]
+
+
+async def test_deleting_a_paper_deletes_its_stored_pdf(
+    client: AsyncClient, db_session: AsyncSession, you: User, project: Project
+):
+    from app.db.models import PaperFile
+
+    paper_id = await _upload(client, you, project, b"%PDF-1.4 x")
+
+    await client.delete(
+        f"/v1/projects/{project.id}/papers/{paper_id}",
+        headers={"X-Dev-User-Id": you.id},
+    )
+
+    remaining = (
+        await db_session.execute(select(PaperFile.paper_id).where(PaperFile.paper_id == paper_id))
+    ).scalar_one_or_none()
+    assert remaining is None

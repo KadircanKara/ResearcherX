@@ -372,6 +372,13 @@ class Settings(BaseSettings):
     # cannot make the tree endpoint or the editor sidebar the slow part.
     latex_max_files: int = 2000
 
+    # The biggest PDF a paper may carry, for BOTH an upload we store and a
+    # link we fetch. Caddy caps `/v1/*` at 64MB and paper ingest was
+    # deliberately unbounded below that -- fine while the bytes were a
+    # transient buffer, but storing them turns "unbounded" into a storage
+    # commitment, and a fetched response is attacker-influenced either way.
+    paper_pdf_max_bytes: int = 30 * 1024 * 1024
+
     # The plan/commit parking spot for an import (services/latex_staging.py).
     # Bounded three ways because it holds whole archives in memory: 8 pending
     # imports, 100MB total, 30 minutes each. In-process, so single-worker

@@ -18,10 +18,14 @@ import type { Paper } from "@/lib/types";
 
 export type PaperMethod = "upload" | "link" | "manual";
 
+// "manual" is deliberately absent: a hand-typed paper has no PDF and no
+// link, so nothing about it can ever be opened or downloaded, and its text
+// is whatever the typist remembered. The manual FORM is still reachable --
+// edit-mode renders it for every paper, which is the only way to fix a
+// title or an author list.
 const METHODS: { key: PaperMethod; label: string }[] = [
   { key: "upload", label: "Upload" },
   { key: "link", label: "Link" },
-  { key: "manual", label: "Manual" },
 ];
 
 const EMPTY: PaperFields = { title: "", abstract: "", body: "" };
