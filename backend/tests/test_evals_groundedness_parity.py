@@ -115,17 +115,32 @@ def test_the_runner_aborts_the_whole_run_when_credits_run_out():
     assert "aborted: the account ran out of credits" in source
 
 
-def test_the_hand_off_markers_still_match_the_production_prompt():
-    """The disclosed/undisclosed split rests entirely on recognising the
-    hand-off production instructs. If SYSTEM's wording changes and
-    `_HANDOFF_MARKERS` does not, every general-knowledge answer silently
-    becomes a hallucination and the negatives' number jumps with no code
-    change to explain it."""
+def test_the_prompt_no_longer_instructs_a_hand_off_to_general_knowledge():
+    """The hand-off was removed from production on 2026-08-22.
+
+    The disclosed/undisclosed split STAYS: it is what makes runs recorded
+    before that change readable, and a model can still produce the pattern
+    unprompted -- `disclosed` then measures a defect rather than a design, and
+    the report prints both rates either way. What must not survive is the
+    prompt instructing it.
+    """
     from app.agents.chat_agent import SYSTEM
-    from evals.groundedness.claims import _HANDOFF_MARKERS
 
     prompt = SYSTEM.lower()
-    assert any(marker in prompt for marker in _HANDOFF_MARKERS)
-    # The specific sentence the prompt tells the model to write.
-    assert "based on general knowledge" in prompt
-    assert "do not appear to cover" in prompt
+    assert "based on general knowledge: ...'" not in prompt
+    assert "never answer from general knowledge" in prompt
+    assert "the ingested documents do not cover this." in prompt
+
+
+def test_the_hand_off_markers_still_detect_the_pattern_they_were_built_for():
+    """`_HANDOFF_MARKERS` outlives the prompt that motivated it, so it is
+    pinned against a real answer from the 2026-08-22 reference run rather than
+    against SYSTEM."""
+    from evals.groundedness.claims import extract_claims
+
+    claims = extract_claims(
+        "The assigned papers do not appear to cover this. "
+        "Based on general knowledge: FPV goggles include the Fat Shark Dominator series."
+    )
+    assert claims[0].disclosed is False
+    assert claims[1].disclosed is True

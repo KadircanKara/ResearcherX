@@ -14,20 +14,44 @@ SYSTEM = (
     "Citation rules:\n"
     "- Every non-trivial claim MUST cite its source excerpt number.\n"
     "- Use ONLY numbers from the provided EXCERPT CATALOG. Never invent numbers.\n"
-    "- If the answer cannot be found in the excerpts or the PAPERS block, say: "
-    "'The assigned papers do not appear to cover this. Based on general knowledge: ...'\n\n"
-    # The rule above is a template: decline, then hand off to another source.
-    # Live testing showed the model following it to the letter for a paper's
-    # own year — declining, then adding "however, based on the EXCERPT
-    # CATALOG..." and fabricating one from a bibliography. For these three
-    # fields there is no other source to hand off to, so the exception has
-    # to name the hand-off words themselves and forbid them outright.
-    "Exception — authors, year, venue: for these three fields only, there is "
-    "no fallback of any kind, not general knowledge and not the excerpts. If "
-    "the PAPERS block does not state one, say the paper does not state it, "
-    "and end the reply there. Do not follow that sentence with 'however', "
-    "'based on', or any other hand-off to another source — for these three "
-    "fields none exists.\n\n"
+    # EVERY sentence, not "every claim" — the previous wording was already
+    # "every non-trivial claim MUST cite", and the model satisfied it by
+    # writing uncited bullets followed by one sentence naming every source at
+    # once. Measured 2026-08-22: only 39% of SUPPORTED claims carried a marker,
+    # and the single worst grounding failure in the whole run was one of those
+    # summarising sentences ("these observations are summarized in excerpts
+    # [1]..[5], which include related figures") — a claim about the catalog
+    # that no excerpt supports. So the rule now names the anti-pattern.
+    "- Put each marker in the SENTENCE that makes the claim, not in a summary "
+    "at the end. Every bullet in a list carries its own marker. Never write a "
+    "trailing sentence that lists sources ('these observations are summarized "
+    "in excerpts [1], [2], [3]') — a reader cannot tell which excerpt carried "
+    "which claim, and that sentence is itself a claim no excerpt supports.\n"
+    # NO FALLBACK OF ANY KIND. This replaced a decline-then-hand-off template
+    # ("The assigned papers do not appear to cover this. Based on general
+    # knowledge: ...") on 2026-08-22. Measured on the off_topic negatives: the
+    # model obeyed that template exactly, and 72% of its claims on those cases
+    # were ungrounded-by-design — uncited FAA certification requirements,
+    # lithium-polymer chemistry, named FPV products — behind a single
+    # disclaiming sentence a reader can easily miss. The product answers from
+    # the ingested corpus or it does not answer.
+    "- NEVER answer from general knowledge. Every statement you make must come "
+    "from the provided excerpts, the PAPERS block, or the prior conversation. "
+    "If they do not answer the question, reply exactly: 'The ingested documents "
+    "do not cover this.' and STOP. Do not follow it with 'however', 'based on', "
+    "'in general', or any other hand-off — there is no other source. Do not "
+    "explain what the papers are about instead, and do not offer to answer from "
+    "elsewhere.\n\n"
+    # Retained after the no-fallback rule above subsumed it, because the
+    # failure it fixes is a different one and was live-verified: the model
+    # declined a paper's own year and then mined a bibliography excerpt for a
+    # year-shaped number. The general rule permits the excerpts; for these
+    # three fields the excerpts are themselves a wrong source.
+    "Exception — authors, year, venue: for these three fields only, not even "
+    "the excerpts are a source. If the PAPERS block does not state one, say the "
+    "paper does not state it, and end the reply there. Do not follow that "
+    "sentence with 'however', 'based on', or any other hand-off — for these "
+    "three fields none exists.\n\n"
     # Without this paragraph the model declines metadata questions even with the
     # block in front of it: the authors are not in any excerpt, and the rule
     # above tells it that means it cannot answer.
@@ -64,6 +88,27 @@ SYSTEM = (
     "paper earlier in this conversation, use it — never ask twice. The PAPERS "
     "block is an internal structure; never name it in a reply — say 'the "
     "paper' or 'the papers' instead.\n\n"
+    # Placed AFTER the metadata sequence, never inside it: that block carries
+    # its own ORDER IS DELIBERATE warning and two live-verified regressions.
+    #
+    # Measured 2026-08-22: all five figure cases in the golden set had the
+    # describing text retrieved, and two still produced an ungrounded claim —
+    # so this is an over-claiming failure, not a retrieval one. The exact
+    # shape, from `brkga-convergence-figure`: the model quoted the caption
+    # correctly ("BRKGA convergence rates for three-UAV cases, based on 10
+    # runs") and then added "demonstrates how the algorithm's performance
+    # improves over iterations", which no sentence in the paper states. That is
+    # the model reasoning about a plot it cannot see, and it is the single most
+    # plausible-sounding hallucination this system produces.
+    "Figures and tables — you cannot see them. Only a caption and the sentences "
+    "around it reach you as text. Answer a question about a figure using ONLY "
+    "what the text states about it: the caption's own words, and any sentence "
+    "that discusses it. Never describe what a plot shows, which way a curve "
+    "moves, what a trend demonstrates, or what a figure proves, unless a "
+    "sentence says so in those terms — describing a 'convergence' plot as "
+    "showing performance improving over iterations is reading the image, not "
+    "the text. If the excerpts name a figure but do not describe what it "
+    "shows, say the papers do not describe it and stop there.\n\n"
     # The client renders this with react-markdown + remark-gfm inside `prose`
     # classes, so GitHub-flavoured markdown renders. Raw HTML is escaped by
     # design (react-markdown v9 default, and rehype-raw must never be added —
@@ -219,8 +264,14 @@ class ChatAgent:
             )
             context_block = f"EXCERPT CATALOG:\n{catalog}"
         else:
+            # Nothing cleared the similarity threshold. That is not a licence
+            # to answer from memory: an empty catalog is precisely the state
+            # the refusal exists for, and the previous text here ("answer from
+            # general knowledge") contradicted the system prompt outright.
             context_block = (
-                "EXCERPT CATALOG: (no excerpts retrieved — answer from general knowledge)"
+                "EXCERPT CATALOG: (empty — no excerpt in the library was similar enough "
+                "to this question. Unless the PAPERS block answers it, reply exactly "
+                "'The ingested documents do not cover this.' and stop.)"
             )
 
         # Build conversation history for multi-turn context
