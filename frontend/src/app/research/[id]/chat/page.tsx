@@ -2,7 +2,13 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
-import { Download, MessageSquarePlus, Pencil, Plus, Trash2 } from "lucide-react";
+import {
+  Download,
+  MessageSquarePlus,
+  Pencil,
+  Plus,
+  Trash2,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { BulkEditBar } from "@/components/bulk-edit-bar";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
@@ -16,11 +22,20 @@ import {
   listConversations,
   renameConversation,
 } from "@/lib/chat";
-import { conversationFilename, conversationToMarkdown } from "@/lib/chat-export";
+import {
+  conversationFilename,
+  conversationToMarkdown,
+} from "@/lib/chat-export";
 import { saveBlob } from "@/lib/download";
 import type { Mention } from "@/lib/mentions";
 import { getProject, listPapers } from "@/lib/projects";
-import { clear, isAllSelected, retainVisible, selectAll, toggle } from "@/lib/selection";
+import {
+  clear,
+  isAllSelected,
+  retainVisible,
+  selectAll,
+  toggle,
+} from "@/lib/selection";
 import { matchesQuery } from "@/lib/search";
 import type { ChatConversation, Paper, Role } from "@/lib/types";
 
@@ -29,7 +44,9 @@ const CAN_DELETE: Role[] = ["owner", "member"];
 
 function fmtDate(iso: string): string {
   return new Date(iso).toLocaleDateString("en-GB", {
-    day: "numeric", month: "short", year: "numeric",
+    day: "numeric",
+    month: "short",
+    year: "numeric",
   });
 }
 
@@ -55,23 +72,28 @@ export default function ChatPage() {
 
   // `silent` skips the loading skeleton — used by handleDelete's error path to
   // resync without flashing the whole list away under the user.
-  const load = useCallback((opts: { silent?: boolean } = {}) => {
-    if (!opts.silent) setLoading(true);
-    Promise.all([listConversations(projectId), getProject(projectId)])
-      .then(([convs, detail]) => {
-        setConversations(convs);
-        setMyRole(detail.my_role);
-      })
-      .catch(() => {})
-      .finally(() => setLoading(false));
-  }, [projectId]);
+  const load = useCallback(
+    (opts: { silent?: boolean } = {}) => {
+      if (!opts.silent) setLoading(true);
+      Promise.all([listConversations(projectId), getProject(projectId)])
+        .then(([convs, detail]) => {
+          setConversations(convs);
+          setMyRole(detail.my_role);
+        })
+        .catch(() => {})
+        .finally(() => setLoading(false));
+    },
+    [projectId],
+  );
 
   useEffect(() => {
     load();
   }, [load]);
 
   useEffect(() => {
-    listPapers(projectId).then(setPapers).catch(() => {});
+    listPapers(projectId)
+      .then(setPapers)
+      .catch(() => {});
   }, [projectId]);
 
   // Deletes immediately, no confirmation — deliberate for now, matching the
@@ -113,7 +135,7 @@ export default function ChatPage() {
     try {
       const updated = await renameConversation(projectId, target.id, title);
       setConversations((prev) =>
-        prev.map((c) => (c.id === updated.id ? { ...c, ...updated } : c))
+        prev.map((c) => (c.id === updated.id ? { ...c, ...updated } : c)),
       );
       setRenaming(null);
     } catch {
@@ -134,8 +156,10 @@ export default function ChatPage() {
       // a transcript.
       const detail = await getConversation(projectId, conv.id);
       saveBlob(
-        new Blob([conversationToMarkdown(detail)], { type: "text/markdown;charset=utf-8" }),
-        conversationFilename(detail.title)
+        new Blob([conversationToMarkdown(detail)], {
+          type: "text/markdown;charset=utf-8",
+        }),
+        conversationFilename(detail.title),
       );
     } catch {
       setBulkError("Could not download this conversation. Please try again.");
@@ -156,7 +180,7 @@ export default function ChatPage() {
     setBulkError(null);
     const ids = [...selected];
     const results = await Promise.allSettled(
-      ids.map((id) => deleteConversation(projectId, id))
+      ids.map((id) => deleteConversation(projectId, id)),
     );
     const failed = ids.filter((_, i) => results[i].status === "rejected");
     setSelected(new Set(failed));
@@ -179,7 +203,9 @@ export default function ChatPage() {
       const ids = mentions.map((mention) => mention.paperId);
       const m = ids.length ? `&m=${ids.map(encodeURIComponent).join(",")}` : "";
       setSubmitting(false);
-      router.push(`/research/${projectId}/chat/${conv.id}?q=${encodeURIComponent(q)}${m}`);
+      router.push(
+        `/research/${projectId}/chat/${conv.id}?q=${encodeURIComponent(q)}${m}`,
+      );
     } catch {
       setSubmitError("Failed to start chat. Please try again.");
       setSubmitting(false);
@@ -201,49 +227,51 @@ export default function ChatPage() {
 
   return (
     <div>
-      <div className="mb-4 flex items-center justify-between">
-        <p className="text-sm text-muted-foreground">
-          {conversations.length === 0
-            ? "No conversations yet"
-            : query
-              ? `${visible.length} of ${conversations.length} conversations`
-              : `${conversations.length} conversation${conversations.length !== 1 ? "s" : ""}`}
-        </p>
-        <div className="flex items-center gap-2">
-          {conversations.length > 0 && (
-            <div className="w-56">
-              <SearchInput
-                value={query}
-                onChange={changeQuery}
-                placeholder="Search conversations…"
-                label="Search conversations by title"
-              />
-            </div>
-          )}
-          <BulkEditBar
-            active={editingMode}
-            count={selected.size}
-            total={visibleIds.length}
-            allSelected={isAllSelected(selected, visibleIds)}
-            busy={bulkBusy}
-            onEnter={() => setEditingMode(true)}
-            onSelectAll={() => setSelected(selectAll(selected, visibleIds))}
-            onClear={() => setSelected(clear())}
-            onDelete={() => setPendingBulkDelete(true)}
-            onDone={() => {
-              setEditingMode(false);
-              // A selection that survives invisibly is a delete waiting to
-              // hit the wrong rows.
-              setSelected(clear());
-            }}
-          />
-          {!showForm && (
-            <Button size="sm" onClick={() => setShowForm(true)}>
-              <Plus className="mr-1.5 size-3.5" />
-              New Chat
-            </Button>
-          )}
+      {/* Count and actions on one line, the search box on its own beneath
+          them at full width -- see the papers page for why. */}
+      <div className="mb-4 flex flex-col gap-2">
+        <div className="flex items-center justify-between gap-3">
+          <p className="text-sm text-muted-foreground">
+            {conversations.length === 0
+              ? "No conversations yet"
+              : query
+                ? `${visible.length} of ${conversations.length} conversations`
+                : `${conversations.length} conversation${conversations.length !== 1 ? "s" : ""}`}
+          </p>
+          <div className="flex shrink-0 items-center gap-2">
+            <BulkEditBar
+              active={editingMode}
+              count={selected.size}
+              total={visibleIds.length}
+              allSelected={isAllSelected(selected, visibleIds)}
+              busy={bulkBusy}
+              onEnter={() => setEditingMode(true)}
+              onSelectAll={() => setSelected(selectAll(selected, visibleIds))}
+              onClear={() => setSelected(clear())}
+              onDelete={() => setPendingBulkDelete(true)}
+              onDone={() => {
+                setEditingMode(false);
+                // A selection that survives invisibly is a delete waiting to
+                // hit the wrong rows.
+                setSelected(clear());
+              }}
+            />
+            {!showForm && (
+              <Button size="sm" onClick={() => setShowForm(true)}>
+                <Plus className="mr-1.5 size-3.5" />
+                New Chat
+              </Button>
+            )}
+          </div>
         </div>
+        {conversations.length > 0 && (
+          <SearchInput
+            value={query}
+            onChange={changeQuery}
+            placeholder="Search conversations…"
+            label="Search conversations by title"
+          />
+        )}
       </div>
 
       {bulkError && (
@@ -267,14 +295,23 @@ export default function ChatPage() {
             <p className="mt-1 text-xs text-destructive">{submitError}</p>
           )}
           <div className="mt-3 flex gap-2">
-            <Button size="sm" onClick={handleStart} disabled={!content.trim() || submitting}>
+            <Button
+              size="sm"
+              onClick={handleStart}
+              disabled={!content.trim() || submitting}
+            >
               <MessageSquarePlus className="mr-1.5 size-3.5" />
               {submitting ? "Starting…" : "Start Chat"}
             </Button>
             <Button
               size="sm"
               variant="ghost"
-              onClick={() => { setShowForm(false); setContent(""); setMentions([]); setSubmitError(null); }}
+              onClick={() => {
+                setShowForm(false);
+                setContent("");
+                setMentions([]);
+                setSubmitError(null);
+              }}
             >
               Cancel
             </Button>
@@ -317,7 +354,9 @@ export default function ChatPage() {
             )}
             <button
               type="button"
-              onClick={() => router.push(`/research/${projectId}/chat/${conv.id}`)}
+              onClick={() =>
+                router.push(`/research/${projectId}/chat/${conv.id}`)
+              }
               className="min-w-0 flex-1 text-left"
             >
               <p className="line-clamp-2 text-sm font-medium text-foreground">

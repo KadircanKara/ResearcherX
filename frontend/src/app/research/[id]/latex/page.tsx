@@ -24,7 +24,13 @@ import {
   type LatexDocument,
 } from "@/lib/latex";
 import { getProject } from "@/lib/projects";
-import { clear, isAllSelected, retainVisible, selectAll, toggle } from "@/lib/selection";
+import {
+  clear,
+  isAllSelected,
+  retainVisible,
+  selectAll,
+  toggle,
+} from "@/lib/selection";
 import { matchesQuery } from "@/lib/search";
 import { STARTER } from "@/lib/latex-starter";
 import type { Role } from "@/lib/types";
@@ -318,49 +324,51 @@ export default function LatexIndexPage() {
 
   return (
     <div>
-      <div className="mb-4 flex items-center justify-between gap-3">
-        <p className="text-sm text-muted-foreground">
-          {docs.length === 0
-            ? "No LaTeX projects yet"
-            : query
-              ? `${visible.length} of ${docs.length} projects`
-              : `${docs.length} project${docs.length !== 1 ? "s" : ""}`}
-        </p>
-        <div className="flex items-center gap-2">
-          {docs.length > 0 && (
-            <div className="w-56">
-              <SearchInput
-                value={query}
-                onChange={changeQuery}
-                placeholder="Search projects…"
-                label="Search LaTeX projects by name or main file"
-              />
-            </div>
-          )}
-          <BulkEditBar
-            active={editingMode}
-            count={selected.size}
-            total={deletableIds.length}
-            allSelected={isAllSelected(selected, deletableIds)}
-            busy={bulkBusy}
-            onEnter={() => setEditingMode(true)}
-            onSelectAll={() => setSelected(selectAll(selected, deletableIds))}
-            onClear={() => setSelected(clear())}
-            onDelete={() => void handleBulkDelete()}
-            onDone={() => {
-              setEditingMode(false);
-              // A selection that survives invisibly is a delete waiting to
-              // hit the wrong rows.
-              setSelected(clear());
-            }}
-          />
-          {canEdit && (
-            <Button size="sm" onClick={() => setNewOpen(true)}>
-              <Plus className="mr-1.5 size-3.5" />
-              New project
-            </Button>
-          )}
+      {/* Count and actions on one line, the search box on its own beneath
+          them at full width -- see the papers page for why. */}
+      <div className="mb-4 flex flex-col gap-2">
+        <div className="flex items-center justify-between gap-3">
+          <p className="text-sm text-muted-foreground">
+            {docs.length === 0
+              ? "No LaTeX projects yet"
+              : query
+                ? `${visible.length} of ${docs.length} projects`
+                : `${docs.length} project${docs.length !== 1 ? "s" : ""}`}
+          </p>
+          <div className="flex shrink-0 items-center gap-2">
+            <BulkEditBar
+              active={editingMode}
+              count={selected.size}
+              total={deletableIds.length}
+              allSelected={isAllSelected(selected, deletableIds)}
+              busy={bulkBusy}
+              onEnter={() => setEditingMode(true)}
+              onSelectAll={() => setSelected(selectAll(selected, deletableIds))}
+              onClear={() => setSelected(clear())}
+              onDelete={() => void handleBulkDelete()}
+              onDone={() => {
+                setEditingMode(false);
+                // A selection that survives invisibly is a delete waiting to
+                // hit the wrong rows.
+                setSelected(clear());
+              }}
+            />
+            {canEdit && (
+              <Button size="sm" onClick={() => setNewOpen(true)}>
+                <Plus className="mr-1.5 size-3.5" />
+                New project
+              </Button>
+            )}
+          </div>
         </div>
+        {docs.length > 0 && (
+          <SearchInput
+            value={query}
+            onChange={changeQuery}
+            placeholder="Search projects…"
+            label="Search LaTeX projects by name or main file"
+          />
+        )}
       </div>
 
       {error && (
