@@ -144,3 +144,17 @@ def test_the_hand_off_markers_still_detect_the_pattern_they_were_built_for():
     )
     assert claims[0].disclosed is False
     assert claims[1].disclosed is True
+
+
+def test_the_refusal_string_still_matches_the_production_prompt():
+    """The harness excludes production's exact refusal from the claim list, so
+    the two must not drift. If SYSTEM's refusal wording changes and REFUSAL
+    does not, every refusal becomes a graded claim again -- and the two judges
+    measured on 2026-08-22 disagreed about that sentence on 12 of 12 negatives
+    (gpt-4.1 called it supported, gpt-4.1-mini called it unsupported), so the
+    drift would show up as judge noise rather than as an obvious break.
+    """
+    from app.agents.chat_agent import SYSTEM
+    from evals.groundedness.claims import REFUSAL
+
+    assert REFUSAL in SYSTEM.lower()

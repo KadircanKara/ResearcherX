@@ -183,14 +183,24 @@ async def _run_case(
 
 
 def _verdicts_by_claim(path: Path) -> tuple[dict[str, dict[int, str]], str]:
+    """Stored verdicts, filtered to claims the CURRENT claims policy still
+    extracts.
+
+    Without the filter, an agreement report keeps comparing verdicts for text
+    that is no longer a claim -- and that is exactly where two judges disagree
+    most. Measured 2026-08-22: 12 of 13 disagreements between gpt-4.1 and
+    gpt-4.1-mini were the production refusal sentence, which is now excluded
+    from claims entirely. Reporting those as judge disagreement blames the
+    models for a harness decision.
+    """
     payload = json.loads(path.read_text())
-    return (
-        {
-            case["case_id"]: {c["index"]: c["verdict"] for c in case["claims"]}
-            for case in payload["cases"]
-        },
-        payload.get("judge_model", "unknown"),
-    )
+    verdicts: dict[str, dict[int, str]] = {}
+    for case in payload["cases"]:
+        live = {c.index for c in extract_claims(case["answer"])}
+        verdicts[case["case_id"]] = {
+            c["index"]: c["verdict"] for c in case["claims"] if c["index"] in live
+        }
+    return verdicts, payload.get("judge_model", "unknown")
 
 
 def _report_agreement(reference_path: Path, candidate_path: Path) -> None:

@@ -332,6 +332,49 @@ option for dumps written before this -- cannot drop a claim that extraction no
 longer produces, so it keeps counting exactly the artifact a claims-policy fix
 was meant to remove. A rescore of an older dump says so in its header.
 
+### Measured — 2026-08-22d (is gpt-4.1-mini good enough as the judge?)
+
+Both judges graded the SAME stored generations (run 2's), so the comparison is
+byte-identical input. Only mini had to be paid for -- $0.46 against the $2.30
+a fresh reference run would have cost.
+
+| | gpt-4.1 | gpt-4.1-mini |
+|---|---|---|
+| positives: support / halluc / clean | 0.99 / 0.01 / 0.93 | 0.99 / 0.01 / 0.93 |
+| positives: cite-P / cite-cov | 0.96 / 0.59 | 0.96 / 0.59 |
+| agreement (149 claims) | — | raw **0.99**, kappa **0.49** |
+| disagreements | — | 1 missed problem, 1 false alarm |
+
+Every reported aggregate is identical. The two per-claim disagreements are
+`nemo-mobility` #2 (mini called a problem fine) and `occupancy-updates` #6
+(mini flagged a claim gpt-4.1 supported).
+
+**Verdict: mini is adequate for the aggregate metrics, and the evidence about
+problem-DETECTION is two events.** Missing 1 of the reference's 2 problems is a
+50% miss rate on the number that matters, and it is also n=2 -- neither
+"adequate" nor "unsafe" is established. Use mini for iteration; re-confirm a
+decision that hinges on hallucination counts with gpt-4.1. Kappa 0.49 says the
+same thing from the other side: raw 0.99 looks conclusive only because the
+population is overwhelmingly `supported`.
+
+**The measurement's first result was a harness bug, not a judge difference.**
+Before the fix below, agreement read raw 0.91 / kappa 0.11 with 13
+disagreements -- and 12 of those 13 were one sentence: production's refusal,
+"The ingested documents do not cover this." gpt-4.1 labelled it `supported` on
+all 12 negatives; mini labelled it `unsupported` on all 12. Neither used
+`no_claim`, though the judge prompt lists refusals there -- the sentence reads
+as a checkable statement ABOUT the corpus, so neither model was being
+unreasonable.
+
+The fix is deterministic, not a sharper judge prompt: the refusal string is
+fixed and known, so `claims.REFUSAL` excludes it before any judge sees it, and
+a parity test pins it against `SYSTEM`. A refusal is a behaviour to measure,
+not a claim to grade -- so a refusing case now has zero checkable claims, its
+support/hallucination columns read "-", and `abstention_rate` carries the whole
+signal. Agreement reporting filters stored verdicts through the CURRENT claims
+policy for the same reason: comparing verdicts about text that is no longer a
+claim blames the models for a harness decision.
+
 ## How answers are produced
 
 `generate.py` assembles production's own components rather than calling

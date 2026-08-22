@@ -65,6 +65,26 @@ _ABBREVIATIONS = (
 # opening marker, never a number ending a real sentence.
 _ENUMERATOR_TAIL_RE = re.compile(r"\n[ \t]*(?:\d+[.)]|[-*+])[ \t]*$")
 
+# Production's exact refusal, from `app/agents/chat_agent.py::SYSTEM`. It is a
+# CONTROL RESPONSE, not an assertion about any paper, so it is not a claim and
+# is excluded before a judge ever sees it.
+#
+# Measured 2026-08-22, comparing two judges over identical answers: gpt-4.1
+# labelled this sentence `supported` on all 12 negatives and gpt-4.1-mini
+# labelled it `unsupported` on all 12 -- 12 of the 13 disagreements between
+# them were this one sentence. Neither used `no_claim`, though the judge prompt
+# lists refusals under it: the sentence reads as a checkable statement ABOUT
+# the corpus, so the models are not being unreasonable. The disagreement is
+# therefore the harness's fault, and the fix belongs here rather than in a
+# sharper judge prompt -- the string is fixed and known, so no model needs to
+# be asked about it at all.
+#
+# Consequence, and it is the correct one: a refusal answer has zero checkable
+# claims, so a negative case's support/hallucination columns read "-" and
+# `abstention_rate` carries the entire signal for those cases. A refusal is a
+# behaviour to measure, not a claim to grade.
+REFUSAL = "the ingested documents do not cover this"
+
 # A "sentence" shorter than this is a fragment, not a claim: a stray "3." left
 # by a numbered list, a bare "Yes.", the tail of an abbreviation this module
 # failed to guard. Judging them wastes a judge call and pollutes the
@@ -207,7 +227,8 @@ def extract_claims(answer: str) -> list[Claim]:
             # stripped -- an unanchored rule would eat the "12." out of "The
             # measured value is 12."
             introduces_only = _ENUMERATOR_TAIL_RE.sub("", sentence).rstrip().endswith(":")
-            if len(sentence) >= _MIN_CLAIM_CHARS and not introduces_only:
+            is_refusal = REFUSAL in lowered
+            if len(sentence) >= _MIN_CLAIM_CHARS and not introduces_only and not is_refusal:
                 markers = tuple(int(m.group(1)) for m in _MARKER_RE.finditer(sentence))
                 claims.append(
                     Claim(

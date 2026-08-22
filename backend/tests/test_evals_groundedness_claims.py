@@ -124,3 +124,22 @@ def test_a_bare_mention_of_general_knowledge_does_not_disclose_the_whole_answer(
         "The revisit time constraint improves update frequency [2]."
     )
     assert not any(c.disclosed for c in claims)
+
+
+def test_the_production_refusal_is_not_a_claim():
+    """It is a control response, not an assertion about a paper. Left in, it
+    was graded -- and the two judges measured on 2026-08-22 disagreed about it
+    on every negative case, which is harness noise, not model behaviour."""
+    claims = extract_claims("The ingested documents do not cover this.")
+    assert claims == []
+
+
+def test_a_refusal_does_not_swallow_the_rest_of_an_answer():
+    """Only the refusal sentence is dropped; anything else in the reply is
+    still judged, so a model that refuses and then keeps talking is caught."""
+    claims = extract_claims(
+        "The ingested documents do not cover this. "
+        "However, swarm coordination generally relies on consensus protocols."
+    )
+    assert len(claims) == 1
+    assert "consensus protocols" in claims[0].text
