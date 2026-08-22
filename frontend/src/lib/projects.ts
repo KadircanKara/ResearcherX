@@ -61,6 +61,26 @@ export async function listPapers(projectId: string): Promise<Paper[]> {
   return apiGet<Paper[]>(`/projects/${projectId}/papers`);
 }
 
+/**
+ * The stored PDF for an uploaded paper. Throws when there is none (404).
+ *
+ * Fetched rather than exposed as a plain link: in dev the identity travels
+ * in an `X-Dev-User-Id` HEADER, which an `<a href>` cannot send -- the same
+ * caveat `downloadExport` carries in the LaTeX client. Keeping the header
+ * handling here means the page never assembles a URL of its own.
+ */
+export async function fetchPaperPdf(projectId: string, paperId: string): Promise<Blob> {
+  const headers: Record<string, string> = {};
+  const uid = getDevUserId();
+  if (uid) headers["X-Dev-User-Id"] = uid;
+  const r = await fetch(`${API_BASE}/v1/projects/${projectId}/papers/${paperId}/pdf`, {
+    headers,
+    cache: "no-store",
+  });
+  if (!r.ok) throw new Error(`paper pdf -> ${r.status}`);
+  return r.blob();
+}
+
 export async function createPaper(
   projectId: string,
   data: {

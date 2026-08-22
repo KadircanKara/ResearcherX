@@ -176,6 +176,13 @@ export interface Paper {
   abstract: string | null;
   body: string | null;
   pdf_url: string | null;
+  /** The URL that actually served the PDF, when an open-access fallback was
+   * used. Preferred over `pdf_url`, which may be the paywall the server
+   * worked around. */
+  resolved_pdf_url: string | null;
   source: PaperSource;
+  /** Whether an uploaded PDF is stored. False for link-sourced papers and
+   * for everything ingested before PDFs were kept. */
+  has_pdf: boolean;
   created_at: string;
 }
