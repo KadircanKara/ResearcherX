@@ -182,6 +182,61 @@ async def _run_case(
         return outcome, generated, second_verdicts
 
 
+def _verdicts_by_claim(path: Path) -> tuple[dict[str, dict[int, str]], str]:
+    payload = json.loads(path.read_text())
+    return (
+        {
+            case["case_id"]: {c["index"]: c["verdict"] for c in case["claims"]}
+            for case in payload["cases"]
+        },
+        payload.get("judge_model", "unknown"),
+    )
+
+
+def _report_agreement(reference_path: Path, candidate_path: Path) -> None:
+    """Compare two stored runs' verdicts. No model calls.
+
+    The cheap way to answer "is a cheaper judge good enough": the reference
+    judge's verdicts are already on disk from an earlier run, so only the
+    candidate has to be paid for -- $0.46 instead of $2.76 on this corpus.
+
+    Valid ONLY when both runs judged the SAME generations. Replay one
+    generation cache for both; otherwise this compares two judges' opinions of
+    two different answers and any disagreement is inseparable from the
+    answers having differed.
+
+    Alignment is by claim INDEX, which is safe here because both dumps come
+    from the same `extract_claims` over the same answers. It is NOT safe across
+    a claims-policy change -- that is what `--rescore`'s text alignment is for.
+    """
+    reference, ref_model = _verdicts_by_claim(reference_path)
+    candidate, cand_model = _verdicts_by_claim(candidate_path)
+    agreement = pair_verdicts(reference, candidate)
+    print(f"JUDGE AGREEMENT — {ref_model} (reference) vs {cand_model} (candidate)")
+    print(f"  reference: {reference_path.name}   candidate: {candidate_path.name}")
+    print(
+        f"  claims compared: {agreement.n}   raw: {_fmt(agreement.raw)}   "
+        f"on problem/not-a-problem: {_fmt(agreement.binary)}   "
+        f"kappa: {_fmt(agreement.kappa)}"
+    )
+    print(f"  the candidate is {verdict_shift(agreement.pairs)}")
+    print(
+        f"  MISSED problems (candidate said fine, reference did not): "
+        f"{len(agreement.false_clean)}   false alarms: {len(agreement.false_alarm)}"
+    )
+    for pair in agreement.false_clean:
+        print(f"    {pair.case_id} claim {pair.index}: {pair.reference} -> {pair.candidate}")
+    for pair in agreement.false_alarm:
+        print(
+            f"    (alarm) {pair.case_id} claim {pair.index}: {pair.reference} -> {pair.candidate}"
+        )
+    print(
+        "  Read `kappa` with `claims compared`, never alone: these verdicts are heavily "
+        "skewed toward supported, so a judge that stopped discriminating still scores "
+        "high raw agreement."
+    )
+
+
 def _rescore(args) -> None:
     """Re-derive the report from a stored run, making no model calls.
 
@@ -239,6 +294,10 @@ def _rescore(args) -> None:
                 marker_total=entry["marker_total"],
             )
         )
+
+    if args.agreement_against:
+        _report_agreement(args.rescore, args.agreement_against)
+        return
 
     print(
         f"RESCORED from {args.rescore.name} — no model calls. "
@@ -391,6 +450,17 @@ async def main() -> None:
             "recompute the report from a previous --json dump, with NO model calls. "
             "For a scoring-policy change (which claims count, how they are grouped) -- "
             "the verdicts are already stored, so re-judging them would only add noise"
+        ),
+    )
+    parser.add_argument(
+        "--agreement-against",
+        type=Path,
+        default=None,
+        metavar="JSON",
+        help=(
+            "with --rescore: compare the two dumps' verdicts and report agreement. "
+            "Costs nothing -- both runs are already paid for. Use when the reference "
+            "judge's verdicts are already on disk, so only the candidate has to run"
         ),
     )
     parser.add_argument(
