@@ -2,14 +2,34 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams } from "next/navigation";
-import { Download, ExternalLink, FileText, Pencil, Plus, Trash2 } from "lucide-react";
+import {
+  Download,
+  ExternalLink,
+  FileText,
+  Pencil,
+  Plus,
+  Trash2,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { BulkEditBar } from "@/components/bulk-edit-bar";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
+import { SearchInput } from "@/components/ui/search-input";
 import { PaperDialog } from "@/components/paper-dialog";
-import { getProject, listPapers, deletePaper, fetchPaperPdf } from "@/lib/projects";
+import {
+  getProject,
+  listPapers,
+  deletePaper,
+  fetchPaperPdf,
+} from "@/lib/projects";
 import { saveBlob } from "@/lib/download";
-import { clear, isAllSelected, selectAll, toggle } from "@/lib/selection";
+import {
+  clear,
+  isAllSelected,
+  retainVisible,
+  selectAll,
+  toggle,
+} from "@/lib/selection";
+import { matchesQuery } from "@/lib/search";
 import type { Paper, Role } from "@/lib/types";
 
 const CAN_ADD: Role[] = ["owner", "member"];
@@ -29,6 +49,26 @@ export default function PapersPage() {
   const [loading, setLoading] = useState(true);
   const [deleting, setDeleting] = useState<string | null>(null);
   const [downloading, setDownloading] = useState<string | null>(null);
+  const [query, setQuery] = useState("");
+
+  const [editingMode, setEditingMode] = useState(false);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const [bulkError, setBulkError] = useState<string | null>(null);
+
+  /** Title and abstract -- the two things the row actually shows, so every
+   * match is visible and nothing reads as a false positive. */
+  const searchable = (paper: Paper) => [paper.title, paper.abstract];
+
+  function changeQuery(next: string) {
+    setQuery(next);
+    // Selections that just left the screen go with it: Delete must never
+    // reach a row the user cannot see.
+    const stillVisible = papers
+      .filter((p) => matchesQuery(next, searchable(p)))
+      .map((p) => p.id);
+    setSelected((prev) => retainVisible(prev, stillVisible));
+  }
 
   async function handleDownloadPdf(paper: Paper) {
     setDownloading(paper.id);
@@ -37,7 +77,11 @@ export default function PapersPage() {
       // Named for the paper, not its id: the file lands in a downloads
       // folder where an id names nothing. Same character rules as the chat
       // transcript export, for the same filesystems.
-      const safe = paper.title.replace(/[\\/:*?"<>|]/g, "-").trim().slice(0, 80) || "paper";
+      const safe =
+        paper.title
+          .replace(/[\\/:*?"<>|]/g, "-")
+          .trim()
+          .slice(0, 80) || "paper";
       saveBlob(blob, `${safe}.pdf`);
     } catch {
       setBulkError("Could not download that PDF. Please try again.");
@@ -46,11 +90,6 @@ export default function PapersPage() {
     }
   }
   const [editing, setEditing] = useState<Paper | null>(null);
-
-  const [editingMode, setEditingMode] = useState(false);
-  const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [bulkBusy, setBulkBusy] = useState(false);
-  const [bulkError, setBulkError] = useState<string | null>(null);
 
   // `silent` skips the full-page loading skeleton. The skeleton branch below
   // doesn't render <PaperDialog>, so a non-silent reload while the Add Paper
@@ -64,20 +103,23 @@ export default function PapersPage() {
   // would otherwise overwrite fresher state with stale data.
   const loadSeq = useRef(0);
 
-  const load = useCallback((opts: { silent?: boolean } = {}) => {
-    const seq = ++loadSeq.current;
-    if (!opts.silent) setLoading(true);
-    Promise.all([listPapers(projectId), getProject(projectId)])
-      .then(([ps, detail]) => {
-        if (seq !== loadSeq.current) return; // a newer load already won
-        setPapers(ps);
-        setMyRole(detail.my_role);
-      })
-      .catch(() => {})
-      .finally(() => {
-        if (seq === loadSeq.current) setLoading(false);
-      });
-  }, [projectId]);
+  const load = useCallback(
+    (opts: { silent?: boolean } = {}) => {
+      const seq = ++loadSeq.current;
+      if (!opts.silent) setLoading(true);
+      Promise.all([listPapers(projectId), getProject(projectId)])
+        .then(([ps, detail]) => {
+          if (seq !== loadSeq.current) return; // a newer load already won
+          setPapers(ps);
+          setMyRole(detail.my_role);
+        })
+        .catch(() => {})
+        .finally(() => {
+          if (seq === loadSeq.current) setLoading(false);
+        });
+    },
+    [projectId],
+  );
 
   async function handleDelete(paperId: string) {
     setDeleting(paperId);
@@ -103,7 +145,7 @@ export default function PapersPage() {
     setBulkError(null);
     const ids = [...selected];
     const results = await Promise.allSettled(
-      ids.map((id) => deletePaper(projectId, id))
+      ids.map((id) => deletePaper(projectId, id)),
     );
     const failed = ids.filter((_, i) => results[i].status === "rejected");
     setSelected(new Set(failed));
@@ -131,43 +173,63 @@ export default function PapersPage() {
   }
 
   const canAdd = myRole !== null && CAN_ADD.includes(myRole);
-  const visibleIds = papers.map((p) => p.id);
+  const visible = papers.filter((p) => matchesQuery(query, searchable(p)));
+  const visibleIds = visible.map((p) => p.id);
 
   return (
     <div>
-      <div className="mb-4 flex items-center justify-between">
-        <p className="text-sm text-muted-foreground">
-          {papers.length === 0
-            ? "No papers yet"
-            : `${papers.length} paper${papers.length !== 1 ? "s" : ""}`}
-        </p>
-        <div className="flex items-center gap-2">
-          <BulkEditBar
-            active={editingMode}
-            count={selected.size}
-            total={papers.length}
-            allSelected={isAllSelected(selected, visibleIds)}
-            busy={bulkBusy}
-            onEnter={() => setEditingMode(true)}
-            onSelectAll={() => setSelected(selectAll(selected, visibleIds))}
-            onClear={() => setSelected(clear())}
-            onDelete={() => setPendingBulkDelete(true)}
-            onDone={() => {
-              setEditingMode(false);
-              // A selection that survives invisibly is a delete waiting to
-              // hit the wrong rows.
-              setSelected(clear());
-            }}
-          />
-          {canAdd && (
-            <PaperDialog projectId={projectId} onSaved={() => load({ silent: true })}>
-              <Button size="sm">
-                <Plus className="mr-1.5 size-3.5" />
-                Add Paper
-              </Button>
-            </PaperDialog>
-          )}
+      {/* Count and actions on one line, the search box on its own beneath
+          them at full width. The box is the widest thing a user types into
+          on this page, and a paper title is long -- squeezing it into the
+          action row left it narrower than the text it searches. */}
+      <div className="mb-4 flex flex-col gap-2">
+        <div className="flex items-center justify-between gap-3">
+          <p className="text-sm text-muted-foreground">
+            {papers.length === 0
+              ? "No papers yet"
+              : query
+                ? `${visible.length} of ${papers.length} papers`
+                : `${papers.length} paper${papers.length !== 1 ? "s" : ""}`}
+          </p>
+          <div className="flex shrink-0 items-center gap-2">
+            <BulkEditBar
+              active={editingMode}
+              count={selected.size}
+              total={visibleIds.length}
+              allSelected={isAllSelected(selected, visibleIds)}
+              busy={bulkBusy}
+              onEnter={() => setEditingMode(true)}
+              onSelectAll={() => setSelected(selectAll(selected, visibleIds))}
+              onClear={() => setSelected(clear())}
+              onDelete={() => setPendingBulkDelete(true)}
+              onDone={() => {
+                setEditingMode(false);
+                // A selection that survives invisibly is a delete waiting to
+                // hit the wrong rows.
+                setSelected(clear());
+              }}
+            />
+            {canAdd && (
+              <PaperDialog
+                projectId={projectId}
+                onSaved={() => load({ silent: true })}
+              >
+                <Button size="sm">
+                  <Plus className="mr-1.5 size-3.5" />
+                  Add Paper
+                </Button>
+              </PaperDialog>
+            )}
+          </div>
         </div>
+        {papers.length > 0 && (
+          <SearchInput
+            value={query}
+            onChange={changeQuery}
+            placeholder="Search papers…"
+            label="Search papers by title or abstract"
+          />
+        )}
       </div>
 
       {bulkError && (
@@ -187,8 +249,16 @@ export default function PapersPage() {
         </div>
       )}
 
+      {/* A query that matches nothing needs saying: an empty list under a
+          filled search box otherwise reads as the library having emptied. */}
+      {papers.length > 0 && visible.length === 0 && (
+        <p className="rounded-xl border border-dashed border-border px-4 py-6 text-center text-sm text-muted-foreground">
+          No papers match “{query}”.
+        </p>
+      )}
+
       <div className="space-y-2">
-        {papers.map((paper) => (
+        {visible.map((paper) => (
           <div
             key={paper.id}
             className="flex items-start gap-3 rounded-xl border border-border bg-card px-4 py-3"

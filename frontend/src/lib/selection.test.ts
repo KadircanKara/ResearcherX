@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { clear, isAllSelected, selectAll, toggle } from "./selection";
+import { clear, isAllSelected, selectAll, toggle, retainVisible } from "./selection";
 
 describe("toggle", () => {
   it("adds an unselected id and removes a selected one", () => {
@@ -44,5 +44,21 @@ describe("isAllSelected", () => {
 describe("clear", () => {
   it("returns an empty set", () => {
     expect([...clear()]).toEqual([]);
+  });
+});
+
+describe("retainVisible", () => {
+  it("keeps only the selections still on screen", () => {
+    expect([...retainVisible(new Set(["a", "b", "c"]), ["a", "c"])].sort()).toEqual(["a", "c"]);
+  });
+
+  it("empties the selection when nothing matches", () => {
+    // Otherwise Delete would take out rows the user cannot see.
+    expect(retainVisible(new Set(["a", "b"]), []).size).toBe(0);
+  });
+
+  it("returns a new set, so React re-renders", () => {
+    const before = new Set(["a"]);
+    expect(retainVisible(before, ["a"])).not.toBe(before);
   });
 });

@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { BulkEditBar } from "@/components/bulk-edit-bar";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { RenameDialog } from "@/components/ui/rename-dialog";
+import { SearchInput } from "@/components/ui/search-input";
 import { ConflictDialog } from "@/components/latex/conflict-dialog";
 import { ImportDropzone } from "@/components/latex/import-dropzone";
 import { NewDocumentDialog } from "@/components/latex/new-document-dialog";
@@ -23,7 +24,14 @@ import {
   type LatexDocument,
 } from "@/lib/latex";
 import { getProject } from "@/lib/projects";
-import { clear, isAllSelected, selectAll, toggle } from "@/lib/selection";
+import {
+  clear,
+  isAllSelected,
+  retainVisible,
+  selectAll,
+  toggle,
+} from "@/lib/selection";
+import { matchesQuery } from "@/lib/search";
 import { STARTER } from "@/lib/latex-starter";
 import type { Role } from "@/lib/types";
 
@@ -46,6 +54,13 @@ export default function LatexIndexPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
+  // Declared with the rest of the state, ABOVE `visible` below. It used to
+  // sit further down beside the rename state, which crashed the page: the
+  // `docs.filter(...)` that reads it runs during render, before the
+  // declaration, and `const` is in its temporal dead zone until then.
+  // `tsc` cannot catch it -- the read is inside the arrow passed to
+  // `filter`, and TypeScript has no way to know when a closure runs.
+  const [query, setQuery] = useState("");
 
   const [editingMode, setEditingMode] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -113,9 +128,29 @@ export default function LatexIndexPage() {
   // Handing selectAll/isAllSelected the full doc list would select rows the
   // checkbox itself refuses to let the user check, guaranteeing a partial-
   // failure banner and making "all selected" unreachable by clicking.
-  const deletableIds = docs
+  /** Name and main file -- the two things the row shows. */
+  const searchable = (doc: LatexDocument) => [doc.name, doc.main_path];
+  const visible = docs.filter((d) => matchesQuery(query, searchable(d)));
+
+  // "Select all" means every row the user can actually act on -- which is
+  // what the disabled checkboxes on view-only rows already say on screen --
+  // AND that the search has left on screen. Handing selectAll/isAllSelected
+  // the full doc list would select rows the checkbox itself refuses to let
+  // the user check, guaranteeing a partial-failure banner and making "all
+  // selected" unreachable by clicking.
+  const deletableIds = visible
     .filter((d) => d.my_access === "editor")
     .map((d) => d.id);
+
+  function changeQuery(next: string) {
+    setQuery(next);
+    // Selections that just left the screen go with it -- Delete must never
+    // reach a row the user cannot see.
+    const stillVisible = docs
+      .filter((d) => matchesQuery(next, searchable(d)))
+      .map((d) => d.id);
+    setSelected((prev) => retainVisible(prev, stillVisible));
+  }
 
   /**
    * Create, and turn a duplicate NAME into the same Keep both / Rename /
@@ -289,37 +324,51 @@ export default function LatexIndexPage() {
 
   return (
     <div>
-      <div className="mb-4 flex items-center justify-between gap-3">
-        <p className="text-sm text-muted-foreground">
-          {docs.length === 0
-            ? "No LaTeX projects yet"
-            : `${docs.length} project${docs.length !== 1 ? "s" : ""}`}
-        </p>
-        <div className="flex items-center gap-2">
-          <BulkEditBar
-            active={editingMode}
-            count={selected.size}
-            total={deletableIds.length}
-            allSelected={isAllSelected(selected, deletableIds)}
-            busy={bulkBusy}
-            onEnter={() => setEditingMode(true)}
-            onSelectAll={() => setSelected(selectAll(selected, deletableIds))}
-            onClear={() => setSelected(clear())}
-            onDelete={() => void handleBulkDelete()}
-            onDone={() => {
-              setEditingMode(false);
-              // A selection that survives invisibly is a delete waiting to
-              // hit the wrong rows.
-              setSelected(clear());
-            }}
-          />
-          {canEdit && (
-            <Button size="sm" onClick={() => setNewOpen(true)}>
-              <Plus className="mr-1.5 size-3.5" />
-              New project
-            </Button>
-          )}
+      {/* Count and actions on one line, the search box on its own beneath
+          them at full width -- see the papers page for why. */}
+      <div className="mb-4 flex flex-col gap-2">
+        <div className="flex items-center justify-between gap-3">
+          <p className="text-sm text-muted-foreground">
+            {docs.length === 0
+              ? "No LaTeX projects yet"
+              : query
+                ? `${visible.length} of ${docs.length} projects`
+                : `${docs.length} project${docs.length !== 1 ? "s" : ""}`}
+          </p>
+          <div className="flex shrink-0 items-center gap-2">
+            <BulkEditBar
+              active={editingMode}
+              count={selected.size}
+              total={deletableIds.length}
+              allSelected={isAllSelected(selected, deletableIds)}
+              busy={bulkBusy}
+              onEnter={() => setEditingMode(true)}
+              onSelectAll={() => setSelected(selectAll(selected, deletableIds))}
+              onClear={() => setSelected(clear())}
+              onDelete={() => void handleBulkDelete()}
+              onDone={() => {
+                setEditingMode(false);
+                // A selection that survives invisibly is a delete waiting to
+                // hit the wrong rows.
+                setSelected(clear());
+              }}
+            />
+            {canEdit && (
+              <Button size="sm" onClick={() => setNewOpen(true)}>
+                <Plus className="mr-1.5 size-3.5" />
+                New project
+              </Button>
+            )}
+          </div>
         </div>
+        {docs.length > 0 && (
+          <SearchInput
+            value={query}
+            onChange={changeQuery}
+            placeholder="Search projects…"
+            label="Search LaTeX projects by name or main file"
+          />
+        )}
       </div>
 
       {error && (
@@ -343,9 +392,15 @@ export default function LatexIndexPage() {
               : "No LaTeX projects have been created yet."}
           </p>
         </div>
+      ) : visible.length === 0 ? (
+        /* A query that matches nothing needs saying: an empty list under a
+           filled search box otherwise reads as the projects having gone. */
+        <p className="rounded-xl border border-dashed border-border px-4 py-6 text-center text-sm text-muted-foreground">
+          No projects match “{query}”.
+        </p>
       ) : (
         <div className="space-y-2">
-          {docs.map((doc) => (
+          {visible.map((doc) => (
             <div
               key={doc.id}
               className="flex items-center gap-3 rounded-xl border border-border bg-card px-4 py-3"
