@@ -33,6 +33,11 @@ export default function PapersPage() {
   const [downloading, setDownloading] = useState<string | null>(null);
   const [query, setQuery] = useState("");
 
+  const [editingMode, setEditingMode] = useState(false);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const [bulkError, setBulkError] = useState<string | null>(null);
+
   /** Title and abstract -- the two things the row actually shows, so every
    * match is visible and nothing reads as a false positive. */
   const searchable = (paper: Paper) => [paper.title, paper.abstract];
@@ -61,11 +66,6 @@ export default function PapersPage() {
     }
   }
   const [editing, setEditing] = useState<Paper | null>(null);
-
-  const [editingMode, setEditingMode] = useState(false);
-  const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [bulkBusy, setBulkBusy] = useState(false);
-  const [bulkError, setBulkError] = useState<string | null>(null);
 
   // `silent` skips the full-page loading skeleton. The skeleton branch below
   // doesn't render <PaperDialog>, so a non-silent reload while the Add Paper

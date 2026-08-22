@@ -48,6 +48,13 @@ export default function LatexIndexPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
+  // Declared with the rest of the state, ABOVE `visible` below. It used to
+  // sit further down beside the rename state, which crashed the page: the
+  // `docs.filter(...)` that reads it runs during render, before the
+  // declaration, and `const` is in its temporal dead zone until then.
+  // `tsc` cannot catch it -- the read is inside the arrow passed to
+  // `filter`, and TypeScript has no way to know when a closure runs.
+  const [query, setQuery] = useState("");
 
   const [editingMode, setEditingMode] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -177,7 +184,6 @@ export default function LatexIndexPage() {
 
   const [renaming, setRenaming] = useState<LatexDocument | null>(null);
   const [renameBusy, setRenameBusy] = useState(false);
-  const [query, setQuery] = useState("");
 
   async function renameTo(name: string) {
     const target = renaming;
