@@ -6,10 +6,12 @@ import { Download, ExternalLink, FileText, Pencil, Plus, Trash2 } from "lucide-r
 import { Button } from "@/components/ui/button";
 import { BulkEditBar } from "@/components/bulk-edit-bar";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
+import { SearchInput } from "@/components/ui/search-input";
 import { PaperDialog } from "@/components/paper-dialog";
 import { getProject, listPapers, deletePaper, fetchPaperPdf } from "@/lib/projects";
 import { saveBlob } from "@/lib/download";
-import { clear, isAllSelected, selectAll, toggle } from "@/lib/selection";
+import { clear, isAllSelected, retainVisible, selectAll, toggle } from "@/lib/selection";
+import { matchesQuery } from "@/lib/search";
 import type { Paper, Role } from "@/lib/types";
 
 const CAN_ADD: Role[] = ["owner", "member"];
@@ -29,6 +31,19 @@ export default function PapersPage() {
   const [loading, setLoading] = useState(true);
   const [deleting, setDeleting] = useState<string | null>(null);
   const [downloading, setDownloading] = useState<string | null>(null);
+  const [query, setQuery] = useState("");
+
+  /** Title and abstract -- the two things the row actually shows, so every
+   * match is visible and nothing reads as a false positive. */
+  const searchable = (paper: Paper) => [paper.title, paper.abstract];
+
+  function changeQuery(next: string) {
+    setQuery(next);
+    // Selections that just left the screen go with it: Delete must never
+    // reach a row the user cannot see.
+    const stillVisible = papers.filter((p) => matchesQuery(next, searchable(p))).map((p) => p.id);
+    setSelected((prev) => retainVisible(prev, stillVisible));
+  }
 
   async function handleDownloadPdf(paper: Paper) {
     setDownloading(paper.id);
@@ -131,7 +146,8 @@ export default function PapersPage() {
   }
 
   const canAdd = myRole !== null && CAN_ADD.includes(myRole);
-  const visibleIds = papers.map((p) => p.id);
+  const visible = papers.filter((p) => matchesQuery(query, searchable(p)));
+  const visibleIds = visible.map((p) => p.id);
 
   return (
     <div>
@@ -139,13 +155,25 @@ export default function PapersPage() {
         <p className="text-sm text-muted-foreground">
           {papers.length === 0
             ? "No papers yet"
-            : `${papers.length} paper${papers.length !== 1 ? "s" : ""}`}
+            : query
+              ? `${visible.length} of ${papers.length} papers`
+              : `${papers.length} paper${papers.length !== 1 ? "s" : ""}`}
         </p>
         <div className="flex items-center gap-2">
+          {papers.length > 0 && (
+            <div className="w-56">
+              <SearchInput
+                value={query}
+                onChange={changeQuery}
+                placeholder="Search papers…"
+                label="Search papers by title or abstract"
+              />
+            </div>
+          )}
           <BulkEditBar
             active={editingMode}
             count={selected.size}
-            total={papers.length}
+            total={visibleIds.length}
             allSelected={isAllSelected(selected, visibleIds)}
             busy={bulkBusy}
             onEnter={() => setEditingMode(true)}
@@ -187,8 +215,16 @@ export default function PapersPage() {
         </div>
       )}
 
+      {/* A query that matches nothing needs saying: an empty list under a
+          filled search box otherwise reads as the library having emptied. */}
+      {papers.length > 0 && visible.length === 0 && (
+        <p className="rounded-xl border border-dashed border-border px-4 py-6 text-center text-sm text-muted-foreground">
+          No papers match “{query}”.
+        </p>
+      )}
+
       <div className="space-y-2">
-        {papers.map((paper) => (
+        {visible.map((paper) => (
           <div
             key={paper.id}
             className="flex items-start gap-3 rounded-xl border border-border bg-card px-4 py-3"

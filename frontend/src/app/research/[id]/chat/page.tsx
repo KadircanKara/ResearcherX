@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { BulkEditBar } from "@/components/bulk-edit-bar";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { RenameDialog } from "@/components/ui/rename-dialog";
+import { SearchInput } from "@/components/ui/search-input";
 import { MentionTextarea } from "@/components/mention-textarea";
 import {
   createConversation,
@@ -19,7 +20,8 @@ import { conversationFilename, conversationToMarkdown } from "@/lib/chat-export"
 import { saveBlob } from "@/lib/download";
 import type { Mention } from "@/lib/mentions";
 import { getProject, listPapers } from "@/lib/projects";
-import { clear, isAllSelected, selectAll, toggle } from "@/lib/selection";
+import { clear, isAllSelected, retainVisible, selectAll, toggle } from "@/lib/selection";
+import { matchesQuery } from "@/lib/search";
 import type { ChatConversation, Paper, Role } from "@/lib/types";
 
 // Project sharing is binary now: any member may delete a conversation.
@@ -91,6 +93,17 @@ export default function ChatPage() {
   const [renameBusy, setRenameBusy] = useState(false);
   const [renameError, setRenameError] = useState<string | null>(null);
   const [downloading, setDownloading] = useState<string | null>(null);
+  const [query, setQuery] = useState("");
+
+  function changeQuery(next: string) {
+    setQuery(next);
+    // Selections that just left the screen go with it -- Delete must never
+    // reach a row the user cannot see.
+    const stillVisible = conversations
+      .filter((c) => matchesQuery(next, [c.title]))
+      .map((c) => c.id);
+    setSelected((prev) => retainVisible(prev, stillVisible));
+  }
 
   async function handleRename(title: string) {
     const target = renaming;
@@ -183,25 +196,38 @@ export default function ChatPage() {
     );
   }
 
+  const visible = conversations.filter((c) => matchesQuery(query, [c.title]));
+  const visibleIds = visible.map((c) => c.id);
+
   return (
     <div>
       <div className="mb-4 flex items-center justify-between">
         <p className="text-sm text-muted-foreground">
           {conversations.length === 0
             ? "No conversations yet"
-            : `${conversations.length} conversation${conversations.length !== 1 ? "s" : ""}`}
+            : query
+              ? `${visible.length} of ${conversations.length} conversations`
+              : `${conversations.length} conversation${conversations.length !== 1 ? "s" : ""}`}
         </p>
         <div className="flex items-center gap-2">
+          {conversations.length > 0 && (
+            <div className="w-56">
+              <SearchInput
+                value={query}
+                onChange={changeQuery}
+                placeholder="Search conversations…"
+                label="Search conversations by title"
+              />
+            </div>
+          )}
           <BulkEditBar
             active={editingMode}
             count={selected.size}
-            total={conversations.length}
-            allSelected={isAllSelected(selected, conversations.map((c) => c.id))}
+            total={visibleIds.length}
+            allSelected={isAllSelected(selected, visibleIds)}
             busy={bulkBusy}
             onEnter={() => setEditingMode(true)}
-            onSelectAll={() =>
-              setSelected(selectAll(selected, conversations.map((c) => c.id)))
-            }
+            onSelectAll={() => setSelected(selectAll(selected, visibleIds))}
             onClear={() => setSelected(clear())}
             onDelete={() => setPendingBulkDelete(true)}
             onDone={() => {
@@ -264,8 +290,16 @@ export default function ChatPage() {
         </div>
       )}
 
+      {/* A query that matches nothing needs saying: an empty list under a
+          filled search box otherwise reads as the chats having disappeared. */}
+      {conversations.length > 0 && visible.length === 0 && (
+        <p className="rounded-xl border border-dashed border-border px-4 py-6 text-center text-sm text-muted-foreground">
+          No conversations match “{query}”.
+        </p>
+      )}
+
       <div className="space-y-2">
-        {conversations.map((conv) => (
+        {visible.map((conv) => (
           // A div, not a button: the delete control is itself a button and
           // nesting one inside another is invalid HTML.
           <div

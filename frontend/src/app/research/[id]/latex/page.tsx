@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { BulkEditBar } from "@/components/bulk-edit-bar";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { RenameDialog } from "@/components/ui/rename-dialog";
+import { SearchInput } from "@/components/ui/search-input";
 import { ConflictDialog } from "@/components/latex/conflict-dialog";
 import { ImportDropzone } from "@/components/latex/import-dropzone";
 import { NewDocumentDialog } from "@/components/latex/new-document-dialog";
@@ -23,7 +24,8 @@ import {
   type LatexDocument,
 } from "@/lib/latex";
 import { getProject } from "@/lib/projects";
-import { clear, isAllSelected, selectAll, toggle } from "@/lib/selection";
+import { clear, isAllSelected, retainVisible, selectAll, toggle } from "@/lib/selection";
+import { matchesQuery } from "@/lib/search";
 import { STARTER } from "@/lib/latex-starter";
 import type { Role } from "@/lib/types";
 
@@ -113,9 +115,29 @@ export default function LatexIndexPage() {
   // Handing selectAll/isAllSelected the full doc list would select rows the
   // checkbox itself refuses to let the user check, guaranteeing a partial-
   // failure banner and making "all selected" unreachable by clicking.
-  const deletableIds = docs
+  /** Name and main file -- the two things the row shows. */
+  const searchable = (doc: LatexDocument) => [doc.name, doc.main_path];
+  const visible = docs.filter((d) => matchesQuery(query, searchable(d)));
+
+  // "Select all" means every row the user can actually act on -- which is
+  // what the disabled checkboxes on view-only rows already say on screen --
+  // AND that the search has left on screen. Handing selectAll/isAllSelected
+  // the full doc list would select rows the checkbox itself refuses to let
+  // the user check, guaranteeing a partial-failure banner and making "all
+  // selected" unreachable by clicking.
+  const deletableIds = visible
     .filter((d) => d.my_access === "editor")
     .map((d) => d.id);
+
+  function changeQuery(next: string) {
+    setQuery(next);
+    // Selections that just left the screen go with it -- Delete must never
+    // reach a row the user cannot see.
+    const stillVisible = docs
+      .filter((d) => matchesQuery(next, searchable(d)))
+      .map((d) => d.id);
+    setSelected((prev) => retainVisible(prev, stillVisible));
+  }
 
   /**
    * Create, and turn a duplicate NAME into the same Keep both / Rename /
@@ -155,6 +177,7 @@ export default function LatexIndexPage() {
 
   const [renaming, setRenaming] = useState<LatexDocument | null>(null);
   const [renameBusy, setRenameBusy] = useState(false);
+  const [query, setQuery] = useState("");
 
   async function renameTo(name: string) {
     const target = renaming;
@@ -293,9 +316,21 @@ export default function LatexIndexPage() {
         <p className="text-sm text-muted-foreground">
           {docs.length === 0
             ? "No LaTeX projects yet"
-            : `${docs.length} project${docs.length !== 1 ? "s" : ""}`}
+            : query
+              ? `${visible.length} of ${docs.length} projects`
+              : `${docs.length} project${docs.length !== 1 ? "s" : ""}`}
         </p>
         <div className="flex items-center gap-2">
+          {docs.length > 0 && (
+            <div className="w-56">
+              <SearchInput
+                value={query}
+                onChange={changeQuery}
+                placeholder="Search projects…"
+                label="Search LaTeX projects by name or main file"
+              />
+            </div>
+          )}
           <BulkEditBar
             active={editingMode}
             count={selected.size}
@@ -343,9 +378,15 @@ export default function LatexIndexPage() {
               : "No LaTeX projects have been created yet."}
           </p>
         </div>
+      ) : visible.length === 0 ? (
+        /* A query that matches nothing needs saying: an empty list under a
+           filled search box otherwise reads as the projects having gone. */
+        <p className="rounded-xl border border-dashed border-border px-4 py-6 text-center text-sm text-muted-foreground">
+          No projects match “{query}”.
+        </p>
       ) : (
         <div className="space-y-2">
-          {docs.map((doc) => (
+          {visible.map((doc) => (
             <div
               key={doc.id}
               className="flex items-center gap-3 rounded-xl border border-border bg-card px-4 py-3"

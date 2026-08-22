@@ -34,6 +34,26 @@ export function clear(): Set<string> {
   return new Set();
 }
 
+/**
+ * Drop selections that are no longer on screen.
+ *
+ * Called when a search query changes. Without it, filtering after selecting
+ * leaves rows selected that the user can no longer see, and Delete then
+ * takes out records they never had in view -- the same "a selection that
+ * survives invisibly is a delete waiting to hit the wrong rows" the Done
+ * button already guards against, arriving by a different route.
+ *
+ * Narrowing rather than clearing: a user refining a query has not changed
+ * their mind about the rows still in front of them.
+ */
+export function retainVisible(
+  selected: ReadonlySet<string>,
+  ids: readonly string[]
+): Set<string> {
+  const visible = new Set(ids);
+  return new Set([...selected].filter((id) => visible.has(id)));
+}
+
 /** False for an empty list: nothing selected is not everything selected. */
 export function isAllSelected(
   selected: ReadonlySet<string>,
