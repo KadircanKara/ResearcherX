@@ -17,6 +17,9 @@ build/
 *.db
 *.db-journal
 /data/
+# Local RAG index (app/local_rag): regenerable from the source documents,
+# and embeddings.npy is megabytes of binary.
+backend/data/
 .DS_Store
 .idea/
 .vscode/
