@@ -20,6 +20,14 @@ dependencies = [
   "pgvector>=0.3",
   "pymupdf>=1.24",
   "pymupdf4llm>=1.27",
+  # app/local_rag — the database-free retrieval system. bm25s is the real
+  # BM25 arm (numpy/scipy, no service to run) and PyStemmer is its stemmer;
+  # index and query must share one, so it is a hard dependency rather than
+  # bm25s's optional extra. numpy is declared explicitly because
+  # app/local_rag uses it directly for the dense arm, not only through bm25s.
+  "bm25s>=0.3",
+  "PyStemmer>=2.2",
+  "numpy>=1.26",
 ]
 
 [project.optional-dependencies]

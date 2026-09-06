@@ -395,6 +395,19 @@ class Settings(BaseSettings):
     latex_staging_entries: int = 8
     latex_staging_bytes: int = 100 * 1024 * 1024
 
+    # ── Local RAG (app/local_rag) ────────────────────────────────────────
+    # The simplified, database-free retrieval system: dense + BM25 fused by
+    # RRF, then a Cohere rerank. Its constants live in
+    # `app.local_rag.search.SearchParams` rather than here, because they are
+    # the parameters of one pipeline rather than app-wide policy; only the
+    # credentials and the index location need the environment.
+    #
+    # An empty COHERE_API_KEY is a supported state, not a misconfiguration:
+    # the reranker is skipped and retrieval degrades to the fused order.
+    cohere_api_key: str = ""
+    cohere_rerank_model: str = "rerank-v3.5"
+    local_rag_dir: str = "./data/local_rag"
+
     @field_validator("cors_origins", mode="before")
     @classmethod
     def _split_cors(cls, v: object) -> object:
