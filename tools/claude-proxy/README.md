@@ -106,6 +106,47 @@ claude -p --restricted --tools "" --strict-mcp-config --max-turns 1 \
   `EMBEDDING_*` on Ollama or OpenAI.
 - **Multimodal content parts are dropped** — text parts only.
 
+## Context freshness, and the preamble that cannot be removed
+
+Every call is a **fresh session**. There is no `--resume`, no session
+persistence, no auto-memory, and the empty temp cwd keeps this repo's own
+`CLAUDE.md` out of the prompt. Verified: one call told the model a secret
+word, the next call asked for it back and got `NONE`.
+
+What is *not* removable is a fixed preamble the Agent SDK wraps around the
+`--system-prompt` on every call — roughly 435 input tokens:
+
+```
+You are a Claude agent, built on Anthropic's Claude Agent SDK.<our system prompt>
+
+# Environment
+ - Primary working directory: ... - Platform: darwin - OS Version: ...
+You are powered by the model named ... knowledge cutoff ...
+
+# userEmail
+The user's email address is <the logged-in account>. ...
+
+Today's date is ...
+```
+
+So the model knows the machine, the date, and the account email of whoever
+is logged in — on a request the app believes carries only its own system
+prompt. Measured 2026-09-07, and every way of stripping it failed:
+
+| Attempt | Result |
+|---|---|
+| `--exclude-dynamic-system-prompt-sections` | identical 435 tokens, still present (the flag is ignored with `--system-prompt`) |
+| `--setting-sources "" --no-session-persistence` | no change |
+| `CLAUDE_CODE_SIMPLE=1` (what `--bare` sets) | `Not logged in · Please run /login` |
+| A system-prompt fence telling the model to ignore the boilerplate | haiku and opus both still answered with the email |
+| A sanitized `HOME` (copy of `.claude.json` with the account fields blanked) | `Not logged in`, with and without a symlink to the real `~/.claude` |
+
+`--bare` is the only thing that removes it, and it hard-requires
+`ANTHROPIC_API_KEY` — which bills API credits rather than the Claude Code
+subscription this proxy exists to use. Accepted as a known limit: the
+preamble is constant, carries no conversation history, and this pipeline
+sends research questions and paper chunks.
+
 ## Errors
 
 A CLI failure whose text mentions a rate/usage limit or quota is returned as
