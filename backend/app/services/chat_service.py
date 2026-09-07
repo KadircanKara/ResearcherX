@@ -29,7 +29,9 @@ from app.services.conversation_service import ConversationService
 from app.services.embedding_service import EmbeddingService
 from app.services.hybrid_ranker import fuse_rrf, keep_within_rank_window
 from app.services.intra_paper_ranker import keep_within_paper
+from app.local_rag.rerank import CohereReranker
 from app.services.mention_ranker import apply_per_paper_floor
+from app.services.rerank_ranker import rerank_items
 from app.services.paper_resolver import ResolvablePaper, resolve_papers_with_evidence
 
 _HISTORY_TOP_K = 5
@@ -216,6 +218,24 @@ class PaperInfo(BaseModel):
     title: str
 
 
+def build_chat_reranker() -> CohereReranker | None:
+    """The chat path's reranker, or None when the stage is off.
+
+    None for a disabled kill switch AND for an absent key: an empty
+    COHERE_API_KEY is a supported state, and `None` here is the same
+    "no opinion" the client returns on failure, so both degrade to the
+    fused order through one code path rather than two.
+
+    Deliberately not `local_rag.rag.build_reranker`, which would be a
+    circular import (`rag` imports `chat_service` for `renumber_citations`)
+    and which ignores `rerank_enabled` because that flag is this path's
+    kill switch, not local_rag's.
+    """
+    if not settings.rerank_enabled or not settings.cohere_api_key:
+        return None
+    return CohereReranker(api_key=settings.cohere_api_key, model=settings.cohere_rerank_model)
+
+
 def _vec_str(embedding: list[float]) -> str:
     """Format Python list as pgvector string: [0.1, 0.2, ...]"""
     return "[" + ",".join(str(x) for x in embedding) + "]"
@@ -228,6 +248,7 @@ class ChatService:
         self._widener = ScopeWidenerAgent()
         self._chat_agent = ChatAgent()
         self._conv_svc = ConversationService()
+        self._reranker = build_chat_reranker()
 
     async def respond(
         self,
@@ -420,12 +441,17 @@ class ChatService:
                             retrieval_embedding,
                             retrieval_query,
                             widened,
+                            reranker=self._reranker,
                         )
                         scope = paper_infos if widened else scope_infos
                     else:
                         async with SessionLocal() as db:
                             paper_chunks = await self._retrieve_paper_chunks(
-                                db, paper_infos, retrieval_embedding, retrieval_query
+                                db,
+                                paper_infos,
+                                retrieval_embedding,
+                                retrieval_query,
+                                reranker=self._reranker,
                             )
 
             if mentioned and not mentioned_infos:
@@ -572,6 +598,7 @@ class ChatService:
         embedding: list[float],
         query_text: str,
         widened: bool,
+        reranker: CohereReranker | None = None,
     ) -> tuple[list[ChunkContext], bool]:
         """Retrieve chunks for a turn scoped to explicitly NAMED papers.
 
@@ -657,6 +684,7 @@ class ChatService:
                 query_text,
                 pool_limit=budget,
                 guarantee_per_paper=floor,
+                reranker=reranker,
             )
 
         if not (widened or not candidates):
@@ -698,6 +726,7 @@ class ChatService:
                     embedding,
                     query_text,
                     pool_limit=budget + len(pinned),
+                    reranker=reranker,
                 )
             extra = [c for c in fill if (c.paper_id, c.chunk_index) not in pinned_keys][:remaining]
 
@@ -745,6 +774,7 @@ class ChatService:
         query_text: str,
         pool_limit: int | None = None,
         guarantee_per_paper: int = 0,
+        reranker: CohereReranker | None = None,
     ) -> list[ChunkContext]:
         """Retrieve the nearest chunks from `paper_infos`, ranked by distance.
 
@@ -894,19 +924,69 @@ class ChatService:
             w_sparse=settings.hybrid_sparse_weight,
             k=settings.hybrid_rrf_k,
         )
-        # Budget FIRST, cut second -- same ordering the dense path documents
-        # above. LIMIT bounds what crosses the wire; this bounds what reaches
-        # the model, and the cut may only shrink what the budget bounded.
-        fused = fused[:pool]
+        # Cut FIRST, then rerank, then budget. The cut moved ahead of the
+        # budget when the rerank landed, and the move is provably a no-op:
+        # `keep_within_rank_window` is `min(len, window)`, so at
+        # intra_paper_rank_window 30 against max_context_chunks 60 it returns
+        # 30 whether it sees the fused list or the budgeted prefix of it. It
+        # has to run first because it is a RANK-SPACE policy -- it reads
+        # positions in the fused order, and a reranked list no longer carries
+        # that order. The budget still runs last: LIMIT bounds what crosses
+        # the wire, this bounds what reaches the model.
         if single_paper:
             fused = fused[
                 : keep_within_rank_window(
                     [score for _, score in fused], window=settings.intra_paper_rank_window
                 )
             ]
-        ranked = [by_id[key] for key, _ in fused]
+        keys = await self._reranked_keys([key for key, _ in fused], by_id, query_text, reranker)
+        ranked = [by_id[key] for key in keys[:pool]]
         ranked = await self._with_guaranteed_rows(db, ranked, ids, qvec, threshold, guarantee)
         return self._to_chunk_contexts(ranked, paper_title_map)
+
+    async def _reranked_keys(
+        self,
+        keys: list,
+        by_id: dict,
+        query_text: str,
+        reranker: CohereReranker | None,
+    ) -> list:
+        """`keys` reordered by a cross-encoder pass, or `keys` unchanged.
+
+        Runs between the fusion and the budget cut, which is the only
+        position where it can change WHICH chunks reach the model rather
+        than merely their order: the hybrid query already returns ~200 dense
+        plus 100 sparse candidates and the budget throws all but 60 away, so
+        this spends a surplus that already exists. No pool widens.
+
+        Three things it deliberately does NOT do:
+
+        - IT NEVER REOPENS THE DISTANCE GATE. Only admitted candidates are
+          in `keys`, so a chunk the 0.75 cutoff dropped cannot come back --
+          the same rule `_guaranteed_rows` holds, and for the same reason:
+          the gate is a measured decision this stage has no vote on.
+        - IT NEVER SEES THE GUARANTEED ROWS. `_with_guaranteed_rows` appends
+          those AFTER this, so they keep their tail position and stay
+          "presence, not promotion". Scoring them here would let a row that
+          entered on a per-paper guarantee outrank candidates that earned a
+          fused rank.
+        - IT NEVER FILTERS. `apply_rerank` keeps every unscored candidate at
+          the tail; shrinking the list here would turn an ordering stage
+          into an admission stage and could return fewer chunks than the
+          budget allows.
+
+        The head/tail split, the fail-open and the "score everything sent"
+        rule all live in `rerank_items`, which the eval harnesses call too --
+        a hand-rolled copy here would be a second implementation of the
+        policy under measurement.
+        """
+        return await rerank_items(
+            keys,
+            query=query_text,
+            text_of=lambda key: by_id[key].text,
+            reranker=reranker,
+            limit=settings.rerank_candidates,
+        )
 
     async def _with_guaranteed_rows(
         self, db: AsyncSession, ranked: list, ids: str, qvec: str, threshold: float, guarantee: int

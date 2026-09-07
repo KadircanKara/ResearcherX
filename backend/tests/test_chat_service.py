@@ -1022,7 +1022,7 @@ async def test_widening_pins_the_mentioned_papers_and_fills_globally(
     calls = []
 
     async def fake_retrieve(
-        db, scope, embedding, query_text, pool_limit=None, guarantee_per_paper=0
+        db, scope, embedding, query_text, pool_limit=None, guarantee_per_paper=0, reranker=None
     ):
         # `pool_limit` mirrors the real signature: the mention path asks for a
         # bigger CANDIDATE pool than the budget so `apply_per_paper_floor` is
@@ -1085,7 +1085,7 @@ async def test_mentions_with_no_chunks_at_all_fall_back_to_the_library(
     scopes = []
 
     async def fake_retrieve(
-        db, scope, embedding, query_text, pool_limit=None, guarantee_per_paper=0
+        db, scope, embedding, query_text, pool_limit=None, guarantee_per_paper=0, reranker=None
     ):
         # `pool_limit` mirrors the real signature: the mention path asks for a
         # bigger CANDIDATE pool than the budget so `apply_per_paper_floor` is
@@ -1197,7 +1197,7 @@ async def test_widened_fill_is_capped_at_the_context_budget(
     calls = []
 
     async def fake_retrieve(
-        db, scope, embedding, query_text, pool_limit=None, guarantee_per_paper=0
+        db, scope, embedding, query_text, pool_limit=None, guarantee_per_paper=0, reranker=None
     ):
         # `pool_limit` mirrors the real signature: the mention path asks for a
         # bigger CANDIDATE pool than the budget so `apply_per_paper_floor` is
@@ -1531,7 +1531,7 @@ async def test_the_candidate_pool_never_scales_with_library_size():
     asked: list[tuple[int | None, int]] = []
 
     async def recording_retrieve(
-        db, papers, embedding, query_text, pool_limit=None, guarantee_per_paper=0
+        db, papers, embedding, query_text, pool_limit=None, guarantee_per_paper=0, reranker=None
     ):
         asked.append((pool_limit, guarantee_per_paper))
         return [ChunkContext(n=1, paper_id="pA", title="A", chunk_index=0, text="t")]
@@ -1596,7 +1596,7 @@ async def test_a_widened_turn_that_lands_no_library_chunk_is_not_reported_widene
     owned = [chunk(i) for i in range(budget)]
 
     async def fake_retrieve(
-        db, scope, embedding, query_text, pool_limit=None, guarantee_per_paper=0
+        db, scope, embedding, query_text, pool_limit=None, guarantee_per_paper=0, reranker=None
     ):
         return list(owned)
 
@@ -2086,3 +2086,183 @@ async def test_the_resolver_reads_the_users_words_not_the_reformulated_query(
     assert len(retrieve.await_args.args[1]) == 3
     retrieving = json.loads(next(e for e in events if e["event"] == "retrieving")["data"])
     assert retrieving["scoped"] is False
+
+
+# ── rerank stage ─────────────────────────────────────────────────────────
+
+
+class _SpyReranker:
+    """Answers with a caller-supplied order and records every request."""
+
+    def __init__(self, order=None):
+        self._order = order
+        self.calls: list[dict] = []
+
+    async def rerank(self, query: str, documents: list[str], top_n: int):
+        from app.local_rag.rerank import RerankResult
+
+        self.calls.append({"query": query, "documents": documents, "top_n": top_n})
+        if self._order is None:
+            return None
+        return [
+            RerankResult(index=i, relevance_score=1.0 - n / 1000)
+            for n, i in enumerate(self._order)
+            if i < len(documents)
+        ]
+
+
+def _dense_rows(n: int, paper_id: str = "p1", start: int = 0) -> list[dict]:
+    return [
+        {
+            "id": f"{paper_id}-{i}",
+            "paper_id": paper_id,
+            "chunk_index": i,
+            "text": f"{paper_id} chunk {i}",
+            "distance": 0.1 + i * 0.001,
+            "d_rank": i + 1,
+            "s_rank": None,
+        }
+        for i in range(start, start + n)
+    ]
+
+
+async def test_the_rerank_changes_which_chunks_reach_the_model():
+    """The whole point of the stage. A chunk the fusion ranked 70th is
+    outside a 60-chunk budget and invisible to the model; promoting it to
+    first must put it in front of the model, not merely reorder the 60 the
+    fusion had already chosen. If this passes with the stage a no-op, it is
+    measuring nothing."""
+    from app.services.chat_service import ChatService, PaperInfo
+
+    svc = ChatService()
+    mock_db = _hybrid_db(_dense_rows(70))
+    papers = [PaperInfo(paper_id="p1", title="A"), PaperInfo(paper_id="p2", title="B")]
+    spy = _SpyReranker(order=[69])
+
+    with patch.object(settings, "max_context_chunks", 60):
+        chunks = await svc._retrieve_paper_chunks(mock_db, papers, [0.0] * 768, "q", reranker=spy)
+
+    assert chunks[0].text == "p1 chunk 69"
+    assert len(chunks) == 60
+
+
+async def test_a_failing_reranker_leaves_the_fused_selection_untouched():
+    """Fail-open, at the level that matters: not just the same order, the
+    same CHUNKS. A Cohere outage must not change what the model is shown."""
+    from app.services.chat_service import ChatService, PaperInfo
+
+    svc = ChatService()
+    papers = [PaperInfo(paper_id="p1", title="A"), PaperInfo(paper_id="p2", title="B")]
+
+    with patch.object(settings, "max_context_chunks", 60):
+        baseline = await svc._retrieve_paper_chunks(
+            _hybrid_db(_dense_rows(70)), papers, [0.0] * 768, "q", reranker=None
+        )
+        degraded = await svc._retrieve_paper_chunks(
+            _hybrid_db(_dense_rows(70)),
+            papers,
+            [0.0] * 768,
+            "q",
+            reranker=_SpyReranker(order=None),
+        )
+
+    assert [c.text for c in degraded] == [c.text for c in baseline]
+
+
+async def test_the_dense_only_path_never_reranks():
+    """`hybrid_retrieval=False` is the kill switch AND the eval harness's
+    control arm. A control with a reranker in it is not a control."""
+    from app.services.chat_service import ChatService, PaperInfo
+
+    svc = ChatService()
+    mock_db = _mock_db_returning(10)
+    papers = [PaperInfo(paper_id="p1", title="A"), PaperInfo(paper_id="p2", title="B")]
+    spy = _SpyReranker(order=[0])
+
+    with patch.object(settings, "hybrid_retrieval", False):
+        await svc._retrieve_paper_chunks(mock_db, papers, [0.0] * 768, "q", reranker=spy)
+
+    assert spy.calls == []
+
+
+async def test_only_rerank_candidates_documents_are_sent():
+    """The bound on what crosses the wire to Cohere. Everything past it
+    still reaches the model behind the reranked head."""
+    from app.services.chat_service import ChatService, PaperInfo
+
+    svc = ChatService()
+    mock_db = _hybrid_db(_dense_rows(150))
+    papers = [PaperInfo(paper_id="p1", title="A"), PaperInfo(paper_id="p2", title="B")]
+    spy = _SpyReranker(order=[0])
+
+    with (
+        patch.object(settings, "rerank_candidates", 100),
+        patch.object(settings, "max_context_chunks", 60),
+    ):
+        await svc._retrieve_paper_chunks(mock_db, papers, [0.0] * 768, "q", reranker=spy)
+
+    assert len(spy.calls) == 1
+    assert len(spy.calls[0]["documents"]) == 100
+
+
+async def test_the_reranker_is_given_the_question_and_the_chunk_text():
+    from app.services.chat_service import ChatService, PaperInfo
+
+    svc = ChatService()
+    mock_db = _hybrid_db(_dense_rows(3))
+    papers = [PaperInfo(paper_id="p1", title="A"), PaperInfo(paper_id="p2", title="B")]
+    spy = _SpyReranker(order=[0])
+
+    await svc._retrieve_paper_chunks(
+        mock_db, papers, [0.0] * 768, "what reward function", reranker=spy
+    )
+
+    assert spy.calls[0]["query"] == "what reward function"
+    assert spy.calls[0]["documents"] == ["p1 chunk 0", "p1 chunk 1", "p1 chunk 2"]
+
+
+async def test_single_paper_scope_cuts_before_the_rerank_sees_the_list():
+    """`intra_paper_rank_window` is a RANK-SPACE policy: it reads positions
+    in the fused order, so it has to run while that order still exists. If
+    the rerank ran first the window would slice a relevance order instead,
+    which is a different policy than the one that was measured."""
+    from app.services.chat_service import ChatService, PaperInfo
+
+    svc = ChatService()
+    mock_db = _hybrid_db(_dense_rows(100))
+    spy = _SpyReranker(order=[0])
+
+    with (
+        patch.object(settings, "intra_paper_rank_window", 30),
+        patch.object(settings, "max_context_chunks", 60),
+    ):
+        chunks = await svc._retrieve_paper_chunks(
+            mock_db, [PaperInfo(paper_id="p1", title="A")], [0.0] * 768, "q", reranker=spy
+        )
+
+    assert len(spy.calls[0]["documents"]) == 30
+    assert len(chunks) == 30
+
+
+async def test_guaranteed_rows_are_never_sent_to_the_reranker():
+    """ "Presence, not promotion" survives the rerank. A guaranteed row
+    entered on a per-paper floor rather than on merit, so scoring it here
+    would let it outrank candidates that earned a fused rank -- and the
+    guarantee deliberately keeps the tail position that says so. The rows
+    are appended after the stage, so the provider must never see them."""
+    from app.services.chat_service import ChatService, PaperInfo
+
+    svc = ChatService()
+    ranked = [MagicMock(**row) for row in _dense_rows(5, paper_id="pA")]
+    guaranteed = [_guaranteed_row(1, "pB", 1), _guaranteed_row(2, "pB", 2)]
+    db = _sequenced_db(ranked, guaranteed)
+    scope = [PaperInfo(paper_id="pA", title="A"), PaperInfo(paper_id="pB", title="B")]
+    spy = _SpyReranker(order=[0])
+
+    chunks = await svc._retrieve_paper_chunks(
+        db, scope, [0.0] * 768, "q", guarantee_per_paper=2, reranker=spy
+    )
+
+    sent = spy.calls[0]["documents"]
+    assert not any(text.startswith("guaranteed") for text in sent)
+    assert [c.text for c in chunks[-2:]] == ["guaranteed 1", "guaranteed 2"]

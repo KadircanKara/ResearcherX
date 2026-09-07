@@ -215,6 +215,38 @@ class Settings(BaseSettings):
     # this number as having solved anything.
     max_context_chunks: int = 60
 
+    # ── Rerank (chat path) ───────────────────────────────────────────────
+    # A Cohere cross-encoder pass over the FUSED candidates, before the
+    # budget cut. It can only reorder: it never reopens the distance gate,
+    # never touches the guaranteed tail rows, and fails open to the fused
+    # order (`CohereReranker.rerank` returns None for every failure,
+    # including a missing key). Kill switch, mirroring `hybrid_retrieval`.
+    #
+    # ON by explicit operator decision (2026-09-07) against its own
+    # measurement. Measured the same day on the 100-paper corpus: the stage
+    # moved 0/30 answers into the budget and 0/30 out of it, on BOTH
+    # harnesses, and every mention-side representation figure is identical
+    # to the arm without it. What it buys is ORDERING -- global MRR 0.528 ->
+    # 0.643 -- so the answering chunk sits higher in the excerpt catalog and
+    # takes a lower citation number.
+    #
+    # Read the zero with its caveat: the budget is 60 of 100 scored
+    # candidates, so a rescue needed a chunk at fused rank 61-100 promoted
+    # past 40 competitors, and the four cases that miss have no satisfying
+    # chunk in their top-60 at all. The experiment had little room to show
+    # an effect. Raising `rerank_candidates` or measuring at a smaller k
+    # would give it room; neither has been run.
+    # See evals/retrieval/README.md, "Measured — 2026-09-07".
+    rerank_enabled: bool = True
+    # Documents sent to Cohere per turn. MUST exceed `max_context_chunks`
+    # or the stage cannot change selection at all: the budget cut happens
+    # after it, so a candidate list of 60 reranked down to 60 reorders the
+    # same chunks the fusion had already chosen. The hybrid query already
+    # returns ~200 dense + 100 sparse candidates and discards everything
+    # past the budget, so this spends a surplus that already exists rather
+    # than widening any pool.
+    rerank_candidates: int = 100
+
     # Chunks each MENTIONED paper is guaranteed before the rest of the budget
     # fills by distance.
     #
@@ -404,6 +436,8 @@ class Settings(BaseSettings):
     #
     # An empty COHERE_API_KEY is a supported state, not a misconfiguration:
     # the reranker is skipped and retrieval degrades to the fused order.
+    # These two are SHARED with the chat path's rerank stage (see
+    # `rerank_enabled` above); the index location below is local_rag's alone.
     cohere_api_key: str = ""
     cohere_rerank_model: str = "rerank-v3.5"
     local_rag_dir: str = "./data/local_rag"
