@@ -249,7 +249,14 @@ def _section_tuple(raw) -> tuple[str, ...]:
 
     Anything else degrades to `()` rather than raising. A section path is a
     label on an excerpt; a malformed one is worth losing, never worth losing
-    the answer it was attached to.
+    the answer it was attached to. That policy is why the empty elements are
+    dropped too: a `None` inside the list would otherwise be stringified and
+    reach the model as the literal heading "None".
+
+    A `tuple` is accepted alongside a `list` because `ChunkContext.section` is
+    itself a tuple, and the eval harnesses hand this method rows they built by
+    hand from ChunkContexts. Rejecting the shape the rest of the read path
+    uses would silently blank the section on exactly those rows.
     """
     if raw is None or raw == "":
         return ()
@@ -258,7 +265,9 @@ def _section_tuple(raw) -> tuple[str, ...]:
             raw = json.loads(raw)
         except ValueError:
             return ()
-    return tuple(str(s) for s in raw) if isinstance(raw, list) else ()
+    if not isinstance(raw, (list, tuple)):
+        return ()
+    return tuple(str(s) for s in raw if s)
 
 
 def _vec_str(embedding: list[float]) -> str:

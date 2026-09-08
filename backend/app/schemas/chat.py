@@ -4,18 +4,38 @@ from pydantic import BaseModel, Field
 
 
 class CitationOut(BaseModel):
+    """The shape `chat_service` writes into `chat_messages.citations`.
+
+    Nothing validates against this model today -- the column is `list[dict]`
+    and `MessageOut` carries it through raw. It is kept because it is the only
+    written-down description of that shape, which makes it worth keeping
+    TRUE: a field added to the citation dict and not to this model turns the
+    one piece of documentation into a lie.
+
+    `section` and `page` are defaulted because citations persisted before
+    structured chunking carry neither, and those rows are read back for the
+    lifetime of every conversation that already exists.
+    """
+
     n: int
     paper_id: str
     title: str
     chunk_index: int
     snippet: str
+    # Snapshots, like chunk_index and snippet. Only `title` is resolved on
+    # read (conversation_service.retitle_citations).
+    section: list[str] = Field(default_factory=list)
+    page: int | None = None
 
 
 class MessageOut(BaseModel):
     id: str
     role: str
     content: str
-    citations: list[dict]  # raw JSON — CitationOut shape, validated at write time
+    # Raw JSON, carried through unvalidated. CitationOut describes the shape
+    # chat_service writes, but nothing enforces it at either end -- see that
+    # model's docstring.
+    citations: list[dict]
     # Paper ids the user scoped this turn to. IDS ONLY, and nothing records
     # which substring of `content` belonged to which id.
     #

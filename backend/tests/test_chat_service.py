@@ -306,6 +306,8 @@ async def test_a_sparse_only_chunk_can_outrank_a_dense_chunk():
             "distance": 0.1 + i * 0.001,
             "d_rank": i,
             "s_rank": None,
+            "section": [],
+            "page": None,
         }
         for i in range(1, 101)
     ]
@@ -317,6 +319,8 @@ async def test_a_sparse_only_chunk_can_outrank_a_dense_chunk():
         "distance": None,
         "d_rank": None,
         "s_rank": 1,
+        "section": [],
+        "page": None,
     }
     mock_db = _hybrid_db([*dense_rows, sparse_row])
     papers = [PaperInfo(paper_id="p1", title="A"), PaperInfo(paper_id="p2", title="B")]
@@ -350,6 +354,8 @@ async def test_a_both_arms_chunk_outranks_a_dense_only_top_hit():
                 "distance": 0.42,
                 "d_rank": 3,
                 "s_rank": 1,
+                "section": [],
+                "page": None,
             },
             {
                 "id": "c2",
@@ -359,6 +365,8 @@ async def test_a_both_arms_chunk_outranks_a_dense_only_top_hit():
                 "distance": 0.30,
                 "d_rank": 1,
                 "s_rank": None,
+                "section": [],
+                "page": None,
             },
         ]
     )
@@ -389,6 +397,8 @@ async def test_citations_are_numbered_contiguously_after_fusion():
                 "distance": 0.4,
                 "d_rank": 1,
                 "s_rank": None,
+                "section": [],
+                "page": None,
             },
             {
                 "id": "c2",
@@ -398,6 +408,8 @@ async def test_citations_are_numbered_contiguously_after_fusion():
                 "distance": None,
                 "d_rank": None,
                 "s_rank": 1,
+                "section": [],
+                "page": None,
             },
         ]
     )
@@ -1287,6 +1299,13 @@ def _row(i: int, paper_id: str) -> MagicMock:
         distance=0.1 + i * 0.0001,
         d_rank=i + 1,
         s_rank=None,
+        # Explicit for the reason `_mock_db_returning` spells out: these rows
+        # go through the real `_retrieve_paper_chunks` into
+        # `_to_chunk_contexts`, and an unset MagicMock attribute is coerced by
+        # pydantic through `__int__` into `page=1` -- a value no row in this
+        # database has.
+        section=[],
+        page=None,
     )
 
 
@@ -2304,21 +2323,78 @@ async def test_chunk_contexts_carry_section_and_page_from_rows():
 
 
 async def test_every_retrieval_query_selects_section_and_page():
-    """A column added to two of the three row-producing queries and not the
-    third attaches the wrong section to the right text, silently. Pin all
-    three: dense-only, hybrid, and the per-paper guarantee."""
+    """All three row-producing queries must carry `section`/`page` all the way
+    to their OUTER projection, not merely into a CTE.
+
+    This is the only guard on this plan's central risk, so it asserts
+    structure rather than substrings. A bare `"c.section" in sql` cannot
+    detect any of the three regressions that actually matter, because
+    `c.`-prefixed references live only inside the CTEs:
+
+    - dropping `section, page` from `_guaranteed_rows`' outer SELECT;
+    - deleting the `COALESCE(...) AS section` / `AS page` lines from
+      `_hybrid_rows`' final SELECT;
+    - adding the columns to the hybrid DENSE arm and forgetting the SPARSE
+      arm (one `c.section` anywhere satisfies a substring check).
+
+    Every one of those leaves `_to_chunk_contexts` reading a column that is
+    not in the result, so every chunk silently arrives with `section=()` and
+    `page=None` and nothing anywhere goes red. Hence the split on the CTE
+    boundaries below: each arm and each outer projection is asserted
+    separately.
+    """
     from app.services.chat_service import ChatService, PaperInfo
 
     svc = ChatService()
     papers = [PaperInfo(paper_id="p1", title="A"), PaperInfo(paper_id="p2", title="B")]
-    for hybrid in (True, False):
-        db = _mock_db_returning(0)
-        with patch.object(settings, "hybrid_retrieval", hybrid):
-            await svc._retrieve_paper_chunks(db, papers, [0.0] * 768, "q")
-        sql = db.execute.call_args.args[0].text
-        assert "c.section" in sql and "c.page" in sql
 
+    # Dense-only path: one SELECT, no outer projection to lose them in.
+    db = _mock_db_returning(0)
+    with patch.object(settings, "hybrid_retrieval", False):
+        await svc._retrieve_paper_chunks(db, papers, [0.0] * 768, "q")
+    dense_only_sql = db.execute.call_args.args[0].text
+    assert "c.text, c.section, c.page," in dense_only_sql
+
+    # Hybrid path: two CTE arms plus a FULL OUTER JOIN projection, and all
+    # three have to carry the columns.
+    db = _mock_db_returning(0)
+    with patch.object(settings, "hybrid_retrieval", True):
+        await svc._retrieve_paper_chunks(db, papers, [0.0] * 768, "q")
+    hybrid_sql = db.execute.call_args.args[0].text
+    dense_arm, sep, rest = hybrid_sql.partition("sparse AS (")
+    assert sep, "hybrid query no longer has a sparse arm -- this test is stale"
+    sparse_arm, sep, outer = rest.partition("SELECT COALESCE(")
+    assert sep, "hybrid query no longer has a COALESCE projection -- this test is stale"
+    assert "c.section" in dense_arm and "c.page" in dense_arm
+    assert "c.section" in sparse_arm and "c.page" in sparse_arm
+    assert "AS section" in outer and "AS page" in outer
+
+    # Guarantee query: a `ranked` CTE plus an outer SELECT that re-lists every
+    # column by name, which is exactly where they are easiest to drop.
     db = _sequenced_db([], [])
     await svc._retrieve_paper_chunks(db, papers, [0.0] * 768, "q", guarantee_per_paper=2)
     guarantee_sql = db.execute.call_args_list[-1].args[0].text
-    assert "c.section" in guarantee_sql and "c.page" in guarantee_sql
+    ranked_cte, sep, guarantee_outer = guarantee_sql.partition("SELECT id, paper_id")
+    assert sep, "guarantee query no longer has its outer projection -- this test is stale"
+    assert "c.section" in ranked_cte and "c.page" in ranked_cte
+    assert guarantee_outer.startswith(", chunk_index, text, section, page, distance, p_rank")
+
+
+async def test_section_tuple_accepts_a_tuple_and_drops_empty_elements():
+    """The two shapes the helper is most likely to be handed by hand.
+
+    A `tuple` because `ChunkContext.section` IS a tuple and the eval harnesses
+    build rows from ChunkContexts -- a list-only check silently blanks the
+    section on exactly those rows. Empty elements because a `None` inside the
+    path would otherwise be stringified and reach the model as a heading
+    literally called "None", which is worse than no heading at all.
+    """
+    from app.services.chat_service import _section_tuple
+
+    assert _section_tuple(("IV. RL", "B. Reward")) == ("IV. RL", "B. Reward")
+    assert _section_tuple([None, "Intro", ""]) == ("Intro",)
+    assert _section_tuple([None]) == ()
+    # Still degrades rather than raising on a shape that is neither.
+    assert _section_tuple(42) == ()
+    assert _section_tuple("not json") == ()
+    assert _section_tuple('{"a": 1}') == ()
