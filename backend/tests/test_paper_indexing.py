@@ -11,6 +11,7 @@ from app.core.config import settings
 from app.db.models import Paper, PaperChunkEmbedding, Project, ProjectMember, User
 from app.db.seed import seed_users
 from app.services import paper_ingest_service as svc
+from app.services.structured_chunker import ChunkRecord
 
 
 @pytest.fixture(autouse=True)
@@ -58,6 +59,19 @@ def _fake_embed(n_dims: int = 768):
     return AsyncMock(side_effect=_embed)
 
 
+def _rec(text: str, section=(), page=None) -> ChunkRecord:
+    return ChunkRecord(text=text, section=tuple(section), page=page)
+
+
+async def _rows(db_session: AsyncSession, paper_id: str):
+    rows = await db_session.execute(
+        select(PaperChunkEmbedding)
+        .where(PaperChunkEmbedding.paper_id == paper_id)
+        .order_by(PaperChunkEmbedding.chunk_index)
+    )
+    return rows.scalars().all()
+
+
 async def test_index_manual_abstract_only(db_session: AsyncSession, paper: Paper):
     with patch.object(svc._embedding_svc, "embed_batch", _fake_embed()):
         n = await svc.index_manual(db_session, paper.id, "A standalone abstract.", None)
@@ -97,15 +111,15 @@ async def test_index_manual_keeps_unique_abstract_at_index_zero(
 
 async def test_index_chunks_is_idempotent(db_session: AsyncSession, paper: Paper):
     with patch.object(svc._embedding_svc, "embed_batch", _fake_embed()):
-        await svc.index_chunks(db_session, paper.id, ["one", "two"])
-        await svc.index_chunks(db_session, paper.id, ["one", "two"])
+        await svc.index_chunks(db_session, paper.id, [_rec("one"), _rec("two")], title="T")
+        await svc.index_chunks(db_session, paper.id, [_rec("one"), _rec("two")], title="T")
     assert await _chunks(db_session, paper.id) == ["one", "two"]
 
 
 async def test_index_chunks_empty_clears_existing(db_session: AsyncSession, paper: Paper):
     with patch.object(svc._embedding_svc, "embed_batch", _fake_embed()):
-        await svc.index_chunks(db_session, paper.id, ["one"])
-        n = await svc.index_chunks(db_session, paper.id, [])
+        await svc.index_chunks(db_session, paper.id, [_rec("one")], title="T")
+        n = await svc.index_chunks(db_session, paper.id, [], title="T")
     assert n == 0
     # A session sees its own uncommitted writes, so reading straight through
     # db_session would pass whether or not index_chunks committed the delete.
@@ -122,7 +136,9 @@ async def test_index_chunks_records_configured_model(db_session: AsyncSession, p
         patch.object(svc._embedding_svc, "embed_batch", _fake_embed()),
         patch.object(settings, "embedding_model", "nomic-embed-text"),
     ):
-        await svc.index_chunks(db_session, paper.id, ["chunk one", "chunk two"])
+        await svc.index_chunks(
+            db_session, paper.id, [_rec("chunk one"), _rec("chunk two")], title="T"
+        )
 
     rows = (
         (
@@ -169,3 +185,78 @@ async def test_chunk_rows_carry_section_and_page_columns(db_session: AsyncSessio
     assert row.section == []
     assert row.section_text == ""
     assert row.page is None
+
+
+async def test_index_chunks_stores_section_path_page_and_the_raw_text(
+    db_session: AsyncSession, paper: Paper
+):
+    recs = [_rec("The reward is a weighted sum.", ("IV. RL", "B. Reward"), 3)]
+    with patch.object(svc._embedding_svc, "embed_batch", _fake_embed()):
+        await svc.index_chunks(db_session, paper.id, recs, title="T")
+    (row,) = await _rows(db_session, paper.id)
+    assert row.text == "The reward is a weighted sum."  # header is NOT in the stored text
+    assert row.section == ["IV. RL", "B. Reward"]
+    assert row.section_text == "IV. RL > B. Reward"
+    assert row.page == 3
+
+
+async def test_index_chunks_embeds_the_header_plus_text(db_session: AsyncSession, paper: Paper):
+    """What reaches the embedding provider is the composed string, so a
+    chunk can be found by the name of its section."""
+    fake = _fake_embed()
+    recs = [_rec("The reward is a weighted sum.", ("IV. RL", "B. Reward"), 3)]
+    with patch.object(svc._embedding_svc, "embed_batch", fake):
+        await svc.index_chunks(db_session, paper.id, recs, title="Coop Search")
+    sent = fake.call_args.args[0][0]
+    assert sent.startswith("[Title: Coop Search | Section: IV. RL > B. Reward]\n\n")
+    assert "Page" not in sent
+    assert sent.endswith("The reward is a weighted sum.")
+
+
+async def test_index_manual_builds_records_with_no_section(db_session: AsyncSession, paper: Paper):
+    with patch.object(svc._embedding_svc, "embed_batch", _fake_embed()):
+        await svc.index_manual(db_session, paper.id, "A standalone abstract.", None)
+    (row,) = await _rows(db_session, paper.id)
+    assert row.text == "A standalone abstract." and row.section == [] and row.page is None
+
+
+async def test_ingest_stores_pages_and_outline_and_chunks_with_sections(
+    db_session: AsyncSession, paper: Paper
+):
+    import pymupdf
+
+    doc = pymupdf.open()
+    p = doc.new_page()
+    p.insert_text((72, 100), "II. SYSTEM MODEL", fontsize=12)
+    p.insert_text((72, 130), "We model a swarm of UAVs.", fontsize=10)
+    # `insert_text`'s point is top-down (origin top-left, matching
+    # `get_text("blocks")`), but a TOC destination's `to` point is PDF user
+    # space (origin BOTTOM-left) — `pdf_extraction._outline` converts with
+    # `height - y`. The brief's literal `Point(72, 90)` skips that inversion
+    # and lands the anchor ~750pt down an 842pt-tall page, nowhere near the
+    # heading text at y≈87 from the top, so no block attaches and the outline
+    # entry is silently dropped (found=0). `height - 85` inverts correctly
+    # and lands just above the heading block (y0≈87.1), which is what the
+    # test's "chunks with sections" assertion actually needs.
+    doc.set_toc(
+        [
+            [
+                1,
+                "System Model",
+                1,
+                {"kind": pymupdf.LINK_GOTO, "to": pymupdf.Point(72, p.rect.height - 85)},
+            ]
+        ]
+    )
+    pdf = doc.tobytes()
+    doc.close()
+
+    with patch.object(svc._embedding_svc, "embed_batch", _fake_embed()):
+        n = await svc.ingest(db_session, paper.id, pdf)
+    assert n >= 1
+    await db_session.refresh(paper)
+    assert paper.extracted_pages and paper.extracted_pages[0]["page"] == 1
+    assert paper.outline and paper.outline[0]["title"] == "System Model"
+    assert "<!--section" not in (paper.extracted_text or "")
+    rows = await _rows(db_session, paper.id)
+    assert any(r.section == ["System Model"] and r.page == 1 for r in rows)

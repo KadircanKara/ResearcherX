@@ -465,7 +465,7 @@ async def test_the_stored_pdf_survives_a_failed_extraction(
     pdf = b"%PDF-1.4 unparseable"
 
     with patch(
-        "app.services.paper_ingest_service._extract_markdown",
+        "app.services.paper_ingest_service.extract_document",
         side_effect=RuntimeError("cannot parse"),
     ):
         # However the failure surfaces -- a raised exception or a 500 -- is
