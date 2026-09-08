@@ -172,9 +172,15 @@ def _has_manual_content(row) -> bool:
     return bool((row.abstract and row.abstract.strip()) or (row.body and row.body.strip()))
 
 
-async def _reindex_one(row, *, allow_fetch: bool) -> tuple[int, str, bool] | None:
-    """`None` means SKIPPED — no chunks were written and nothing existing
-    was touched. Every other return commits a write."""
+async def _reindex_one(row, *, allow_fetch: bool) -> tuple[int | None, str | None, bool]:
+    """`n is None` means SKIPPED — no chunks were written and nothing
+    existing was touched; every other `n` commits a write. `fetch_attempted`
+    is returned on BOTH paths — a skip can still follow a fetch that hit the
+    network and failed (no `pdf_url`/`has_file` fallback content either), and
+    the caller's rate-limit pacing has to fire then too. A first cut of this
+    guard collapsed the skip to a bare `None`, which discarded the flag and
+    silently reintroduced the zero-delay-on-failure bug for that one subset
+    of rows — caught in review, not by the corpus this shipped against."""
     records, tier, persist, fetch_attempted = await records_for(row, allow_fetch=allow_fetch)
     if not records and not _has_manual_content(row):
         # Nothing to chunk from pages/PDF/markdown AND no hand-entered text
@@ -183,7 +189,7 @@ async def _reindex_one(row, *, allow_fetch: bool) -> tuple[int, str, bool] | Non
         # — the right behavior for a genuine re-chunk, but calling either
         # here would delete a paper's existing index and replace it with
         # nothing. Leave it alone; the caller counts and reports this.
-        return None
+        return None, None, fetch_attempted
     async with SessionLocal() as db:
         if tier == "manual":
             return await index_manual(db, row.id, row.abstract, row.body), tier, fetch_attempted
@@ -229,17 +235,21 @@ async def main() -> None:
     tiers: dict[str, int] = {}
     for i, row in enumerate(rows, 1):
         try:
-            result = await _reindex_one(row, allow_fetch=args.fetch)
-            if result is None:
+            n, tier, fetch_attempted = await _reindex_one(row, allow_fetch=args.fetch)
+            if n is None:
                 skipped.append(row.id)
                 print(
                     f"[{i}/{len(rows)}] SKIP         {row.title[:60]}  (no content to index)",
                     flush=True,
                 )
-                continue
-            n, tier, fetch_attempted = result
-            tiers[tier] = tiers.get(tier, 0) + 1
-            print(f"[{i}/{len(rows)}] {n:>4} chunks  {tier:<9} {row.title[:60]}", flush=True)
+            else:
+                tiers[tier] = tiers.get(tier, 0) + 1
+                print(f"[{i}/{len(rows)}] {n:>4} chunks  {tier:<9} {row.title[:60]}", flush=True)
+            # Outside the if/else on purpose: a fetch can hit the network and
+            # fail with nothing to fall back to, which SKIPS the paper but
+            # still has to pace the same as a write would — the delay is
+            # keyed on whether the network was touched, not on what happened
+            # to the paper as a result.
             if fetch_attempted:
                 await asyncio.sleep(_FETCH_DELAY_S)
         except Exception as exc:  # noqa: BLE001 — report at the end, keep going

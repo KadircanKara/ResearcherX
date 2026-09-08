@@ -115,8 +115,24 @@ async def test_a_paper_with_nothing_to_index_is_skipped_not_emptied():
     wipe this paper's existing chunk rows and leave zero. `_reindex_one`
     must refuse to write at all."""
     row = _row(pdf_url="https://arxiv.org/abs/1")
-    result = await rp._reindex_one(row, allow_fetch=False)
-    assert result is None
+    n, tier, fetch_attempted = await rp._reindex_one(row, allow_fetch=False)
+    assert n is None and tier is None and fetch_attempted is False
+
+
+async def test_a_failed_fetch_with_nothing_to_fall_back_to_is_skipped_but_still_paces():
+    """The regression from fix round 1: a skip must not swallow
+    `fetch_attempted`. `pdf_url` set, `--fetch` on, `fetch_pdf` raises, and
+    no `extracted_text`/abstract/body to fall back to — the paper is
+    SKIPPED (nothing to chunk anywhere), but the fetch DID hit the network
+    and fail, so the caller's rate-limit delay must still fire. A first cut
+    of the skip guard returned a bare `None` here, discarding the bool and
+    silently reintroducing "zero delay on failure" for exactly this subset
+    of rows."""
+    row = _row(pdf_url="https://arxiv.org/abs/1")
+    with patch.object(rp, "fetch_pdf", new=AsyncMock(side_effect=RuntimeError("403"))):
+        n, tier, fetch_attempted = await rp._reindex_one(row, allow_fetch=True)
+    assert n is None and tier is None
+    assert fetch_attempted is True
 
 
 async def test_a_genuinely_manual_paper_with_content_is_not_skipped():
