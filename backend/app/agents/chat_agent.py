@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 
 from app.core.config import settings
 from app.llm.client import create_chat_completion
+from app.services.chunk_header import excerpt_text
 
 SYSTEM = (
     "You are a research assistant with access to excerpts from academic papers. "
@@ -90,6 +91,16 @@ class ChunkContext(BaseModel):
     title: str
     chunk_index: int
     text: str
+    # Where the chunk sits in the paper: the section path outermost first, and
+    # the page it starts on. Both DEFAULT to absent, which is not a
+    # convenience -- every row indexed before structured chunking has
+    # section=[] and page=NULL, and that state has to render as a plain
+    # title header rather than as a dangling "Section: ". The tuple is
+    # immutable on purpose: ChunkContext is copied by `_renumber_chunks`
+    # (model_copy) and passed around after retrieval, and a shared mutable
+    # default there is a bug waiting for a caller that appends to it.
+    section: tuple[str, ...] = ()
+    page: int | None = None
 
 
 class PaperMetaContext(BaseModel):
@@ -213,8 +224,17 @@ class ChatAgent:
 
     async def stream(self, inp: ChatAgentInput) -> AsyncIterator[str]:
         if inp.paper_chunks:
+            # The header is COMPOSED here, from the paper's current title plus
+            # the chunk's stored section/page — never read back as a stored
+            # string. `chunk_header.excerpt_text` is the same function the
+            # index path builds its embedded header with (minus the page,
+            # which is a locator and carries no meaning to an embedding
+            # model), so the two cannot drift. The chunk_index is gone from
+            # the visible header: it named a position in an arbitrary
+            # fixed-size split, which told the model nothing, where the
+            # section path tells it where in the paper this text sits.
             catalog = "\n\n".join(
-                f"[{c.n}] From '{c.title}' (chunk {c.chunk_index}):\n{c.text}"
+                f"[{c.n}] {excerpt_text(c.title, c.section, c.page, c.text)}"
                 for c in inp.paper_chunks
             )
             context_block = f"EXCERPT CATALOG:\n{catalog}"

@@ -330,3 +330,74 @@ def test_a_mention_scope_block_keeps_the_user_wording():
     assert "SCOPE: the user restricted this question to:" in build_scope_block(
         ["Paper A"], widened=False
     )
+
+
+async def test_excerpt_catalog_shows_title_section_and_page(monkeypatch):
+    """The model reads the composed header, not a bare 'From title (chunk n)'.
+
+    The header is built at READ time from the paper's CURRENT title plus the
+    chunk's stored section/page — see chunk_header.py for why the title is
+    never persisted alongside the row.
+    """
+    captured = {}
+
+    async def fake_stream(**kwargs):
+        captured["messages"] = kwargs["messages"]
+
+        async def gen():
+            yield MagicMock(choices=[MagicMock(delta=MagicMock(content="ok"))])
+
+        return gen()
+
+    monkeypatch.setattr("app.agents.chat_agent.create_chat_completion", fake_stream)
+    inp = ChatAgentInput(
+        query="q",
+        prior_messages=[],
+        paper_chunks=[
+            ChunkContext(
+                n=1,
+                paper_id="p",
+                title="Coop Search",
+                chunk_index=6,
+                text="The reward is a weighted sum.",
+                section=("IV. RL", "B. Reward"),
+                page=3,
+            )
+        ],
+    )
+    async for _ in ChatAgent().stream(inp):
+        pass
+    user = captured["messages"][-1]["content"]
+    assert "[1] [Title: Coop Search | Section: IV. RL > B. Reward | Page: 3]" in user
+    assert "The reward is a weighted sum." in user
+
+
+async def test_excerpt_catalog_omits_empty_section_and_page(monkeypatch):
+    """A row written before structured chunking has section=[] and page=NULL.
+
+    It must render as a bare title header — no dangling 'Section: ' and no
+    'Page: None' — because the whole corpus looks like this until the
+    re-index runs.
+    """
+    captured = {}
+
+    async def fake_stream(**kwargs):
+        captured["messages"] = kwargs["messages"]
+
+        async def gen():
+            yield MagicMock(choices=[MagicMock(delta=MagicMock(content="ok"))])
+
+        return gen()
+
+    monkeypatch.setattr("app.agents.chat_agent.create_chat_completion", fake_stream)
+    inp = ChatAgentInput(
+        query="q",
+        prior_messages=[],
+        paper_chunks=[ChunkContext(n=1, paper_id="p", title="Old Paper", chunk_index=0, text="t")],
+    )
+    async for _ in ChatAgent().stream(inp):
+        pass
+    user = captured["messages"][-1]["content"]
+    assert "[1] [Title: Old Paper]\n\nt" in user
+    assert "Section:" not in user
+    assert "Page:" not in user

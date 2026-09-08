@@ -158,6 +158,13 @@ def _mock_db_returning(n_rows: int) -> MagicMock:
             distance=0.1 + i * 0.0001,
             d_rank=i + 1,
             s_rank=None,
+            # Explicit, not left to MagicMock's auto-attribute: pydantic
+            # coerces a MagicMock to int through __int__, so an unset `page`
+            # would silently arrive as 1 and a test asserting "no page" would
+            # pass for the wrong reason. These are the values a row indexed
+            # before structured chunking actually has.
+            section=[],
+            page=None,
         )
         for i in range(n_rows)
     ]
@@ -786,7 +793,9 @@ async def test_single_paper_scope_applies_the_delta_cut():
 
     svc = ChatService()
     rows = [
-        MagicMock(paper_id="p1", chunk_index=i, text=f"chunk {i}", distance=d)
+        MagicMock(
+            paper_id="p1", chunk_index=i, text=f"chunk {i}", distance=d, section=[], page=None
+        )
         for i, d in enumerate([0.50, 0.60, 0.74, 0.80])
     ]
     mock_result = MagicMock()
@@ -819,7 +828,9 @@ async def test_multi_paper_scope_applies_no_delta_cut():
 
     svc = ChatService()
     rows = [
-        MagicMock(paper_id=f"p{i}", chunk_index=0, text=f"chunk {i}", distance=d)
+        MagicMock(
+            paper_id=f"p{i}", chunk_index=0, text=f"chunk {i}", distance=d, section=[], page=None
+        )
         for i, d in enumerate([0.30, 0.60, 0.74])
     ]
     mock_result = MagicMock()
@@ -1344,6 +1355,8 @@ def _guaranteed_row(i: int, paper_id: str, p_rank: int) -> MagicMock:
         text=f"guaranteed {i}",
         distance=0.6 + i * 0.0001,
         p_rank=p_rank,
+        section=[],
+        page=None,
     )
 
 
@@ -2121,6 +2134,8 @@ def _dense_rows(n: int, paper_id: str = "p1", start: int = 0) -> list[dict]:
             "distance": 0.1 + i * 0.001,
             "d_rank": i + 1,
             "s_rank": None,
+            "section": [],
+            "page": None,
         }
         for i in range(start, start + n)
     ]
@@ -2266,3 +2281,44 @@ async def test_guaranteed_rows_are_never_sent_to_the_reranker():
     sent = spy.calls[0]["documents"]
     assert not any(text.startswith("guaranteed") for text in sent)
     assert [c.text for c in chunks[-2:]] == ["guaranteed 1", "guaranteed 2"]
+
+
+async def test_chunk_contexts_carry_section_and_page_from_rows():
+    """The JSON column arrives as a list from asyncpg and as a str from
+    sqlite, and a pre-re-index row arrives as None. All three must land as a
+    tuple the excerpt header can render."""
+    from app.services.chat_service import ChatService
+
+    svc = ChatService()
+    rows = [
+        MagicMock(
+            paper_id="p1", chunk_index=6, text="t", section='["IV. RL", "B. Reward"]', page=3
+        ),
+        MagicMock(paper_id="p1", chunk_index=0, text="u", section=["Intro"], page=None),
+        MagicMock(paper_id="p1", chunk_index=1, text="v", section=None, page=None),
+    ]
+    ctx = svc._to_chunk_contexts(rows, {"p1": "T"})
+    assert ctx[0].section == ("IV. RL", "B. Reward") and ctx[0].page == 3
+    assert ctx[1].section == ("Intro",) and ctx[1].page is None
+    assert ctx[2].section == () and ctx[2].page is None
+
+
+async def test_every_retrieval_query_selects_section_and_page():
+    """A column added to two of the three row-producing queries and not the
+    third attaches the wrong section to the right text, silently. Pin all
+    three: dense-only, hybrid, and the per-paper guarantee."""
+    from app.services.chat_service import ChatService, PaperInfo
+
+    svc = ChatService()
+    papers = [PaperInfo(paper_id="p1", title="A"), PaperInfo(paper_id="p2", title="B")]
+    for hybrid in (True, False):
+        db = _mock_db_returning(0)
+        with patch.object(settings, "hybrid_retrieval", hybrid):
+            await svc._retrieve_paper_chunks(db, papers, [0.0] * 768, "q")
+        sql = db.execute.call_args.args[0].text
+        assert "c.section" in sql and "c.page" in sql
+
+    db = _sequenced_db([], [])
+    await svc._retrieve_paper_chunks(db, papers, [0.0] * 768, "q", guarantee_per_paper=2)
+    guarantee_sql = db.execute.call_args_list[-1].args[0].text
+    assert "c.section" in guarantee_sql and "c.page" in guarantee_sql

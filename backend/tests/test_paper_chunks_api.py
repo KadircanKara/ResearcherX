@@ -86,6 +86,10 @@ async def test_returns_full_chunk_text(
     body = r.json()
     assert body["chunk_index"] == 1
     assert body["text"] == "The reward is a weighted sum."
+    # Written without a section, like every row indexed before structured
+    # chunking. The hover card has to render that as "no section", not crash.
+    assert body["section"] == []
+    assert body["page"] is None
     assert body["paper_title"] == "Cooperative Search"
 
 

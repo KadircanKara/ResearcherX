@@ -236,6 +236,31 @@ def build_chat_reranker() -> CohereReranker | None:
     return CohereReranker(api_key=settings.cohere_api_key, model=settings.cohere_rerank_model)
 
 
+def _section_tuple(raw) -> tuple[str, ...]:
+    """A retrieval row's `section` column as a tuple, whatever shape it lands in.
+
+    Three shapes are all legitimate and all reach here:
+    - a `list`, which is what asyncpg gives back for a JSON column in prod;
+    - a `str`, which is what sqlite gives back in tests (it stores JSON as
+      text and the raw `text()` queries bypass the ORM's type decoding);
+    - `None` or `""`, which is every row indexed before structured chunking
+      landed — those must render exactly as a chunk with no section does,
+      with no crash and no empty "Section: " fragment.
+
+    Anything else degrades to `()` rather than raising. A section path is a
+    label on an excerpt; a malformed one is worth losing, never worth losing
+    the answer it was attached to.
+    """
+    if raw is None or raw == "":
+        return ()
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except ValueError:
+            return ()
+    return tuple(str(s) for s in raw) if isinstance(raw, list) else ()
+
+
 def _vec_str(embedding: list[float]) -> str:
     """Format Python list as pgvector string: [0.1, 0.2, ...]"""
     return "[" + ",".join(str(x) for x in embedding) + "]"
@@ -571,6 +596,15 @@ class ChatService:
                     "title": by_old[old_n].title,
                     "chunk_index": by_old[old_n].chunk_index,
                     "snippet": by_old[old_n].text[:200],
+                    # SNAPSHOTS, like chunk_index and snippet: they describe
+                    # where the text the model was actually shown came from.
+                    # Only `title` resolves on read (conversation_service.
+                    # retitle_citations), because a title labels a paper that
+                    # still exists while these locate a specific excerpt. A
+                    # re-index that re-chunks a paper does not retroactively
+                    # move the excerpt this answer was written against.
+                    "section": list(by_old[old_n].section),
+                    "page": by_old[old_n].page,
                 }
                 for old_n, new_n in sorted(renumbered.items(), key=lambda kv: kv[1])
                 if old_n in by_old
@@ -1054,7 +1088,7 @@ class ChatService:
                 FROM jsonb_array_elements_text(CAST(:ids AS jsonb))
             ),
             ranked AS (
-                SELECT c.id, c.paper_id, c.chunk_index, c.text,
+                SELECT c.id, c.paper_id, c.chunk_index, c.text, c.section, c.page,
                        (c.embedding <=> CAST(:qvec AS vector)) AS distance,
                        ROW_NUMBER() OVER (
                            PARTITION BY c.paper_id
@@ -1065,7 +1099,7 @@ class ChatService:
                 WHERE c.model = :model
                   AND (c.embedding <=> CAST(:qvec AS vector)) < :threshold
             )
-            SELECT id, paper_id, chunk_index, text, distance, p_rank
+            SELECT id, paper_id, chunk_index, text, section, page, distance, p_rank
             FROM ranked
             WHERE p_rank <= :guarantee
             ORDER BY p_rank ASC, distance ASC
@@ -1095,6 +1129,17 @@ class ChatService:
 
         `n` is the marker the model cites, so it must follow the order the
         model sees -- after fusion and after every cut, never the row order.
+
+        This is the ONE place a retrieval row becomes a ChunkContext, which is
+        why `section`/`page` are read with `getattr`: all three row-producing
+        queries (`_dense_only_rows`, `_hybrid_rows`, `_guaranteed_rows`) do
+        select them, but this method is also handed hand-built rows by the
+        eval harnesses and the tests, and a missing column there should
+        degrade to "no section" rather than take the whole turn down.
+
+        The TITLE still comes from `paper_title_map`, not from the row --
+        composing the header at read time from `papers.title` is what stops a
+        rename making thousands of stored rows lie (see chunk_header.py).
         """
         return [
             ChunkContext(
@@ -1103,6 +1148,8 @@ class ChatService:
                 title=paper_title_map.get(row.paper_id, ""),
                 chunk_index=row.chunk_index,
                 text=row.text,
+                section=_section_tuple(getattr(row, "section", None)),
+                page=getattr(row, "page", None),
             )
             for i, row in enumerate(rows, 1)
         ]
@@ -1119,7 +1166,7 @@ class ChatService:
                 SELECT value AS paper_id
                 FROM jsonb_array_elements_text(CAST(:ids AS jsonb))
             )
-            SELECT c.id, c.paper_id, c.chunk_index, c.text,
+            SELECT c.id, c.paper_id, c.chunk_index, c.text, c.section, c.page,
                    (c.embedding <=> CAST(:qvec AS vector)) AS distance
             FROM paper_chunk_embeddings c
             JOIN scope s ON s.paper_id = c.paper_id
@@ -1176,7 +1223,7 @@ class ChatService:
                 SELECT websearch_to_tsquery('english', :qtext) AS tsq
             ),
             dense AS (
-                SELECT c.id, c.paper_id, c.chunk_index, c.text,
+                SELECT c.id, c.paper_id, c.chunk_index, c.text, c.section, c.page,
                        (c.embedding <=> CAST(:qvec AS vector)) AS distance,
                        ROW_NUMBER() OVER (
                            ORDER BY c.embedding <=> CAST(:qvec AS vector)
@@ -1189,7 +1236,7 @@ class ChatService:
                 LIMIT :dense_pool
             ),
             sparse AS (
-                SELECT c.id, c.paper_id, c.chunk_index, c.text,
+                SELECT c.id, c.paper_id, c.chunk_index, c.text, c.section, c.page,
                        ROW_NUMBER() OVER (
                            ORDER BY ts_rank_cd(c.tsv, q.tsq) DESC, c.id
                        ) AS s_rank
@@ -1205,6 +1252,16 @@ class ChatService:
                    COALESCE(d.paper_id, sp.paper_id)       AS paper_id,
                    COALESCE(d.chunk_index, sp.chunk_index) AS chunk_index,
                    COALESCE(d.text, sp.text)               AS text,
+                   -- Both arms carry these for the same reason both carry
+                   -- `text`: the FULL OUTER JOIN admits a chunk that only
+                   -- one arm found, and a sparse-only chunk with a NULL
+                   -- section would reach the model as an excerpt that has
+                   -- lost the heading it sits under. d and sp are the same
+                   -- physical row whenever both are present, so the
+                   -- COALESCE can never pick one chunk's section for
+                   -- another chunk's text.
+                   COALESCE(d.section, sp.section)         AS section,
+                   COALESCE(d.page, sp.page)               AS page,
                    d.distance                              AS distance,
                    d.d_rank                                AS d_rank,
                    sp.s_rank                                AS s_rank
