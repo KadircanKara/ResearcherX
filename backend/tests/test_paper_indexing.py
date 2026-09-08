@@ -157,3 +157,15 @@ async def test_ingest_persists_extracted_text(db_session: AsyncSession, paper: P
     await db_session.refresh(paper)
     assert paper.extracted_text is not None
     assert "Hello World" in paper.extracted_text
+
+
+async def test_chunk_rows_carry_section_and_page_columns(db_session: AsyncSession, paper: Paper):
+    """The columns exist and default to 'no section, no page' so rows
+    written before the re-index keep working."""
+    row = PaperChunkEmbedding(paper_id=paper.id, chunk_index=0, text="t", embedding="[0]")
+    db_session.add(row)
+    await db_session.commit()
+    await db_session.refresh(row)
+    assert row.section == []
+    assert row.section_text == ""
+    assert row.page is None
