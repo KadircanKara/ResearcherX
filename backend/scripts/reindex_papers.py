@@ -1,118 +1,193 @@
-"""Re-index paper chunks under the currently configured embedding model.
+"""Re-index paper chunks under the current chunker and embedding model.
 
-The paper-side counterpart to reembed_messages.py. Changing EMBEDDING_MODEL or
-either EMBEDDING_*_PREFIX invalidates every stored vector — retrieval filters on
-`model` in SQL, so stale rows don't error, they just silently stop being
-retrievable. Nothing detects that; this script is the documented repair.
+Run:  docker compose exec -T backend python -m scripts.reindex_papers [--all] [--fetch] [--dry-run]
 
-Run:  docker compose exec -T backend python -m scripts.reindex_papers
+The `-m` form is required: pyproject.toml packages only `app*`.
 
-The `-m` form is required: pyproject.toml packages only `app*`, so `scripts` is
-not installed and file-path invocation drops cwd from sys.path.
+Default: papers with no chunk at the configured embedding model (the
+original purpose). `--all`: every paper, which is what a CHUNKER change
+needs — the rows exist, they are just cut the old way. `--fetch`: allow one
+network fetch per paper that has a `pdf_url` (or a retained PDF) but no
+stored pages, so it gets real sections and pages (tier 1/2) instead of the
+markdown-only tier 3. Fetches are 3 s apart and a failure degrades that ONE
+paper to tier 3 and continues.
 
-No PDF re-fetch is needed: `ingest()` persists the extracted markdown to
-`papers.extracted_text`, so chunking replays from the database. Papers ingested
-by hand have no extracted_text and are replayed through the manual path instead,
-matching how each was originally indexed.
+Tiers, best available per paper (spec §1):
+    pages     stored extracted_pages/outline -> no PDF, no network
+    pdf       paper_files blob or pdf_url     -> extract, STORE pages/outline
+    markdown  extracted_text                  -> sections, no pages
+    manual    abstract + body                 -> index_manual
+
+One paper per transaction, sequentially, so a failure leaves that one paper
+unindexed and every other untouched.
 """
 
 import argparse
 import asyncio
+import json
 
 from sqlalchemy import text
 
 from app.core.config import settings
 from app.db.session import SessionLocal
+from app.services.paper_fetch_service import fetch_pdf
 from app.services.paper_ingest_service import (
-    _chunk_text,
-    _extract_figure_captions,
+    _FIGURE_CAPTION_RE,
+    chunk_records_for_markdown,
     index_chunks,
     index_manual,
 )
+from app.services.pdf_extraction import (
+    extract_document,
+    outline_to_json,
+    pages_from_json,
+    pages_to_json,
+)
+from app.services.structured_chunker import ChunkRecord, chunk_pages
 
-# Papers with no chunk at the configured model. A paper that genuinely indexes
-# to zero chunks (empty text) is selected on every run; that is deliberate —
-# treating "no rows" as "already done" would permanently hide a paper whose
-# ingest silently produced nothing.
-_STALE_SQL = text("""
-    SELECT p.id, p.title, p.extracted_text, p.abstract, p.body
+_FETCH_DELAY_S = 3.0
+
+_SELECT = """
+    SELECT p.id, p.title, p.extracted_text, p.extracted_pages, p.outline, p.pdf_url,
+           p.abstract, p.body,
+           EXISTS (SELECT 1 FROM paper_files f WHERE f.paper_id = p.id) AS has_file
     FROM papers p
+"""
+_STALE_SQL = text(
+    _SELECT
+    + """
     WHERE NOT EXISTS (
         SELECT 1 FROM paper_chunk_embeddings c
         WHERE c.paper_id = p.id AND c.model = :model
     )
     ORDER BY p.created_at
-""")
+"""
+)
+_ALL_SQL = text(_SELECT + " ORDER BY p.created_at")
+_BLOB_SQL = text("SELECT blob FROM paper_files WHERE paper_id = :id")
 
 
-async def _reindex_one(row) -> int:
-    """Replay the indexing path this paper was originally ingested through."""
+def _pdf_url(url: str) -> str:
+    """arXiv abstract pages serve HTML; the PDF lives under /pdf/."""
+    return url.replace("arxiv.org/abs/", "arxiv.org/pdf/", 1)
+
+
+def tier_for(row) -> str:
+    if row.extracted_pages:
+        return "pages"
+    if row.pdf_url or getattr(row, "has_file", False):
+        return "pdf"
+    if row.extracted_text:
+        return "markdown"
+    return "manual"
+
+
+async def _pdf_bytes(row) -> bytes | None:
+    if getattr(row, "has_file", False):
+        async with SessionLocal() as db:
+            blob = (await db.execute(_BLOB_SQL, {"id": row.id})).scalar_one_or_none()
+        if blob:
+            return bytes(blob)
+    if row.pdf_url:
+        pdf, _served_from = await fetch_pdf(_pdf_url(row.pdf_url))
+        return pdf
+    return None
+
+
+async def records_for(row, *, allow_fetch: bool) -> tuple[list[ChunkRecord], str, dict | None]:
+    """(chunk records, tier actually used, papers-columns to persist or None)."""
+    tier = tier_for(row)
+    if tier == "pages":
+        pages = pages_from_json(row.extracted_pages)
+        return (
+            chunk_pages(pages, use_markers=bool(row.outline), caption_re=_FIGURE_CAPTION_RE),
+            "pages",
+            None,
+        )
+    if tier == "pdf" and allow_fetch:
+        try:
+            pdf = await _pdf_bytes(row)
+        except Exception as exc:  # noqa: BLE001 — one paper degrades, the run continues
+            print(f"    fetch failed ({type(exc).__name__}); falling back to markdown", flush=True)
+            pdf = None
+        if pdf:
+            ex = extract_document(pdf)
+            return (
+                chunk_pages(ex.pages, use_markers=ex.has_outline, caption_re=_FIGURE_CAPTION_RE),
+                "pdf",
+                {
+                    "extracted_pages": pages_to_json(ex.pages),
+                    "outline": outline_to_json(ex.outline),
+                    "extracted_text": ex.markdown,
+                },
+            )
+    if row.extracted_text:
+        return chunk_records_for_markdown(row.extracted_text), "markdown", None
+    return [], "manual", None
+
+
+async def _reindex_one(row, *, allow_fetch: bool) -> tuple[int, str]:
+    records, tier, persist = await records_for(row, allow_fetch=allow_fetch)
     async with SessionLocal() as db:
-        if row.extracted_text:
-            md = row.extracted_text
-            chunks = _chunk_text(md) + _extract_figure_captions(md)
-            return await index_chunks(db, row.id, chunks)
-        return await index_manual(db, row.id, row.abstract, row.body)
+        if tier == "manual":
+            return await index_manual(db, row.id, row.abstract, row.body), tier
+        if persist:
+            await db.execute(
+                text(
+                    "UPDATE papers SET extracted_pages = CAST(:pages AS json), "
+                    "outline = CAST(:outline AS json), extracted_text = :md WHERE id = :id"
+                ),
+                {
+                    "pages": json.dumps(persist["extracted_pages"]),
+                    "outline": json.dumps(persist["outline"]),
+                    "md": persist["extracted_text"],
+                    "id": row.id,
+                },
+            )
+        n = await index_chunks(db, row.id, records, title=row.title)
+        return n, tier
 
 
 async def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="list what would be re-indexed, embed nothing",
-    )
+    parser.add_argument("--dry-run", action="store_true", help="list, embed nothing")
+    parser.add_argument("--all", action="store_true", help="every paper, not only the stale ones")
+    parser.add_argument("--fetch", action="store_true", help="allow one PDF fetch per paper")
     args = parser.parse_args()
 
     async with SessionLocal() as db:
-        rows = (await db.execute(_STALE_SQL, {"model": settings.embedding_model})).fetchall()
+        rows = (
+            await db.execute(
+                _ALL_SQL if args.all else _STALE_SQL, {"model": settings.embedding_model}
+            )
+        ).fetchall()
 
-    print(f"{len(rows)} paper(s) missing chunks for model {settings.embedding_model!r}")
+    print(f"{len(rows)} paper(s) selected ({'all' if args.all else 'stale only'})")
     if args.dry_run:
         for row in rows:
-            path = "extracted_text" if row.extracted_text else "manual (abstract+body)"
-            print(f"  would re-index {row.id}  [{path}]  {row.title[:60]}")
+            print(f"  {tier_for(row):<9} {row.id}  {row.title[:60]}")
         return
 
-    # One paper per transaction, sequentially. index_chunks deletes the paper's
-    # existing rows before inserting, so a failure mid-run leaves that ONE paper
-    # unindexed and every other paper untouched — and the next run picks it up,
-    # because it still has no row at the configured model. Batching papers into
-    # a shared transaction would trade that property for throughput this script
-    # does not need.
     failed: list[tuple[str, str]] = []
+    tiers: dict[str, int] = {}
     for i, row in enumerate(rows, 1):
         try:
-            n = await _reindex_one(row)
-            print(f"[{i}/{len(rows)}] {n:>4} chunks  {row.title[:60]}", flush=True)
-        except Exception as exc:
+            n, tier = await _reindex_one(row, allow_fetch=args.fetch)
+            tiers[tier] = tiers.get(tier, 0) + 1
+            print(f"[{i}/{len(rows)}] {n:>4} chunks  {tier:<9} {row.title[:60]}", flush=True)
+            if tier == "pdf" and args.fetch and not getattr(row, "has_file", False):
+                await asyncio.sleep(_FETCH_DELAY_S)
+        except Exception as exc:  # noqa: BLE001 — report at the end, keep going
             failed.append((row.id, f"{type(exc).__name__}: {exc}"))
             print(
                 f"[{i}/{len(rows)}] FAILED       {row.title[:60]}  ({type(exc).__name__})",
                 flush=True,
             )
 
-    # Re-query rather than trusting the loop: proves the rows are actually at
-    # the configured model, which is the only thing retrieval will accept.
-    async with SessionLocal() as db:
-        (remaining,) = (
-            await db.execute(
-                text("""
-                SELECT count(*) FROM papers p
-                WHERE NOT EXISTS (
-                    SELECT 1 FROM paper_chunk_embeddings c
-                    WHERE c.paper_id = p.id AND c.model = :model
-                )
-            """),
-                {"model": settings.embedding_model},
-            )
-        ).one()
-
     print(f"\nre-indexed {len(rows) - len(failed)} of {len(rows)} papers")
+    print("by tier: " + ", ".join(f"{k}={v}" for k, v in sorted(tiers.items())))
     for paper_id, err in failed:
         print(f"  failed: {paper_id}  {err}")
-    if remaining:
-        print(f"{remaining} paper(s) still have no chunks at {settings.embedding_model!r}")
 
 
 if __name__ == "__main__":

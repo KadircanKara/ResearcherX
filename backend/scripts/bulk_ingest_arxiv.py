@@ -22,10 +22,9 @@ Two deliberate differences from the `/papers/{id}/ingest-from-url` endpoint:
 - **No HTTP layer**, so the per-IP limiter in `core/security.py` doesn't reject
   the run partway through.
 
-Chunking is NOT re-implemented: it calls the same `_chunk_text` /
-`_extract_figure_captions` / `index_chunks` that `ingest()` uses. A corpus
-chunked differently from production would make every retrieval number a
-measurement of this script instead of the system.
+Chunking is NOT re-implemented: it calls the same `chunk_pages` / `index_chunks`
+that `ingest()` uses. A corpus chunked differently from production would make
+every retrieval number a measurement of this script instead of the system.
 """
 
 import argparse
@@ -38,12 +37,9 @@ from sqlalchemy import select
 from app.core.config import settings
 from app.db.models import Paper, PaperSource
 from app.db.session import SessionLocal
-from app.services.paper_ingest_service import (
-    _chunk_text,
-    _extract_figure_captions,
-    _extract_markdown,
-    index_chunks,
-)
+from app.services.paper_ingest_service import _FIGURE_CAPTION_RE, index_chunks
+from app.services.pdf_extraction import extract_document, outline_to_json, pages_to_json
+from app.services.structured_chunker import chunk_pages
 
 _TITLE_MAX = 512  # papers.title is String(512)
 
@@ -62,8 +58,9 @@ async def _already_loaded(project_id: str) -> set[str]:
 
 
 async def _ingest_one(project_id: str, rec: dict, pdf: pathlib.Path) -> int:
-    md = _extract_markdown(pdf.read_bytes())
-    chunks = _chunk_text(md) + _extract_figure_captions(md)
+    ex = extract_document(pdf.read_bytes())
+    md = ex.markdown
+    chunks = chunk_pages(ex.pages, use_markers=ex.has_outline, caption_re=_FIGURE_CAPTION_RE)
 
     async with SessionLocal() as db:
         paper = Paper(
@@ -75,6 +72,8 @@ async def _ingest_one(project_id: str, rec: dict, pdf: pathlib.Path) -> int:
             venue=rec.get("venue") or "arXiv",
             metadata_source="s2",
             extracted_text=md,
+            extracted_pages=pages_to_json(ex.pages),
+            outline=outline_to_json(ex.outline),
             pdf_url=_abs_url(rec["arxiv_id"]),
             source=PaperSource.LINK,
         )
@@ -83,7 +82,7 @@ async def _ingest_one(project_id: str, rec: dict, pdf: pathlib.Path) -> int:
         # index_chunks commits, carrying the flushed Paper with it — so an
         # embedding failure rolls back the paper row too, exactly as
         # create_paper does. No orphan rows whose chunks never got written.
-        return await index_chunks(db, paper.id, chunks)
+        return await index_chunks(db, paper.id, chunks, title=paper.title)
 
 
 async def main() -> None:
