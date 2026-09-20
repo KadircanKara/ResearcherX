@@ -54,6 +54,17 @@ from evals.groundedness.metrics import (
     undisclosed_hallucination_rate,
     unjudged_markers,
 )
+from evals.groundedness.relevance import (
+    METRICS,
+    RelevanceOutcome,
+    SelfJudgeError,
+    check_judge_independence,
+    context_precision,
+    csv_row,
+    mean_answer_relevance,
+    parse_metrics,
+    write_csv,
+)
 from evals.retrieval.golden_set import Case, chunk_satisfies, load_golden_set
 
 _DEFAULT_SET = Path(__file__).resolve().parents[1] / "retrieval" / "golden_set.json"
@@ -99,6 +110,61 @@ def _evidence_present(case: Case, generated: Generated) -> bool | None:
     return any(chunk_satisfies(case, c.title, c.text) for c in generated.chunks)
 
 
+async def _judge_relevance(
+    *, case: Case, generated: Generated, judge: Judge, metrics: frozenset[str]
+) -> tuple[RelevanceOutcome | None, CaseError | None]:
+    """The opt-in judged metrics for one case.
+
+    Kept apart from the support verdicts so that a relevance call failing costs
+    the case its relevance columns and nothing else: the support outcome was
+    already paid for, and dropping it would shrink every groundedness
+    denominator because of a metric that has nothing to do with them.
+    `QuotaExhausted` is not caught -- it has to reach the caller and abort.
+    """
+    if not metrics & {"answer_relevance", "context_relevance"}:
+        return None, None
+    score: float | None = None
+    reason = ""
+    relevant: frozenset[int] | None = None
+    failures: list[str] = []
+    # off_topic: the right answer is a refusal, which this rubric scores 0.0 by
+    # design. `stance` already grades those cases; averaging a column of
+    # correct refusals in as zeros would make refusing look like failing.
+    if "answer_relevance" in metrics and not case.is_negative:
+        try:
+            graded = await judge.judge_answer_relevance(
+                question=case.question, answer=generated.answer
+            )
+            score, reason = graded.score, graded.reason
+        except QuotaExhausted:
+            raise
+        except Exception as exc:  # noqa: BLE001 - reported, never silently dropped
+            failures.append(f"answer_relevance {type(exc).__name__}: {exc}")
+    # Runs on off_topic too: nothing in the library is relevant to those
+    # questions, so their precision should read ~0 -- a direct measure of what
+    # the distance gate let through.
+    if "context_relevance" in metrics:
+        try:
+            relevant = await judge.judge_context_relevance(
+                question=case.question,
+                excerpts=[(c.n, c.title, c.text) for c in generated.chunks],
+            )
+        except QuotaExhausted:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            failures.append(f"context_relevance {type(exc).__name__}: {exc}")
+    outcome = RelevanceOutcome(
+        case_id=case.id,
+        kind=case.kind,
+        answer_relevance=score,
+        answer_relevance_reason=reason,
+        shown=tuple(c.n for c in generated.chunks),
+        relevant=relevant,
+    )
+    error = CaseError(case.id, "relevance", "; ".join(failures)) if failures else None
+    return outcome, error
+
+
 async def _run_case(
     *,
     case: Case,
@@ -109,7 +175,11 @@ async def _run_case(
     abort: asyncio.Event,
     replayed: Generated | None = None,
     second_judge: Judge | None = None,
-) -> tuple[CaseOutcome, Generated, dict[int, str]] | CaseError:
+    metrics: frozenset[str] = frozenset({"support"}),
+) -> (
+    tuple[CaseOutcome, Generated, dict[int, str], RelevanceOutcome | None, CaseError | None]
+    | CaseError
+):
     if abort.is_set():
         return CaseError(case.id, "skipped", "aborted: the account ran out of credits")
     async with semaphore:
@@ -148,6 +218,9 @@ async def _run_case(
                     excerpts=[(c.n, c.title, c.text) for c in generated.chunks],
                 )
                 second_verdicts = {index: v.verdict for index, v in other.items()}
+            relevance, relevance_error = await _judge_relevance(
+                case=case, generated=generated, judge=judge, metrics=metrics
+            )
         except QuotaExhausted:
             abort.set()
             return CaseError(case.id, "judge", "aborted: the account ran out of credits")
@@ -179,7 +252,7 @@ async def _run_case(
             evidence_present=_evidence_present(case, generated),
             marker_total=marker_count(generated.answer),
         )
-        return outcome, generated, second_verdicts
+        return outcome, generated, second_verdicts, relevance, relevance_error
 
 
 def _verdicts_by_claim(path: Path) -> tuple[dict[str, dict[int, str]], str]:
@@ -420,6 +493,56 @@ def _report(
             )
 
 
+def _relevance_row(label: str, rows: list[RelevanceOutcome]) -> str:
+    if not rows:
+        return f"{label:<34} (no cases)"
+    return (
+        f"{label:<34}{len(rows):>5}"
+        f"{_fmt(mean_answer_relevance(rows)):>12}"
+        f"{_fmt(context_precision(rows)):>10}"
+        f"{_fmt(context_precision(rows, k=10)):>10}"
+        f"{sum(len(r.shown) for r in rows if r.relevant is not None):>10}"
+    )
+
+
+def _report_relevance(relevances: list[RelevanceOutcome], outcomes: list[CaseOutcome]) -> None:
+    """Grouped exactly as the support table is, so the two read side by side.
+
+    The evidence split matters here for a different reason than it does for
+    groundedness: an answer can only be as relevant as what retrieval handed
+    the model, so a low answer-relevance on the "did NOT reach" row is a
+    retrieval finding, not a generation one.
+    """
+    evidence = {o.case_id: o.evidence_present for o in outcomes}
+    positives = [r for r in relevances if r.kind != "off_topic"]
+    print()
+    print("JUDGED RELEVANCE (opt-in via --metrics; `-` = not measured)")
+    print(
+        f"{'group':<34}{'cases':>5}{'answer-rel':>12}{'ctx-P':>10}{'ctx-P@10':>10}{'excerpts':>10}"
+    )
+    print(_relevance_row("positives (pooled)", positives))
+    print(
+        _relevance_row(
+            "  evidence reached the model", [r for r in positives if evidence.get(r.case_id)]
+        )
+    )
+    print(
+        _relevance_row(
+            "  evidence did NOT reach",
+            [r for r in positives if evidence.get(r.case_id) is False],
+        )
+    )
+    for kind in sorted({r.kind for r in positives}):
+        print(_relevance_row(f"  kind: {kind}", [r for r in positives if r.kind == kind]))
+    print(_relevance_row("off_topic negatives", [r for r in relevances if r.kind == "off_topic"]))
+    print(
+        "`answer-rel` is never scored on off_topic (a correct refusal scores 0.0 by the "
+        "rubric; `stance` grades those). `ctx-P` is excerpts a person answering would use "
+        "over excerpts SHOWN -- on off_topic it should read ~0.00, and anything above is "
+        "what the distance gate let through. `ctx-P@10` is the first ten catalog positions."
+    )
+
+
 async def main() -> None:
     parser = argparse.ArgumentParser(
         description="Measure answer groundedness and citation correctness."
@@ -482,6 +605,28 @@ async def main() -> None:
             "Use with --replay to answer 'is a cheaper judge good enough' for judge tokens only"
         ),
     )
+    parser.add_argument(
+        "--metrics",
+        default=None,
+        metavar="LIST",
+        help=(
+            f"comma list from {', '.join(METRICS)}. `support` is always measured; the other "
+            "two are judged and cost extra calls (context_relevance reads the whole catalog "
+            "again), so they are opt-in and the default run stays comparable with every "
+            "recorded one"
+        ),
+    )
+    parser.add_argument(
+        "--csv",
+        type=Path,
+        default=None,
+        help="write one row per case: question, answer, contexts and every score",
+    )
+    parser.add_argument(
+        "--allow-self-judge",
+        action="store_true",
+        help="run even when --judge-model IS the answering model; the report says so",
+    )
     parser.add_argument("--per-case", action="store_true", help="print the per-case table")
     parser.add_argument(
         "--limit", type=int, default=None, help="first N cases only, for a smoke run"
@@ -495,6 +640,11 @@ async def main() -> None:
     if args.rescore:
         _rescore(args)
         return
+
+    try:
+        metrics = parse_metrics(args.metrics)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from None
 
     generator = AnswerGenerator()
     judge = Judge(model=args.judge_model)
@@ -513,6 +663,20 @@ async def main() -> None:
                 f"{args.replay}: no saved generation for {len(missing)} case(s): "
                 f"{', '.join(missing[:5])}{' ...' if len(missing) > 5 else ''}"
             )
+    from app.core.config import settings
+
+    answering = replay_model if args.replay else settings.llm_model
+    # BEFORE any model call: a self-judged run discovered in the report header
+    # has already been paid for.
+    try:
+        independence_note = check_judge_independence(
+            judge_model=args.judge_model,
+            answering_model=answering,
+            allow_self_judge=args.allow_self_judge,
+        )
+    except SelfJudgeError as exc:
+        raise SystemExit(str(exc)) from None
+
     semaphore = asyncio.Semaphore(args.concurrency)
     # Set by the first case to see a credit-exhaustion error. Every case still
     # queued then short-circuits instead of spending a request on a failure
@@ -530,6 +694,7 @@ async def main() -> None:
                 abort=abort,
                 replayed=replayed.get(case.id),
                 second_judge=second_judge,
+                metrics=metrics,
             )
             for case in cases
         )
@@ -539,25 +704,31 @@ async def main() -> None:
     generations: dict[str, Generated] = {}
     errors: list[CaseError] = []
     candidate_verdicts: dict[str, dict[int, str]] = {}
+    relevances: dict[str, RelevanceOutcome] = {}
     for result in results:
         if isinstance(result, CaseError):
             errors.append(result)
             continue
-        outcome, generated, second = result
+        outcome, generated, second, relevance, relevance_error = result
+        if relevance is not None:
+            relevances[outcome.case_id] = relevance
+        if relevance_error is not None:
+            errors.append(relevance_error)
         outcomes.append(outcome)
         generations[outcome.case_id] = generated
         if second:
             candidate_verdicts[outcome.case_id] = second
 
-    from app.core.config import settings
-
-    answering = replay_model if args.replay else settings.llm_model
     replay_note = f" (replayed from {args.replay.name})" if args.replay else ""
     print(
         f"judge: {args.judge_model}   answering model: {answering}{replay_note}   "
-        f"project: {args.project_id}   set: {args.set.name}"
+        f"project: {args.project_id}   set: {args.set.name} ({len(cases)} cases)"
     )
+    if independence_note:
+        print(independence_note)
     _report(outcomes, generations=generations, errors=errors, per_case=args.per_case)
+    if relevances:
+        _report_relevance(list(relevances.values()), outcomes)
 
     if candidate_verdicts:
         reference = {
@@ -595,7 +766,10 @@ async def main() -> None:
 
     if errors:
         print()
-        print("ERRORS (excluded from every denominator above)")
+        print(
+            "ERRORS (excluded from every denominator above; a `relevance` error costs "
+            "only that case's relevance columns)"
+        )
         for err in errors:
             print(f"  {err.case_id:<34}{err.stage:<10}{err.error}")
 
@@ -608,6 +782,23 @@ async def main() -> None:
         )
         print(f"\nwrote {args.save_generations} ({len(generations)} generations)")
 
+    if args.csv:
+        rows = [
+            csv_row(
+                outcome=o,
+                relevance=relevances.get(o.case_id),
+                question=generations[o.case_id].question,
+                answer=generations[o.case_id].answer,
+                contexts=[f"[{c.n}] {c.title}: {c.text}" for c in generations[o.case_id].chunks],
+                judge_model=args.judge_model,
+                answering_model=answering,
+            )
+            for o in outcomes
+        ]
+        with args.csv.open("w", newline="", encoding="utf-8") as handle:
+            write_csv(handle, rows)
+        print(f"\nwrote {args.csv} ({len(rows)} rows)")
+
     if args.json:
         claim_texts = {
             o.case_id: {c.index: c.text for c in extract_claims(generations[o.case_id].answer)}
@@ -615,7 +806,8 @@ async def main() -> None:
         }
         payload = {
             "judge_model": args.judge_model,
-            "answering_model": settings.llm_model,
+            "answering_model": answering,
+            "metrics": sorted(metrics),
             "project_id": args.project_id,
             "set": str(args.set),
             "cases": [
@@ -643,6 +835,22 @@ async def main() -> None:
                     "answer": generations[o.case_id].answer,
                     "chunk_count": len(generations[o.case_id].chunks),
                     "scope_source": generations[o.case_id].scope_source,
+                    **(
+                        {
+                            "answer_relevance": relevances[o.case_id].answer_relevance,
+                            "answer_relevance_reason": relevances[
+                                o.case_id
+                            ].answer_relevance_reason,
+                            "shown_excerpts": list(relevances[o.case_id].shown),
+                            "relevant_excerpts": (
+                                None
+                                if relevances[o.case_id].relevant is None
+                                else sorted(relevances[o.case_id].relevant)
+                            ),
+                        }
+                        if o.case_id in relevances
+                        else {}
+                    ),
                 }
                 for o in outcomes
             ],

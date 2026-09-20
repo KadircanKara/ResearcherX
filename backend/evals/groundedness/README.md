@@ -14,7 +14,8 @@ file-path invocation fails with `ModuleNotFoundError: No module named 'app'`.
 Flags: `--judge-model` (default `gpt-4.1`), `--concurrency` (default 1 — the
 judge's TPM cap, not this, is the throughput bound; raising it mostly buys
 429s the judge then sleeps off), `--set` (default: the retrieval harness's own
-`golden_set.json`), `--limit N` for a smoke run, `--per-case`, `--json`.
+`golden_set.json`), `--limit N` for a smoke run, `--per-case`, `--json`,
+`--metrics` / `--csv` / `--allow-self-judge` (see *Judged relevance* below).
 
 ## What this measures that `evals/retrieval` does not
 
@@ -440,6 +441,99 @@ module writes nothing.
 Not reproduced, because the golden set is single-turn: conversation-history
 retrieval, query reformulation (production skips it on a first turn anyway),
 persistence, and SSE emission.
+
+**The wiring drifted once already, and nothing crashed.** When the harness was
+brought onto structured chunking (2026-09-20) it was still calling both
+retrieval methods without `reranker=`, so it graded the fused catalog order
+while production served the reranked one, and it rebuilt each chunk field by
+field, dropping the `section` and `page` the model's excerpt header carries.
+Both are now pinned by the parity tests, and the generation cache is version 2
+(it stores section and page) — a version-1 cache is refused, not upgraded.
+
+## Judged relevance (`--metrics`)
+
+Groundedness is silent on two other ways a turn fails, so two judged metrics
+sit beside it. Both are **opt-in**: the default run is still the support-only
+run every "Measured" block above was taken with.
+
+    --metrics support,answer_relevance,context_relevance
+
+| metric | the judge sees | reported as |
+|---|---|---|
+| `answer_relevance` | question + answer, **never the excerpts** | mean 0–1 (`answer-rel`) |
+| `context_relevance` | question + excerpts, **never the answer** | `ctx-P`, `ctx-P@10` |
+
+- **Answer relevance** catches the fully grounded answer to a question nobody
+  asked. It is not shown the catalog, because whether the answer is *supported*
+  is the support judge's question and a well-grounded non-answer would
+  otherwise score high on the wrong evidence. It is **not scored on
+  `off_topic`**: the right answer there is a refusal, which the rubric scores
+  0.0 by design, and averaging a column of correct refusals in as zeros would
+  make refusing look like failing. `stance` grades those cases.
+- **Context precision** is excerpts a person answering would use, over
+  excerpts *shown* — the noise the model had to read past, which
+  `evals/retrieval`'s recall cannot see. The judge is never shown the answer:
+  one that can see it marks an excerpt relevant because the answer used it,
+  and the column becomes a second, worse citation metric. `ctx-P@10` cuts by
+  catalog **position**, not by excerpt number — numbers are post-renumbering
+  citation numbers, and `[7]` can stand first. It **does** run on `off_topic`,
+  where it should read ~0.00; anything above is what the distance gate let
+  through. Sliced like the support judge, and like it refuses to fail open: an
+  excerpt that comes back with no verdict is an error, never "not relevant".
+
+A relevance call that fails costs that case its relevance columns **only**. It
+is listed under ERRORS with stage `relevance`, and the support outcome — already
+paid for — stays in every groundedness denominator.
+
+`--csv PATH` writes one row per case: question, answer, the contexts as a JSON
+list, and every score. An unmeasured score is an **empty cell, never 0** — a
+zero is a measurement.
+
+### Judging with the Claude Code CLI
+
+`tools/claude-proxy` already turns `claude -p` into an OpenAI-compatible
+endpoint, and the judge owns a plain `AsyncOpenAI` client pointed at
+`JUDGE_BASE_URL` — so a `claude -p` judge is an env override, not a second
+transport:
+
+    make claude-proxy                      # on the HOST; serves answerer and judge
+
+    JUDGE="-e JUDGE_BASE_URL=http://host.docker.internal:8787/v1 -e JUDGE_API_KEY=claude-code"
+
+    # 1. answer once (the answering model is whatever LLM_MODEL names)
+    docker compose exec -T $JUDGE backend python -m evals.groundedness.run_eval \
+        --project-id <uuid> --judge-model sonnet --save-generations /tmp/gen.json
+
+    # 2. judge the SAME answers, as often as needed
+    docker compose exec -T $JUDGE backend python -m evals.groundedness.run_eval \
+        --project-id <uuid> --replay /tmp/gen.json --judge-model sonnet \
+        --metrics support,answer_relevance,context_relevance \
+        --csv /tmp/claude_cli_eval_results.csv --json /tmp/groundedness.json
+
+The `-e` overrides are needed whenever `.env` points `JUDGE_BASE_URL` at
+another vendor, and on BOTH steps: there is no generate-only mode, step 1
+judges too, and a case whose judge call fails is an error row whose generation
+is **not** saved. `/tmp` is the container's; `docker compose cp
+backend:/tmp/claude_cli_eval_results.csv .` brings a file out.
+
+**The judge must not be the answerer.** With the proxy serving both, that is
+one flag away, so the runner refuses `--judge-model X` when the answering model
+is `X` — *before* any call is made — unless `--allow-self-judge` is passed, in
+which case the header says `SELF-JUDGED`. Two models from one family (sonnet
+grading opus) run, with a same-family note in the header: self-preference is
+reduced by a different model, not removed. For a number a decision rests on,
+confirm a Claude-judged run against a `gpt-4.1` judge over the same `--replay`
+cache with `--compare-judge` / `--agreement-against`.
+
+Keep `--concurrency 1` with the proxy unless its own `--concurrency` is raised
+to match: both ends draw on one CLI login, and the proxy's semaphore is the
+real bound.
+
+Smoke run, 2026-09-20, 2 content cases, sonnet judging opus, 60-chunk
+catalogs: support 0.95, answer-rel 0.88, **ctx-P 0.22, ctx-P@10 0.75**. Two
+cases is a wiring check, not a measurement — but the shape is the expected one:
+the rerank puts the useful excerpts first, and most of a 60-chunk budget is
+read past.
 
 ## Disclosed general knowledge is not hallucination
 

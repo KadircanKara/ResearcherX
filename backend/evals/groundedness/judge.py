@@ -138,6 +138,27 @@ class AnswerStance(BaseModel):
     reason: str = ""
 
 
+class AnswerRelevance(BaseModel):
+    """Does the answer address the question that was asked.
+
+    Bounded by the schema, not clamped afterwards: a judge that returns 1.4 has
+    not followed the rubric, and quietly turning that into 1.0 would record a
+    perfect score for a malformed response.
+    """
+
+    score: float = Field(ge=0.0, le=1.0, description="0.0 to 1.0, per the rubric")
+    reason: str = Field(default="", description="one short sentence")
+
+
+class ExcerptRelevance(BaseModel):
+    n: int = Field(description="the excerpt's number, copied from the input")
+    relevant: bool
+
+
+class ContextRelevanceResponse(BaseModel):
+    verdicts: list[ExcerptRelevance]
+
+
 _SUPPORT_SYSTEM = """\
 You grade whether each CLAIM is supported by the EXCERPTS given to you.
 
@@ -171,6 +192,40 @@ or asked for clarification instead of answering.
 content.
 
 Return only the classification."""
+
+
+_ANSWER_RELEVANCE_SYSTEM = """\
+You grade whether an ANSWER addresses the QUESTION it was given.
+
+You are grading relevance, not correctness and not support. Do not reward or \
+punish the answer for being true, false, cited or uncited -- other graders \
+handle that. Ask only: does this text respond to what was asked?
+
+Score from 0.0 to 1.0:
+- 1.0: answers the question asked, directly and completely.
+- 0.7: answers it, but pads with material the question did not ask for, or \
+leaves a minor part unaddressed.
+- 0.4: on the right topic but answers a different or much narrower question.
+- 0.1: mentions the topic and says nothing responsive.
+- 0.0: unrelated, or declines to answer.
+
+A refusal or a request for clarification scores 0.0 here even when refusing \
+was the right thing to do -- whether it was is graded separately."""
+
+_CONTEXT_RELEVANCE_SYSTEM = """\
+You grade whether each EXCERPT is relevant to a QUESTION. The excerpts were \
+retrieved by a search system; you are measuring how much of what it returned \
+was worth reading.
+
+An excerpt is relevant when a person answering the question would use it: it \
+states the answer, part of the answer, or a fact the answer depends on.
+
+An excerpt is NOT relevant when it merely shares the topic or the vocabulary. \
+An excerpt from the right paper that discusses something else is not \
+relevant. A reference list, a header or boilerplate is not relevant.
+
+Judge each excerpt on its own. Do not mark one relevant because another one \
+is. Return one verdict per excerpt, keyed by the excerpt's number."""
 
 
 # Verdict precedence when slices disagree. SUPPORTED WINS: the question each
@@ -381,6 +436,54 @@ class Judge:
         if missing:
             raise ValueError(f"judge returned no verdict for claim index(es) {missing}")
         return merged
+
+    async def judge_answer_relevance(self, *, question: str, answer: str) -> AnswerRelevance:
+        """Question and answer only -- never the excerpts. Whether the answer
+        is SUPPORTED is `judge_claims`' question; showing the catalog here lets
+        a well-grounded non-answer score high on the wrong evidence."""
+        return await self._structured(
+            system=_ANSWER_RELEVANCE_SYSTEM,
+            user=f"QUESTION\n{question}\n\nANSWER\n{answer}",
+            model_cls=AnswerRelevance,
+        )
+
+    async def judge_context_relevance(
+        self, *, question: str, excerpts: list[tuple[int, str, str]]
+    ) -> frozenset[int]:
+        """The numbers of the excerpts a person answering `question` would use.
+
+        The judge is NEVER shown the answer. Context relevance is a property of
+        retrieval, and a judge that can see the answer marks an excerpt
+        relevant because the answer used it -- which turns this into a second,
+        worse citation metric.
+
+        Sliced by the same `_pack` as the support judge and for the same
+        reason; an excerpt's relevance does not depend on its neighbours, so
+        slices need no merge beyond a union. Raises when any shown excerpt
+        comes back without a verdict: defaulting it to "not relevant" would
+        report a precision the judge never measured.
+        """
+        if not excerpts:
+            return frozenset()
+        shown = {n for n, _, _ in excerpts}
+        judged: dict[int, bool] = {}
+        for excerpt_slice in _pack(excerpts, self.excerpt_chars_per_request):
+            excerpt_block = "\n\n".join(
+                f"[{n}] (from: {title})\n{text}" for n, title, text in excerpt_slice
+            )
+            parsed = await self._structured(
+                system=_CONTEXT_RELEVANCE_SYSTEM,
+                user=f"QUESTION\n{question}\n\nEXCERPTS\n{excerpt_block}",
+                model_cls=ContextRelevanceResponse,
+            )
+            # A number the judge invented is dropped rather than raised on: it
+            # names nothing in the catalog, so it cannot move any count.
+            judged.update({v.n: v.relevant for v in parsed.verdicts if v.n in shown})
+        missing = sorted(shown - judged.keys())
+        if missing:
+            listed = ", ".join(f"[{n}]" for n in missing)
+            raise ValueError(f"judge returned no relevance verdict for excerpt(s) {listed}")
+        return frozenset(n for n, relevant in judged.items() if relevant)
 
     async def judge_stance(self, *, question: str, answer: str) -> AnswerStance:
         return await self._structured(
