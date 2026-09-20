@@ -14,7 +14,15 @@ def a_generation():
         question="What does the planner optimise?",
         answer="It minimises revisit time [1].",
         chunks=(
-            ChunkContext(n=1, paper_id="p1", title="Joint Optimization", chunk_index=3, text="…"),
+            ChunkContext(
+                n=1,
+                paper_id="p1",
+                title="Joint Optimization",
+                chunk_index=3,
+                text="…",
+                section=("4 Method", "4.2 Objective"),
+                page=7,
+            ),
         ),
         citations=({"n": 1, "paper_id": "p1", "title": "Joint Optimization", "chunk_index": 3},),
         scope_source="none",
@@ -24,7 +32,7 @@ def a_generation():
     )
 
 
-def test_a_saved_generation_round_trips_including_the_full_chunk_text(tmp_path):
+def test_a_saved_generation_round_trips_including_chunk_text_section_and_page(tmp_path):
     """The catalog must survive whole: a replay judging against truncated
     excerpts would turn supported claims into unsupported ones."""
     path = tmp_path / "gen.json"

@@ -81,7 +81,10 @@ class AnswerGenerator:
         self._agent = ChatAgent()
         # Retrieval lives on ChatService and is imported, never re-implemented:
         # the per-paper floor shipped as a no-op precisely because a harness
-        # mirrored the SQL instead of calling it.
+        # mirrored the SQL instead of calling it. Its `_reranker` comes along
+        # for the same reason -- built by production's own `build_chat_reranker`,
+        # so RERANK_ENABLED / COHERE_API_KEY gate the harness exactly as they
+        # gate a real turn.
         self._chat = ChatService()
 
     async def _papers(self, project_id: str) -> list[Paper]:
@@ -130,12 +133,21 @@ class AnswerGenerator:
                 WidenerInput(query=question, mentioned_titles=[p.title for p in scope_infos])
             )
             chunks, widened = await self._chat._retrieve_mentioned_chunks(
-                scope_infos, paper_infos, embedding, question, widened
+                scope_infos,
+                paper_infos,
+                embedding,
+                question,
+                widened,
+                reranker=self._chat._reranker,
             )
         else:
             async with SessionLocal() as db:
                 chunks = await self._chat._retrieve_paper_chunks(
-                    db, paper_infos, embedding, question
+                    db,
+                    paper_infos,
+                    embedding,
+                    question,
+                    reranker=self._chat._reranker,
                 )
 
         contributing = {c.paper_id for c in chunks}
@@ -187,15 +199,12 @@ class AnswerGenerator:
         # into no citation keep their original number -- they were still in
         # front of the model and can still support a claim the model forgot to
         # cite, which is exactly what `citation_coverage` measures.
+        #
+        # `model_copy`, not a field-by-field rebuild: the rebuild silently
+        # dropped `section` and `page` when structured chunking added them, so
+        # the stored catalog stopped being the one the model was shown.
         renumbered_chunks = tuple(
-            ChunkContext(
-                n=renumbered.get(c.n, c.n),
-                paper_id=c.paper_id,
-                title=c.title,
-                chunk_index=c.chunk_index,
-                text=c.text,
-            )
-            for c in chunks
+            c.model_copy(update={"n": renumbered.get(c.n, c.n)}) for c in chunks
         )
 
         return Generated(

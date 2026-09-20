@@ -29,7 +29,7 @@ from evals.groundedness.generate import Generated
 
 # Bumped when `Generated` changes shape. A silently-mismatched replay would
 # judge answers against a catalog that never produced them.
-CACHE_VERSION = 1
+CACHE_VERSION = 2
 
 
 def save_generations(
@@ -50,6 +50,8 @@ def save_generations(
                         "title": c.title,
                         "chunk_index": c.chunk_index,
                         "text": c.text,
+                        "section": list(c.section),
+                        "page": c.page,
                     }
                     for c in g.chunks
                 ],

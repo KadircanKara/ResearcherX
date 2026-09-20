@@ -83,6 +83,41 @@ def test_the_scope_ladder_matches_production_minus_the_rung_needing_a_click():
     assert "ScopeWidener" in inspect.getsource(generate) or "_widener" in source
 
 
+def test_every_retrieval_call_is_handed_productions_reranker():
+    """`respond` passes `reranker=self._reranker` at both retrieval call sites.
+
+    The harness was written before the rerank stage shipped and called both
+    without it, so it went on measuring the fused order while production served
+    the reranked one. Nothing crashes: the rerank changes the ORDER the catalog
+    is read in (MRR 0.528 -> 0.643, evals/retrieval/README.md 2026-09-07), so
+    the harness simply graded a catalog no user was shown -- and any
+    rank-sensitive metric (context precision at a cutoff) was wrong outright.
+    """
+    production = inspect.getsource(chat_service.ChatService.respond)
+    harness = inspect.getsource(generate.AnswerGenerator.generate)
+    for call in ("_retrieve_mentioned_chunks(", "_retrieve_paper_chunks("):
+        assert _call_passes_reranker(production, call), f"production changed: {call}"
+        assert _call_passes_reranker(harness, call), f"harness drops the reranker: {call}"
+
+
+def _call_passes_reranker(source: str, call: str) -> bool:
+    start = source.index(call)
+    depth, end = 0, start
+    for end in range(start + len(call) - 1, len(source)):
+        depth += {"(": 1, ")": -1}.get(source[end], 0)
+        if depth == 0:
+            break
+    return "reranker=" in source[start:end]
+
+
+def test_the_judged_catalog_keeps_the_section_and_page_the_model_was_shown():
+    """The excerpt header the model reads carries section and page
+    (`chunk_header.excerpt_text`). Rebuilding each chunk field by field dropped
+    both, so a replayed catalog was not the catalog that produced the answer."""
+    source = inspect.getsource(generate.AnswerGenerator.generate)
+    assert "model_copy(" in source
+
+
 def test_credit_exhaustion_is_told_apart_from_a_throughput_limit():
     """A 429 means two different things on this endpoint. Treating them the
     same is what turned the first real run into 20 identical error rows: the
