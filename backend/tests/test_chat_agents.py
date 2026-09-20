@@ -210,21 +210,62 @@ def test_system_prompt_forbids_mining_excerpts_for_paper_metadata():
     assert "the paper does not state it" in SYSTEM
 
 
+def test_system_prompt_forbids_answering_from_general_knowledge_at_all():
+    """The prompt used to instruct a hand-off — decline, then answer from
+    general knowledge anyway. Measured on the off_topic negatives 2026-08-22:
+    the model obeyed it exactly and 72% of its claims there were ungrounded by
+    design (uncited FAA requirements, named FPV products) behind one disclaiming
+    sentence. The product answers from the ingested corpus or it does not
+    answer.
+    """
+    assert "NEVER answer from general knowledge" in SYSTEM
+    assert "The ingested documents do not cover this." in SYSTEM
+    # The old template must not survive anywhere in the prompt: one sanctioned
+    # example of the behaviour outweighs a paragraph forbidding it.
+    assert "Based on general knowledge: ...'" not in SYSTEM
+    assert "do not appear to cover this. Based on" not in SYSTEM
+
+
 def test_system_prompt_forbids_hand_off_after_declining_a_metadata_question():
-    """Regression: the general decline rule is a template — decline, then
-    supply an answer from elsewhere ('Based on general knowledge: ...'). The
-    model followed it to the letter for a paper's own year, declining and
-    then adding "however, based on the EXCERPT CATALOG..." with a fabricated
-    year from a bibliography excerpt. For authors/year/venue there must be no
-    hand-off at all: the reply ends at the decline.
+    """Regression, live-verified: the model declined a paper's own year and
+    then mined a bibliography excerpt for a year-shaped number. Retained after
+    the blanket no-fallback rule subsumed the general case, because this
+    failure is different — the blanket rule permits the excerpts, and for
+    these three fields the excerpts are themselves a wrong source.
     """
     assert "Exception — authors, year, venue" in SYSTEM
-    assert "no fallback of any kind" in SYSTEM
+    assert "not even the excerpts are a source" in SYSTEM
     assert "'however'" in SYSTEM
     assert "'based on'" in SYSTEM
-    # The general decline-then-speculate rule is untouched — this is a scoped
-    # exception, not a replacement.
-    assert "Based on general knowledge: ...'" in SYSTEM
+
+
+def test_system_prompt_demands_a_marker_in_the_sentence_that_makes_the_claim():
+    """ "Every non-trivial claim MUST cite" was already there, and the model
+    satisfied it with uncited bullets plus one sentence naming every source at
+    once — measured cite-cov 0.39. The rule has to name that anti-pattern."""
+    assert "Put each marker in the SENTENCE that makes the claim" in SYSTEM
+    assert "Every bullet in a list carries its own marker" in SYSTEM
+    assert "summarized in excerpts" in SYSTEM
+
+
+def test_the_prompt_carries_no_figure_paragraph():
+    """A figures-are-not-visible rule was added on 2026-08-22 and reverted the
+    same day: measured against the otherwise identical prompt it moved every
+    positive metric the wrong way (citation coverage 0.59 -> 0.43, clean 0.93
+    -> 0.87, citation precision 0.96 -> 0.91) AND still produced the exact
+    over-claim it forbade, on a case that had been clean without it.
+
+    The reading is prompt dilution -- a long paragraph competing with the
+    citation rules, which the metadata block's own ORDER IS DELIBERATE warning
+    records a live-verified version of. Figure over-claiming remains a known
+    ~1-in-150-claims failure; the next attempt is retrieval-side (anchor a
+    figure's caption to the paragraphs that discuss it), not more prompt text.
+
+    This test exists so the paragraph is not re-added without re-measuring:
+    see evals/groundedness/README.md, "Measured — 2026-08-22c".
+    """
+    assert "Figures and tables" not in SYSTEM
+    assert "reading the image, not the text" not in SYSTEM
 
 
 def test_system_prompt_asks_which_paper_when_metadata_question_is_ambiguous():
@@ -238,7 +279,11 @@ def test_system_prompt_still_forbids_mining_excerpts_for_metadata():
     rules that took two live fix rounds to get right. They must survive it."""
     assert "ONLY source for" in SYSTEM
     assert "reference list" in SYSTEM
-    assert "no fallback of any kind" in SYSTEM
+    # Was "no fallback of any kind" until 2026-08-22. The blanket no-general-
+    # knowledge rule made that phrasing ambiguous (it read as forbidding the
+    # excerpts everywhere), so the metadata exception now says outright that
+    # for these three fields the excerpts themselves are a wrong source.
+    assert "not even the excerpts are a source" in SYSTEM
 
 
 def test_system_prompt_lists_titles_only_when_asking_which_paper():

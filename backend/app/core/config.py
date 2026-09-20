@@ -30,6 +30,21 @@ class Settings(BaseSettings):
     # limits (~30 req/min; one run fires a dozen-plus calls).
     llm_max_retries: int = 5
 
+    # The groundedness eval's LLM judge (`evals/groundedness/judge.py`), which
+    # deliberately does NOT ride the provider pool: a judge that rotates
+    # provider mid-run averages two models into one column and destroys the
+    # only thing that harness is for, comparing runs.
+    #
+    # Separate from LLM_* so the judge can sit on a different vendor from the
+    # system under test. That is not just cost — a model grading its own
+    # output is self-preference bias, so pointing the judge elsewhere is the
+    # cheap fix. Empty = fall back to the LLM_* values, which is the shipped
+    # default and keeps existing behaviour.
+    #
+    # Used ONLY by the eval harness. Nothing in `app/` reads these.
+    judge_base_url: str = ""
+    judge_api_key: str = ""
+
     # Alternate providers for daily-quota failover, as a JSON list:
     # LLM_FALLBACKS='[{"base_url":"...","api_key":"...","model":"..."}]'
     # When the active provider keeps 429ing after SDK retries (e.g. Groq's
@@ -548,6 +563,30 @@ class Settings(BaseSettings):
     def resolved_embedding_api_key(self) -> str:
         """Use dedicated embedding key or fall back to the LLM key."""
         return self.embedding_api_key or self.llm_api_key
+
+    @property
+    def resolved_judge_base_url(self) -> str:
+        """The eval judge's endpoint, or the LLM's if none is set."""
+        return self.judge_base_url or self.llm_base_url
+
+    @property
+    def resolved_judge_api_key(self) -> str:
+        """The eval judge's key, or the LLM's when the judge shares its endpoint.
+
+        Refuses to fall back once JUDGE_BASE_URL points somewhere else:
+        inheriting LLM_API_KEY there would send the OpenAI key to whatever
+        host was configured — an OpenRouter endpoint, a colleague's proxy, a
+        typo. A key is only ever reused for the endpoint it belongs to.
+        """
+        if self.judge_api_key:
+            return self.judge_api_key
+        if self.judge_base_url and self.judge_base_url != self.llm_base_url:
+            raise RuntimeError(
+                "JUDGE_BASE_URL is set to a different endpoint than LLM_BASE_URL but "
+                "JUDGE_API_KEY is empty. Set JUDGE_API_KEY — falling back to LLM_API_KEY "
+                "would send that key to the judge's host."
+            )
+        return self.llm_api_key
 
 
 settings = Settings()  # type: ignore[call-arg]
