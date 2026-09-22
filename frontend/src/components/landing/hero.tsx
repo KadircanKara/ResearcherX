@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { routes } from "@/lib/routes";
 import { usePrefersReducedMotion } from "@/hooks/use-reveal";
 import { HERO_VIDEO, heroVideoTier, type HeroVideoTier } from "@/lib/landing-video";
+import { scrollToHash } from "./scroll-to";
 
 const QUESTIONS = [
   "What reward function does the planner use?",
@@ -153,6 +154,9 @@ export function Hero() {
             </a>
             <a
               href="#how-it-works"
+              onClick={(e) => {
+                if (scrollToHash("#how-it-works", !reduced)) e.preventDefault();
+              }}
               className="pill-ghost-light px-7 py-3.5 text-sm font-medium"
             >
               See how it works

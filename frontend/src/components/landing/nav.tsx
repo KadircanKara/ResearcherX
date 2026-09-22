@@ -1,7 +1,9 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, type MouseEvent } from "react";
+import { usePrefersReducedMotion } from "@/hooks/use-reveal";
 import { routes } from "@/lib/routes";
+import { scrollToHash } from "./scroll-to";
 
 const links = [
   { label: "How it works", href: "#how-it-works" },
@@ -12,6 +14,15 @@ const links = [
 export function Nav() {
   const [scrolled, setScrolled] = useState(false);
   const [open, setOpen] = useState(false);
+  const reduced = usePrefersReducedMotion();
+
+  function go(event: MouseEvent<HTMLAnchorElement>, hash: string) {
+    // The open menu locks body scrolling; release it before the glide starts
+    // rather than a render later, or the first frames go nowhere.
+    document.body.style.overflow = "";
+    setOpen(false);
+    if (scrollToHash(hash, !reduced)) event.preventDefault();
+  }
 
   useEffect(() => {
     const onScroll = () => setScrolled(window.scrollY > 24);
@@ -44,6 +55,7 @@ export function Nav() {
       <div className="mx-auto flex h-16 max-w-[1240px] items-center justify-between px-5 sm:px-8">
         <a
           href="#top"
+          onClick={(e) => go(e, "#top")}
           className="text-lp-paper text-base font-semibold tracking-[-0.02em]"
         >
           ResearcherX
@@ -54,6 +66,7 @@ export function Nav() {
             <a
               key={l.href}
               href={l.href}
+              onClick={(e) => go(e, l.href)}
               className="text-lp-paper/70 hover:text-lp-paper text-sm transition-colors"
             >
               {l.label}
@@ -84,7 +97,7 @@ export function Nav() {
             <a
               key={l.href}
               href={l.href}
-              onClick={() => setOpen(false)}
+              onClick={(e) => go(e, l.href)}
               className="text-lp-paper text-3xl font-medium tracking-[-0.03em]"
             >
               {l.label}
