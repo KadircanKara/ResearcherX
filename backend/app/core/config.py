@@ -30,6 +30,21 @@ class Settings(BaseSettings):
     # limits (~30 req/min; one run fires a dozen-plus calls).
     llm_max_retries: int = 5
 
+    # The groundedness eval's LLM judge (`evals/groundedness/judge.py`), which
+    # deliberately does NOT ride the provider pool: a judge that rotates
+    # provider mid-run averages two models into one column and destroys the
+    # only thing that harness is for, comparing runs.
+    #
+    # Separate from LLM_* so the judge can sit on a different vendor from the
+    # system under test. That is not just cost — a model grading its own
+    # output is self-preference bias, so pointing the judge elsewhere is the
+    # cheap fix. Empty = fall back to the LLM_* values, which is the shipped
+    # default and keeps existing behaviour.
+    #
+    # Used ONLY by the eval harness. Nothing in `app/` reads these.
+    judge_base_url: str = ""
+    judge_api_key: str = ""
+
     # Alternate providers for daily-quota failover, as a JSON list:
     # LLM_FALLBACKS='[{"base_url":"...","api_key":"...","model":"..."}]'
     # When the active provider keeps 429ing after SDK retries (e.g. Groq's
@@ -214,6 +229,38 @@ class Settings(BaseSettings):
     # question. Hybrid lexical + dense ranking is the actual fix — do not read
     # this number as having solved anything.
     max_context_chunks: int = 60
+
+    # ── Rerank (chat path) ───────────────────────────────────────────────
+    # A Cohere cross-encoder pass over the FUSED candidates, before the
+    # budget cut. It can only reorder: it never reopens the distance gate,
+    # never touches the guaranteed tail rows, and fails open to the fused
+    # order (`CohereReranker.rerank` returns None for every failure,
+    # including a missing key). Kill switch, mirroring `hybrid_retrieval`.
+    #
+    # ON by explicit operator decision (2026-09-07) against its own
+    # measurement. Measured the same day on the 100-paper corpus: the stage
+    # moved 0/30 answers into the budget and 0/30 out of it, on BOTH
+    # harnesses, and every mention-side representation figure is identical
+    # to the arm without it. What it buys is ORDERING -- global MRR 0.528 ->
+    # 0.643 -- so the answering chunk sits higher in the excerpt catalog and
+    # takes a lower citation number.
+    #
+    # Read the zero with its caveat: the budget is 60 of 100 scored
+    # candidates, so a rescue needed a chunk at fused rank 61-100 promoted
+    # past 40 competitors, and the four cases that miss have no satisfying
+    # chunk in their top-60 at all. The experiment had little room to show
+    # an effect. Raising `rerank_candidates` or measuring at a smaller k
+    # would give it room; neither has been run.
+    # See evals/retrieval/README.md, "Measured — 2026-09-07".
+    rerank_enabled: bool = True
+    # Documents sent to Cohere per turn. MUST exceed `max_context_chunks`
+    # or the stage cannot change selection at all: the budget cut happens
+    # after it, so a candidate list of 60 reranked down to 60 reorders the
+    # same chunks the fusion had already chosen. The hybrid query already
+    # returns ~200 dense + 100 sparse candidates and discards everything
+    # past the budget, so this spends a surplus that already exists rather
+    # than widening any pool.
+    rerank_candidates: int = 100
 
     # Chunks each MENTIONED paper is guaranteed before the rest of the budget
     # fills by distance.
@@ -404,6 +451,8 @@ class Settings(BaseSettings):
     #
     # An empty COHERE_API_KEY is a supported state, not a misconfiguration:
     # the reranker is skipped and retrieval degrades to the fused order.
+    # These two are SHARED with the chat path's rerank stage (see
+    # `rerank_enabled` above); the index location below is local_rag's alone.
     cohere_api_key: str = ""
     cohere_rerank_model: str = "rerank-v3.5"
     local_rag_dir: str = "./data/local_rag"
@@ -514,6 +563,30 @@ class Settings(BaseSettings):
     def resolved_embedding_api_key(self) -> str:
         """Use dedicated embedding key or fall back to the LLM key."""
         return self.embedding_api_key or self.llm_api_key
+
+    @property
+    def resolved_judge_base_url(self) -> str:
+        """The eval judge's endpoint, or the LLM's if none is set."""
+        return self.judge_base_url or self.llm_base_url
+
+    @property
+    def resolved_judge_api_key(self) -> str:
+        """The eval judge's key, or the LLM's when the judge shares its endpoint.
+
+        Refuses to fall back once JUDGE_BASE_URL points somewhere else:
+        inheriting LLM_API_KEY there would send the OpenAI key to whatever
+        host was configured — an OpenRouter endpoint, a colleague's proxy, a
+        typo. A key is only ever reused for the endpoint it belongs to.
+        """
+        if self.judge_api_key:
+            return self.judge_api_key
+        if self.judge_base_url and self.judge_base_url != self.llm_base_url:
+            raise RuntimeError(
+                "JUDGE_BASE_URL is set to a different endpoint than LLM_BASE_URL but "
+                "JUDGE_API_KEY is empty. Set JUDGE_API_KEY — falling back to LLM_API_KEY "
+                "would send that key to the judge's host."
+            )
+        return self.llm_api_key
 
 
 settings = Settings()  # type: ignore[call-arg]

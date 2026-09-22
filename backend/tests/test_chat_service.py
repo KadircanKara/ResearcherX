@@ -158,6 +158,13 @@ def _mock_db_returning(n_rows: int) -> MagicMock:
             distance=0.1 + i * 0.0001,
             d_rank=i + 1,
             s_rank=None,
+            # Explicit, not left to MagicMock's auto-attribute: pydantic
+            # coerces a MagicMock to int through __int__, so an unset `page`
+            # would silently arrive as 1 and a test asserting "no page" would
+            # pass for the wrong reason. These are the values a row indexed
+            # before structured chunking actually has.
+            section=[],
+            page=None,
         )
         for i in range(n_rows)
     ]
@@ -299,6 +306,8 @@ async def test_a_sparse_only_chunk_can_outrank_a_dense_chunk():
             "distance": 0.1 + i * 0.001,
             "d_rank": i,
             "s_rank": None,
+            "section": [],
+            "page": None,
         }
         for i in range(1, 101)
     ]
@@ -310,6 +319,8 @@ async def test_a_sparse_only_chunk_can_outrank_a_dense_chunk():
         "distance": None,
         "d_rank": None,
         "s_rank": 1,
+        "section": [],
+        "page": None,
     }
     mock_db = _hybrid_db([*dense_rows, sparse_row])
     papers = [PaperInfo(paper_id="p1", title="A"), PaperInfo(paper_id="p2", title="B")]
@@ -343,6 +354,8 @@ async def test_a_both_arms_chunk_outranks_a_dense_only_top_hit():
                 "distance": 0.42,
                 "d_rank": 3,
                 "s_rank": 1,
+                "section": [],
+                "page": None,
             },
             {
                 "id": "c2",
@@ -352,6 +365,8 @@ async def test_a_both_arms_chunk_outranks_a_dense_only_top_hit():
                 "distance": 0.30,
                 "d_rank": 1,
                 "s_rank": None,
+                "section": [],
+                "page": None,
             },
         ]
     )
@@ -382,6 +397,8 @@ async def test_citations_are_numbered_contiguously_after_fusion():
                 "distance": 0.4,
                 "d_rank": 1,
                 "s_rank": None,
+                "section": [],
+                "page": None,
             },
             {
                 "id": "c2",
@@ -391,6 +408,8 @@ async def test_citations_are_numbered_contiguously_after_fusion():
                 "distance": None,
                 "d_rank": None,
                 "s_rank": 1,
+                "section": [],
+                "page": None,
             },
         ]
     )
@@ -786,7 +805,9 @@ async def test_single_paper_scope_applies_the_delta_cut():
 
     svc = ChatService()
     rows = [
-        MagicMock(paper_id="p1", chunk_index=i, text=f"chunk {i}", distance=d)
+        MagicMock(
+            paper_id="p1", chunk_index=i, text=f"chunk {i}", distance=d, section=[], page=None
+        )
         for i, d in enumerate([0.50, 0.60, 0.74, 0.80])
     ]
     mock_result = MagicMock()
@@ -819,7 +840,9 @@ async def test_multi_paper_scope_applies_no_delta_cut():
 
     svc = ChatService()
     rows = [
-        MagicMock(paper_id=f"p{i}", chunk_index=0, text=f"chunk {i}", distance=d)
+        MagicMock(
+            paper_id=f"p{i}", chunk_index=0, text=f"chunk {i}", distance=d, section=[], page=None
+        )
         for i, d in enumerate([0.30, 0.60, 0.74])
     ]
     mock_result = MagicMock()
@@ -1022,7 +1045,7 @@ async def test_widening_pins_the_mentioned_papers_and_fills_globally(
     calls = []
 
     async def fake_retrieve(
-        db, scope, embedding, query_text, pool_limit=None, guarantee_per_paper=0
+        db, scope, embedding, query_text, pool_limit=None, guarantee_per_paper=0, reranker=None
     ):
         # `pool_limit` mirrors the real signature: the mention path asks for a
         # bigger CANDIDATE pool than the budget so `apply_per_paper_floor` is
@@ -1085,7 +1108,7 @@ async def test_mentions_with_no_chunks_at_all_fall_back_to_the_library(
     scopes = []
 
     async def fake_retrieve(
-        db, scope, embedding, query_text, pool_limit=None, guarantee_per_paper=0
+        db, scope, embedding, query_text, pool_limit=None, guarantee_per_paper=0, reranker=None
     ):
         # `pool_limit` mirrors the real signature: the mention path asks for a
         # bigger CANDIDATE pool than the budget so `apply_per_paper_floor` is
@@ -1197,7 +1220,7 @@ async def test_widened_fill_is_capped_at_the_context_budget(
     calls = []
 
     async def fake_retrieve(
-        db, scope, embedding, query_text, pool_limit=None, guarantee_per_paper=0
+        db, scope, embedding, query_text, pool_limit=None, guarantee_per_paper=0, reranker=None
     ):
         # `pool_limit` mirrors the real signature: the mention path asks for a
         # bigger CANDIDATE pool than the budget so `apply_per_paper_floor` is
@@ -1276,6 +1299,13 @@ def _row(i: int, paper_id: str) -> MagicMock:
         distance=0.1 + i * 0.0001,
         d_rank=i + 1,
         s_rank=None,
+        # Explicit for the reason `_mock_db_returning` spells out: these rows
+        # go through the real `_retrieve_paper_chunks` into
+        # `_to_chunk_contexts`, and an unset MagicMock attribute is coerced by
+        # pydantic through `__int__` into `page=1` -- a value no row in this
+        # database has.
+        section=[],
+        page=None,
     )
 
 
@@ -1344,6 +1374,8 @@ def _guaranteed_row(i: int, paper_id: str, p_rank: int) -> MagicMock:
         text=f"guaranteed {i}",
         distance=0.6 + i * 0.0001,
         p_rank=p_rank,
+        section=[],
+        page=None,
     )
 
 
@@ -1531,7 +1563,7 @@ async def test_the_candidate_pool_never_scales_with_library_size():
     asked: list[tuple[int | None, int]] = []
 
     async def recording_retrieve(
-        db, papers, embedding, query_text, pool_limit=None, guarantee_per_paper=0
+        db, papers, embedding, query_text, pool_limit=None, guarantee_per_paper=0, reranker=None
     ):
         asked.append((pool_limit, guarantee_per_paper))
         return [ChunkContext(n=1, paper_id="pA", title="A", chunk_index=0, text="t")]
@@ -1596,7 +1628,7 @@ async def test_a_widened_turn_that_lands_no_library_chunk_is_not_reported_widene
     owned = [chunk(i) for i in range(budget)]
 
     async def fake_retrieve(
-        db, scope, embedding, query_text, pool_limit=None, guarantee_per_paper=0
+        db, scope, embedding, query_text, pool_limit=None, guarantee_per_paper=0, reranker=None
     ):
         return list(owned)
 
@@ -2086,3 +2118,283 @@ async def test_the_resolver_reads_the_users_words_not_the_reformulated_query(
     assert len(retrieve.await_args.args[1]) == 3
     retrieving = json.loads(next(e for e in events if e["event"] == "retrieving")["data"])
     assert retrieving["scoped"] is False
+
+
+# ── rerank stage ─────────────────────────────────────────────────────────
+
+
+class _SpyReranker:
+    """Answers with a caller-supplied order and records every request."""
+
+    def __init__(self, order=None):
+        self._order = order
+        self.calls: list[dict] = []
+
+    async def rerank(self, query: str, documents: list[str], top_n: int):
+        from app.local_rag.rerank import RerankResult
+
+        self.calls.append({"query": query, "documents": documents, "top_n": top_n})
+        if self._order is None:
+            return None
+        return [
+            RerankResult(index=i, relevance_score=1.0 - n / 1000)
+            for n, i in enumerate(self._order)
+            if i < len(documents)
+        ]
+
+
+def _dense_rows(n: int, paper_id: str = "p1", start: int = 0) -> list[dict]:
+    return [
+        {
+            "id": f"{paper_id}-{i}",
+            "paper_id": paper_id,
+            "chunk_index": i,
+            "text": f"{paper_id} chunk {i}",
+            "distance": 0.1 + i * 0.001,
+            "d_rank": i + 1,
+            "s_rank": None,
+            "section": [],
+            "page": None,
+        }
+        for i in range(start, start + n)
+    ]
+
+
+async def test_the_rerank_changes_which_chunks_reach_the_model():
+    """The whole point of the stage. A chunk the fusion ranked 70th is
+    outside a 60-chunk budget and invisible to the model; promoting it to
+    first must put it in front of the model, not merely reorder the 60 the
+    fusion had already chosen. If this passes with the stage a no-op, it is
+    measuring nothing."""
+    from app.services.chat_service import ChatService, PaperInfo
+
+    svc = ChatService()
+    mock_db = _hybrid_db(_dense_rows(70))
+    papers = [PaperInfo(paper_id="p1", title="A"), PaperInfo(paper_id="p2", title="B")]
+    spy = _SpyReranker(order=[69])
+
+    with patch.object(settings, "max_context_chunks", 60):
+        chunks = await svc._retrieve_paper_chunks(mock_db, papers, [0.0] * 768, "q", reranker=spy)
+
+    assert chunks[0].text == "p1 chunk 69"
+    assert len(chunks) == 60
+
+
+async def test_a_failing_reranker_leaves_the_fused_selection_untouched():
+    """Fail-open, at the level that matters: not just the same order, the
+    same CHUNKS. A Cohere outage must not change what the model is shown."""
+    from app.services.chat_service import ChatService, PaperInfo
+
+    svc = ChatService()
+    papers = [PaperInfo(paper_id="p1", title="A"), PaperInfo(paper_id="p2", title="B")]
+
+    with patch.object(settings, "max_context_chunks", 60):
+        baseline = await svc._retrieve_paper_chunks(
+            _hybrid_db(_dense_rows(70)), papers, [0.0] * 768, "q", reranker=None
+        )
+        degraded = await svc._retrieve_paper_chunks(
+            _hybrid_db(_dense_rows(70)),
+            papers,
+            [0.0] * 768,
+            "q",
+            reranker=_SpyReranker(order=None),
+        )
+
+    assert [c.text for c in degraded] == [c.text for c in baseline]
+
+
+async def test_the_dense_only_path_never_reranks():
+    """`hybrid_retrieval=False` is the kill switch AND the eval harness's
+    control arm. A control with a reranker in it is not a control."""
+    from app.services.chat_service import ChatService, PaperInfo
+
+    svc = ChatService()
+    mock_db = _mock_db_returning(10)
+    papers = [PaperInfo(paper_id="p1", title="A"), PaperInfo(paper_id="p2", title="B")]
+    spy = _SpyReranker(order=[0])
+
+    with patch.object(settings, "hybrid_retrieval", False):
+        await svc._retrieve_paper_chunks(mock_db, papers, [0.0] * 768, "q", reranker=spy)
+
+    assert spy.calls == []
+
+
+async def test_only_rerank_candidates_documents_are_sent():
+    """The bound on what crosses the wire to Cohere. Everything past it
+    still reaches the model behind the reranked head."""
+    from app.services.chat_service import ChatService, PaperInfo
+
+    svc = ChatService()
+    mock_db = _hybrid_db(_dense_rows(150))
+    papers = [PaperInfo(paper_id="p1", title="A"), PaperInfo(paper_id="p2", title="B")]
+    spy = _SpyReranker(order=[0])
+
+    with (
+        patch.object(settings, "rerank_candidates", 100),
+        patch.object(settings, "max_context_chunks", 60),
+    ):
+        await svc._retrieve_paper_chunks(mock_db, papers, [0.0] * 768, "q", reranker=spy)
+
+    assert len(spy.calls) == 1
+    assert len(spy.calls[0]["documents"]) == 100
+
+
+async def test_the_reranker_is_given_the_question_and_the_chunk_text():
+    from app.services.chat_service import ChatService, PaperInfo
+
+    svc = ChatService()
+    mock_db = _hybrid_db(_dense_rows(3))
+    papers = [PaperInfo(paper_id="p1", title="A"), PaperInfo(paper_id="p2", title="B")]
+    spy = _SpyReranker(order=[0])
+
+    await svc._retrieve_paper_chunks(
+        mock_db, papers, [0.0] * 768, "what reward function", reranker=spy
+    )
+
+    assert spy.calls[0]["query"] == "what reward function"
+    assert spy.calls[0]["documents"] == ["p1 chunk 0", "p1 chunk 1", "p1 chunk 2"]
+
+
+async def test_single_paper_scope_cuts_before_the_rerank_sees_the_list():
+    """`intra_paper_rank_window` is a RANK-SPACE policy: it reads positions
+    in the fused order, so it has to run while that order still exists. If
+    the rerank ran first the window would slice a relevance order instead,
+    which is a different policy than the one that was measured."""
+    from app.services.chat_service import ChatService, PaperInfo
+
+    svc = ChatService()
+    mock_db = _hybrid_db(_dense_rows(100))
+    spy = _SpyReranker(order=[0])
+
+    with (
+        patch.object(settings, "intra_paper_rank_window", 30),
+        patch.object(settings, "max_context_chunks", 60),
+    ):
+        chunks = await svc._retrieve_paper_chunks(
+            mock_db, [PaperInfo(paper_id="p1", title="A")], [0.0] * 768, "q", reranker=spy
+        )
+
+    assert len(spy.calls[0]["documents"]) == 30
+    assert len(chunks) == 30
+
+
+async def test_guaranteed_rows_are_never_sent_to_the_reranker():
+    """ "Presence, not promotion" survives the rerank. A guaranteed row
+    entered on a per-paper floor rather than on merit, so scoring it here
+    would let it outrank candidates that earned a fused rank -- and the
+    guarantee deliberately keeps the tail position that says so. The rows
+    are appended after the stage, so the provider must never see them."""
+    from app.services.chat_service import ChatService, PaperInfo
+
+    svc = ChatService()
+    ranked = [MagicMock(**row) for row in _dense_rows(5, paper_id="pA")]
+    guaranteed = [_guaranteed_row(1, "pB", 1), _guaranteed_row(2, "pB", 2)]
+    db = _sequenced_db(ranked, guaranteed)
+    scope = [PaperInfo(paper_id="pA", title="A"), PaperInfo(paper_id="pB", title="B")]
+    spy = _SpyReranker(order=[0])
+
+    chunks = await svc._retrieve_paper_chunks(
+        db, scope, [0.0] * 768, "q", guarantee_per_paper=2, reranker=spy
+    )
+
+    sent = spy.calls[0]["documents"]
+    assert not any(text.startswith("guaranteed") for text in sent)
+    assert [c.text for c in chunks[-2:]] == ["guaranteed 1", "guaranteed 2"]
+
+
+async def test_chunk_contexts_carry_section_and_page_from_rows():
+    """The JSON column arrives as a list from asyncpg and as a str from
+    sqlite, and a pre-re-index row arrives as None. All three must land as a
+    tuple the excerpt header can render."""
+    from app.services.chat_service import ChatService
+
+    svc = ChatService()
+    rows = [
+        MagicMock(
+            paper_id="p1", chunk_index=6, text="t", section='["IV. RL", "B. Reward"]', page=3
+        ),
+        MagicMock(paper_id="p1", chunk_index=0, text="u", section=["Intro"], page=None),
+        MagicMock(paper_id="p1", chunk_index=1, text="v", section=None, page=None),
+    ]
+    ctx = svc._to_chunk_contexts(rows, {"p1": "T"})
+    assert ctx[0].section == ("IV. RL", "B. Reward") and ctx[0].page == 3
+    assert ctx[1].section == ("Intro",) and ctx[1].page is None
+    assert ctx[2].section == () and ctx[2].page is None
+
+
+async def test_every_retrieval_query_selects_section_and_page():
+    """All three row-producing queries must carry `section`/`page` all the way
+    to their OUTER projection, not merely into a CTE.
+
+    This is the only guard on this plan's central risk, so it asserts
+    structure rather than substrings. A bare `"c.section" in sql` cannot
+    detect any of the three regressions that actually matter, because
+    `c.`-prefixed references live only inside the CTEs:
+
+    - dropping `section, page` from `_guaranteed_rows`' outer SELECT;
+    - deleting the `COALESCE(...) AS section` / `AS page` lines from
+      `_hybrid_rows`' final SELECT;
+    - adding the columns to the hybrid DENSE arm and forgetting the SPARSE
+      arm (one `c.section` anywhere satisfies a substring check).
+
+    Every one of those leaves `_to_chunk_contexts` reading a column that is
+    not in the result, so every chunk silently arrives with `section=()` and
+    `page=None` and nothing anywhere goes red. Hence the split on the CTE
+    boundaries below: each arm and each outer projection is asserted
+    separately.
+    """
+    from app.services.chat_service import ChatService, PaperInfo
+
+    svc = ChatService()
+    papers = [PaperInfo(paper_id="p1", title="A"), PaperInfo(paper_id="p2", title="B")]
+
+    # Dense-only path: one SELECT, no outer projection to lose them in.
+    db = _mock_db_returning(0)
+    with patch.object(settings, "hybrid_retrieval", False):
+        await svc._retrieve_paper_chunks(db, papers, [0.0] * 768, "q")
+    dense_only_sql = db.execute.call_args.args[0].text
+    assert "c.text, c.section, c.page," in dense_only_sql
+
+    # Hybrid path: two CTE arms plus a FULL OUTER JOIN projection, and all
+    # three have to carry the columns.
+    db = _mock_db_returning(0)
+    with patch.object(settings, "hybrid_retrieval", True):
+        await svc._retrieve_paper_chunks(db, papers, [0.0] * 768, "q")
+    hybrid_sql = db.execute.call_args.args[0].text
+    dense_arm, sep, rest = hybrid_sql.partition("sparse AS (")
+    assert sep, "hybrid query no longer has a sparse arm -- this test is stale"
+    sparse_arm, sep, outer = rest.partition("SELECT COALESCE(")
+    assert sep, "hybrid query no longer has a COALESCE projection -- this test is stale"
+    assert "c.section" in dense_arm and "c.page" in dense_arm
+    assert "c.section" in sparse_arm and "c.page" in sparse_arm
+    assert "AS section" in outer and "AS page" in outer
+
+    # Guarantee query: a `ranked` CTE plus an outer SELECT that re-lists every
+    # column by name, which is exactly where they are easiest to drop.
+    db = _sequenced_db([], [])
+    await svc._retrieve_paper_chunks(db, papers, [0.0] * 768, "q", guarantee_per_paper=2)
+    guarantee_sql = db.execute.call_args_list[-1].args[0].text
+    ranked_cte, sep, guarantee_outer = guarantee_sql.partition("SELECT id, paper_id")
+    assert sep, "guarantee query no longer has its outer projection -- this test is stale"
+    assert "c.section" in ranked_cte and "c.page" in ranked_cte
+    assert guarantee_outer.startswith(", chunk_index, text, section, page, distance, p_rank")
+
+
+async def test_section_tuple_accepts_a_tuple_and_drops_empty_elements():
+    """The two shapes the helper is most likely to be handed by hand.
+
+    A `tuple` because `ChunkContext.section` IS a tuple and the eval harnesses
+    build rows from ChunkContexts -- a list-only check silently blanks the
+    section on exactly those rows. Empty elements because a `None` inside the
+    path would otherwise be stringified and reach the model as a heading
+    literally called "None", which is worse than no heading at all.
+    """
+    from app.services.chat_service import _section_tuple
+
+    assert _section_tuple(("IV. RL", "B. Reward")) == ("IV. RL", "B. Reward")
+    assert _section_tuple([None, "Intro", ""]) == ("Intro",)
+    assert _section_tuple([None]) == ()
+    # Still degrades rather than raising on a shape that is neither.
+    assert _section_tuple(42) == ()
+    assert _section_tuple("not json") == ()
+    assert _section_tuple('{"a": 1}') == ()

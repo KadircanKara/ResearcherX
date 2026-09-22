@@ -39,11 +39,15 @@ from sqlalchemy import text
 
 from app.core.config import settings
 from app.db.session import SessionLocal
+from app.local_rag.rerank import CohereReranker
 from app.services.embedding_service import EmbeddingService
 from app.services.hybrid_ranker import fuse_rrf, keep_within_rank_window
 from app.services.intra_paper_ranker import keep_within_paper
+from app.services.rerank_ranker import rerank_items
 from evals.retrieval.golden_set import Case, load_golden_set
 from evals.retrieval.metrics import (
+    rerank_lost_count,
+    rerank_rescued_count,
     THRESHOLDS,
     Scored,
     SeparationDiagnosis,
@@ -686,7 +690,30 @@ async def main() -> None:  # noqa: PLR0912, PLR0915 — a report script, not a l
             "the dense-only baseline, plus the `rescued` count"
         ),
     )
+    parser.add_argument(
+        "--rerank",
+        action="store_true",
+        help=(
+            "also run the Cohere rerank arm over the fused candidates and report "
+            "it beside the hybrid arm, plus rescued/lost across the budget edge"
+        ),
+    )
     args = parser.parse_args()
+
+    # The rerank consumes a fused candidate list, and there is no fused list
+    # without the hybrid arm. Refusing is better than silently reranking the
+    # dense-only ordering, which is a policy production never runs.
+    if args.rerank and not args.hybrid:
+        print("\nERROR: --rerank requires --hybrid (it reorders the fused candidates)")
+        return
+    reranker = None
+    if args.rerank:
+        if not settings.cohere_api_key:
+            print("\nERROR: --rerank needs COHERE_API_KEY; without it the stage is a no-op")
+            return
+        reranker = CohereReranker(
+            api_key=settings.cohere_api_key, model=settings.cohere_rerank_model
+        )
 
     cases = load_golden_set(args.set)
     svc = EmbeddingService()
@@ -706,6 +733,11 @@ async def main() -> None:  # noqa: PLR0912, PLR0915 — a report script, not a l
     # function (see the module CRITICAL docstring above).
     hybrid_positives: list[tuple[Case, list[Scored]]] = []
     hybrid_targeted_rows: list[dict] = []
+    # Rerank arm. Populated only with --rerank, and always case-for-case with
+    # `hybrid_positives`: the two are the before/after of one run, and
+    # `rerank_rescued_count` refuses a misaligned pair rather than silently
+    # attributing one case's answer to another's ranking.
+    rerank_positives: list[tuple[Case, list[Scored]]] = []
 
     async with SessionLocal() as db:
         counts = {r.model: r.n for r in (await db.execute(_MODEL_COUNTS_SQL)).fetchall()}
@@ -789,6 +821,24 @@ async def main() -> None:  # noqa: PLR0912, PLR0915 — a report script, not a l
                     db, svc, case, args.project_id, threshold=settings.similarity_threshold
                 )
                 hybrid_positives.append((case, hybrid_chunks))
+
+                if args.rerank:
+                    # `rerank_items` is IMPORTED from the shipped path, not
+                    # mirrored: the head/tail split, the fail-open and the
+                    # score-everything-sent rule are the policy under
+                    # measurement, and this harness already mirrors the SQL.
+                    rerank_positives.append(
+                        (
+                            case,
+                            await rerank_items(
+                                hybrid_chunks,
+                                query=case.question,
+                                text_of=lambda c: c.chunk_text,
+                                reranker=reranker,
+                                limit=settings.rerank_candidates,
+                            ),
+                        )
+                    )
 
             rank = first_satisfying_rank(case, simulate_retrieval(chunks, args.k))
             topk_distance = topk_satisfying_distance(case, chunks, args.k)
@@ -901,6 +951,57 @@ async def main() -> None:  # noqa: PLR0912, PLR0915 — a report script, not a l
             )
         else:
             print("hybrid arm: skipped — no positive cases scored (see ERRORS above)")
+            print()
+
+    # --- rerank arm: fused order vs cross-encoder order ---------------------
+    # Reported against the HYBRID arm, never against the dense baseline: the
+    # rerank reorders fused candidates, so the fused ordering is the only
+    # thing it changed and the only honest control.
+    #
+    # `rescued` and `lost` are budget-edge crossings at
+    # `settings.max_context_chunks` -- what actually reaches the model in
+    # production -- for the same reason the hybrid arm pins its own rescue
+    # budget there rather than to `args.k`.
+    #
+    # There is no negatives row here, and its absence is a result rather than
+    # an omission: the stage reorders ADMITTED candidates only, so off-topic
+    # acceptance -- how many chunks clear the distance gate on an off_topic
+    # case -- is arithmetically identical with and without it. Printing a
+    # duplicated number would imply the rerank had been measured against
+    # off-topic noise when it cannot move that figure at all.
+    if args.rerank:
+        print()
+        if rerank_positives:
+            budget = settings.max_context_chunks
+            r_recall = recall_at_k(rerank_positives, args.k, presorted=True)
+            r_mrr = mean_reciprocal_rank(rerank_positives, args.k, presorted=True)
+            rescued = rerank_rescued_count(hybrid_positives, rerank_positives, budget)
+            lost = rerank_lost_count(hybrid_positives, rerank_positives, budget)
+            print(
+                f"rerank arm (model={settings.cohere_rerank_model} "
+                f"candidates={settings.rerank_candidates} budget={budget}):"
+            )
+            print(
+                f"  hybrid       recall@{args.k}: "
+                f"{recall_at_k(hybrid_positives, args.k, presorted=True):.2f}    "
+                f"MRR: {mean_reciprocal_rank(hybrid_positives, args.k, presorted=True):.3f}"
+            )
+            print(f"  reranked     recall@{args.k}: {r_recall:.2f}    MRR: {r_mrr:.3f}")
+            print(
+                f"  rescued@{budget}: {rescued}/{len(rerank_positives)}"
+                f"    lost@{budget}: {lost}/{len(rerank_positives)}"
+            )
+            # Netting these two would hide the case that matters. One rescue
+            # and one loss is two changed answers, not a wash, and a stage
+            # that trades evenly is worse than none because it also costs a
+            # round trip per turn.
+            if lost > rescued:
+                print("  <-- the stage LOSES more answers than it rescues; do not ship it on")
+            elif rescued == 0 and lost == 0:
+                print("  <-- the stage moved no answer across the budget edge on this set")
+            print()
+        else:
+            print("rerank arm: skipped — no positive cases scored (see ERRORS above)")
             print()
 
     # Column width derived from the actual ids so a long case id can never

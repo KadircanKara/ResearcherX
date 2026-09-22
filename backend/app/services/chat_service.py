@@ -29,7 +29,9 @@ from app.services.conversation_service import ConversationService
 from app.services.embedding_service import EmbeddingService
 from app.services.hybrid_ranker import fuse_rrf, keep_within_rank_window
 from app.services.intra_paper_ranker import keep_within_paper
+from app.local_rag.rerank import CohereReranker
 from app.services.mention_ranker import apply_per_paper_floor
+from app.services.rerank_ranker import rerank_items
 from app.services.paper_resolver import ResolvablePaper, resolve_papers_with_evidence
 
 _HISTORY_TOP_K = 5
@@ -216,6 +218,58 @@ class PaperInfo(BaseModel):
     title: str
 
 
+def build_chat_reranker() -> CohereReranker | None:
+    """The chat path's reranker, or None when the stage is off.
+
+    None for a disabled kill switch AND for an absent key: an empty
+    COHERE_API_KEY is a supported state, and `None` here is the same
+    "no opinion" the client returns on failure, so both degrade to the
+    fused order through one code path rather than two.
+
+    Deliberately not `local_rag.rag.build_reranker`, which would be a
+    circular import (`rag` imports `chat_service` for `renumber_citations`)
+    and which ignores `rerank_enabled` because that flag is this path's
+    kill switch, not local_rag's.
+    """
+    if not settings.rerank_enabled or not settings.cohere_api_key:
+        return None
+    return CohereReranker(api_key=settings.cohere_api_key, model=settings.cohere_rerank_model)
+
+
+def _section_tuple(raw) -> tuple[str, ...]:
+    """A retrieval row's `section` column as a tuple, whatever shape it lands in.
+
+    Three shapes are all legitimate and all reach here:
+    - a `list`, which is what asyncpg gives back for a JSON column in prod;
+    - a `str`, which is what sqlite gives back in tests (it stores JSON as
+      text and the raw `text()` queries bypass the ORM's type decoding);
+    - `None` or `""`, which is every row indexed before structured chunking
+      landed — those must render exactly as a chunk with no section does,
+      with no crash and no empty "Section: " fragment.
+
+    Anything else degrades to `()` rather than raising. A section path is a
+    label on an excerpt; a malformed one is worth losing, never worth losing
+    the answer it was attached to. That policy is why the empty elements are
+    dropped too: a `None` inside the list would otherwise be stringified and
+    reach the model as the literal heading "None".
+
+    A `tuple` is accepted alongside a `list` because `ChunkContext.section` is
+    itself a tuple, and the eval harnesses hand this method rows they built by
+    hand from ChunkContexts. Rejecting the shape the rest of the read path
+    uses would silently blank the section on exactly those rows.
+    """
+    if raw is None or raw == "":
+        return ()
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except ValueError:
+            return ()
+    if not isinstance(raw, (list, tuple)):
+        return ()
+    return tuple(str(s) for s in raw if s)
+
+
 def _vec_str(embedding: list[float]) -> str:
     """Format Python list as pgvector string: [0.1, 0.2, ...]"""
     return "[" + ",".join(str(x) for x in embedding) + "]"
@@ -228,6 +282,7 @@ class ChatService:
         self._widener = ScopeWidenerAgent()
         self._chat_agent = ChatAgent()
         self._conv_svc = ConversationService()
+        self._reranker = build_chat_reranker()
 
     async def respond(
         self,
@@ -420,12 +475,17 @@ class ChatService:
                             retrieval_embedding,
                             retrieval_query,
                             widened,
+                            reranker=self._reranker,
                         )
                         scope = paper_infos if widened else scope_infos
                     else:
                         async with SessionLocal() as db:
                             paper_chunks = await self._retrieve_paper_chunks(
-                                db, paper_infos, retrieval_embedding, retrieval_query
+                                db,
+                                paper_infos,
+                                retrieval_embedding,
+                                retrieval_query,
+                                reranker=self._reranker,
                             )
 
             if mentioned and not mentioned_infos:
@@ -545,6 +605,15 @@ class ChatService:
                     "title": by_old[old_n].title,
                     "chunk_index": by_old[old_n].chunk_index,
                     "snippet": by_old[old_n].text[:200],
+                    # SNAPSHOTS, like chunk_index and snippet: they describe
+                    # where the text the model was actually shown came from.
+                    # Only `title` resolves on read (conversation_service.
+                    # retitle_citations), because a title labels a paper that
+                    # still exists while these locate a specific excerpt. A
+                    # re-index that re-chunks a paper does not retroactively
+                    # move the excerpt this answer was written against.
+                    "section": list(by_old[old_n].section),
+                    "page": by_old[old_n].page,
                 }
                 for old_n, new_n in sorted(renumbered.items(), key=lambda kv: kv[1])
                 if old_n in by_old
@@ -572,6 +641,7 @@ class ChatService:
         embedding: list[float],
         query_text: str,
         widened: bool,
+        reranker: CohereReranker | None = None,
     ) -> tuple[list[ChunkContext], bool]:
         """Retrieve chunks for a turn scoped to explicitly NAMED papers.
 
@@ -657,6 +727,7 @@ class ChatService:
                 query_text,
                 pool_limit=budget,
                 guarantee_per_paper=floor,
+                reranker=reranker,
             )
 
         if not (widened or not candidates):
@@ -698,6 +769,7 @@ class ChatService:
                     embedding,
                     query_text,
                     pool_limit=budget + len(pinned),
+                    reranker=reranker,
                 )
             extra = [c for c in fill if (c.paper_id, c.chunk_index) not in pinned_keys][:remaining]
 
@@ -745,6 +817,7 @@ class ChatService:
         query_text: str,
         pool_limit: int | None = None,
         guarantee_per_paper: int = 0,
+        reranker: CohereReranker | None = None,
     ) -> list[ChunkContext]:
         """Retrieve the nearest chunks from `paper_infos`, ranked by distance.
 
@@ -894,19 +967,69 @@ class ChatService:
             w_sparse=settings.hybrid_sparse_weight,
             k=settings.hybrid_rrf_k,
         )
-        # Budget FIRST, cut second -- same ordering the dense path documents
-        # above. LIMIT bounds what crosses the wire; this bounds what reaches
-        # the model, and the cut may only shrink what the budget bounded.
-        fused = fused[:pool]
+        # Cut FIRST, then rerank, then budget. The cut moved ahead of the
+        # budget when the rerank landed, and the move is provably a no-op:
+        # `keep_within_rank_window` is `min(len, window)`, so at
+        # intra_paper_rank_window 30 against max_context_chunks 60 it returns
+        # 30 whether it sees the fused list or the budgeted prefix of it. It
+        # has to run first because it is a RANK-SPACE policy -- it reads
+        # positions in the fused order, and a reranked list no longer carries
+        # that order. The budget still runs last: LIMIT bounds what crosses
+        # the wire, this bounds what reaches the model.
         if single_paper:
             fused = fused[
                 : keep_within_rank_window(
                     [score for _, score in fused], window=settings.intra_paper_rank_window
                 )
             ]
-        ranked = [by_id[key] for key, _ in fused]
+        keys = await self._reranked_keys([key for key, _ in fused], by_id, query_text, reranker)
+        ranked = [by_id[key] for key in keys[:pool]]
         ranked = await self._with_guaranteed_rows(db, ranked, ids, qvec, threshold, guarantee)
         return self._to_chunk_contexts(ranked, paper_title_map)
+
+    async def _reranked_keys(
+        self,
+        keys: list,
+        by_id: dict,
+        query_text: str,
+        reranker: CohereReranker | None,
+    ) -> list:
+        """`keys` reordered by a cross-encoder pass, or `keys` unchanged.
+
+        Runs between the fusion and the budget cut, which is the only
+        position where it can change WHICH chunks reach the model rather
+        than merely their order: the hybrid query already returns ~200 dense
+        plus 100 sparse candidates and the budget throws all but 60 away, so
+        this spends a surplus that already exists. No pool widens.
+
+        Three things it deliberately does NOT do:
+
+        - IT NEVER REOPENS THE DISTANCE GATE. Only admitted candidates are
+          in `keys`, so a chunk the 0.75 cutoff dropped cannot come back --
+          the same rule `_guaranteed_rows` holds, and for the same reason:
+          the gate is a measured decision this stage has no vote on.
+        - IT NEVER SEES THE GUARANTEED ROWS. `_with_guaranteed_rows` appends
+          those AFTER this, so they keep their tail position and stay
+          "presence, not promotion". Scoring them here would let a row that
+          entered on a per-paper guarantee outrank candidates that earned a
+          fused rank.
+        - IT NEVER FILTERS. `apply_rerank` keeps every unscored candidate at
+          the tail; shrinking the list here would turn an ordering stage
+          into an admission stage and could return fewer chunks than the
+          budget allows.
+
+        The head/tail split, the fail-open and the "score everything sent"
+        rule all live in `rerank_items`, which the eval harnesses call too --
+        a hand-rolled copy here would be a second implementation of the
+        policy under measurement.
+        """
+        return await rerank_items(
+            keys,
+            query=query_text,
+            text_of=lambda key: by_id[key].text,
+            reranker=reranker,
+            limit=settings.rerank_candidates,
+        )
 
     async def _with_guaranteed_rows(
         self, db: AsyncSession, ranked: list, ids: str, qvec: str, threshold: float, guarantee: int
@@ -974,7 +1097,7 @@ class ChatService:
                 FROM jsonb_array_elements_text(CAST(:ids AS jsonb))
             ),
             ranked AS (
-                SELECT c.id, c.paper_id, c.chunk_index, c.text,
+                SELECT c.id, c.paper_id, c.chunk_index, c.text, c.section, c.page,
                        (c.embedding <=> CAST(:qvec AS vector)) AS distance,
                        ROW_NUMBER() OVER (
                            PARTITION BY c.paper_id
@@ -985,7 +1108,7 @@ class ChatService:
                 WHERE c.model = :model
                   AND (c.embedding <=> CAST(:qvec AS vector)) < :threshold
             )
-            SELECT id, paper_id, chunk_index, text, distance, p_rank
+            SELECT id, paper_id, chunk_index, text, section, page, distance, p_rank
             FROM ranked
             WHERE p_rank <= :guarantee
             ORDER BY p_rank ASC, distance ASC
@@ -1015,6 +1138,17 @@ class ChatService:
 
         `n` is the marker the model cites, so it must follow the order the
         model sees -- after fusion and after every cut, never the row order.
+
+        This is the ONE place a retrieval row becomes a ChunkContext, which is
+        why `section`/`page` are read with `getattr`: all three row-producing
+        queries (`_dense_only_rows`, `_hybrid_rows`, `_guaranteed_rows`) do
+        select them, but this method is also handed hand-built rows by the
+        eval harnesses and the tests, and a missing column there should
+        degrade to "no section" rather than take the whole turn down.
+
+        The TITLE still comes from `paper_title_map`, not from the row --
+        composing the header at read time from `papers.title` is what stops a
+        rename making thousands of stored rows lie (see chunk_header.py).
         """
         return [
             ChunkContext(
@@ -1023,6 +1157,8 @@ class ChatService:
                 title=paper_title_map.get(row.paper_id, ""),
                 chunk_index=row.chunk_index,
                 text=row.text,
+                section=_section_tuple(getattr(row, "section", None)),
+                page=getattr(row, "page", None),
             )
             for i, row in enumerate(rows, 1)
         ]
@@ -1039,7 +1175,7 @@ class ChatService:
                 SELECT value AS paper_id
                 FROM jsonb_array_elements_text(CAST(:ids AS jsonb))
             )
-            SELECT c.id, c.paper_id, c.chunk_index, c.text,
+            SELECT c.id, c.paper_id, c.chunk_index, c.text, c.section, c.page,
                    (c.embedding <=> CAST(:qvec AS vector)) AS distance
             FROM paper_chunk_embeddings c
             JOIN scope s ON s.paper_id = c.paper_id
@@ -1096,7 +1232,7 @@ class ChatService:
                 SELECT websearch_to_tsquery('english', :qtext) AS tsq
             ),
             dense AS (
-                SELECT c.id, c.paper_id, c.chunk_index, c.text,
+                SELECT c.id, c.paper_id, c.chunk_index, c.text, c.section, c.page,
                        (c.embedding <=> CAST(:qvec AS vector)) AS distance,
                        ROW_NUMBER() OVER (
                            ORDER BY c.embedding <=> CAST(:qvec AS vector)
@@ -1109,7 +1245,7 @@ class ChatService:
                 LIMIT :dense_pool
             ),
             sparse AS (
-                SELECT c.id, c.paper_id, c.chunk_index, c.text,
+                SELECT c.id, c.paper_id, c.chunk_index, c.text, c.section, c.page,
                        ROW_NUMBER() OVER (
                            ORDER BY ts_rank_cd(c.tsv, q.tsq) DESC, c.id
                        ) AS s_rank
@@ -1125,6 +1261,16 @@ class ChatService:
                    COALESCE(d.paper_id, sp.paper_id)       AS paper_id,
                    COALESCE(d.chunk_index, sp.chunk_index) AS chunk_index,
                    COALESCE(d.text, sp.text)               AS text,
+                   -- Both arms carry these for the same reason both carry
+                   -- `text`: the FULL OUTER JOIN admits a chunk that only
+                   -- one arm found, and a sparse-only chunk with a NULL
+                   -- section would reach the model as an excerpt that has
+                   -- lost the heading it sits under. d and sp are the same
+                   -- physical row whenever both are present, so the
+                   -- COALESCE can never pick one chunk's section for
+                   -- another chunk's text.
+                   COALESCE(d.section, sp.section)         AS section,
+                   COALESCE(d.page, sp.page)               AS page,
                    d.distance                              AS distance,
                    d.d_rank                                AS d_rank,
                    sp.s_rank                                AS s_rank

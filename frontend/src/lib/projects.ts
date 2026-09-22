@@ -198,6 +198,19 @@ export interface PaperChunk {
   chunk_index: number;
   text: string;
   paper_title: string;
+  /**
+   * Where this chunk sits in the paper, as the chunk is indexed TODAY.
+   *
+   * The hover card deliberately shows the citation's own snapshot of these
+   * instead (see citation-hover-card.tsx): a citation records where the
+   * excerpt was when the answer was written, and a re-index can move it.
+   * Declared here because the API returns them and a type that omits half a
+   * response is a type that lies.
+   *
+   * Empty/null for every chunk indexed before structured chunking.
+   */
+  section: string[];
+  page: number | null;
 }
 
 export async function getPaperChunk(

@@ -167,6 +167,13 @@ class Paper(Base):
     # with a 422. Storing it makes a future embedding-model change a pure
     # re-embed instead of a re-download.
     extracted_text: Mapped[str | None] = mapped_column(Text, default=None)
+    # Per-page markdown and the PDF outline, stored so a RE-CHUNK never
+    # needs the PDF again (only 2 of 102 PDFs were retained when this
+    # landed; 100 had to be re-downloaded once). Shapes are
+    # pdf_extraction.pages_to_json / outline_to_json. Null for papers
+    # ingested before structured chunking and not yet re-indexed with --fetch.
+    extracted_pages: Mapped[list | None] = mapped_column(JSON, default=None)
+    outline: Mapped[list | None] = mapped_column(JSON, default=None)
     pdf_url: Mapped[str | None] = mapped_column(Text, default=None)
     # The URL that actually SERVED the PDF, when it differs from the one the
     # user pasted. `paper_fetch_service.fetch_pdf` falls back to Unpaywall or
@@ -393,6 +400,16 @@ class PaperChunkEmbedding(Base):
     )
     chunk_index: Mapped[int] = mapped_column(Integer())
     text: Mapped[str] = mapped_column(Text)
+    # Section path, outermost first, and the page the chunk STARTS on — set
+    # by the chunker (structured_chunker.ChunkRecord), same lifecycle as the
+    # row. `section_text` is the path joined with " > ", denormalised on
+    # purpose: the generated `tsv` (migration d0e1f2a3b4c5) needs an
+    # IMMUTABLE expression, and Postgres cannot build one over a JSON array.
+    # The TITLE is deliberately NOT here — composed from papers.title at use,
+    # so a rename cannot make 4,594 rows lie (see chunk_header.py).
+    section: Mapped[list] = mapped_column(JSON, default=list, server_default="[]")
+    section_text: Mapped[str] = mapped_column(Text, default="", server_default="")
+    page: Mapped[int | None] = mapped_column(Integer(), default=None)
     # Declared as Text so SQLite tests (create_all) don't fail on unknown type.
     # The Alembic migration converts this to vector(768) in Postgres.
     embedding: Mapped[str] = mapped_column(Text)
@@ -402,7 +419,8 @@ class PaperChunkEmbedding(Base):
     model: Mapped[str] = mapped_column(String(64), default="", server_default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     # NOT DECLARED HERE, on purpose: `tsv`, a generated tsvector column with a
-    # GIN index, added by migration a7b8c9d0e1f2 for hybrid retrieval's sparse
+    # GIN index, added by migration a7b8c9d0e1f2 and regenerated over
+    # section_text + text by d0e1f2a3b4c5 for hybrid retrieval's sparse
     # arm. SQLite `create_all` in tests cannot take a tsvector, and nothing
     # reads it through the ORM -- retrieval uses raw text() SQL. The guard that
     # stops autogenerate proposing to drop it lives in app/db/autogenerate.py

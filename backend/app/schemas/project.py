@@ -143,3 +143,8 @@ class PaperChunkOut(BaseModel):
     chunk_index: int
     text: str
     paper_title: str
+    # Defaulted so a row indexed before structured chunking (section=[],
+    # page=NULL) still serialises — that is the whole corpus until the
+    # re-index runs, and the hover card must keep working through it.
+    section: list[str] = []
+    page: int | None = None

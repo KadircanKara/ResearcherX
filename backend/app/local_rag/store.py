@@ -75,6 +75,13 @@ class Chunk:
     paper_title: str
     chunk_index: int
     text: str
+    # Mirrors `paper_chunk_embeddings.section`/`.page` in the database path
+    # (structured_chunker.ChunkRecord). Both default absent so a store built
+    # before this field existed still loads: `[]`/`None` render as a bare
+    # title header, the same degraded-but-correct state a not-yet-re-indexed
+    # database row is in.
+    section: tuple[str, ...] = ()
+    page: int | None = None
 
     @property
     def chunk_id(self) -> str:
@@ -89,6 +96,8 @@ class Chunk:
             "paper_title": self.paper_title,
             "chunk_index": self.chunk_index,
             "text": self.text,
+            "section": list(self.section),
+            "page": self.page,
         }
 
     @classmethod
@@ -98,6 +107,8 @@ class Chunk:
             paper_title=raw["paper_title"],
             chunk_index=raw["chunk_index"],
             text=raw["text"],
+            section=tuple(raw.get("section", ())),
+            page=raw.get("page"),
         )
 
 

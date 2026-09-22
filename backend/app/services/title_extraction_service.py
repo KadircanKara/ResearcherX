@@ -371,7 +371,7 @@ async def extract_meta_from_pdf(
     """Extract (title, abstract, body) from a PDF via pymupdf4llm + structured LLM.
 
     Text-only markdown is stored as body — images are not embedded (see
-    `paper_ingest_service._extract_markdown`); figure captions survive.
+    `pdf_extraction.extract_document`); figure captions survive.
     """
     try:
         import fitz

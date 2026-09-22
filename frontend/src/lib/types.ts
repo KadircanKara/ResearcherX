@@ -122,6 +122,18 @@ export interface ChatCitation {
   title: string;
   chunk_index: number;
   snippet: string;
+  /**
+   * Where the excerpt sat when this answer was written. SNAPSHOTS, like
+   * `chunk_index` and `snippet` — only `title` is re-resolved server-side on
+   * read, because a title labels a paper that still exists while these
+   * locate one specific excerpt.
+   *
+   * Optional because every citation persisted before structured chunking
+   * carries neither, and those rows are read back for the life of the
+   * conversation.
+   */
+  section?: string[];
+  page?: number | null;
 }
 
 export interface ChatMessage {

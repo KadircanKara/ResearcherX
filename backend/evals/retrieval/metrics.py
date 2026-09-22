@@ -166,6 +166,78 @@ def rescued_count(case_chunks: list[tuple[Case, list[Scored]]], k: int) -> int:
     return rescued
 
 
+def answered_within(case: Case, chunks: list[Scored], k: int) -> bool:
+    """Does a satisfying chunk reach the model at all, given a budget of `k`?
+
+    A yes/no, unlike `first_satisfying_rank`'s position: the rerank moves a
+    chunk ACROSS the budget edge or it does not, and a rank change inside the
+    budget changes nothing about what the model can read.
+
+    `chunks` must already be in the arm's own order — fused for the hybrid
+    arm, reranked for the rerank arm. Never distance-sorted here: a fused or
+    reranked list carries `distance=None` for sparse-only admissions.
+    """
+    return any(chunk_satisfies(case, c.paper_title, c.chunk_text) for c in chunks[:k])
+
+
+def rerank_rescued_count(
+    fused: list[tuple[Case, list[Scored]]],
+    reranked: list[tuple[Case, list[Scored]]],
+    k: int,
+) -> int:
+    """Positives the rerank moved INTO the budget.
+
+    This is the number that justifies the rerank stage, and it is the exact
+    analogue of `rescued_count` for the hybrid arm: recall@k can improve from
+    reordering alone, but only a crossing of the budget edge changes what the
+    model is able to read. If it is zero the stage is paying a provider call
+    per turn to permute chunks the fusion had already chosen.
+
+    Both lists must cover the SAME cases in the SAME order — they are the two
+    arms of one run, so a mismatch is a harness bug rather than a result.
+    """
+    _assert_aligned(fused, reranked)
+    return sum(
+        1
+        for (case, before), (_, after) in zip(fused, reranked, strict=True)
+        if not answered_within(case, before, k) and answered_within(case, after, k)
+    )
+
+
+def rerank_lost_count(
+    fused: list[tuple[Case, list[Scored]]],
+    reranked: list[tuple[Case, list[Scored]]],
+    k: int,
+) -> int:
+    """Positives the rerank pushed OUT of the budget.
+
+    The number that would justify shipping the stage off. Reported beside
+    `rerank_rescued_count` and never netted against it: one rescue and one
+    loss is not a wash, it is two cases whose answers changed, and a stage
+    that trades answers evenly is worse than no stage because it also costs a
+    round trip.
+    """
+    _assert_aligned(fused, reranked)
+    return sum(
+        1
+        for (case, before), (_, after) in zip(fused, reranked, strict=True)
+        if answered_within(case, before, k) and not answered_within(case, after, k)
+    )
+
+
+def _assert_aligned(
+    fused: list[tuple[Case, list[Scored]]], reranked: list[tuple[Case, list[Scored]]]
+) -> None:
+    """Two arms of one run, case for case.
+
+    Comparing misaligned lists would silently attribute one case's answer to
+    another's ranking — the same class of error as a store whose vector rows
+    and chunk lines drift apart, and just as undetectable in the output.
+    """
+    if [c.id for c, _ in fused] != [c.id for c, _ in reranked]:
+        raise ValueError("rerank arm and fused arm cover different cases")
+
+
 def rescue_eligible_count(dense_case_chunks: list[tuple[Case, list[Scored]]], k: int) -> int:
     """Positives whose answering chunk is ABSENT from the dense arm's own
     admitted set within `k` — the only cases a sparse-only admission could

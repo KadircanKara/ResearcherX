@@ -69,6 +69,7 @@ from pathlib import Path
 from sqlalchemy import text
 
 from app.core.config import settings
+from app.local_rag.rerank import CohereReranker
 from app.db.session import SessionLocal
 from app.services.embedding_service import EmbeddingService
 from app.services.hybrid_ranker import fuse_rrf, keep_within_rank_window
@@ -227,6 +228,11 @@ class Arm:
     mode: str
     threshold: float
     admission: float | None
+    # Only meaningful for "production": the shipped path takes a reranker as
+    # an argument, so an arm turns the stage on by passing one rather than by
+    # mutating `settings` mid-run. A flat or per_paper arm has no rerank
+    # stage to enable -- those mirror the SQL, and the rerank is not in it.
+    rerank: bool = False
 
 
 def _arms() -> list[Arm]:
@@ -234,8 +240,20 @@ def _arms() -> list[Arm]:
     (`SIMILARITY_THRESHOLD=...`) reaches the arms the same way it reaches
     production."""
     return [
-        # First, and the only arm that imports the shipped path end to end.
+        # First, and the only arms that import the shipped path end to end.
         Arm("production", "production", settings.similarity_threshold, None),
+        # The same shipped path with the rerank stage on, so the two rows are
+        # a controlled before/after of that stage alone. This is where the
+        # interaction of interest shows up: the rerank reorders exactly the
+        # candidates `apply_per_paper_floor` then has to pin, so a drop in
+        # `repr` or `both` here means the stage is fighting the floor.
+        Arm(
+            "production-rerank",
+            "production",
+            settings.similarity_threshold,
+            None,
+            rerank=True,
+        ),
         Arm("mirror-0.75", "flat", settings.similarity_threshold, None),
         Arm("policy-A", "flat", settings.intra_paper_ceiling, None),
         Arm("policy-B", "per_paper", settings.intra_paper_ceiling, settings.similarity_threshold),
@@ -364,6 +382,18 @@ def _best_distance(chunks: list[Scored]) -> float | None:
     return min(distances) if distances else None
 
 
+def _build_reranker(arm: Arm) -> CohereReranker | None:
+    """The reranker an arm runs with, or None.
+
+    None for an arm that does not want the stage AND for a missing key. The
+    caller is told about the missing key once, in `main`, rather than having
+    every case silently measure a no-op arm as if it were the real thing.
+    """
+    if not arm.rerank or not settings.cohere_api_key:
+        return None
+    return CohereReranker(api_key=settings.cohere_api_key, model=settings.cohere_rerank_model)
+
+
 async def _run_arm(
     db,
     arm: Arm,
@@ -394,12 +424,19 @@ async def _run_arm(
         from app.services.chat_service import ChatService, PaperInfo
 
         scope = [PaperInfo(paper_id=pid, title=(titles or {}).get(pid, "")) for pid in scope_ids]
+        # Passed explicitly, never by patching `settings.rerank_enabled`: two
+        # arms of one run would then contend for one global, and an arm's
+        # configuration has to be a value it holds, not a side effect it
+        # leaves behind. `_build_reranker` returns None when the arm wants no
+        # rerank, which is the same "no opinion" the client returns on
+        # failure -- one degraded path, not two.
         chunks, _widened = await ChatService()._retrieve_mentioned_chunks(
             scope,
             scope,
             embedding or [],
             qtext,
             False,
+            reranker=_build_reranker(arm),
         )
         return [
             Scored(
@@ -836,6 +873,18 @@ async def main() -> None:  # noqa: PLR0912 — a report script, not a library AP
     comparisons = [] if args.skip_comparisons else load_comparison_set(args.comparison_set)
     svc = EmbeddingService()
     arms = _arms()
+
+    # Said once, loudly, rather than letting every case quietly measure a
+    # no-op arm as though the stage had run. A rerank arm without a key is
+    # byte-identical to the arm above it, and two identical rows read as
+    # "the rerank changed nothing", which is a conclusion rather than a
+    # missing credential.
+    if any(arm.rerank for arm in arms) and not settings.cohere_api_key:
+        print(
+            "\nWARNING: COHERE_API_KEY is empty — the rerank arm runs with no reranker "
+            "and will report exactly the production arm's numbers. Set the key or read "
+            "that row as absent, not as a result.\n"
+        )
     pairings = ("nearest", "seeded")
 
     outcomes: list[MentionOutcome] = []

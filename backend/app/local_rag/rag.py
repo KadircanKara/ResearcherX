@@ -39,7 +39,15 @@ def build_reranker() -> CohereReranker | None:
 
 
 def to_chunk_contexts(hits: list[Hit]) -> list[ChunkContext]:
-    """The excerpt catalog the model is shown, in retrieval order."""
+    """The excerpt catalog the model is shown, in retrieval order.
+
+    Carries `section`/`page` from the store's `Chunk` so the excerpt header
+    (`chunk_header.excerpt_text`, called by `ChatAgent`) renders the same
+    `[Title | Section | Page]` locator the database path does — before this,
+    `local_rag.store.Chunk` had no such fields and every excerpt here
+    degraded to a bare `[Title: X]`, losing information the main path
+    already carries and gaining nothing in return.
+    """
     return [
         ChunkContext(
             n=hit.n,
@@ -47,6 +55,8 @@ def to_chunk_contexts(hits: list[Hit]) -> list[ChunkContext]:
             title=hit.chunk.paper_title,
             chunk_index=hit.chunk.chunk_index,
             text=hit.chunk.text,
+            section=hit.chunk.section,
+            page=hit.chunk.page,
         )
         for hit in hits
     ]

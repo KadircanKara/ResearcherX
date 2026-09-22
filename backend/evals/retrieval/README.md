@@ -9,6 +9,14 @@ it never writes.
 > A recall@5 from the old harness and a recall@5 from this one measure
 > different things.
 
+> **2026-09-07 — `rerank_enabled` defaults to True on an operator decision
+> that its own measurement does not support.** See "Measured — 2026-09-07"
+> below: the stage moved 0/30 answers into the budget and 0/30 out of it, on
+> either harness. It improves ORDERING only (global MRR 0.528 -> 0.643). By
+> the standard this harness applies to the hybrid arm — see `rescued_count`'s
+> docstring, "if it is zero ... the change should not ship" — that is a
+> not-yet-earned default, kept deliberately rather than by oversight.
+
     docker compose exec -T backend python -m evals.retrieval.run_eval --project-id <uuid>
     docker compose exec -T backend python -m evals.retrieval.run_eval --project-id <uuid> --k 3 --json /tmp/retrieval.json
 
@@ -39,6 +47,15 @@ Flags:
   positives whose answering chunk reached the budget **only** via the sparse
   arm. Costs one extra query per positive case, plus one per targeted positive
   when combined with `--targeted`. See "Measured — 2026-08-15" below.
+- `--rerank` — also run the Cohere rerank arm over the fused candidates and
+  report it beside the hybrid arm. **Requires `--hybrid`** (it reorders a
+  fused list; there is no fused list without it) and `COHERE_API_KEY` — the
+  harness refuses rather than silently measuring a no-op. Costs one provider
+  call per positive case. Reports `rescued@budget` and `lost@budget`: the
+  answers the stage moved into and out of `max_context_chunks`. It reports no
+  negatives row, and that absence is a result: the stage reorders **admitted**
+  candidates only, so off-topic acceptance is arithmetically identical with
+  and without it.
 
 ## What it measures vs. what production does
 
@@ -524,6 +541,113 @@ do not, the override is not reaching the process and every row is one point
 measured N times. The weights must sum to exactly 1.0 or `Settings` refuses
 to start. One run is ~one embedding call per case plus one per targeted
 positive (~72 calls on this set), so a full grid is not free.
+
+### Measured — 2026-08-22 (fresh baseline, k=30 hybrid RRF in place)
+
+The first full re-baseline since `hybrid_rrf_k` moved 60 → 30 on 2026-08-15.
+Command: `--targeted --hybrid`, no env overrides, shipped constants.
+
+- corpus: **4594 chunks / 102 papers** (project `fa2ab869…52922`) — the same
+  project as every block above, two papers larger
+- model: `text-embedding-3-small`; answering model `gpt-4.1-mini`
+- golden set unchanged: 30 positives, 12 negatives, no `ERRORS` block
+
+| arm | recall@60 | MRR | rescued |
+|---|---|---|---|
+| dense-only | 0.87 (26/30) | 0.527 | — |
+| **hybrid** | **0.93 (28/30)** | 0.528 | **2/30 — 2 of the 4 cases dense actually missed** |
+
+**The `rrf_k` change is confirmed live, and it is the whole story of this
+run.** On 2026-08-15 the sparse arm measured `rescued = 0` at k=60 and the
+README recorded why: with the dense arm saturating the pool, a sparse-only
+chunk could only enter the budget if
+`w_sparse·(k + max_context_chunks) > w_dense·(k + 1)`, which is false at k=60.
+At k=30 it is true, and the arm now rescues 2 of the 4 positives dense misses
+outright — recall 0.87 → 0.93 for one constant, with MRR unmoved (0.527 →
+0.528, i.e. the rescues land near the budget edge, which is exactly where a
+rescued chunk should land).
+
+Unchanged and still the two open problems:
+
+- `similarity_threshold = 0.75` accepts **75%** of off-topic questions (9 of
+  12). Better than the 100% recorded on the 4-paper corpus, but not a guard
+  rail. The closed form still reports `NO SEPARATION POSSIBLE AT THIS k`,
+  blocked by the same four positives (`ground-control-station`,
+  `drl-subagent-decomposition`, `demand-algorithm-baselines`,
+  `epec-stackelberg`) — all four of which survive the single-paper cut.
+- targeted mode: survival **1.00 (30/30)**, mean kept 27.6 chunks / ~12.1k
+  tokens, worst off-topic kept **52** — the ceiling is still the loose
+  constant, exactly as the 2026-08-12 block predicted. Hybrid targeted:
+  survival 1.00, mean kept 28.4.
+
+Companion harnesses on the same corpus, same day:
+
+- `resolver_eval`: **4/4 resolved, 4/4 fell through** — the safety property
+  holds on a corpus two papers larger than the one it was authored against.
+- `mention_eval`, production arm: representation **1.00** (nearest pairing) /
+  **0.97** (seeded), both-sides **1.00** / **0.93**, real comparisons **1.00**
+  both-sides with zero shut-outs. The production arm reads 0.97/0.93 where the
+  `mirror-0.75` arm reads 0.93/0.87 — that gap is the per-paper candidate
+  guarantee, which the mirror cannot see, and it is the reason the production
+  arm exists.
+- `evals/metadata`: 5/6 correct, 1 wrong (authors), **0 hallucinated**.
+
+### Measured — 2026-09-07 (rerank: Cohere cross-encoder over the fused candidates)
+
+    docker compose exec -T backend python -m evals.retrieval.run_eval \
+        --project-id <uuid> --hybrid --rerank
+    docker compose exec -T backend python -m evals.retrieval.mention_eval --project-id <uuid>
+
+100-paper project, 4,594 chunks, `text-embedding-3-small`, `rerank-v3.5`,
+`rerank_candidates=100`, `max_context_chunks=60`.
+
+**Global arm (30 positives):**
+
+    dense-only   recall@60: 0.87    MRR: 0.527
+    hybrid       recall@60: 0.93    MRR: 0.528
+    reranked     recall@60: 0.93    MRR: 0.643
+    rescued@60: 0/30    lost@60: 0/30
+
+**Mention arm** — `production-rerank` against `production`, all three
+pairings:
+
+    pairing            repr   both   survival   mean kept   other share
+    synthetic          1.00   1.00     1.00        57.6      0.42 -> 0.42
+    seeded             0.97   0.93     1.00        56.4      0.28 -> 0.29
+    real comparisons   1.00   1.00     1.00        55.6      0.39 -> 0.39
+
+Every representation figure is IDENTICAL to `production`. Off-topic
+containment is identical too (33.0 mean kept, 0.75 papers represented), which
+is not a coincidence and not a bug: the stage reorders admitted candidates, so
+it cannot change how many chunks clear the gate on an off-topic question.
+
+**What this measures, and what it does not.** The rerank improves the ORDER
+the model reads its excerpts in — a 22% relative MRR gain, so the answering
+chunk sits higher in the catalog and takes a lower citation number — and
+changes NOTHING about which chunks reach the model. Zero crossings in either
+direction, on either harness.
+
+Two mechanical reasons, both worth knowing before re-running this:
+
+- **The budget is 60 of 100 scored candidates**, so there are only 40
+  positions of headroom. A rescue requires the answering chunk to sit in fused
+  ranks 61-100 AND to be promoted past 40 competitors.
+- **The four missing cases are not reachable by ranking at all** at this k.
+  `ground-control-station`, `drl-subagent-decomposition`,
+  `demand-algorithm-baselines` and `epec-stackelberg` have no satisfying chunk
+  anywhere in their own top-60; the closed-form section of the same run says
+  no threshold recovers them either.
+
+So a zero here is weaker evidence against the stage than the hybrid arm's zero
+would have been: the experiment had little room to show an effect. Raising
+`rerank_candidates` above 100, or measuring at a smaller `--k`, would give the
+stage room to move something. Neither has been run.
+
+**The interaction that was checked and did not fire.** The rerank reorders
+exactly the candidates `apply_per_paper_floor` then pins, so the risk was that
+a promoted chunk from one mentioned paper would crowd out the other paper's
+floor. `repr` and `both` are unchanged across all three pairings, so it does
+not — the floor pins per paper regardless of the order it is handed.
 
 ## Multi-mention mode
 

@@ -6,6 +6,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { getPaperChunk } from "@/lib/projects";
 import { highlightTerms } from "@/lib/highlight-terms";
+import { formatChunkLocator } from "@/lib/citation-locator";
 import type { ChatCitation } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -158,6 +159,9 @@ export function CitationHoverCard({
     }
   }
 
+  // "" when the citation carries neither, which renders nothing at all.
+  const locator = formatChunkLocator(citation.section, citation.page);
+
   const hasGroup = citations.length > 1;
   function step(delta: number) {
     setIndex((i) => Math.min(citations.length - 1, Math.max(0, i + delta)));
@@ -220,9 +224,28 @@ export function CitationHoverCard({
                   "linear-gradient(to bottom, black calc(100% - 1.5rem), transparent)",
               }}
             >
-              <p className="mb-1.5 text-xs font-medium text-foreground">
+              <p className={cn("text-xs font-medium text-foreground", locator ? "mb-0.5" : "mb-1.5")}>
                 {citation.title}
               </p>
+              {/* Read from the CITATION, not from the fetched chunk. A
+                  citation's section/page are snapshots of where the excerpt
+                  sat when this answer was written, exactly like chunk_index
+                  and snippet; the chunk's own values describe the paper as
+                  indexed today, and a re-index can move them. Showing the
+                  snapshot also means this line is stable from first paint —
+                  it never appears, changes or disappears when the full text
+                  lands, and it is identical on a cache hit and a cache miss
+                  (loadFullText returns early on a hit, so a chunk-derived
+                  locator would differ between the first hover and the
+                  second).
+
+                  Rendered only when there is something to render:
+                  formatChunkLocator returns "" for section: [] / page: null,
+                  which is every citation written before structured chunking
+                  and every chunk until the re-index runs. */}
+              {locator && (
+                <p className="mb-1.5 text-[11px] text-muted-foreground">{locator}</p>
+              )}
               {/* Tuple form, not highlightTerms({...}): unified treats a bare
                   function as an ATTACHER and calls it with the options, using
                   its return value as the transformer. Passing an

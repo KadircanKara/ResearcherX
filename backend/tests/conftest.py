@@ -23,6 +23,12 @@ os.environ["EMBEDDING_BASE_URL"] = "http://localhost:1/v1"  # unroutable: fail f
 # fallback chain puts live credentials into every test run — and pytest
 # prints the whole Settings repr, keys included, in an assertion failure.
 os.environ["LLM_FALLBACKS"] = "[]"
+# Same leak, second source: the eval judge reads JUDGE_BASE_URL/JUDGE_API_KEY,
+# and a dev .env that points the judge at another vendor puts that vendor's
+# live key into Settings here too. Empty is the shipped default ("share the
+# LLM's endpoint"), which is also what the judge config tests assert against.
+os.environ["JUDGE_BASE_URL"] = ""
+os.environ["JUDGE_API_KEY"] = ""
 
 import asyncio  # noqa: E402
 

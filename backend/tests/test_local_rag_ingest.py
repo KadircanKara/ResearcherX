@@ -40,6 +40,7 @@ async def test_ingests_a_text_file_into_a_loadable_store(tmp_path: Path):
     assert report.n_chunks == len(store.chunks) > 0
     assert store.papers[0].title == "swarms"
     assert store.vectors.shape == (len(store.chunks), DIM)
+    assert all(hasattr(c, "section") for c in store.chunks)
 
 
 async def test_chunk_indices_are_sequential_per_paper(tmp_path: Path):
@@ -98,7 +99,12 @@ async def test_multiple_papers_keep_their_own_titles_and_ids(tmp_path: Path):
 
 
 async def test_re_ingesting_replaces_rather_than_appends(tmp_path: Path):
-    source = _write(tmp_path, "a.txt", "alpha " * 400)
+    # 6000 chars: comfortably over CHUNK_SIZE (2400) so the structured
+    # chunker's RecursiveCharacterTextSplitter still produces multiple
+    # chunks here — "alpha " * 400 (2400 chars, the old word-window
+    # fixture) now fits in exactly one chunk under the new splitter and
+    # made this test vacuous (1 < 1).
+    source = _write(tmp_path, "a.txt", "alpha " * 1000)
     root = tmp_path / "index"
     await ingest(sources=[source], root=root, embed=_fake_embed)
     first = len(LocalStore.load(root).chunks)

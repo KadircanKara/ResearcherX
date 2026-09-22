@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 
 from app.core.config import settings
 from app.llm.client import create_chat_completion
+from app.services.chunk_header import excerpt_text
 
 SYSTEM = (
     "You are a research assistant with access to excerpts from academic papers. "
@@ -14,20 +15,44 @@ SYSTEM = (
     "Citation rules:\n"
     "- Every non-trivial claim MUST cite its source excerpt number.\n"
     "- Use ONLY numbers from the provided EXCERPT CATALOG. Never invent numbers.\n"
-    "- If the answer cannot be found in the excerpts or the PAPERS block, say: "
-    "'The assigned papers do not appear to cover this. Based on general knowledge: ...'\n\n"
-    # The rule above is a template: decline, then hand off to another source.
-    # Live testing showed the model following it to the letter for a paper's
-    # own year — declining, then adding "however, based on the EXCERPT
-    # CATALOG..." and fabricating one from a bibliography. For these three
-    # fields there is no other source to hand off to, so the exception has
-    # to name the hand-off words themselves and forbid them outright.
-    "Exception — authors, year, venue: for these three fields only, there is "
-    "no fallback of any kind, not general knowledge and not the excerpts. If "
-    "the PAPERS block does not state one, say the paper does not state it, "
-    "and end the reply there. Do not follow that sentence with 'however', "
-    "'based on', or any other hand-off to another source — for these three "
-    "fields none exists.\n\n"
+    # EVERY sentence, not "every claim" — the previous wording was already
+    # "every non-trivial claim MUST cite", and the model satisfied it by
+    # writing uncited bullets followed by one sentence naming every source at
+    # once. Measured 2026-08-22: only 39% of SUPPORTED claims carried a marker,
+    # and the single worst grounding failure in the whole run was one of those
+    # summarising sentences ("these observations are summarized in excerpts
+    # [1]..[5], which include related figures") — a claim about the catalog
+    # that no excerpt supports. So the rule now names the anti-pattern.
+    "- Put each marker in the SENTENCE that makes the claim, not in a summary "
+    "at the end. Every bullet in a list carries its own marker. Never write a "
+    "trailing sentence that lists sources ('these observations are summarized "
+    "in excerpts [1], [2], [3]') — a reader cannot tell which excerpt carried "
+    "which claim, and that sentence is itself a claim no excerpt supports.\n"
+    # NO FALLBACK OF ANY KIND. This replaced a decline-then-hand-off template
+    # ("The assigned papers do not appear to cover this. Based on general
+    # knowledge: ...") on 2026-08-22. Measured on the off_topic negatives: the
+    # model obeyed that template exactly, and 72% of its claims on those cases
+    # were ungrounded-by-design — uncited FAA certification requirements,
+    # lithium-polymer chemistry, named FPV products — behind a single
+    # disclaiming sentence a reader can easily miss. The product answers from
+    # the ingested corpus or it does not answer.
+    "- NEVER answer from general knowledge. Every statement you make must come "
+    "from the provided excerpts, the PAPERS block, or the prior conversation. "
+    "If they do not answer the question, reply exactly: 'The ingested documents "
+    "do not cover this.' and STOP. Do not follow it with 'however', 'based on', "
+    "'in general', or any other hand-off — there is no other source. Do not "
+    "explain what the papers are about instead, and do not offer to answer from "
+    "elsewhere.\n\n"
+    # Retained after the no-fallback rule above subsumed it, because the
+    # failure it fixes is a different one and was live-verified: the model
+    # declined a paper's own year and then mined a bibliography excerpt for a
+    # year-shaped number. The general rule permits the excerpts; for these
+    # three fields the excerpts are themselves a wrong source.
+    "Exception — authors, year, venue: for these three fields only, not even "
+    "the excerpts are a source. If the PAPERS block does not state one, say the "
+    "paper does not state it, and end the reply there. Do not follow that "
+    "sentence with 'however', 'based on', or any other hand-off — for these "
+    "three fields none exists.\n\n"
     # Without this paragraph the model declines metadata questions even with the
     # block in front of it: the authors are not in any excerpt, and the rule
     # above tells it that means it cannot answer.
@@ -90,6 +115,16 @@ class ChunkContext(BaseModel):
     title: str
     chunk_index: int
     text: str
+    # Where the chunk sits in the paper: the section path outermost first, and
+    # the page it starts on. Both DEFAULT to absent, which is not a
+    # convenience -- every row indexed before structured chunking has
+    # section=[] and page=NULL, and that state has to render as a plain
+    # title header rather than as a dangling "Section: ". The tuple is
+    # immutable on purpose: ChunkContext is copied by `_renumber_chunks`
+    # (model_copy) and passed around after retrieval, and a shared mutable
+    # default there is a bug waiting for a caller that appends to it.
+    section: tuple[str, ...] = ()
+    page: int | None = None
 
 
 class PaperMetaContext(BaseModel):
@@ -213,14 +248,29 @@ class ChatAgent:
 
     async def stream(self, inp: ChatAgentInput) -> AsyncIterator[str]:
         if inp.paper_chunks:
+            # The header is COMPOSED here, from the paper's current title plus
+            # the chunk's stored section/page — never read back as a stored
+            # string. `chunk_header.excerpt_text` is the same function the
+            # index path builds its embedded header with (minus the page,
+            # which is a locator and carries no meaning to an embedding
+            # model), so the two cannot drift. The chunk_index is gone from
+            # the visible header: it named a position in an arbitrary
+            # fixed-size split, which told the model nothing, where the
+            # section path tells it where in the paper this text sits.
             catalog = "\n\n".join(
-                f"[{c.n}] From '{c.title}' (chunk {c.chunk_index}):\n{c.text}"
+                f"[{c.n}] {excerpt_text(c.title, c.section, c.page, c.text)}"
                 for c in inp.paper_chunks
             )
             context_block = f"EXCERPT CATALOG:\n{catalog}"
         else:
+            # Nothing cleared the similarity threshold. That is not a licence
+            # to answer from memory: an empty catalog is precisely the state
+            # the refusal exists for, and the previous text here ("answer from
+            # general knowledge") contradicted the system prompt outright.
             context_block = (
-                "EXCERPT CATALOG: (no excerpts retrieved — answer from general knowledge)"
+                "EXCERPT CATALOG: (empty — no excerpt in the library was similar enough "
+                "to this question. Unless the PAPERS block answers it, reply exactly "
+                "'The ingested documents do not cover this.' and stop.)"
             )
 
         # Build conversation history for multi-turn context

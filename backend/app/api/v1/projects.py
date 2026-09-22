@@ -330,7 +330,16 @@ async def get_paper_chunk(
     if chunk is None:
         raise HTTPException(status_code=404, detail="Chunk not found")
 
-    return PaperChunkOut(chunk_index=chunk.chunk_index, text=chunk.text, paper_title=paper.title)
+    return PaperChunkOut(
+        chunk_index=chunk.chunk_index,
+        text=chunk.text,
+        paper_title=paper.title,
+        # `or []` covers the pre-structured-chunking rows: the column is JSON
+        # with a server_default of '[]', but a row written before the column
+        # existed can still read back as NULL through the ORM.
+        section=list(chunk.section or []),
+        page=chunk.page,
+    )
 
 
 @router.post(

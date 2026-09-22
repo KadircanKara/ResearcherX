@@ -20,6 +20,10 @@ dependencies = [
   "pgvector>=0.3",
   "pymupdf>=1.24",
   "pymupdf4llm>=1.27",
+  # Structured chunking: the section-aware splitter runs INSIDE a section
+  # (see app/services/structured_chunker.py). Standalone package, not the
+  # LangChain framework.
+  "langchain-text-splitters>=0.3",
   # app/local_rag — the database-free retrieval system. bm25s is the real
   # BM25 arm (numpy/scipy, no service to run) and PyStemmer is its stemmer;
   # index and query must share one, so it is a hard dependency rather than

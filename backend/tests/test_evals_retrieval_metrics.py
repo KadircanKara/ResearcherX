@@ -4,6 +4,9 @@ import pytest
 
 from evals.retrieval.golden_set import Case
 from evals.retrieval.metrics import (
+    answered_within,
+    rerank_lost_count,
+    rerank_rescued_count,
     Scored,
     SeparatingInterval,
     best_satisfying_distance,
@@ -601,3 +604,69 @@ def test_rescue_eligible_count_respects_k():
     chunks = [_s("A", "irrelevant", 0.10), _s("A", "the reward table lists", 0.20)]
     assert rescue_eligible_count([(case, chunks)], k=1) == 1
     assert rescue_eligible_count([(case, chunks)], k=2) == 0
+
+
+# ── rerank arm: budget-edge crossings ────────────────────────────────────
+
+
+def _noise(n: int, start: int = 0) -> list[Scored]:
+    return [_s("A", f"noise {i}", 0.3 + i * 0.001) for i in range(start, start + n)]
+
+
+def test_answered_within_reads_the_budget_and_not_the_rank():
+    """The rerank moves a chunk across the budget edge or it does nothing
+    the model can see; a rank change inside the budget is invisible."""
+    case = _case("target")
+    answer = _s("A", "the target text", 0.4)
+    assert answered_within(case, [answer, *_noise(5)], 3) is True
+    assert answered_within(case, [*_noise(5), answer], 3) is False
+    # Inside the budget, position does not matter.
+    assert answered_within(case, [*_noise(2), answer], 3) is True
+
+
+def test_rerank_rescued_counts_answers_pulled_into_the_budget():
+    case = _case("target")
+    answer = _s("A", "the target text", 0.4)
+    fused = [(case, [*_noise(5), answer])]
+    reranked = [(case, [answer, *_noise(5)])]
+    assert rerank_rescued_count(fused, reranked, 3) == 1
+    assert rerank_lost_count(fused, reranked, 3) == 0
+
+
+def test_rerank_lost_counts_answers_pushed_out_of_the_budget():
+    """The number that would justify shipping the stage off."""
+    case = _case("target")
+    answer = _s("A", "the target text", 0.4)
+    fused = [(case, [answer, *_noise(5)])]
+    reranked = [(case, [*_noise(5), answer])]
+    assert rerank_lost_count(fused, reranked, 3) == 1
+    assert rerank_rescued_count(fused, reranked, 3) == 0
+
+
+def test_a_reorder_inside_the_budget_is_neither_rescued_nor_lost():
+    """Recall@k can improve from reordering alone. These two numbers exist
+    precisely so that improvement cannot be mistaken for a changed answer."""
+    case = _case("target")
+    answer = _s("A", "the target text", 0.4)
+    fused = [(case, [*_noise(2), answer, *_noise(3, start=2)])]
+    reranked = [(case, [answer, *_noise(5)])]
+    assert rerank_rescued_count(fused, reranked, 5) == 0
+    assert rerank_lost_count(fused, reranked, 5) == 0
+
+
+def test_misaligned_arms_raise_rather_than_reporting_a_number():
+    """Two arms of one run, case for case. Comparing misaligned lists would
+    attribute one case's answer to another's ranking, which is undetectable
+    in the printed output."""
+    a = _case("target")
+    b = Case(
+        id="other",
+        kind="content",
+        question="q",
+        paper_title_contains="A",
+        expect_substrings=("target",),
+    )
+    with pytest.raises(ValueError, match="different cases"):
+        rerank_rescued_count([(a, [])], [(b, [])], 3)
+    with pytest.raises(ValueError, match="different cases"):
+        rerank_lost_count([(a, [])], [(b, [])], 3)
