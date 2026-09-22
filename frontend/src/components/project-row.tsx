@@ -1,5 +1,6 @@
 "use client"
 
+import { routes } from "@/lib/routes";
 import Link from "next/link"
 import { ChevronRight, FileText, MessageSquare, Users } from "lucide-react"
 import { colorFor } from "@/lib/project-colors"
@@ -22,7 +23,7 @@ interface ProjectRowProps {
 export function ProjectRow({ project }: ProjectRowProps) {
   return (
     <Link
-      href={`/research/${project.id}`}
+      href={routes.project(project.id)}
       className="group flex items-center gap-3 border-b border-border px-3 py-3 transition-colors last:border-b-0 hover:bg-muted/60 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
     >
       <span

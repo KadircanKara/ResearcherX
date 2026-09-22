@@ -1,4 +1,5 @@
 "use client";
+import { routes } from "@/lib/routes";
 import { Fragment, useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
@@ -19,8 +20,8 @@ import { ThemeToggle } from "@/components/theme-toggle";
 import { UserMenu } from "@/components/user-menu";
 
 const NAV_LINKS = [
-  { href: "/research", label: "Research", icon: Brain },
-  { href: "/explorer", label: "Explorer", icon: Compass },
+  { href: routes.research(), label: "Research", icon: Brain },
+  { href: routes.explorer(), label: "Explorer", icon: Compass },
 ];
 
 function initials(name: string): string {
@@ -44,8 +45,8 @@ function BrandMark() {
 const COLLAPSE_KEY = "rx.sidebar.collapsed";
 
 function breadcrumbLabel(pathname: string): string {
-  if (pathname.startsWith("/research")) return "Research";
-  if (pathname.startsWith("/explorer")) return "Explorer";
+  if (pathname.startsWith(routes.research())) return "Research";
+  if (pathname.startsWith(routes.explorer())) return "Explorer";
   return "ResearcherX";
 }
 
@@ -109,7 +110,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       >
         {/* Brand */}
         <Link
-          href="/research"
+          href={routes.research()}
           title={collapsed ? "ResearcherX" : undefined}
           className={cn(
             "flex items-center gap-2 py-3",
@@ -171,7 +172,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               )
             ) : (
               projects.slice(0, 8).map((p) => {
-                const href = `/research/${p.id}`;
+                const href = routes.project(p.id);
                 const active = pathname.startsWith(href);
                 const link = (
                   <Link
@@ -275,7 +276,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         {/* Sticky glass topbar */}
         <header className="sticky top-0 z-30 flex h-12 items-center justify-between gap-4 border-b border-border bg-background/80 px-4 backdrop-blur-md">
           <div className="flex items-center gap-2">
-            <Link href="/research" className="md:hidden">
+            <Link href={routes.research()} className="md:hidden">
               <BrandMark />
             </Link>
             {/* `md:` only -- below that breakpoint the sidebar is not

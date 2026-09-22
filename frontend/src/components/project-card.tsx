@@ -1,5 +1,6 @@
 "use client"
 
+import { routes } from "@/lib/routes";
 import Link from "next/link"
 import { ArrowRight, FileText, MessageSquare, Users } from "lucide-react"
 import { colorFor } from "@/lib/project-colors"
@@ -17,7 +18,7 @@ export function ProjectCard({ project }: ProjectCardProps) {
   const extra = project.topic_keywords.length - chips.length
 
   return (
-    <Link href={`/research/${project.id}`} className="group block h-full">
+    <Link href={routes.project(project.id)} className="group block h-full">
       <div className="relative flex h-full flex-col gap-3 overflow-hidden rounded-2xl border border-border bg-card p-6 shadow-sm transition-all duration-300 hover:-translate-y-1.5 hover:shadow-lift hover:border-primary/40 focus-within:ring-2 focus-within:ring-ring">
         <span className="pointer-events-none absolute inset-x-0 top-0 h-[3px] gradient-edge opacity-0 transition-opacity duration-300 group-hover:opacity-100" />
 

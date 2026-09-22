@@ -2,9 +2,6 @@ import type { Metadata } from "next";
 import { Inter } from "next/font/google";
 import "./globals.css";
 import { ThemeProvider } from "@/components/theme-provider";
-import { IdentityProvider } from "@/lib/identity";
-import { AppShell } from "@/components/app-shell";
-import { DebugPanel } from "@/components/debug-panel";
 
 const inter = Inter({
   subsets: ["latin"],
@@ -13,19 +10,20 @@ const inter = Inter({
 
 export const metadata: Metadata = {
   title: "ResearcherX",
-  description: "Autonomous multi-agent research assistant.",
+  description: "Ask your papers. Get answers with receipts.",
 };
 
+/**
+ * The root layout carries only what every page shares: the document, the
+ * font and the colour scheme. The app shell, the identity lookup and the
+ * debug panel belong to the app alone and live in `admin/layout.tsx`, so the
+ * landing page at "/" renders without a sidebar and without calling the API.
+ */
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en" suppressHydrationWarning className={inter.variable}>
       <body className="min-h-screen font-sans">
-        <ThemeProvider>
-          <IdentityProvider>
-            <AppShell>{children}</AppShell>
-          </IdentityProvider>
-          {process.env.NODE_ENV !== "production" && <DebugPanel />}
-        </ThemeProvider>
+        <ThemeProvider>{children}</ThemeProvider>
       </body>
     </html>
   );

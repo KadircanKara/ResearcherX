@@ -1,5 +1,6 @@
 "use client";
 
+import { routes } from "@/lib/routes";
 import { useState } from "react";
 import Link from "next/link";
 import { ArrowLeft } from "lucide-react";
@@ -49,7 +50,7 @@ export function ExplorationThread({ exploration }: { exploration: Exploration })
       <div className="rx-exgrid">
         <div className="rx-head">
           <div>
-            <Link href="/explorer" className="rx-backlink">
+            <Link href={routes.explorer()} className="rx-backlink">
               <ArrowLeft className="size-3" aria-hidden="true" />
               All explorations
             </Link>

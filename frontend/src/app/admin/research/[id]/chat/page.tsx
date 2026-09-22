@@ -1,5 +1,6 @@
 "use client";
 
+import { routes } from "@/lib/routes";
 import { useCallback, useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { BulkEditBar } from "@/components/bulk-edit-bar";
@@ -213,7 +214,7 @@ export default function ChatPage() {
       const m = ids.length ? `&m=${ids.map(encodeURIComponent).join(",")}` : "";
       setSubmitting(false);
       router.push(
-        `/research/${projectId}/chat/${conv.id}?q=${encodeURIComponent(q)}${m}`,
+        `${routes.conversation(projectId, conv.id)}?q=${encodeURIComponent(q)}${m}`,
       );
     } catch {
       setSubmitError("Failed to start chat. Please try again.");
@@ -375,7 +376,7 @@ export default function ChatPage() {
                   )}
                   <button
                     type="button"
-                    onClick={() => router.push(`/research/${projectId}/chat/${conv.id}`)}
+                    onClick={() => router.push(routes.conversation(projectId, conv.id))}
                     className="rx-copen"
                   >
                     <span className="rx-ct">{conv.title}</span>

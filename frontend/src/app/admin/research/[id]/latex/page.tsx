@@ -1,5 +1,6 @@
 "use client";
 
+import { routes } from "@/lib/routes";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
@@ -166,7 +167,7 @@ export default function LatexIndexPage() {
     setError(null);
     try {
       const doc = await createDocument(projectId, { name, source: STARTER });
-      router.push(`/research/${projectId}/latex/${doc.id}`);
+      router.push(routes.latexDoc(projectId, doc.id));
     } catch (err) {
       if (err instanceof NameCollisionError) {
         // One row, the same shape `import-dropzone.tsx` renders a duplicate
@@ -424,7 +425,7 @@ export default function LatexIndexPage() {
                   inside it -- an <a> wrapping the actions would make Export
                   navigate as well as download. */}
               <Link
-                href={`/research/${projectId}/latex/${doc.id}`}
+                href={routes.latexDoc(projectId, doc.id)}
                 className="min-w-0 flex-1"
               >
                 <p className="line-clamp-1 text-sm font-medium text-foreground">
@@ -489,7 +490,7 @@ export default function LatexIndexPage() {
         onClose={() => setImportOpen(false)}
         onDone={(result) => {
           setImportOpen(false);
-          router.push(`/research/${projectId}/latex/${result.id}`);
+          router.push(routes.latexDoc(projectId, result.id));
         }}
       />
 

@@ -1,5 +1,6 @@
 "use client";
 
+import { routes } from "@/lib/routes";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
@@ -386,7 +387,7 @@ export function LatexWorkspace({ projectId, documentId, ownerId }: LatexWorkspac
     setConfirmingDelete(false);
     if (!docId) return;
     await doc.removeDoc(docId);
-    router.push(`/research/${projectId}/latex`);
+    router.push(routes.latex(projectId));
   }
 
   const activePath = doc.activePath;
@@ -492,7 +493,7 @@ export function LatexWorkspace({ projectId, documentId, ownerId }: LatexWorkspac
       <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-2 rounded-xl border border-border px-3 py-2">
         <div className="flex min-w-0 items-center gap-2">
           <Link
-            href={`/research/${projectId}/latex`}
+            href={routes.latex(projectId)}
             title="All LaTeX projects"
             aria-label="All LaTeX projects"
             className="shrink-0 rounded-md p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
@@ -878,7 +879,7 @@ export function LatexWorkspace({ projectId, documentId, ownerId }: LatexWorkspac
             return;
           }
           void doc.adoptDocument(result.id);
-          router.push(`/research/${projectId}/latex/${result.id}`);
+          router.push(routes.latexDoc(projectId, result.id));
         }}
       />
 

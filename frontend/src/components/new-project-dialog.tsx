@@ -1,5 +1,6 @@
 "use client"
 
+import { routes } from "@/lib/routes";
 import { useState } from "react"
 import { useRouter } from "next/navigation"
 import { PlusIcon } from "lucide-react"
@@ -50,7 +51,7 @@ export function NewProjectDialog() {
       })
       setOpen(false)
       reset()
-      router.push(`/research/${project.id}`)
+      router.push(routes.project(project.id))
     } catch {
       setError("Failed to create project. Please try again.")
       setSubmitting(false)
