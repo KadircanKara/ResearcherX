@@ -5,8 +5,9 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Clock3, Search, Sparkles, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { SearchInput } from "@/components/ui/search-input";
+import { Input } from "@/components/ui/input";
 import { Composer } from "@/components/explorer/composer";
+import { ThemeToggle } from "@/components/theme-toggle";
 import {
   DEMO_THREAD_ID,
   MOCK_NOW,
@@ -45,8 +46,11 @@ export default function ExplorerPage() {
   }
 
   return (
-    <div className="min-h-full">
-      <section className="mx-auto flex max-w-4xl flex-col px-4 pb-10 pt-12 sm:px-8">
+    <div className="min-h-screen">
+      <div className="hidden h-14 items-center justify-end border-b px-6 lg:flex">
+        <ThemeToggle />
+      </div>
+      <section className="mx-auto flex min-h-[43vh] max-w-4xl flex-col justify-end px-4 pb-10 pt-12 sm:px-8">
         <div className="mb-5 flex items-center gap-2">
           <Sparkles aria-hidden="true" className="size-4 text-primary" />
           <h1 className="text-lg font-semibold">Explore beyond your library</h1>
@@ -89,12 +93,17 @@ export default function ExplorerPage() {
                 Continue where you left off
               </p>
             </div>
-            <div className="w-full sm:w-64">
-              <SearchInput
+            <div className="relative w-full sm:w-64">
+              <Search
+                aria-hidden="true"
+                className="absolute left-3 top-2.5 size-4 text-muted-foreground"
+              />
+              <Input
                 value={query}
-                onChange={setQuery}
+                onChange={(e) => setQuery(e.target.value)}
                 placeholder="Search explorations"
-                label="Search explorations"
+                aria-label="Search explorations"
+                className="pl-9 shadow-none"
               />
             </div>
           </div>
