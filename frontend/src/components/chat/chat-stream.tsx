@@ -1,13 +1,14 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
 import type { ChatCitation, ChatEvent, ChatMessage, Paper } from "@/lib/types";
 import { chatMessagesUrl, getConversation } from "@/lib/chat";
 import { getDevUserId } from "@/lib/api";
-import { CitationHoverCard, queryTermsFrom, resetChunkCache } from "@/components/chat/citation-hover-card";
-import { citationMarks } from "@/lib/citation-marks";
+import { AssistantAnswer, StreamingAnswer } from "@/components/chat/assistant-answer";
+import { resetChunkCache } from "@/components/chat/citation-hover-card";
+import { ScopeBanner } from "@/components/chat/scope-banner";
+import { StatusLine } from "@/components/chat/status-line";
+import { UserTurn } from "@/components/chat/user-turn";
 import { groupTurns } from "@/lib/conversations";
 import {
   emptyMentionsNote,
@@ -17,15 +18,10 @@ import {
   type RetrievingInfo,
 } from "@/lib/chat-scope";
 
-// Markdown inside the answer is styled by `chat.css` on `.rx-answer` in the
-// concept's serif measure, NOT by `@tailwindcss/typography`'s `prose`: that
-// scale was tuned for a 14px sans bubble, and mixing the two would leave two
-// stylesheets arguing over every element's font-size.
-//
-// A wide table is contained by CSS alone (`display:block; overflow-x:auto` on
-// the table itself), not by a wrapper component — the same trick
-// `citation-hover-card.tsx` already uses. A wrapper would mean a `components`
-// override whose only job is to drop react-markdown's `node` prop.
+// The live SSE consumer. A `fetch` POST with a manual frame parse, NOT an
+// `EventSource` — EventSource cannot POST. There are exactly five event
+// types (thinking, retrieving, delta, done, error) and one branch each; a new
+// one needs ONE branch here, not the two registrations run-stream.tsx needs.
 
 interface Props {
   projectId: string;
@@ -42,61 +38,6 @@ interface Props {
   pendingMentions?: string[];
   /** Full paper list, for resolving mention ids to titles at render time. */
   papers: Paper[];
-}
-
-function MentionedContent({ content, mentions, papers }: {
-  content: string;
-  mentions: string[];
-  papers: Paper[];
-}) {
-  if (mentions.length === 0) return <>{content}</>;
-  // Each id is resolved to its CURRENT title at render time, then matched
-  // against the message's frozen `content` string below. This does NOT make
-  // a rename "relabel every past turn" the way citation chips do: `content`
-  // is a historical record of what the user typed and is never rewritten,
-  // so after a rename the text still holds the OLD title. The highlight
-  // then simply stops matching (the mention keeps working for retrieval
-  // SCOPE, which is id-based) rather than tracking the new name.
-  const titles = mentions
-    .map((id) => papers.find((p) => p.id === id)?.title)
-    .filter((t): t is string => Boolean(t));
-  if (titles.length === 0) return <>{content}</>;
-  // Longest-first, same convention as reconcileMentions in lib/mentions.ts:
-  // otherwise a shorter co-mentioned title that prefixes a longer one (e.g.
-  // "RL" and "RL Survey") can steal the match and split the longer title in two.
-  const sortedTitles = [...titles].sort((a, b) => b.length - a.length);
-  const parts = content.split(new RegExp(`(${sortedTitles.map(escapeRegExp).map((t) => `@${t}`).join("|")})`));
-  return (
-    <>
-      {parts.map((part, i) =>
-        part.startsWith("@") && titles.some((t) => part === `@${t}`) ? (
-          // Rendered only inside the filled user bubble: a tint mixed from the
-          // page accent is blue-on-blue there and renders invisible, so
-          // `.rx-mention` mixes from the bubble's OWN foreground instead. See
-          // the rule in chat.css.
-          <span key={i} className="rx-mention">
-            {part}
-          </span>
-        ) : (
-          <span key={i}>{part}</span>
-        )
-      )}
-    </>
-  );
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-/** The concept's scope glyph: a magnifier, at the head of the scope line. */
-function ScopeGlyph() {
-  return (
-    <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" aria-hidden="true">
-      <circle cx="7" cy="7" r="4.5" />
-      <path d="M10.4 10.4 14 14" />
-    </svg>
-  );
 }
 
 /**
@@ -252,9 +193,9 @@ export function ChatStream({
     return () => { cancelled = true; controller.abort(); };
   }, [pendingContent, pendingMentions, projectId, conversationId]);
 
-  // Turns, not messages: the reading treatment draws a hairline BETWEEN a
-  // question-and-answer pair, which a flat list cannot locate. `groupTurns`
-  // is pure and tested; see lib/conversations.ts.
+  // Turns, not messages: a question and the answer it got are one unit of
+  // reading, which a flat list cannot locate. `groupTurns` is pure and
+  // tested; see lib/conversations.ts.
   const turns = groupTurns(messages);
 
   // The question currently in flight, or null. Written as a value rather than
@@ -265,152 +206,50 @@ export function ChatStream({
   const emptyNote = live ? emptyMentionsNote(retrievingInfo) : null;
   const working = live ? statusLabel(status, retrievingInfo) : null;
 
-  function renderAnswer(msg: ChatMessage, question: string) {
-    // The user message this answer replied to, for term highlighting.
-    // Resolving conversation state is this component's job, not the card's.
-    const queryTerms = queryTermsFrom(question);
-    return (
-      <div key={msg.id}>
-        <div className="rx-answer">
-          <ReactMarkdown
-            remarkPlugins={[remarkGfm]}
-            // Tuple form, not citationMarks({...}): unified treats a bare
-            // function as an ATTACHER and calls it with the options, using
-            // its return value as the transformer. Passing an
-            // already-invoked transformer makes unified call it again with
-            // no arguments, and it crashes on an undefined tree — after
-            // passing tsc, lint and build, so only a browser check finds it.
-            rehypePlugins={[
-              [citationMarks, { valid: new Set(msg.citations.map((c) => c.n)) }],
-            ]}
-            components={{
-              span: ({ node, children, ...props }) => {
-                const raw = props as Record<string, string | undefined>;
-                const n = Number(raw["data-citation-n"]);
-                const groupAttr = raw["data-citation-group"];
-                if (!groupAttr || Number.isNaN(n)) return <span {...props}>{children}</span>;
-                const group = groupAttr
-                  .split(",")
-                  .map(Number)
-                  .map((num) => msg.citations.find((c) => c.n === num))
-                  .filter((c): c is ChatCitation => c !== undefined);
-                const start = group.findIndex((c) => c.n === n);
-                if (start === -1) return <span {...props}>{children}</span>;
-                return (
-                  <CitationHoverCard
-                    citations={group}
-                    startIndex={start}
-                    projectId={projectId}
-                    queryTerms={queryTerms}
-                    variant="inline"
-                  />
-                );
-              },
-            }}
-          >
-            {msg.content}
-          </ReactMarkdown>
-        </div>
-        {msg.citations.length > 0 && (
-          <div className="rx-srcs">
-            <span className="rx-srcs-h">Sources</span>
-            {msg.citations.map((c, i) => (
-              <CitationHoverCard
-                key={c.n}
-                citations={msg.citations}
-                startIndex={i}
-                projectId={projectId}
-                queryTerms={queryTerms}
-                variant="chip"
-              />
-            ))}
-          </div>
-        )}
-      </div>
-    );
-  }
-
   return (
-    // No width cap here: the page wraps this AND the composer in one
-    // `.rx-chcol`, so the two cannot drift apart.
-    <div>
+    <div className="space-y-7">
       {turns.map((turn) => (
-        <article className="rx-turn" key={turn.key}>
+        <article key={turn.key} className="space-y-4">
           {turn.question && (
-            <div className="rx-user-row">
-              <div className="rx-bub-user">
-                <MentionedContent
-                  content={turn.question.content}
-                  mentions={turn.question.mentions}
-                  papers={papers}
-                />
-              </div>
-            </div>
+            <UserTurn
+              content={turn.question.content}
+              mentions={turn.question.mentions}
+              papers={papers}
+            />
           )}
-          {turn.answers.map((answer) => renderAnswer(answer, turn.question?.content ?? ""))}
+          {turn.answers.map((answer) => (
+            <AssistantAnswer
+              key={answer.id}
+              message={answer}
+              question={turn.question?.content ?? ""}
+              projectId={projectId}
+            />
+          ))}
         </article>
       ))}
 
       {live !== null && (
-        <article className="rx-turn">
+        <article className="space-y-4">
           {/* Optimistic user bubble. The mentions are ids the composer just
               handed over, so the same resolve-on-render rule applies. */}
-          <div className="rx-user-row">
-            <div className="rx-bub-user">
-              <MentionedContent
-                content={live}
-                mentions={pendingMentions ?? []}
-                papers={papers}
-              />
-            </div>
-          </div>
+          <UserTurn content={live} mentions={pendingMentions ?? []} papers={papers} />
 
-          {/* The scope line. Deliberately NOT folded into the working line,
-              which is about the phase: on a RESOLVED scope the user clicked
-              nothing, so this is the only place they learn the answer was
-              written from part of the library, and it has to survive into
-              streaming to be read at all. Every word of it comes from
-              `lib/chat-scope.ts`, which reads only the backend's own
-              `retrieving` event. */}
-          {scope && (
-            <div className="rx-scope">
-              <ScopeGlyph />
-              <div>
-                {scope.map((segment, i) =>
-                  segment.emphasis ? <em key={i}>{segment.text}</em> : <span key={i}>{segment.text}</span>
-                )}
-                {/* A paper the user NAMED that returned nothing. Kept visible
-                    through streaming: the answer is being written from fewer
-                    papers than were asked for. */}
-                {emptyNote && <span className="rx-scope-warn">{emptyNote}</span>}
-              </div>
-            </div>
-          )}
+          {/* The scope line survives into streaming on purpose: on a resolved
+              scope the user clicked nothing, and this is the only place they
+              learn the search was narrowed. */}
+          {scope && <ScopeBanner segments={scope} note={emptyNote} />}
 
-          {working && (
-            <p className="rx-working" role="status">
-              <span>{working}</span>
-              <span className="rx-curdot" aria-hidden="true" />
-            </p>
-          )}
+          {working && <StatusLine label={working} />}
 
-          {streamingText && (
-            // `rx-live` is what puts the writing caret at the end of the last
-            // block, from CSS — appending a caret element to the markdown
-            // would put it on a line of its own.
-            //
-            // No citationMarks here: citations arrive with the `done` event,
-            // so mid-stream there is nothing to resolve a marker against.
-            <div className="rx-live">
-              <div className="rx-answer">
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>{streamingText}</ReactMarkdown>
-              </div>
-            </div>
-          )}
+          {streamingText && <StreamingAnswer text={streamingText} />}
         </article>
       )}
 
-      {error && <p className="rx-cherror">{error}</p>}
+      {error && (
+        <p role="alert" className="border-l-2 border-destructive pl-3 text-[13px] text-destructive">
+          {error}
+        </p>
+      )}
 
       <div ref={bottomRef} />
     </div>

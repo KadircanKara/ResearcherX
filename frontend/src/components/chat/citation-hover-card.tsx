@@ -185,26 +185,20 @@ export function CitationHoverCard({
       <PreviewCard.Trigger
         render={<span />}
         tabIndex={0}
-        // A styling hook, nothing more. The Reading Room screens re-point the
-        // colours from their own stylesheet (`.rx-ch [data-rx-citation=…]`,
-        // two class selectors, which beats the single-class Tailwind
-        // utilities below) rather than forking this component or growing a
-        // second visual variant of it.
-        data-rx-citation={variant}
+        aria-label={`Citation ${anchor.n}: ${anchor.title}`}
         onKeyDown={(event) => {
           if (event.key === "ArrowLeft") { event.preventDefault(); step(-1); }
           if (event.key === "ArrowRight") { event.preventDefault(); step(1); }
         }}
         className={cn(
-          "cursor-help rounded transition-colors",
-          "text-blue-600 dark:text-blue-400",
-          "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+          "inline-flex cursor-help items-center justify-center rounded bg-primary/15 font-medium text-primary tabular-nums transition-colors",
+          "hover:bg-primary/25 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
           variant === "chip"
-            ? "bg-background/50 px-1.5 py-0.5 text-xs hover:bg-background"
-            : "font-medium hover:underline"
+            ? "size-4 shrink-0 text-[10px] leading-none"
+            : "mx-0.5 h-4 min-w-4 px-1 align-super text-[10px] leading-none"
         )}
       >
-        [{anchor.n}]
+        {anchor.n}
       </PreviewCard.Trigger>
       <PreviewCard.Portal>
         <PreviewCard.Positioner side="top" sideOffset={6} className="isolate z-50">
