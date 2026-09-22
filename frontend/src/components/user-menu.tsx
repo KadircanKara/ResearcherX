@@ -2,10 +2,7 @@
 import { useEffect, useState } from "react";
 import { Check } from "lucide-react";
 import { useIdentity } from "@/lib/identity";
-import {
-  Avatar,
-  AvatarFallback,
-} from "@/components/ui/avatar";
+import { cn } from "@/lib/utils";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -15,36 +12,39 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { InitialsAvatar } from "@/components/initials-avatar";
 
-function initials(name: string): string {
-  return name
-    .split(" ")
-    .map((p) => p[0])
-    .join("")
-    .slice(0, 2)
-    .toUpperCase();
-}
-
-export function UserMenu() {
+/**
+ * The dev identity switcher: who the app is acting as (`X-Dev-User-Id`).
+ * Sharing is only exercisable because a second seeded teammate can be picked
+ * here, so it must stay reachable -- the sidebar's user block is its trigger.
+ *
+ * `children` is the trigger's content and `className` its box; the menu opens
+ * on `side` / `align` of it.
+ */
+export function UserMenu({
+  children,
+  className,
+  side = "top",
+  align = "start",
+}: {
+  children: React.ReactNode;
+  className?: string;
+  side?: "top" | "bottom" | "left" | "right";
+  align?: "start" | "center" | "end";
+}) {
   const { me, users, actAs } = useIdentity();
-  // Track which user we're currently acting as (null = acting as self / first user)
+  // Which user we're acting as (null = acting as self / first user)
   const [actingId, setActingId] = useState<string | null>(null);
 
   useEffect(() => {
     setActingId(localStorage.getItem("devUserId"));
   }, []);
 
-  if (!me) {
-    return (
-      <Avatar size="sm">
-        <AvatarFallback>?</AvatarFallback>
-      </Avatar>
-    );
-  }
+  if (!me) return <div className={className}>{children}</div>;
 
   // The first user in the list is "You" (default). If devUserId isn't set, we act as the first user.
-  const firstUser = users[0];
-  const selfId = firstUser?.id ?? me.id;
+  const selfId = users[0]?.id ?? me.id;
   const currentActingId = actingId ?? selfId;
 
   function handleActAs(id: string) {
@@ -55,51 +55,30 @@ export function UserMenu() {
   return (
     <DropdownMenu>
       <DropdownMenuTrigger
-        aria-label="User menu"
-        className="rounded-full focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        aria-label="Switch user"
+        className={cn(
+          "text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring",
+          className
+        )}
       >
-        <Avatar size="sm">
-          <AvatarFallback
-            className="text-xs font-semibold"
-            style={{ backgroundColor: me.avatar_color, color: "#fff" }}
-          >
-            {initials(me.name)}
-          </AvatarFallback>
-        </Avatar>
+        {children}
       </DropdownMenuTrigger>
 
-      <DropdownMenuContent align="end" side="bottom" sideOffset={8} className="min-w-48">
-        <div className="px-2 pt-1.5 pb-0.5 text-sm font-semibold text-foreground">
-          {me.name}
-        </div>
+      <DropdownMenuContent side={side} align={align} sideOffset={8} className="min-w-52">
+        <div className="px-2 pt-1.5 text-sm font-semibold">{me.name}</div>
         <div className="px-2 pb-1.5 text-xs text-muted-foreground">{me.email}</div>
-
         <DropdownMenuSeparator />
-
         <DropdownMenuGroup>
-          <DropdownMenuLabel>Acting as</DropdownMenuLabel>
-          {users.map((u, i) => {
-            const label = i === 0 ? `You (${u.name})` : u.name;
-            const isCurrent = u.id === currentActingId;
-            return (
-              <DropdownMenuItem
-                key={u.id}
-                onClick={() => handleActAs(u.id)}
-                className="gap-2"
-              >
-                <Avatar size="sm">
-                  <AvatarFallback
-                    className="text-xs"
-                    style={{ backgroundColor: u.avatar_color, color: "#fff" }}
-                  >
-                    {initials(u.name)}
-                  </AvatarFallback>
-                </Avatar>
-                <span className="flex-1 text-sm">{label}</span>
-                {isCurrent && <Check className="size-3.5 text-primary" />}
-              </DropdownMenuItem>
-            );
-          })}
+          <DropdownMenuLabel className="text-xs font-medium text-muted-foreground">
+            Acting as
+          </DropdownMenuLabel>
+          {users.map((u, i) => (
+            <DropdownMenuItem key={u.id} onClick={() => handleActAs(u.id)}>
+              <InitialsAvatar person={u} size={20} />
+              <span className="flex-1">{i === 0 ? `You (${u.name})` : u.name}</span>
+              {u.id === currentActingId && <Check className="text-primary" />}
+            </DropdownMenuItem>
+          ))}
         </DropdownMenuGroup>
       </DropdownMenuContent>
     </DropdownMenu>

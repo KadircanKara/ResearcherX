@@ -1,5 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { datePart, formatDate, plural, previousDay, timePart } from "./format";
+import {
+  datePart,
+  formatDate,
+  formatShortDay,
+  initials,
+  plural,
+  previousDay,
+  relativeLabel,
+  timePart,
+} from "./format";
 
 describe("datePart / timePart", () => {
   it("splits a full stamp", () => {
@@ -51,5 +60,47 @@ describe("plural", () => {
 
   it("takes an irregular plural", () => {
     expect(plural(2, "entry", "entries")).toBe("2 entries");
+  });
+});
+
+describe("formatShortDay", () => {
+  it("drops the year", () => {
+    expect(formatShortDay("2026-09-18")).toBe("18 Sep");
+    expect(formatShortDay("2026-01-02T09:00:00+00:00")).toBe("2 Jan");
+  });
+
+  it("degrades to the raw date on a bad month", () => {
+    expect(formatShortDay("2026-13-02")).toBe("2026-13-02");
+  });
+});
+
+describe("relativeLabel", () => {
+  const now = new Date("2026-09-22T16:25:00Z");
+
+  it("reads minutes, then hours", () => {
+    expect(relativeLabel("2026-09-22T16:24:50Z", now)).toBe("just now");
+    expect(relativeLabel("2026-09-22T16:13:00Z", now)).toBe("12 min ago");
+    expect(relativeLabel("2026-09-22T14:25:00Z", now)).toBe("2h ago");
+  });
+
+  it("says Yesterday inside two days, then the date", () => {
+    expect(relativeLabel("2026-09-21T10:00:00Z", now)).toBe("Yesterday");
+    expect(relativeLabel("2026-09-18T10:00:00Z", now)).toBe("Sep 18");
+  });
+
+  it("returns an unparseable stamp as it came", () => {
+    expect(relativeLabel("not a date", now)).toBe("not a date");
+  });
+});
+
+describe("initials", () => {
+  it("takes up to two initials, upper-cased", () => {
+    expect(initials("Ada Kim")).toBe("AK");
+    expect(initials("ada lovelace byron")).toBe("AL");
+    expect(initials("Ada")).toBe("A");
+  });
+
+  it("ignores extra whitespace", () => {
+    expect(initials("  Ada   Kim ")).toBe("AK");
   });
 });
