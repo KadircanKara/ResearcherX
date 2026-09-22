@@ -36,95 +36,126 @@ body {
  * utilities or the plugin's theme config instead. */
 
 @layer base {
+  /* The app's palette is the "ResearcherX App" prototype's (`src/styles.css`
+     in Lovable project 36777114), value for value: the prototype writes each
+     token as `oklch(L C H)`, and Tailwind here wraps a token as
+     `oklch(var(--token) / <alpha-value>)`, so each value below is that
+     triple with the `oklch()` stripped.
+
+     Three dark tokens in the prototype carry their own alpha --
+     `--border: oklch(1 0 0 / 10%)`, `--input: oklch(1 0 0 / 15%)`,
+     `--sidebar-border: oklch(1 0 0 / 10%)` -- and a channel triple cannot.
+     Precomputing an opaque colour would only match over ONE surface (a
+     white-10% border reads differently over a card than over the page), so
+     those three keep the alpha as a separate `--*-alpha` variable that
+     tailwind.config.ts multiplies into `<alpha-value>`. `border-border/50`
+     therefore still halves it, exactly as the prototype's Tailwind v4 would. */
   :root {
     color-scheme: light;
-    /* shadcn neutral (zinc) base + Cobalt accent */
-    --background: 0.9851 0.0000 89.88;          /* #FAFAFA */
-    --foreground: 0.1408 0.0044 285.82;         /* #09090B */
-    --card: 1.0000 0.0000 89.88;                /* #FFFFFF */
-    --card-foreground: 0.1408 0.0044 285.82;    /* #09090B */
-    --popover: 1.0000 0.0000 89.88;             /* #FFFFFF */
-    --popover-foreground: 0.1408 0.0044 285.82; /* #09090B */
-    --primary: 0.6231 0.1880 259.81;            /* #3B82F6 cobalt */
-    --primary-foreground: 1.0000 0.0000 89.88;  /* #FFFFFF */
-    --secondary: 0.9674 0.0013 286.38;          /* #F4F4F5 zinc-100 */
-    --secondary-foreground: 0.2103 0.0059 285.89; /* #18181B */
-    --muted: 0.9674 0.0013 286.38;              /* #F4F4F5 */
-    --muted-foreground: 0.5517 0.0138 285.94;   /* #71717A zinc-500 */
-    --accent: 0.9525 0.0212 259.19;             /* #E7F0FE cobalt tint */
-    --accent-foreground: 0.4882 0.2172 264.38;  /* #1D4ED8 blue-700 */
-    --destructive: 0.5771 0.2152 27.33;         /* #DC2626 */
-    --border: 0.9197 0.0040 286.32;             /* #E4E4E7 zinc-200 */
-    --input: 0.9197 0.0040 286.32;              /* #E4E4E7 */
-    --ring: 0.6231 0.1880 259.81;               /* #3B82F6 */
-    --positive: 0.6271 0.1699 149.21;           /* #16A34A */
-    /* Explorer's process trail grades a critic's issues low / medium / high.
-       `low` is muted and `high` is `--destructive`; medium needed a third
-       colour that reads as "look at this" without reading as "this failed". */
-    --warning: 0.6635 0.1522 58.32;             /* #D97706 amber-600 */
     --radius: 0.5rem;
-    /* brand gradient (raw hex — used only inside linear-gradient/color-mix) */
-    --grad-a: #3B82F6;
+    --background: 0.985 0.002 247;
+    --foreground: 0.18 0.01 255;
+    --card: 1 0 0;
+    --card-foreground: 0.129 0.042 264.695;
+    --popover: 1 0 0;
+    --popover-foreground: 0.129 0.042 264.695;
+    --primary: 0.55 0.2 258;
+    --primary-foreground: 0.99 0 0;
+    --secondary: 0.968 0.007 247.896;
+    --secondary-foreground: 0.208 0.042 265.755;
+    --muted: 0.968 0.007 247.896;
+    --muted-foreground: 0.554 0.046 257.417;
+    --accent: 0.968 0.007 247.896;
+    --accent-foreground: 0.208 0.042 265.755;
+    --destructive: 0.577 0.245 27.325;
+    --destructive-foreground: 0.984 0.003 247.858;
+    --border: 0.929 0.013 255.508;
+    --border-alpha: 1;
+    --input: 0.929 0.013 255.508;
+    --input-alpha: 1;
+    --ring: 0.704 0.04 256.788;
+    --chart-1: 0.646 0.222 41.116;
+    --chart-2: 0.6 0.118 184.704;
+    --chart-3: 0.398 0.07 227.392;
+    --chart-4: 0.828 0.189 84.429;
+    --chart-5: 0.769 0.188 70.08;
+    --sidebar: 0.97 0.003 247;
+    --sidebar-foreground: 0.129 0.042 264.695;
+    --sidebar-primary: 0.208 0.042 265.755;
+    --sidebar-primary-foreground: 0.984 0.003 247.858;
+    --sidebar-accent: 0.968 0.007 247.896;
+    --sidebar-accent-foreground: 0.208 0.042 265.755;
+    --sidebar-border: 0.929 0.013 255.508;
+    --sidebar-border-alpha: 1;
+    --sidebar-ring: 0.704 0.04 256.788;
+
+    /* Not in the prototype; the app reads them. `--positive` is a paper's
+       "indexed" dot, `--warning` Explorer's medium-severity critic issue and
+       the chat scope banner: a colour that reads as "look at this" without
+       reading as "this failed". */
+    --positive: 0.6271 0.1699 149.21;           /* #16A34A */
+    --warning: 0.6635 0.1522 58.32;             /* #D97706 amber-600 */
+    /* Brand gradient, raw hex because it is only ever used inside
+       linear-gradient()/color-mix(). Starts on `--primary`. */
+    --grad-a: #076BE3;
     --grad-b: #06B6D4;
     --font-serif: ui-serif,"New York",Georgia,"Times New Roman",serif;
-    --font-mono: ui-monospace,"SF Mono",Menlo,Consolas,monospace;
-    --chart-1: 0.6231 0.1880 259.81;
-    --chart-2: 0.6889 0.1322 200.50;
-    --chart-3: 0.6271 0.1699 149.21;
-    --chart-4: 0.7686 0.1647 70.08;
-    --chart-5: 0.6368 0.2078 25.33;
-    --sidebar: 0.9851 0.0000 89.88;             /* #FAFAFA */
-    --sidebar-foreground: 0.2103 0.0059 285.89; /* #18181B */
-    --sidebar-primary: 0.6231 0.1880 259.81;    /* #3B82F6 */
-    --sidebar-primary-foreground: 1.0000 0.0000 89.88;
-    --sidebar-accent: 0.9525 0.0212 259.19;     /* #E7F0FE */
-    --sidebar-accent-foreground: 0.4882 0.2172 264.38; /* #1D4ED8 */
-    --sidebar-border: 0.9197 0.0040 286.32;     /* #E4E4E7 */
-    --sidebar-ring: 0.6231 0.1880 259.81;
+    --font-mono: ui-monospace,SFMono-Regular,Menlo,monospace;
   }
   .dark {
     color-scheme: dark;
-    --background: 0.1408 0.0044 285.82;         /* #09090B zinc-950 */
-    --foreground: 0.9851 0.0000 89.88;          /* #FAFAFA */
-    --card: 0.2011 0.0039 286.04;               /* #161618 */
-    --card-foreground: 0.9851 0.0000 89.88;     /* #FAFAFA */
-    --popover: 0.2011 0.0039 286.04;            /* #161618 */
-    --popover-foreground: 0.9851 0.0000 89.88;  /* #FAFAFA */
-    --primary: 0.6231 0.1880 259.81;            /* #3B82F6 */
-    --primary-foreground: 1.0000 0.0000 89.88;  /* #FFFFFF */
-    --secondary: 0.2739 0.0055 286.03;          /* #27272A zinc-800 */
-    --secondary-foreground: 0.9851 0.0000 89.88;
-    --muted: 0.2739 0.0055 286.03;              /* #27272A */
-    --muted-foreground: 0.7118 0.0129 286.07;   /* #A1A1AA zinc-400 */
-    --accent: 0.2703 0.0589 260.47;             /* #152643 cobalt-on-dark */
-    --accent-foreground: 0.8091 0.0956 251.81;  /* #93C5FD blue-300 */
-    --destructive: 0.7106 0.1661 22.22;         /* #F87171 */
-    --border: 0.2739 0.0055 286.03;             /* #27272A */
-    --input: 0.2739 0.0055 286.03;              /* #27272A */
-    --ring: 0.7137 0.1434 254.62;               /* #60A5FA */
+    --background: 0.16 0.008 255;
+    --foreground: 0.984 0.003 247.858;
+    --card: 0.208 0.042 265.755;
+    --card-foreground: 0.984 0.003 247.858;
+    --popover: 0.208 0.042 265.755;
+    --popover-foreground: 0.984 0.003 247.858;
+    --primary: 0.64 0.18 258;
+    --primary-foreground: 0.99 0 0;
+    --secondary: 0.279 0.041 260.031;
+    --secondary-foreground: 0.984 0.003 247.858;
+    --muted: 0.279 0.041 260.031;
+    --muted-foreground: 0.704 0.04 256.788;
+    --accent: 0.279 0.041 260.031;
+    --accent-foreground: 0.984 0.003 247.858;
+    --destructive: 0.704 0.191 22.216;
+    --destructive-foreground: 0.984 0.003 247.858;
+    --border: 1 0 0;
+    --border-alpha: 0.1;
+    --input: 1 0 0;
+    --input-alpha: 0.15;
+    --ring: 0.551 0.027 264.364;
+    --chart-1: 0.488 0.243 264.376;
+    --chart-2: 0.696 0.17 162.48;
+    --chart-3: 0.769 0.188 70.08;
+    --chart-4: 0.627 0.265 303.9;
+    --chart-5: 0.645 0.246 16.439;
+    --sidebar: 0.19 0.009 255;
+    --sidebar-foreground: 0.984 0.003 247.858;
+    --sidebar-primary: 0.488 0.243 264.376;
+    --sidebar-primary-foreground: 0.984 0.003 247.858;
+    --sidebar-accent: 0.279 0.041 260.031;
+    --sidebar-accent-foreground: 0.984 0.003 247.858;
+    --sidebar-border: 1 0 0;
+    --sidebar-border-alpha: 0.1;
+    --sidebar-ring: 0.551 0.027 264.364;
+
     --positive: 0.7227 0.1920 149.58;           /* #22C55E */
     --warning: 0.8369 0.1644 84.43;             /* #FBBF24 amber-400 */
-    --grad-a: #3B82F6;
+    --grad-a: #3E89F7;
     --grad-b: #22D3EE;
-    --chart-1: 0.7137 0.1434 254.62;
-    --chart-2: 0.7889 0.1322 200.50;
-    --chart-3: 0.7227 0.1920 149.58;
-    --chart-4: 0.8186 0.1647 70.08;
-    --chart-5: 0.7368 0.2078 25.33;
-    --sidebar: 0.1408 0.0044 285.82;            /* #09090B */
-    --sidebar-foreground: 0.9851 0.0000 89.88;  /* #FAFAFA */
-    --sidebar-primary: 0.6231 0.1880 259.81;    /* #3B82F6 */
-    --sidebar-primary-foreground: 1.0000 0.0000 89.88;
-    --sidebar-accent: 0.2703 0.0589 260.47;     /* #152643 */
-    --sidebar-accent-foreground: 0.8091 0.0956 251.81; /* #93C5FD */
-    --sidebar-border: 0.2739 0.0055 286.03;     /* #27272A */
-    --sidebar-ring: 0.7137 0.1434 254.62;       /* #60A5FA */
   }
   * {
     @apply border-border;
   }
+  /* The prototype's base: 14px body text, no tracking. On `body` rather than
+     on the app shell because dialogs, menus and popovers portal into `body`
+     and must inherit the same size. Rem-based utilities are unaffected; the
+     landing page resets its own root to 1rem (`landing.css`). */
   body {
     @apply bg-background text-foreground;
+    font-size: 14px;
+    letter-spacing: 0;
   }
   html {
     @apply font-sans;
@@ -203,17 +234,19 @@ body {
     0 8px 16px -8px rgba(0, 0, 0, 0.5);
 }
 
-/* ── Explorer entrance animations ──────────────────────────────────────
-   Two one-shot entrances, ported from the prototype, which declared them as
-   Tailwind v4 `@utility` rules. This project is on v3.4, where `@utility`
+/* ── Prototype motion utilities: shimmer, fade-block, slide-in-rail ─────
+   Two one-shot entrances and a loading sheen, ported from the prototype,
+   which declared them as Tailwind v4 `@utility` rules. This project is on v3.4, where `@utility`
    does not exist, so they are plain classes -- Tailwind never needs to know
    about them because nothing composes them with a variant.
 
-   `fade-block` is a candidate card arriving; `slide-in-rail` is a paper
-   landing in the rail after it is added. Both are `both`-filled so the
-   element is not visible for a frame before its animation starts.
+   `fade-block` is a block arriving (a candidate card, an empty state, a
+   list); `slide-in-rail` is a paper landing in the rail after it is added.
+   Both are `both`-filled so the element is not visible for a frame before its
+   animation starts. `shimmer` sweeps a light band across a placeholder while
+   something loads.
 
-   The reduced-motion block is scoped to these two rather than the
+   The reduced-motion block is scoped to these three rather than the
    prototype's global `*` reset: this app has its own motion elsewhere
    (`tailwindcss-animate`, the sidebar's width transition) and a blanket
    `animation-duration: 0.01ms !important` here would reach all of it. */
@@ -237,6 +270,23 @@ body {
     transform: translateX(0);
   }
 }
+@keyframes explorer-shimmer {
+  100% {
+    transform: translateX(100%);
+  }
+}
+.shimmer {
+  position: relative;
+  overflow: hidden;
+}
+.shimmer::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(90deg, transparent, oklch(1 0 0 / 35%), transparent);
+  animation: explorer-shimmer 1.4s infinite;
+}
 .fade-block {
   animation: explorer-fade 200ms ease-out both;
 }
@@ -245,7 +295,8 @@ body {
 }
 @media (prefers-reduced-motion: reduce) {
   .fade-block,
-  .slide-in-rail {
+  .slide-in-rail,
+  .shimmer::after {
     animation: none;
   }
 }
