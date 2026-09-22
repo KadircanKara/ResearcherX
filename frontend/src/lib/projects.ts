@@ -9,6 +9,8 @@ export async function createProject(body: {
   title: string;
   description?: string | null;
   topic_keywords?: string[];
+  /** Must be a `PROJECT_COLORS` entry; the server 422s anything else. */
+  color?: string;
 }): Promise<Project> {
   return (await apiSend<Project>("POST", "/projects", body)) as Project;
 }
