@@ -157,6 +157,47 @@ export function railTotal(summary: LibrarySummary): string {
   return summary.total === 0 ? "Nothing here yet" : plural(summary.total, "paper");
 }
 
+/**
+ * The table's Retriever cell: what the retriever is KNOWN to hold.
+ *
+ * Deliberately narrower than the State cell beside it. "holds text" is only
+ * ever said on the back of a probe, because that is the only signal that has
+ * asked the retriever — an `expected` paper (manual, indexed inside its own
+ * create transaction) reads "—" here even though its State says "indexed on
+ * save", since nothing has confirmed the retriever still holds it under the
+ * CURRENT embedding model. `no-text` is the one un-probed "holds nothing":
+ * a hand-typed paper with no abstract and no body had nothing to index in
+ * the first place, so there is no claim being made about a retrieval that
+ * happened.
+ */
+export function retrieverLabel(state: PaperState): string {
+  switch (state.kind) {
+    case "indexed":
+      return "holds text";
+    case "empty":
+    case "no-text":
+      return "holds nothing";
+    default:
+      return "—";
+  }
+}
+
+/**
+ * The header's right-hand meta line.
+ *
+ * Reads `created_at` off the papers themselves rather than taking a
+ * pre-computed date, so the "nothing yet" case cannot be reached with a
+ * stale stamp still in hand.
+ */
+export function lastAddedLabel(papers: readonly Paper[]): string {
+  const latest = papers.reduce<string | null>(
+    (newest, paper) =>
+      newest === null || paper.created_at > newest ? paper.created_at : newest,
+    null
+  );
+  return latest === null ? "Nothing added yet" : `Last added ${formatAdded(latest)}`;
+}
+
 export function sourceLine(paper: Paper): string {
   switch (paper.source) {
     case "upload":

@@ -60,17 +60,18 @@ export default function ProjectLayout({ children }: { children: React.ReactNode 
   // Only Chat is a reading column and stays at 5xl. The other three are not,
   // and each states its own cap for its own reason: the LaTeX tab is a
   // three-pane editor and 5xl is roughly one pane wide; the Graph tab is a
-  // canvas beside a rail, and the Papers tab a table beside a rail, that have
-  // to sit within one eye span, which the concept puts at 2080px (130rem) --
-  // past that a row's State cell is a head turn away from the title it
-  // belongs to. Papers' own rail column only appears at all above 1240px, so
-  // at 5xl (1024px) it could never have rendered.
+  // canvas beside a rail that has to sit within one eye span, which the
+  // concept puts at 2080px (130rem). Papers is a table beside a 20rem rail
+  // and caps at 90rem: its four columns are fixed-width apart from the
+  // title, so past that the row is mostly the gap between a title and the
+  // State cell that belongs to it.
   const tabWidth = pathname.startsWith(routes.latex(id))
     ? "max-w-[110rem]"
-    : pathname.startsWith(routes.graph(id)) ||
-        pathname.startsWith(routes.papers(id))
+    : pathname.startsWith(routes.graph(id))
       ? "max-w-[130rem]"
-      : "max-w-5xl"
+      : pathname.startsWith(routes.papers(id))
+        ? "max-w-[90rem]"
+        : "max-w-5xl"
 
   return (
     <div className={cn("mx-auto w-full px-6 py-8", tabWidth)}>

@@ -5,32 +5,35 @@ import { Button } from "@/components/ui/button";
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
   DialogHeader,
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog";
-import { PaperLinkScreen } from "@/components/paper-link-screen";
-import { PaperManualScreen, type PaperFields } from "@/components/paper-manual-screen";
-import { TITLE_MAX } from "@/components/paper-row-fields";
-import { PaperUploadScreen } from "@/components/paper-upload-screen";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { PaperLinkScreen } from "@/components/papers/paper-link-screen";
+import { PaperManualScreen, type PaperFields } from "@/components/papers/paper-manual-screen";
+import { TITLE_MAX } from "@/components/papers/paper-row-fields";
+import { PaperUploadScreen } from "@/components/papers/paper-upload-screen";
 import { createPaper, patchPaper } from "@/lib/projects";
 import type { Paper } from "@/lib/types";
 
 export type PaperMethod = "upload" | "link" | "manual";
 
-// "manual" is deliberately absent: a hand-typed paper has no PDF and no
-// link, so nothing about it can ever be opened or downloaded, and its text
-// is whatever the typist remembered. The manual FORM is still reachable --
-// edit-mode renders it for every paper, which is the only way to fix a
-// title or an author list.
+// Three ways in, as tabs. "manual" was dropped from this list once, on the
+// grounds that a hand-typed paper has no PDF and no link to open later --
+// but the backend indexes a manual paper's abstract and body inside the
+// same transaction that writes it, and `lib/papers.ts` has states for
+// exactly that, so the route exists and the UI should show it.
 const METHODS: { key: PaperMethod; label: string }[] = [
   { key: "upload", label: "Upload" },
-  { key: "link", label: "Link" },
+  { key: "link", label: "URL" },
+  { key: "manual", label: "Manual" },
 ];
 
 const EMPTY: PaperFields = { title: "", abstract: "", body: "" };
 
-function MethodSelector({
+function MethodTabs({
   value,
   onChange,
   disabled,
@@ -40,24 +43,19 @@ function MethodSelector({
   disabled: boolean;
 }) {
   return (
-    <div className="flex rounded-lg border border-border p-[3px]">
-      {METHODS.map((m) => (
-        <button
-          key={m.key}
-          type="button"
-          disabled={disabled}
-          onClick={() => onChange(m.key)}
-          className={
-            "flex-1 rounded-md px-3 py-1.5 text-sm font-medium transition-colors disabled:opacity-50 " +
-            (value === m.key
-              ? "bg-primary text-primary-foreground"
-              : "text-muted-foreground hover:text-foreground")
-          }
-        >
-          {m.label}
-        </button>
-      ))}
-    </div>
+    // Tabs.Root without Tabs.Panel: each method's body is rendered by the
+    // dialog below, because two of the three own async work (an upload
+    // batch, a URL fetch) and a Panel would unmount that work every time
+    // the reader glanced at another tab.
+    <Tabs value={value} onValueChange={(next) => onChange(next as PaperMethod)}>
+      <TabsList className="grid h-9 w-full grid-cols-3">
+        {METHODS.map((m) => (
+          <TabsTrigger key={m.key} value={m.key} disabled={disabled}>
+            {m.label}
+          </TabsTrigger>
+        ))}
+      </TabsList>
+    </Tabs>
   );
 }
 
@@ -196,12 +194,17 @@ export function PaperDialog({
       {children && <DialogTrigger render={children}></DialogTrigger>}
       <DialogContent className="flex max-h-[90vh] flex-col sm:max-w-xl">
         <DialogHeader>
-          <DialogTitle>{isEdit ? "Edit Paper" : "Add Paper"}</DialogTitle>
+          <DialogTitle>{isEdit ? "Edit paper" : "Add papers"}</DialogTitle>
+          {!isEdit && (
+            <DialogDescription>
+              Upload PDFs, link to a paper elsewhere, or enter one by hand.
+            </DialogDescription>
+          )}
         </DialogHeader>
 
         <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto pb-1">
           {!isEdit && (
-            <MethodSelector
+            <MethodTabs
               value={method}
               onChange={setMethodState}
               disabled={submitting || screenBusy}
