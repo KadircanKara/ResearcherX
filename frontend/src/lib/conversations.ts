@@ -1,27 +1,55 @@
 /**
  * Pure formatting rules for the Chat conversation list and thread header.
  *
- * Unlike `lib/explorer.ts`, the stamps here are REAL and come from the backend
- * as UTC ISO-8601 (`2026-08-19T14:02:11.123456+00:00`). They are converted to
- * the reader's own local wall clock exactly once, in `toLocalStamp`, and every
- * rule downstream operates on the `YYYY-MM-DDTHH:MM` string that produces — so
+ * Unlike Explorer's, the stamps here are REAL and come from the backend as UTC
+ * ISO-8601 (`2026-08-19T14:02:11.123456+00:00`). They are converted to the
+ * reader's own local wall clock exactly once, in `toLocalStamp`, and every rule
+ * downstream operates on the `YYYY-MM-DDTHH:MM` string that produces — so
  * "Today" means today where the reader is sitting, and the day-boundary logic
- * in `formatActivity` never has to know about time zones.
+ * in `activityStamp` never has to know about time zones.
  *
  * There is no hydration hazard in doing this: both Chat screens are client
  * components that render a skeleton until their fetch lands, so no timestamp
  * is ever part of the server-rendered HTML.
+ *
+ * The two stamp rules below used to live in `lib/explorer.ts`, back when both
+ * screens wanted the same wording. Explorer's redesign wants its own (`Sep 18`,
+ * a twelve-hour clock, `12 min ago`), so each screen now owns how its dates
+ * read and `lib/format.ts` keeps only what they genuinely share.
  */
 
-import { formatActivity, plural, startedLabel } from "./explorer";
+import { datePart, formatDate, plural, previousDay, timePart } from "./format";
 import type { ChatMessage } from "./types";
 
 function pad(n: number): string {
   return String(n).padStart(2, "0");
 }
 
-/** A `Date` as the local-wall-clock `YYYY-MM-DDTHH:MM` string the explorer
- *  date rules are written against. */
+/**
+ * Last-activity wording: `Today, 15:10`, `Yesterday, 10:22`, `16 Aug 2026`.
+ * Older stamps drop the time — a clock is only meaningful while "today" and
+ * "yesterday" still locate it.
+ */
+function activityStamp(stamp: string, now: string): string {
+  const day = datePart(stamp);
+  const today = datePart(now);
+  const time = timePart(stamp);
+  if (day === today) return time ? `Today, ${time}` : "Today";
+  if (day === previousDay(today)) return time ? `Yesterday, ${time}` : "Yesterday";
+  return formatDate(stamp);
+}
+
+/** Thread header: `today` / `yesterday` / `2 Aug 2026`. */
+function startedStamp(stamp: string, now: string): string {
+  const day = datePart(stamp);
+  const today = datePart(now);
+  if (day === today) return "today";
+  if (day === previousDay(today)) return "yesterday";
+  return formatDate(stamp);
+}
+
+/** A `Date` as the local-wall-clock `YYYY-MM-DDTHH:MM` string the stamp rules
+ *  above (and everything in `lib/format.ts`) are written against. */
 export function toLocalStamp(date: Date): string {
   return (
     `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}` +
@@ -37,14 +65,14 @@ export function toLocalStamp(date: Date): string {
 export function activityLabel(iso: string, now: Date = new Date()): string {
   const at = new Date(iso);
   if (Number.isNaN(at.getTime())) return "";
-  return formatActivity(toLocalStamp(at), toLocalStamp(now));
+  return activityStamp(toLocalStamp(at), toLocalStamp(now));
 }
 
 /** Thread header: `started today` / `started yesterday` / `started 2 Aug 2026`. */
 export function startedAt(iso: string, now: Date = new Date()): string {
   const at = new Date(iso);
   if (Number.isNaN(at.getTime())) return "";
-  return `started ${startedLabel(toLocalStamp(at), toLocalStamp(now))}`;
+  return `started ${startedStamp(toLocalStamp(at), toLocalStamp(now))}`;
 }
 
 /** List header count. Zero is spelled out — "0 conversations" reads as a bug. */
@@ -80,8 +108,8 @@ export function questionCount(
 export function startedDay(iso: string, now: Date = new Date()): string {
   const at = new Date(iso);
   if (Number.isNaN(at.getTime())) return "";
-  // Slicing the time off is what makes `formatActivity` drop the clock.
-  return formatActivity(toLocalStamp(at).slice(0, 10), toLocalStamp(now));
+  // Slicing the time off is what makes `activityStamp` drop the clock.
+  return activityStamp(toLocalStamp(at).slice(0, 10), toLocalStamp(now));
 }
 
 /**

@@ -29,7 +29,7 @@
  * with no jsdom: a rule left inside a component is a rule with no test.
  */
 
-import { plural } from "./explorer";
+import { plural } from "./format";
 
 /** The payload of the backend's `retrieving` SSE event, as the UI holds it. */
 export interface RetrievingInfo {

@@ -58,6 +58,10 @@ body {
     --input: 0.9197 0.0040 286.32;              /* #E4E4E7 */
     --ring: 0.6231 0.1880 259.81;               /* #3B82F6 */
     --positive: 0.6271 0.1699 149.21;           /* #16A34A */
+    /* Explorer's process trail grades a critic's issues low / medium / high.
+       `low` is muted and `high` is `--destructive`; medium needed a third
+       colour that reads as "look at this" without reading as "this failed". */
+    --warning: 0.6635 0.1522 58.32;             /* #D97706 amber-600 */
     --radius: 0.5rem;
     /* brand gradient (raw hex — used only inside linear-gradient/color-mix) */
     --grad-a: #3B82F6;
@@ -99,6 +103,7 @@ body {
     --input: 0.2739 0.0055 286.03;              /* #27272A */
     --ring: 0.7137 0.1434 254.62;               /* #60A5FA */
     --positive: 0.7227 0.1920 149.58;           /* #22C55E */
+    --warning: 0.8369 0.1644 84.43;             /* #FBBF24 amber-400 */
     --grad-a: #3B82F6;
     --grad-b: #22D3EE;
     --chart-1: 0.7137 0.1434 254.62;
@@ -196,4 +201,51 @@ body {
   box-shadow:
     0 20px 30px -12px color-mix(in srgb, var(--grad-a) 40%, transparent),
     0 8px 16px -8px rgba(0, 0, 0, 0.5);
+}
+
+/* ── Explorer entrance animations ──────────────────────────────────────
+   Two one-shot entrances, ported from the prototype, which declared them as
+   Tailwind v4 `@utility` rules. This project is on v3.4, where `@utility`
+   does not exist, so they are plain classes -- Tailwind never needs to know
+   about them because nothing composes them with a variant.
+
+   `fade-block` is a candidate card arriving; `slide-in-rail` is a paper
+   landing in the rail after it is added. Both are `both`-filled so the
+   element is not visible for a frame before its animation starts.
+
+   The reduced-motion block is scoped to these two rather than the
+   prototype's global `*` reset: this app has its own motion elsewhere
+   (`tailwindcss-animate`, the sidebar's width transition) and a blanket
+   `animation-duration: 0.01ms !important` here would reach all of it. */
+@keyframes explorer-fade {
+  from {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+@keyframes explorer-slide {
+  from {
+    opacity: 0;
+    transform: translateX(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+.fade-block {
+  animation: explorer-fade 200ms ease-out both;
+}
+.slide-in-rail {
+  animation: explorer-slide 200ms ease-out both;
+}
+@media (prefers-reduced-motion: reduce) {
+  .fade-block,
+  .slide-in-rail {
+    animation: none;
+  }
 }
