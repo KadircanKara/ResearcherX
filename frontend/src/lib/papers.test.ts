@@ -20,6 +20,8 @@ function paper(over: Partial<Paper> = {}): Paper {
     abstract: null,
     body: null,
     pdf_url: null,
+    resolved_pdf_url: null,
+    has_pdf: false,
     source: "upload" as PaperSource,
     created_at: "2026-08-14T09:30:00Z",
     ...over,
