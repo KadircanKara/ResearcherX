@@ -13,7 +13,16 @@ interface OpenTabsProps {
   onClose: (path: string) => void;
 }
 
+/** The open-files bar above the editor, ported from the prototype's `LatexTabsBar`. */
 export function OpenTabs({ paths, activePath, dirtyPaths, onSelect, onClose }: OpenTabsProps) {
+  if (paths.length === 0) {
+    return (
+      <div className="flex h-9 items-center border-b px-3 text-[12px] text-muted-foreground">
+        No files open
+      </div>
+    );
+  }
+
   // A tab shows the basename -- `intro.tex` is what the user is looking for,
   // `chapters/intro.tex` doesn't fit in a tab. But two open files CAN share a
   // basename (chapters/intro.tex, appendix/intro.tex), and showing "intro.tex"
@@ -27,36 +36,34 @@ export function OpenTabs({ paths, activePath, dirtyPaths, onSelect, onClose }: O
   const dirty = new Set(dirtyPaths);
 
   return (
-    <div className="flex h-8 shrink-0 items-center gap-0.5 overflow-x-auto border-b border-border px-1">
+    <div role="tablist" aria-label="Open files" className="flex h-9 shrink-0 items-stretch overflow-x-auto border-b">
       {paths.map((path) => {
         const label = (counts.get(basename(path)) ?? 0) > 1 ? path : basename(path);
         const isActive = path === activePath;
         return (
           <div
             key={path}
+            role="tab"
+            aria-selected={isActive}
             title={path}
             className={cn(
-              "group flex shrink-0 items-center gap-1.5 rounded-t-md border-b-2 px-2.5 py-1 text-sm",
-              isActive
-                ? "border-primary bg-muted font-medium text-foreground"
-                : "border-transparent text-muted-foreground hover:bg-muted/60 hover:text-foreground"
+              "group flex shrink-0 items-center gap-1.5 border-r px-2.5 text-[12px]",
+              isActive ? "bg-card text-foreground" : "text-muted-foreground hover:bg-muted"
             )}
           >
-            <button className="max-w-40 truncate" onClick={() => onSelect(path)}>
-              {label}
+            <button type="button" onClick={() => onSelect(path)} className="flex items-center gap-1.5 py-1.5">
+              <span className="font-mono">{label}</span>
+              {dirty.has(path) && (
+                <span aria-label="Unsaved changes" className="size-1.5 rounded-full bg-foreground/70" />
+              )}
             </button>
-            {dirty.has(path) && (
-              <span
-                className="size-1.5 shrink-0 rounded-full bg-foreground/60"
-                title="Unsaved changes"
-              />
-            )}
             <button
-              title="Close"
-              className="shrink-0 text-muted-foreground/70 hover:text-foreground"
+              type="button"
+              aria-label={`Close ${basename(path)}`}
               onClick={() => onClose(path)}
+              className="rounded p-0.5 opacity-0 hover:bg-muted-foreground/20 focus-visible:opacity-100 group-hover:opacity-100"
             >
-              <X className="size-3" />
+              <X className="size-3" aria-hidden />
             </button>
           </div>
         );
