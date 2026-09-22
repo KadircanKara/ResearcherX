@@ -1,5 +1,6 @@
 "use client"
 
+import { routes } from "@/lib/routes";
 import Link from "next/link"
 import { usePathname } from "next/navigation"
 import { MessageSquare, FileText, Network, FileCode } from "lucide-react"
@@ -25,7 +26,7 @@ export function ProjectTabs({ projectId }: ProjectTabsProps) {
       aria-label="Project tabs"
     >
       {TABS.map(({ slug, label, icon: Icon }) => {
-        const href = `/research/${projectId}/${slug}`
+        const href = `${routes.project(projectId)}/${slug}`
         const active = pathname === href || pathname.startsWith(href + "/")
         return (
           <Link

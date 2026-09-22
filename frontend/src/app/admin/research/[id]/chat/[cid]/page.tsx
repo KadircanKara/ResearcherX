@@ -1,5 +1,6 @@
 "use client";
 
+import { routes } from "@/lib/routes";
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useParams, useSearchParams } from "next/navigation";
@@ -89,7 +90,7 @@ export default function ConversationPage() {
       <div className="rx-shell">
         <header className="rx-head">
           <div>
-            <Link href={`/research/${projectId}/chat`} className="rx-backlink">
+            <Link href={routes.chat(projectId)} className="rx-backlink">
               <BackGlyph />
               All conversations
             </Link>

@@ -1,3 +1,4 @@
+import { routes } from "@/lib/routes";
 import { redirect } from "next/navigation"
 
 interface Params {
@@ -6,5 +7,5 @@ interface Params {
 
 export default async function ProjectPage({ params }: Params) {
   const { id } = await params
-  redirect(`/research/${id}/chat`)
+  redirect(routes.chat(id))
 }

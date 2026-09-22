@@ -1,5 +1,6 @@
 "use client"
 
+import { routes } from "@/lib/routes";
 import { useEffect, useState } from "react"
 import { useParams, usePathname } from "next/navigation"
 import { ProjectHeader } from "@/components/project-header"
@@ -64,10 +65,10 @@ export default function ProjectLayout({ children }: { children: React.ReactNode 
   // past that a row's State cell is a head turn away from the title it
   // belongs to. Papers' own rail column only appears at all above 1240px, so
   // at 5xl (1024px) it could never have rendered.
-  const tabWidth = pathname.startsWith(`/research/${id}/latex`)
+  const tabWidth = pathname.startsWith(routes.latex(id))
     ? "max-w-[110rem]"
-    : pathname.startsWith(`/research/${id}/graph`) ||
-        pathname.startsWith(`/research/${id}/papers`)
+    : pathname.startsWith(routes.graph(id)) ||
+        pathname.startsWith(routes.papers(id))
       ? "max-w-[130rem]"
       : "max-w-5xl"
 

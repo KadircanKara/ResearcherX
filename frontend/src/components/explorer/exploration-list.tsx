@@ -1,5 +1,6 @@
 "use client";
 
+import { routes } from "@/lib/routes";
 import Link from "next/link";
 import { Trash2 } from "lucide-react";
 import { Composer } from "@/components/explorer/composer";
@@ -65,7 +66,7 @@ export function ExplorationList({
           // button, and nesting interactive content is invalid HTML. The row's
           // hit area comes from the link's ::after overlay instead.
           <div className="rx-crow" key={e.id}>
-            <Link href={`/explorer/${e.id}`} className="rx-copen">
+            <Link href={routes.exploration(e.id)} className="rx-copen">
               <span className="rx-ct">{e.title}</span>
               <span className="rx-cq">Last asked: “{e.lastAsked}”</span>
             </Link>

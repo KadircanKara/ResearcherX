@@ -1,5 +1,6 @@
 "use client";
 
+import { routes } from "@/lib/routes";
 import Link from "next/link";
 import { Composer } from "@/components/explorer/composer";
 import { EMPTY_META, SUGGESTIONS } from "@/lib/explorer-data";
@@ -41,7 +42,7 @@ export function ExplorerEmpty() {
         <ul className="rx-sugg">
           {SUGGESTIONS.map((s) => (
             <li key={s.prompt}>
-              <Link href={`/explorer/${s.exploration}`}>
+              <Link href={routes.exploration(s.exploration)}>
                 {s.prompt}
                 <span className="rx-why">{s.why}</span>
               </Link>

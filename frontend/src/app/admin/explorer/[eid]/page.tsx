@@ -1,5 +1,6 @@
 "use client";
 
+import { routes } from "@/lib/routes";
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { ArrowLeft } from "lucide-react";
@@ -19,7 +20,7 @@ export default function ExplorationPage() {
     return (
       <div className="rx-shell">
         <div className="rx-head">
-          <Link href="/explorer" className="rx-backlink">
+          <Link href={routes.explorer()} className="rx-backlink">
             <ArrowLeft className="size-3" aria-hidden="true" />
             All explorations
           </Link>

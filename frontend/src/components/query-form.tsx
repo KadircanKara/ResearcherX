@@ -1,5 +1,6 @@
 "use client";
 
+import { routes } from "@/lib/routes";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { createRun } from "@/lib/api";
@@ -22,7 +23,7 @@ export function QueryForm() {
     setError(null);
     try {
       const run = await createRun(question.trim());
-      router.push(`/research/${run.id}`);
+      router.push(routes.project(run.id));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to create run.");
       setSubmitting(false);
