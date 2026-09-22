@@ -86,14 +86,21 @@ export function scopeLine(info: RetrievingInfo | null): ScopeSegment[] | null {
         },
       ];
     }
-    const segments: ScopeSegment[] = [{ text: "Matched " }];
+    // The quote marks are the sentence's, not the user's: only the phrase
+    // itself is emphasised, as the prototype draws it.
+    const segments: ScopeSegment[] = [];
+    const plain = (text: string) => {
+      const last = segments[segments.length - 1];
+      if (last && !last.emphasis) last.text += text;
+      else segments.push({ text });
+    };
+    plain("Matched ");
     info.scope_evidence.forEach((phrase, i) => {
-      if (i > 0) segments.push({ text: ", " });
-      segments.push({ text: `“${phrase}”`, emphasis: true });
+      plain(i > 0 ? ", “" : "“");
+      segments.push({ text: phrase, emphasis: true });
+      plain("”");
     });
-    segments.push({
-      text: ` in your question — ${papersSearched(info.scoped_count, info.widened)}`,
-    });
+    plain(` in your question — ${papersSearched(info.scoped_count, info.widened)}`);
     return segments;
   }
 
@@ -124,7 +131,28 @@ export function scopeLine(info: RetrievingInfo | null): ScopeSegment[] | null {
  */
 export function emptyMentionsNote(info: RetrievingInfo | null): string | null {
   if (!info || info.empty_mentions.length === 0) return null;
-  return `No excerpts from ${info.empty_mentions.join(", ")}.`;
+  return `No excerpts from ${listJoin(info.empty_mentions)}.`;
+}
+
+/** `A`, `A and B`, `A, B and C`. */
+function listJoin(items: string[]): string {
+  if (items.length <= 1) return items[0] ?? "";
+  return `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]}`;
+}
+
+/**
+ * Whether the scope line stays under the answer once it has finished.
+ *
+ * Only a RESOLVED scope does. The user clicked nothing, so the finished answer
+ * is the last place they can learn it was written from part of the library.
+ * A mention scope is something they chose and can see in their own question,
+ * and a global turn has nothing to disclose. "Mentions unavailable" is not
+ * kept either: it describes a fallback to the whole library, which is what an
+ * unscoped answer is anyway.
+ */
+export function isPersistentScope(info: RetrievingInfo | null): boolean {
+  if (!info) return false;
+  return info.scope_source === "resolved" && info.scoped_count > 0;
 }
 
 export type ChatStatus = "idle" | "thinking" | "retrieving" | "streaming";
