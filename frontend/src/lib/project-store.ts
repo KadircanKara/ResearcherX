@@ -34,3 +34,23 @@ export function subscribeProjectColor(fn: (change: ProjectColorChange) => void) 
     listeners.delete(fn);
   };
 }
+
+/*
+ * "The project list changed" -- a project was created. The sidebar fetches
+ * its list once per identity, so without this a new project appeared there
+ * only after a full reload. Carries no payload: the subscriber refetches
+ * rather than splicing in a row whose shape (counts, members) only the list
+ * endpoint knows.
+ */
+const listChangedListeners = new Set<() => void>();
+
+export function publishProjectListChanged() {
+  listChangedListeners.forEach((fn) => fn());
+}
+
+export function subscribeProjectListChanged(fn: () => void) {
+  listChangedListeners.add(fn);
+  return () => {
+    listChangedListeners.delete(fn);
+  };
+}

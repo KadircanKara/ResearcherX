@@ -35,3 +35,20 @@ describe("project colour store", () => {
     off();
   });
 });
+
+describe("project list change signal", () => {
+  it("notifies every live subscriber and stops after unsubscribe", async () => {
+    const { publishProjectListChanged, subscribeProjectListChanged } = await import("./project-store");
+    const a = vi.fn();
+    const b = vi.fn();
+    const offA = subscribeProjectListChanged(a);
+    const offB = subscribeProjectListChanged(b);
+    publishProjectListChanged();
+    offA();
+    publishProjectListChanged();
+    offB();
+    publishProjectListChanged();
+    expect(a).toHaveBeenCalledTimes(1);
+    expect(b).toHaveBeenCalledTimes(2);
+  });
+});

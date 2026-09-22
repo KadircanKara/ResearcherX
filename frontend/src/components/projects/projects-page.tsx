@@ -12,6 +12,7 @@ import { EmptyState, NoMatchState } from "@/components/ui/empty-state";
 import { Input } from "@/components/ui/input";
 import { useIdentity } from "@/lib/identity";
 import { createProject, listMembers, listProjects } from "@/lib/projects";
+import { publishProjectListChanged } from "@/lib/project-store";
 import {
   DEFAULT_PROJECT_VIEW,
   PROJECT_VIEW_KEY,
@@ -103,6 +104,7 @@ export function ProjectsPage() {
       color: values.color,
     });
     setDialogOpen(false);
+    publishProjectListChanged();
     router.push(routes.chat(project.id));
   }
 

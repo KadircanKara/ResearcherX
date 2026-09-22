@@ -7,7 +7,7 @@ import { routes } from "@/lib/routes";
 import { cn } from "@/lib/utils";
 import { listProjects } from "@/lib/projects";
 import { colorFor } from "@/lib/project-colors";
-import { subscribeProjectColor } from "@/lib/project-store";
+import { subscribeProjectColor, subscribeProjectListChanged } from "@/lib/project-store";
 import { initials } from "@/lib/format";
 import { useIdentity } from "@/lib/identity";
 import type { Project } from "@/lib/types";
@@ -176,15 +176,21 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     let cancelled = false;
-    listProjects()
-      .then((rows) => {
-        if (!cancelled) setProjects(rows);
-      })
-      .catch(() => {
-        if (!cancelled) setProjects([]);
-      });
+    const load = () =>
+      listProjects()
+        .then((rows) => {
+          if (!cancelled) setProjects(rows);
+        })
+        .catch(() => {
+          if (!cancelled) setProjects([]);
+        });
+    void load();
+    // A project created elsewhere (the projects page) must reach the rail
+    // without a reload; the rail owns no other refresh trigger.
+    const off = subscribeProjectListChanged(() => void load());
     return () => {
       cancelled = true;
+      off();
     };
   }, [me?.id]);
 
