@@ -65,7 +65,15 @@ export interface UseLatexDocument {
   openFile: (path: string) => Promise<void>;
   closeFile: (path: string) => void;
   editBuffer: (path: string, text: string) => void;
-  createFile: (path: string) => Promise<void>;
+  /**
+   * Creates a text file (empty unless `content` is given). Resolves `true`
+   * only when the file was written into the document that is STILL open, so
+   * a caller can safely open it; `false` when nothing was done or the user
+   * has moved to another document. REJECTS with the request's own error --
+   * `PathCollisionError` for the conflict dialog, a `LatexRequestError` for
+   * everything else -- rather than folding it into `error`.
+   */
+  createFile: (path: string, content?: string) => Promise<boolean>;
   removeFile: (path: string) => Promise<void>;
   moveFile: (from: string, to: string) => Promise<void>;
   uploadBinary: (path: string, data: Blob) => Promise<void>;
@@ -563,25 +571,31 @@ export function useLatexDocument(
   // ---------------------------------------------------------------------
 
   const createFile = useCallback(
-    async (path: string) => {
+    async (path: string, content = ""): Promise<boolean> => {
       const docId = selectedIdRef.current;
-      if (!docId || !canEdit) return;
+      if (!docId || !canEdit) return false;
       setError(null);
       try {
         // "fail" (the default) on purpose: this is a CREATE, and a path that
         // already exists must come back as a 409 the caller can offer a
-        // `(n)` name for -- never as a silent overwrite.
-        const m = await writeTextFile(projectId, docId, path, "");
+        // `(n)` name for -- never as a silent overwrite. The editor's
+        // "Duplicate current file" leans on exactly that: it writes the copy
+        // at the ORIGINAL path, and the 409's own `suggestion` is where the
+        // duplicate's name comes from.
+        const m = await writeTextFile(projectId, docId, path, content);
         applyMutation(m, docId);
         await refreshTree(docId);
+        return selectedIdRef.current === docId;
       } catch (err) {
-        if (selectedIdRef.current !== docId) return;
-        // Rethrown UNCHANGED so the caller can open the conflict dialog.
-        // Folding it into `error` text here would hide the suggestion the
-        // dialog is built from -- the same reason the import flow carries
-        // its payload as a typed error rather than a sentence.
-        if (err instanceof PathCollisionError) throw err;
-        setError(errorText(err));
+        if (selectedIdRef.current !== docId) return false;
+        // Rethrown UNCHANGED, every kind: a `PathCollisionError` so the
+        // caller can open the conflict dialog (folding it into `error` text
+        // would hide the suggestion the dialog is built from), and anything
+        // else -- a 422 naming a bad path, above all -- so the new-file
+        // dialog can show the server's own words under the field the user
+        // is still looking at. The browser never validates a path itself;
+        // this is the only place that message reaches the user.
+        throw err;
       }
     },
     [projectId, canEdit, applyMutation, refreshTree]

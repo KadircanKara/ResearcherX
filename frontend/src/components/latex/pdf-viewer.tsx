@@ -1,7 +1,14 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { canvasToTex, texToCanvas, type TexPoint } from "@/lib/latex-sync";
+import { FileWarning, Loader2 } from "lucide-react";
+import {
+  canvasToTex,
+  texToPercent,
+  type CompileStatus,
+  type TexPoint,
+} from "@/lib/latex-sync";
+import { cn } from "@/lib/utils";
 // Type-only: erased at build time, so this does not touch the module-scope
 // import restriction below (pdf.js itself is still loaded only inside the
 // effect).
@@ -17,7 +24,13 @@ export interface PdfHighlight {
 
 interface PdfViewerProps {
   bytes: Uint8Array | null;
-  scale: number;
+  /** What to say when there is no PDF yet: compiling, failed, or never built. */
+  status: CompileStatus;
+  /**
+   * PDF-only mode. Pages there may grow to `max-w-3xl`; beside the source
+   * they keep the prototype's `max-w-md` card width.
+   */
+  wide: boolean;
   highlight: PdfHighlight | null;
   scrollToPage: number | null;
   onPageDoubleClick: (page: number, point: TexPoint) => void;
@@ -25,14 +38,23 @@ interface PdfViewerProps {
 
 interface RenderedPage {
   pageNumber: number;
-  /** CSS pixels, already multiplied by `scale`. */
+  /** TeX big points -- the page at `scale: 1`. Every coordinate is relative to these. */
   width: number;
   height: number;
 }
 
+/**
+ * The CSS width every page is DRAWN at: the widest a page is ever shown
+ * (`max-w-3xl`, 48rem). A narrower pane scales the canvas down with CSS,
+ * never re-renders it -- so dragging the file tree's seam costs nothing, and
+ * the backing store is still sharp at the largest size it can appear.
+ */
+const RENDER_CSS_WIDTH = 768;
+
 export function PdfViewer({
   bytes,
-  scale,
+  status,
+  wide,
   highlight,
   scrollToPage,
   onPageDoubleClick,
@@ -125,8 +147,9 @@ export function PdfViewer({
         for (let n = 1; n <= doc.numPages; n++) {
           const page = await doc.getPage(n);
           if (cancelled || seq !== renderSeq.current) return;
-          const viewport = page.getViewport({ scale });
-          laid.push({ pageNumber: n, width: viewport.width, height: viewport.height });
+          const natural = page.getViewport({ scale: 1 });
+          const viewport = page.getViewport({ scale: RENDER_CSS_WIDTH / natural.width });
+          laid.push({ pageNumber: n, width: natural.width, height: natural.height });
           setPages([...laid]);
 
           // The canvas for page n only exists after React has flushed the
@@ -138,13 +161,13 @@ export function PdfViewer({
           const ctx = canvas?.getContext("2d");
           if (!canvas || !ctx) continue;
 
-          // Backing store in device pixels for a sharp render; CSS size stays
-          // in the scale-multiplied units the click maths uses, so device
-          // pixel ratio never leaks into a coordinate.
+          // Backing store in device pixels for a sharp render. The CSS size is
+          // NOT set here: the canvas fills its page card, whose aspect ratio
+          // comes from the page itself, and the click and highlight maths
+          // read the card's DISPLAYED size -- so neither the render width nor
+          // the device pixel ratio ever leaks into a coordinate.
           canvas.width = Math.floor(viewport.width * dpr);
           canvas.height = Math.floor(viewport.height * dpr);
-          canvas.style.width = `${viewport.width}px`;
-          canvas.style.height = `${viewport.height}px`;
           ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
           const renderTask = page.render({ canvasContext: ctx, viewport });
@@ -203,7 +226,7 @@ export function PdfViewer({
       loadingTask.current?.destroy().catch(() => {});
       loadingTask.current = null;
     };
-  }, [bytes, scale]);
+  }, [bytes]);
 
   useEffect(() => {
     if (scrollToPage === null) return;
@@ -211,16 +234,37 @@ export function PdfViewer({
     canvas?.scrollIntoView({ behavior: "smooth", block: "center" });
   }, [scrollToPage, highlight]);
 
+  // With a PDF on screen, a compile in flight or a failed one leaves it there:
+  // a broken edit must not blank the preview, and the previous render is
+  // still the most useful thing available. These states are for the pane
+  // that has nothing to show yet.
   if (!bytes) {
+    if (status === "compiling") {
+      return (
+        <div className="flex h-full flex-1 flex-col items-center justify-center gap-2 bg-muted/20 text-muted-foreground">
+          <Loader2 className="size-6 animate-spin" aria-hidden />
+          <p className="text-[13px]">Compiling…</p>
+        </div>
+      );
+    }
+    if (status === "failed") {
+      return (
+        <div className="flex h-full flex-1 flex-col items-center justify-center gap-2 bg-muted/20 p-6 text-center text-muted-foreground">
+          <FileWarning className="size-8" aria-hidden />
+          <p className="text-[13px] font-medium text-foreground">No PDF to show</p>
+          <p className="text-[12px]">The last compile failed. Fix the error and compile again.</p>
+        </div>
+      );
+    }
     return (
-      <div className="flex h-full items-center justify-center p-6 text-center text-sm text-muted-foreground">
-        Compile to see a preview.
+      <div className="flex h-full flex-1 flex-col items-center justify-center gap-2 bg-muted/20 p-6 text-center text-muted-foreground">
+        <p className="text-[13px]">Compile to see the PDF.</p>
       </div>
     );
   }
 
   return (
-    <div className="relative h-full overflow-auto bg-muted/40 p-4">
+    <div className="relative flex h-full flex-1 flex-col items-center gap-3 overflow-y-auto bg-muted/20 p-4">
       {error && (
         // An OVERLAY, not a replacement for the canvas container below --
         // that container must stay mounted (so canvasRefs keeps every
@@ -230,51 +274,61 @@ export function PdfViewer({
         // `continue`s past all of them, and the preview stays blank until a
         // THIRD compile. Same visual result as before -- the error covers
         // the content -- reached without ever unmounting what's underneath.
-        <div className="absolute inset-0 z-10 flex items-center justify-center bg-muted/40 p-6 text-center text-sm text-muted-foreground">
+        <div className="absolute inset-0 z-10 flex items-center justify-center bg-muted/20 p-6 text-center text-[13px] text-muted-foreground">
           The preview could not be displayed. {error}
         </div>
       )}
-      <div className="flex flex-col items-center gap-4">
-        {pages.map((page) => {
-          const matched = highlight && highlight.page === page.pageNumber ? highlight : null;
-          const pos = matched ? texToCanvas({ x: matched.x, y: matched.y }, scale) : null;
-          return (
-            <div key={page.pageNumber} className="relative shadow-sm">
-              <canvas
-                ref={(el) => {
-                  if (el) canvasRefs.current.set(page.pageNumber, el);
-                  else canvasRefs.current.delete(page.pageNumber);
-                }}
-                className="block bg-white"
-                onDoubleClick={(e) => {
-                  const box = e.currentTarget.getBoundingClientRect();
-                  // getBoundingClientRect is CSS pixels, which is exactly the
-                  // unit the canvas was sized in, so dividing by `scale` lands
-                  // back in TeX big points with no DPR term.
-                  onPageDoubleClick(
-                    page.pageNumber,
-                    canvasToTex(
-                      { x: e.clientX - box.left, y: e.clientY - box.top },
-                      scale
-                    )
-                  );
+      {pages.map((page) => {
+        const matched = highlight && highlight.page === page.pageNumber ? highlight : null;
+        const pos = matched ? texToPercent({ x: matched.x, y: matched.y }, page) : null;
+        return (
+          <div
+            key={page.pageNumber}
+            // The card's aspect ratio is the PAGE's own, so the box has its
+            // final size before pdf.js has drawn anything into it.
+            style={{ aspectRatio: `${page.width} / ${page.height}` }}
+            className={cn(
+              "relative w-full shrink-0 overflow-hidden rounded-sm border bg-card shadow-sm",
+              wide ? "max-w-3xl" : "max-w-md"
+            )}
+          >
+            <canvas
+              ref={(el) => {
+                if (el) canvasRefs.current.set(page.pageNumber, el);
+                else canvasRefs.current.delete(page.pageNumber);
+              }}
+              className="absolute inset-0 block h-full w-full bg-white"
+              onDoubleClick={(e) => {
+                const box = e.currentTarget.getBoundingClientRect();
+                // The DISPLAYED scale -- CSS pixels on screen per TeX big
+                // point -- read off the box at the moment of the click. The
+                // canvas is drawn at one fixed width and scaled by CSS, so
+                // this, not the render width, is what a click position is
+                // measured in. getBoundingClientRect is CSS pixels, so no
+                // DPR term enters.
+                onPageDoubleClick(
+                  page.pageNumber,
+                  canvasToTex(
+                    { x: e.clientX - box.left, y: e.clientY - box.top },
+                    box.width / page.width
+                  )
+                );
+              }}
+            />
+            {matched && pos && (
+              <div
+                className="pointer-events-none absolute animate-pulse rounded-sm bg-primary/30 ring-2 ring-primary"
+                style={{
+                  left: `${pos.x}%`,
+                  top: `${pos.y}%`,
+                  width: `max(4px, ${(matched.width / page.width) * 100}%)`,
+                  height: `max(12px, ${(matched.height / page.height) * 100}%)`,
                 }}
               />
-              {matched && pos && (
-                <div
-                  className="pointer-events-none absolute animate-pulse rounded-sm bg-primary/30 ring-2 ring-primary"
-                  style={{
-                    left: pos.x,
-                    top: pos.y,
-                    width: Math.max(matched.width * scale, 4),
-                    height: Math.max(matched.height * scale, 12),
-                  }}
-                />
-              )}
-            </div>
-          );
-        })}
-      </div>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }

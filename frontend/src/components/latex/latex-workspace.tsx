@@ -1,33 +1,28 @@
 "use client";
 
 import { routes } from "@/lib/routes";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { useRouter } from "next/navigation";
-import Link from "next/link";
+import { FilePlus2, Upload, UploadCloud, X } from "lucide-react";
+import { Button, buttonVariants } from "@/components/ui/button";
+import { Progress } from "@/components/ui/progress";
 import {
-  ArrowLeft,
-  Pencil,
-  Code,
-  Cog,
-  Columns2,
-  Download,
-  FileDown,
-  FileText,
-  Loader2,
-  PanelLeftOpen,
-  Play,
-  Trash2,
-  X,
-} from "lucide-react";
-import { Button } from "@/components/ui/button";
+  ResizableHandle,
+  ResizablePanel,
+  ResizablePanelGroup,
+} from "@/components/ui/resizable";
 import { BinaryPreview } from "@/components/latex/binary-preview";
 import { ConflictDialog } from "@/components/latex/conflict-dialog";
 import { DocumentShareDialog } from "@/components/latex/document-share-dialog";
+import {
+  EditorDeleteDialog,
+  EditorNewFileDialog,
+  EditorRenameDialog,
+} from "@/components/latex/editor-dialogs";
 import { EditorPane } from "@/components/latex/editor-pane";
+import { EditorToolbar, type ViewMode } from "@/components/latex/editor-toolbar";
 import { FileTree } from "@/components/latex/file-tree";
 import { ImportDropzone } from "@/components/latex/import-dropzone";
-import { ConfirmDialog } from "@/components/ui/confirm-dialog";
-import { RenameDialog } from "@/components/ui/rename-dialog";
 import { LogPanel } from "@/components/latex/log-panel";
 import { OpenTabs } from "@/components/latex/open-tabs";
 import { PdfViewer } from "@/components/latex/pdf-viewer";
@@ -40,11 +35,10 @@ import {
   errorText,
   saveBlob,
   type LatexCollision,
-  type LatexEngine,
 } from "@/lib/latex";
-import { buildTree, isBeneath, isTexPath, parentDir } from "@/lib/latex-tree";
+import { buildTree, formatBytes, isBeneath, isTexPath, parentDir } from "@/lib/latex-tree";
+import { cn } from "@/lib/utils";
 
-const STALE_NOTE = "Out of date — compile to sync";
 // SyncTeX speaks paths relative to the main file's own directory, so a file
 // outside it has no representable coordinate -- this is a documented
 // limitation of the design, not a bug. See `isBeneath` in `lib/latex-tree.ts`.
@@ -56,13 +50,26 @@ const OUTSIDE_MAIN_NOTE = "Sync only covers files beside or below the main file.
 // happens to be active: a confident wrong jump is worse than no jump.
 const LOG_FILE_UNKNOWN_NOTE = "Couldn't tell which file that error is in, so the editor didn't jump.";
 
-type ViewMode = "split" | "code" | "pdf";
+// The prototype lays the editor out twice -- a stacked column under `md` and
+// resizable panels from `md` up -- and lets CSS hide one. Here only ONE is
+// ever mounted: CodeMirror and pdf.js each hold real state (undo history, a
+// parsed PDF, a live worker), and a hidden second copy would double every
+// render and split every jump between two editors. Same breakpoint as `md:`.
+const DESKTOP_QUERY = "(min-width: 768px)";
 
-const VIEW_MODES: { mode: ViewMode; label: string; Icon: typeof Code }[] = [
-  { mode: "code", label: "Source only", Icon: Code },
-  { mode: "split", label: "Split source and PDF", Icon: Columns2 },
-  { mode: "pdf", label: "PDF only", Icon: FileText },
-];
+function subscribeDesktop(onChange: () => void): () => void {
+  const mq = window.matchMedia(DESKTOP_QUERY);
+  mq.addEventListener("change", onChange);
+  return () => mq.removeEventListener("change", onChange);
+}
+
+function useIsDesktop(): boolean {
+  return useSyncExternalStore(
+    subscribeDesktop,
+    () => window.matchMedia(DESKTOP_QUERY).matches,
+    () => true
+  );
+}
 
 interface LatexWorkspaceProps {
   projectId: string;
@@ -74,6 +81,12 @@ interface LatexWorkspaceProps {
   ownerId: string | null;
 }
 
+/**
+ * The LaTeX editor, laid out as the prototype's `LatexEditorWorkspace`:
+ * one bordered frame holding the toolbar, the file tree, the open-file tabs,
+ * source and PDF side by side, and the compile bar. The prototype's editor
+ * is a mock; everything behind this layout is the real engine.
+ */
 export function LatexWorkspace({ projectId, documentId, ownerId }: LatexWorkspaceProps) {
   const router = useRouter();
 
@@ -148,101 +161,41 @@ export function LatexWorkspace({ projectId, documentId, ownerId }: LatexWorkspac
     beforeCompile,
   });
 
+  const isDesktop = useIsDesktop();
+
+  // The editor opens on the main file, as the prototype's does -- ONCE per
+  // document: a user who then closes every tab has asked for an empty
+  // editor, and re-opening the main file under them would undo that.
+  // Waits for the document's own tree, so it never opens a path the server
+  // has not listed, and for the route's document to be the selected one, so
+  // it can never open a file in the document being left.
+  const autoOpenedFor = useRef<string | null>(null);
+  const openMainFile = doc.openFile;
+  useEffect(() => {
+    if (autoOpenedFor.current === documentId) return;
+    if (doc.selectedId !== documentId || doc.document?.id !== documentId) return;
+    const main = doc.mainPath;
+    if (!main || !doc.files.some((f) => f.path === main)) return;
+    autoOpenedFor.current = documentId;
+    if (doc.openPaths.length === 0) void openMainFile(main);
+  }, [documentId, doc.selectedId, doc.document?.id, doc.mainPath, doc.files, doc.openPaths.length, openMainFile]);
+
   // Which panes are on screen. The editor and the preview are the only two
-  // that answer to this -- the file tree collapses independently, because
-  // "show me only the PDF" and "give the tree's width back" are different
-  // requests and folding them together would make each imply the other.
+  // that answer to this; the file tree has its own panel and width.
   const [viewMode, setViewMode] = useState<ViewMode>("split");
 
-  // Percent of the EDITOR+PREVIEW region (never of the whole row) taken by
-  // the editor. The tree is outside that region and has its own width, so
-  // this stays a true even split at 50 whatever the tree is doing -- the
-  // previous percent-of-the-whole-row reading made the default silently
-  // uneven, and made every tree resize move the seam.
-  const [splitPercent, setSplitPercent] = useState(50);
-  const [treeWidth, setTreeWidth] = useState(256);
-  const [treeCollapsed, setTreeCollapsed] = useState(false);
-
-  // The active drag's teardown, so an unmount mid-drag can still run it.
-  const dragCleanup = useRef<(() => void) | null>(null);
-
-  // Shared by both seams. The pointer-capture and teardown rules below are
-  // subtle enough that a second copy of them would be a second place for
-  // the pointercancel case to go missing; only the per-drag maths differs,
-  // and that arrives as `onMove`.
-  function beginDrag(
-    e: React.PointerEvent<HTMLDivElement>,
-    onMove: (ev: PointerEvent, hostBox: DOMRect) => void
-  ) {
-    const handle = e.currentTarget;
-    const host = handle.parentElement;
-    if (!host) return;
-    const box = host.getBoundingClientRect();
-    const pointerId = e.pointerId;
-    // Capture so move/up/cancel keep reaching this element even once the
-    // pointer leaves the 1.5px-wide handle -- true for any drag that moves
-    // more than a few pixels, not an edge case.
-    handle.setPointerCapture(pointerId);
-
-    const move = (ev: PointerEvent) => onMove(ev, box);
-    const stop = () => {
-      handle.removeEventListener("pointermove", move);
-      handle.removeEventListener("pointerup", stop);
-      handle.removeEventListener("pointercancel", stop);
-      if (handle.hasPointerCapture(pointerId)) {
-        handle.releasePointerCapture(pointerId);
-      }
-      dragCleanup.current = null;
-    };
-
-    // pointercancel fires when the browser interrupts tracking (alt-tab, an
-    // OS-level gesture, losing focus) -- exactly the case a bare pointerup
-    // listener never sees. That gap is what used to leak move/up listeners
-    // permanently and leave the pane resizing on unrelated mouse movement
-    // afterwards, since nothing was left to remove them.
-    handle.addEventListener("pointermove", move);
-    handle.addEventListener("pointerup", stop);
-    handle.addEventListener("pointercancel", stop);
-    dragCleanup.current = stop;
-  }
-
-  // Clamped so neither pane can be dragged out of existence.
-  function startSplitDrag(e: React.PointerEvent<HTMLDivElement>) {
-    beginDrag(e, (ev, box) => {
-      const pct = ((ev.clientX - box.left) / box.width) * 100;
-      setSplitPercent(Math.min(80, Math.max(20, pct)));
-    });
-  }
-
-  // Clamped in pixels, not percent: the tree holds file names, whose
-  // legibility has nothing to do with how wide the window is. The floor is
-  // the point below which the header controls stop fitting; collapsing
-  // entirely is the button's job, not the drag's.
-  function startTreeDrag(e: React.PointerEvent<HTMLDivElement>) {
-    beginDrag(e, (ev, box) => {
-      setTreeWidth(Math.min(520, Math.max(180, ev.clientX - box.left)));
-    });
-  }
-
-  // A drag in progress when the component unmounts (e.g. a route change
-  // mid-drag) would otherwise leak its listeners forever -- nothing else is
-  // left to ever call `stop` for it.
-  useEffect(() => {
-    return () => {
-      dragCleanup.current?.();
-    };
-  }, []);
+  const [shareOpen, setShareOpen] = useState(false);
 
   // Import dialog: open state only. The two-step plan/commit conversation
   // (and its own busy/error) lives inside `ImportDropzone`, which the
   // projects list page shares.
   const [importOpen, setImportOpen] = useState(false);
-  // The archive the tree's "Add files" control handed over, so the import
-  // dialog opens with it already chosen. Cleared with the dialog.
+  // The archive the "Upload file" control handed over, so the import dialog
+  // opens with it already chosen. Cleared with the dialog.
   const [importFile, setImportFile] = useState<File | null>(null);
 
   /**
-   * One file picked from the tree header, routed by what it IS.
+   * One file picked from the "Upload file" control, routed by what it IS.
    *
    * A `.zip` goes through the merge-import flow so it lands as real files:
    * LaTeX resolves `\input` and `\includegraphics` against paths on disk
@@ -263,12 +216,10 @@ export function LatexWorkspace({ projectId, documentId, ownerId }: LatexWorkspac
     void withConflicts((p) => doc.uploadBinary(p, file), file.name);
   }
 
-  const [engineOpen, setEngineOpen] = useState(false);
-
   // The duplicate-name question for the TREE surfaces (new file, upload,
-  // rename). `retry` is the same operation the user already asked for,
-  // re-issued at whatever path they settle on -- never a second, different
-  // call built from the collision.
+  // rename, duplicate). `retry` is the same operation the user already asked
+  // for, re-issued at whatever path they settle on -- never a second,
+  // different call built from the collision.
   const [conflict, setConflict] = useState<{
     collisions: LatexCollision[];
     retry: (path: string) => Promise<void>;
@@ -318,6 +269,69 @@ export function LatexWorkspace({ projectId, documentId, ownerId }: LatexWorkspac
     setConflict((current) => (current === pending ? null : current));
   }
 
+  // New file. The path goes to the server exactly as typed (trimmed) and a
+  // refusal comes back into the dialog in the server's own words.
+  const [newFile, setNewFile] = useState<{ open: boolean; initial: string }>({
+    open: false,
+    initial: "",
+  });
+  const [newFileBusy, setNewFileBusy] = useState(false);
+  const [newFileError, setNewFileError] = useState<string | null>(null);
+
+  function openNewFile(dir: string) {
+    setNewFileError(null);
+    setNewFile({ open: true, initial: dir ? `${dir}/` : "" });
+  }
+
+  // Creates, then opens -- but only a file that landed in the document still
+  // on screen (`createFile` resolves false otherwise), so a slow create can
+  // never open a path in a document the user has since left.
+  const createAndOpen = useCallback(
+    async (path: string) => {
+      if (await doc.createFile(path)) await doc.openFile(path);
+    },
+    // Only these two are read off `doc`; see `beforeCompile` above.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [doc.createFile, doc.openFile]
+  );
+
+  async function handleCreateFile(path: string) {
+    setNewFileBusy(true);
+    setNewFileError(null);
+    try {
+      await createAndOpen(path);
+      setNewFile((s) => ({ ...s, open: false }));
+    } catch (err) {
+      if (err instanceof PathCollisionError) {
+        // Handed to the shared conflict dialog, which offers the server's
+        // `(n)` suggestion and re-runs the SAME create at the chosen path.
+        setNewFile((s) => ({ ...s, open: false }));
+        setConflict({ collisions: err.collisions, retry: createAndOpen });
+        return;
+      }
+      setNewFileError(errorText(err));
+    } finally {
+      setNewFileBusy(false);
+    }
+  }
+
+  /**
+   * Duplicate the active text file. The copy is written at the ORIGINAL
+   * path with the default `if_exists=fail`, so the server answers 409 with
+   * its own `(n)` suggestion -- the conflict dialog then re-sends the same
+   * write at whatever path the user settles on. The browser never invents
+   * the suffix. The text is the buffer on screen, unsaved edits included.
+   */
+  function handleDuplicate() {
+    const path = doc.activePath;
+    if (!path) return;
+    const text = doc.buffers[path];
+    if (text === undefined) return;
+    void withConflicts(async (p) => {
+      await doc.createFile(p, text);
+    }, path);
+  }
+
   async function handleExport() {
     const docId = doc.selectedId;
     if (!docId) return;
@@ -326,7 +340,7 @@ export function LatexWorkspace({ projectId, documentId, ownerId }: LatexWorkspac
     } catch (err) {
       // Routed to the SAME surface every other failure in this shell uses.
       // An empty catch here left a failed export (a 413 over the size cap, a
-      // 5xx, a dropped connection) with no surface at all: the button simply
+      // 5xx, a dropped connection) with no surface at all: the control simply
       // appeared inert, which reads as a broken build rather than a failed
       // request. `reportError` applies the hook's own 4xx-shows-the-detail /
       // 5xx-shows-a-generic-line rule, so the size-cap message reaches the
@@ -340,23 +354,19 @@ export function LatexWorkspace({ projectId, documentId, ownerId }: LatexWorkspac
     // that route is keyed on a compile hash in an IN-PROCESS cache, so a
     // link to it 404s for any build this browser did not just make. If
     // there is no `pdfBytes` there is nothing to download, which is why the
-    // button is disabled rather than triggering a compile.
+    // item is disabled rather than triggering a compile.
     if (!compile.pdfBytes) return;
     const name = doc.document?.name ?? "document";
     saveBlob(new Blob([compile.pdfBytes.slice()], { type: "application/pdf" }), `${name}.pdf`);
   }
 
-  // The only irreversible control on this screen -- everything else here is
-  // a save, a compile or a download -- so it is the only one that asks. It
-  // asks through a real dialog, never `window.confirm`: see `ConfirmDialog`
-  // for why a native confirm can silently return false without opening.
-  const [confirmingDelete, setConfirmingDelete] = useState(false);
-  const [renamingDoc, setRenamingDoc] = useState(false);
+  const [deleteOpen, setDeleteOpen] = useState(false);
+  const [renameOpen, setRenameOpen] = useState(false);
   const [renameBusy, setRenameBusy] = useState(false);
   const [renameError, setRenameError] = useState<string | null>(null);
 
   /**
-   * Rename the open project from its own header.
+   * Rename the open document from its own header.
    *
    * A collision is reported INLINE here rather than handed to
    * `ConflictDialog`: there is exactly one name in question and the field
@@ -370,7 +380,7 @@ export function LatexWorkspace({ projectId, documentId, ownerId }: LatexWorkspac
     setRenameError(null);
     try {
       await doc.renameDoc(docId, name);
-      setRenamingDoc(false);
+      setRenameOpen(false);
     } catch (err) {
       if (err instanceof NameCollisionError) {
         setRenameError(`"${err.takenName}" is taken. Try "${err.suggestion}".`);
@@ -384,7 +394,7 @@ export function LatexWorkspace({ projectId, documentId, ownerId }: LatexWorkspac
 
   async function handleDeleteDocument() {
     const docId = doc.selectedId;
-    setConfirmingDelete(false);
+    setDeleteOpen(false);
     if (!docId) return;
     await doc.removeDoc(docId);
     router.push(routes.latex(projectId));
@@ -447,13 +457,164 @@ export function LatexWorkspace({ projectId, documentId, ownerId }: LatexWorkspac
   );
 
   if (doc.loading) {
-    return <div className="h-[70vh] animate-pulse rounded-xl bg-muted" />;
+    return <div className="h-[75vh] animate-pulse rounded-lg bg-muted" />;
   }
 
   const activeMeta = activePath ? doc.files.find((f) => f.path === activePath) : undefined;
+  /*
+    BOTH signals, never `isTexPath` alone. The two answer DIFFERENT questions
+    (see `isTexPath`'s own comment in `lib/latex-tree.ts`): `is_binary` is how
+    the backend STORED the bytes, `isTexPath` is whether a human should be
+    shown a text buffer. A `.bib`/`.sty`/`.bst` in latin-1 out of a real
+    Overleaf or arXiv project decodes as binary and is stored that way, and so
+    is every file uploaded through the file tree whatever its extension.
+    `openFile` correctly skips the fetch and the buffer for such a path -- so
+    routing on the extension alone rendered an EMPTY editor over it, and the
+    first keystroke PUT that empty buffer through `write_text`, which sets
+    `is_binary=False` and `blob=None`. The original bytes were gone
+    permanently and silently. Do not re-simplify this to one test.
+  */
+  const activeIsSource = activePath !== null && isTexPath(activePath) && !activeMeta?.is_binary;
+  const canDuplicate = canEdit && activeIsSource && doc.buffers[activePath] !== undefined;
+
+  const showSource = viewMode !== "pdf";
+  const showPdf = viewMode !== "source";
+  const pctUsed = doc.maxBytes > 0 ? (doc.usedBytes / doc.maxBytes) * 100 : 0;
+
+  const tree = (
+    <FileTree
+      nodes={buildTree(doc.files)}
+      activePath={doc.activePath}
+      mainPath={doc.mainPath}
+      canEdit={canEdit}
+      onOpen={(path) => void doc.openFile(path)}
+      onNewFileIn={openNewFile}
+      onDelete={(path) => void doc.removeFile(path)}
+      onRename={(from, to) => void withConflicts((p) => doc.moveFile(from, p), to)}
+      onRenameDir={(from, to) => void withConflicts((p) => doc.moveDir(from, p), to)}
+      onSetMain={(path) => void doc.setMainPath(path)}
+      onUpload={(path, data) => void withConflicts((p) => doc.uploadBinary(p, data), path)}
+    />
+  );
+
+  // A label wrapping a hidden input, not a Button that opens a dialog: the
+  // dialog's only job would be to show a "browse" link. Accepts ANY type --
+  // a project needs figures, .bib, .sty and .cls at least as often as it
+  // needs an archive -- and routes a .zip to the import flow.
+  function uploadControl(withLabel: boolean) {
+    return (
+      <label
+        title="Upload a file (a .zip is unpacked into this project)"
+        aria-label={withLabel ? undefined : "Upload file"}
+        className={cn(
+          buttonVariants({ variant: "ghost", size: withLabel ? "sm" : "icon" }),
+          withLabel && "gap-1.5",
+          !canEdit && "pointer-events-none opacity-50"
+        )}
+      >
+        <Upload className="size-3.5" aria-hidden />
+        {withLabel && "Upload file"}
+        <input
+          type="file"
+          className="hidden"
+          disabled={!canEdit}
+          onChange={(e) => {
+            const file = e.target.files?.[0];
+            // Cleared so picking the SAME file twice still fires `change` --
+            // re-uploading a figure you just fixed is the common case, and
+            // without this the second pick is silently ignored.
+            e.target.value = "";
+            if (file) handleAddFile(file);
+          }}
+        />
+      </label>
+    );
+  }
+
+  const main = (
+    <div className="flex h-full min-h-0 flex-col">
+      {showSource ? (
+        <OpenTabs
+          paths={doc.openPaths}
+          activePath={doc.activePath}
+          dirtyPaths={doc.dirtyPaths}
+          onSelect={(path) => void doc.openFile(path)}
+          onClose={doc.closeFile}
+        />
+      ) : null}
+      <div className="flex min-h-0 flex-1">
+        {/*
+          Both panes are hidden with `display: none`, never unmounted, when
+          the view mode leaves them out. CodeMirror's undo history, cursor and
+          scroll position live in the editor instance, and pdf.js re-parses
+          the document on mount -- so unmounting would make every flip
+          through the view modes cost the user real state and the browser a
+          full re-render of the PDF.
+        */}
+        <div
+          className={
+            !showSource
+              ? "hidden"
+              : showPdf
+                ? "flex min-h-0 w-1/2 min-w-0 flex-col border-r"
+                : "flex min-h-0 min-w-0 flex-1 flex-col"
+          }
+        >
+          {activePath === null ? (
+            <div className="flex flex-1 items-center justify-center text-[13px] text-muted-foreground">
+              Choose a file to edit
+            </div>
+          ) : activeIsSource ? (
+            <EditorPane
+              path={activePath}
+              openPaths={doc.openPaths}
+              value={doc.buffers[activePath] ?? ""}
+              onChange={handleChange}
+              onLineDoubleClick={handleLineDoubleClick}
+              gotoLine={compile.gotoLine}
+              readOnly={!canEdit}
+            />
+          ) : (
+            <BinaryPreview
+              projectId={projectId}
+              documentId={doc.selectedId ?? documentId}
+              path={activePath}
+              sizeBytes={activeMeta?.size_bytes ?? 0}
+            />
+          )}
+        </div>
+        <div
+          className={
+            !showPdf
+              ? "hidden"
+              : showSource
+                ? "flex min-h-0 w-1/2 min-w-0 flex-col"
+                : "flex min-h-0 min-w-0 flex-1 flex-col"
+          }
+        >
+          <PdfViewer
+            bytes={compile.pdfBytes}
+            status={compile.status}
+            wide={!showSource}
+            highlight={compile.highlight}
+            scrollToPage={compile.scrollToPage}
+            onPageDoubleClick={(page, point) => void compile.jumpToSource(page, point)}
+          />
+        </div>
+      </div>
+      <LogPanel
+        status={compile.status}
+        log={compile.status === "failed" ? (compile.log?.text ?? null) : compile.buildLog}
+        errorFile={compile.log?.file ?? null}
+        errorLine={compile.log?.line ?? null}
+        onJumpToError={handleJumpToError}
+        note={compile.syncNote}
+      />
+    </div>
+  );
 
   return (
-    <div className="flex h-[calc(100vh-14rem)] min-h-[32rem] flex-col gap-2">
+    <div className="space-y-2">
       {/*
         A save failure is a fact about the user's TEXT, not about which
         document happens to be on screen -- it must survive a switch away
@@ -463,397 +624,181 @@ export function LatexWorkspace({ projectId, documentId, ownerId }: LatexWorkspac
         re-sending it over newer server state is a worse bug than the one
         this surfaces.
       */}
-      {doc.saveFailures.length > 0 && (
-        <div className="flex flex-col gap-1">
-          {doc.saveFailures.map((f) => (
-            <div
-              // Keyed on BOTH halves of the record's identity: two files in
-              // the same document can be failing at once, and an id-only key
-              // collides between them.
-              key={`${f.id}\u0000${f.path}`}
-              className="flex items-center justify-between rounded-md border border-destructive/40 bg-destructive/10 px-3 py-1.5 text-xs text-destructive"
-            >
-              {/* Names the FILE as well as the document: a document-level
-                  message could not tell the user which of several open
-                  files is the one still unsaved. */}
-              <span>
-                Changes to {f.path} in {f.name} could not be saved.
-              </span>
-              <button
-                onClick={() => doc.dismissSaveFailure(f.id, f.path)}
-                className="text-destructive/70 hover:text-destructive"
-              >
-                <X className="size-3.5" />
-              </button>
-            </div>
-          ))}
+      {doc.saveFailures.map((f) => (
+        <div
+          // Keyed on BOTH halves of the record's identity: two files in the
+          // same document can be failing at once, and an id-only key
+          // collides between them.
+          key={`${f.id}\u0000${f.path}`}
+          role="alert"
+          className="flex items-center justify-between gap-2 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-1.5 text-[12px] text-destructive"
+        >
+          {/* Names the FILE as well as the document: a document-level
+              message could not tell the user which of several open files is
+              the one still unsaved. */}
+          <span>
+            Changes to {f.path} in {f.name} could not be saved.
+          </span>
+          <button
+            type="button"
+            aria-label="Dismiss"
+            onClick={() => doc.dismissSaveFailure(f.id, f.path)}
+            className="text-destructive/70 hover:text-destructive"
+          >
+            <X className="size-3.5" aria-hidden />
+          </button>
+        </div>
+      ))}
+      {doc.error && (
+        <div
+          role="alert"
+          className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-1.5 text-[12px] text-destructive"
+        >
+          {doc.error}
         </div>
       )}
 
-      <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-2 rounded-xl border border-border px-3 py-2">
-        <div className="flex min-w-0 items-center gap-2">
-          <Link
-            href={routes.latex(projectId)}
-            title="All LaTeX projects"
-            aria-label="All LaTeX projects"
-            className="shrink-0 rounded-md p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-          >
-            <ArrowLeft className="size-4" />
-          </Link>
-          {/* Truncated, never sized to its content: a project name is
-              user-supplied and unbounded, and this row's width is the one
-              thing that used to push the whole page into horizontal scroll. */}
-          <span className="truncate text-sm font-medium" title={doc.document?.name}>
-            {doc.document?.name ?? "…"}
-          </span>
-          {canEdit && (
-            <button
-              onClick={() => {
-                setRenameError(null);
-                setRenamingDoc(true);
-              }}
-              title="Rename project"
-              aria-label="Rename project"
-              className="shrink-0 rounded-md p-1 text-muted-foreground/60 transition-colors hover:bg-muted hover:text-foreground"
-            >
-              <Pencil className="size-3.5" />
-            </button>
-          )}
-          {doc.error && (
-            <span className="truncate text-xs text-destructive" title={doc.error}>
-              {doc.error}
-            </span>
-          )}
-        </div>
+      <div className="flex flex-col overflow-hidden rounded-lg border" style={{ height: "75vh" }}>
+        <EditorToolbar
+          projectId={projectId}
+          name={doc.document?.name ?? "…"}
+          mainPath={doc.mainPath ?? ""}
+          engine={doc.engine}
+          canEdit={canEdit}
+          viewMode={viewMode}
+          onViewModeChange={setViewMode}
+          compiling={compile.compiling}
+          onCompile={() => void compile.compile()}
+          pdfStale={canEdit && compile.pdfBytes !== null && compile.stale && !compile.compiling}
+          onShare={() => setShareOpen(true)}
+          onRename={() => {
+            setRenameError(null);
+            setRenameOpen(true);
+          }}
+          onDelete={() => setDeleteOpen(true)}
+          onEngineChange={(engine) => void doc.setEngine(engine)}
+          canDownloadPdf={compile.pdfBytes !== null}
+          onDownloadPdf={handleDownloadPdf}
+          onExport={() => void handleExport()}
+        />
 
-        <div className="flex shrink-0 items-center gap-1">
-          <button
-            onClick={handleDownloadPdf}
-            disabled={!compile.pdfBytes}
-            title={compile.pdfBytes ? "Download PDF" : "Compile first to download a PDF"}
-            aria-label="Download PDF"
-            className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:opacity-40 disabled:hover:bg-transparent"
-          >
-            <FileDown className="size-4" />
-          </button>
-
-          <button
-            onClick={() => void handleExport()}
-            title="Export .zip"
-            aria-label="Export .zip"
-            className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-          >
-            <Download className="size-4" />
-          </button>
-
-          <DocumentShareDialog
-            projectId={projectId}
-            documentId={documentId}
-            canEdit={canEdit}
-            fullAccessUserIds={[ownerId, doc.document?.created_by ?? null].filter(
-              (id): id is string => id !== null
-            )}
-          />
-
-          {canEdit && (
-            <button
-              onClick={() => setConfirmingDelete(true)}
-              title="Delete project"
-              aria-label="Delete project"
-              className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive"
-            >
-              <Trash2 className="size-4" />
-            </button>
-          )}
-
-          {/*
-            Three states, not a single "focus" toggle: a writer wants the
-            source alone while drafting and the PDF alone while reading, and
-            a toggle between "split" and one favoured pane cannot express
-            both without a second control anyway.
-          */}
-          <div className="mr-1 flex items-center rounded-md border border-border p-0.5">
-            {VIEW_MODES.map(({ mode, label, Icon }) => (
-              <button
-                key={mode}
-                onClick={() => setViewMode(mode)}
-                title={label}
-                aria-label={label}
-                aria-pressed={viewMode === mode}
-                className={
-                  viewMode === mode
-                    ? "rounded-[3px] bg-muted p-1 text-foreground"
-                    : "rounded-[3px] p-1 text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground"
-                }
-              >
-                <Icon className="size-3.5" />
-              </button>
-            ))}
-          </div>
-
-          {/*
-            The engine lives behind this popover rather than on the rail
-            because it is ALREADY decided for the user: import picks xelatex
-            when the source loads fontspec/unicode-math/polyglossia, which
-            hard-fail under pdflatex. Someone who has to change it needs the
-            explanation more than they need the control.
-          */}
-          <div className="relative">
-            <button
-              onClick={() => setEngineOpen((prev) => !prev)}
-              title="Compiler settings"
-              aria-label="Compiler settings"
-              aria-expanded={engineOpen}
-              className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-            >
-              <Cog className="size-4" />
-            </button>
-            {engineOpen && (
-              <div className="absolute right-0 z-20 mt-1 w-72 rounded-lg border border-border bg-popover p-3 text-left shadow-md">
-                <label className="text-xs font-medium text-foreground">Engine</label>
-                <select
-                  value={doc.engine}
-                  disabled={!canEdit}
-                  onChange={(e) => void doc.setEngine(e.target.value as LatexEngine)}
-                  className="mt-1 w-full rounded-md border border-input bg-background px-2 py-1 text-sm"
-                >
-                  <option value="pdflatex">pdflatex</option>
-                  <option value="xelatex">xelatex</option>
-                </select>
-                <p className="mt-2 text-[11px] leading-snug text-muted-foreground">
-                  pdflatex is faster and is what most publisher templates
-                  assume. Switch to xelatex if the document loads{" "}
-                  <code className="font-mono">fontspec</code>,{" "}
-                  <code className="font-mono">unicode-math</code> or{" "}
-                  <code className="font-mono">polyglossia</code>, or needs a
-                  system font or a non-Latin script.
-                </p>
+        {/* `selectedId` trails the route by one render (the hook mirrors the
+            prop in an effect), so this is a transient state, not the "no
+            document" case the list page owns. */}
+        {doc.selectedId === null ? (
+          <div className="min-h-0 flex-1 animate-pulse bg-muted" />
+        ) : isDesktop ? (
+          <ResizablePanelGroup orientation="horizontal" className="hidden min-h-0 flex-1 md:flex">
+            <ResizablePanel defaultSize={20} minSize={14} maxSize={32}>
+              <div className="flex h-full flex-col">
+                <div className="flex items-center gap-1 border-b p-1.5">
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    aria-label="New file"
+                    disabled={!canEdit}
+                    onClick={() => openNewFile("")}
+                  >
+                    <FilePlus2 className="size-3.5" aria-hidden />
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    aria-label="Import zip"
+                    disabled={!canEdit}
+                    onClick={() => setImportOpen(true)}
+                  >
+                    <UploadCloud className="size-3.5" aria-hidden />
+                  </Button>
+                  {uploadControl(false)}
+                </div>
+                <div className="min-h-0 flex-1 overflow-y-auto">
+                  {tree}
+                  {canDuplicate && (
+                    <div className="px-2 pb-2">
+                      <Button variant="ghost" size="sm" className="text-[11px]" onClick={handleDuplicate}>
+                        Duplicate current file
+                      </Button>
+                    </div>
+                  )}
+                </div>
+                {/*
+                  Always visible, not just above some threshold: a cap the
+                  user can't see is a cap they hit as an unexplained failure
+                  -- this footer is the reason the tree endpoint returns these
+                  two numbers at all.
+                */}
+                <div className="border-t px-3 py-2">
+                  <Progress
+                    value={Math.min(pctUsed, 100)}
+                    aria-label="Project storage used"
+                    className={cn("h-1", pctUsed >= 90 && "bg-destructive/20 [&>div]:bg-destructive")}
+                  />
+                  <p
+                    className={cn(
+                      "mt-1.5 text-[11px]",
+                      pctUsed >= 90 ? "font-medium text-destructive" : "text-muted-foreground"
+                    )}
+                  >
+                    {formatBytes(doc.usedBytes)} of {formatBytes(doc.maxBytes)}
+                  </p>
+                </div>
               </div>
-            )}
+            </ResizablePanel>
+            <ResizableHandle withHandle />
+            <ResizablePanel defaultSize={80}>{main}</ResizablePanel>
+          </ResizablePanelGroup>
+        ) : (
+          <div className="flex min-h-0 flex-1 flex-col md:hidden">
+            <div className="flex items-center gap-1 border-b p-1.5">
+              <Button
+                variant="ghost"
+                size="sm"
+                className="gap-1.5"
+                disabled={!canEdit}
+                onClick={() => openNewFile("")}
+              >
+                <FilePlus2 className="size-3.5" aria-hidden /> New file
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="gap-1.5"
+                disabled={!canEdit}
+                onClick={() => setImportOpen(true)}
+              >
+                <UploadCloud className="size-3.5" aria-hidden /> Import zip
+              </Button>
+              {uploadControl(true)}
+            </div>
+            <div className="max-h-40 overflow-y-auto border-b">{tree}</div>
+            {main}
           </div>
-
-          {/* Default size and variant, exactly like "New project" on the
-              research page: this is the primary action of the whole
-              workspace, and it was the only primary button in the app
-              shrunk to the size of the icon-only controls beside it. */}
-          <Button
-            className="shrink-0 gap-1.5"
-            disabled={!canEdit || compile.compiling}
-            title={canEdit ? "Compile (Cmd/Ctrl+S)" : "You need editor access to compile"}
-            onClick={() => void compile.compile()}
-          >
-            {compile.compiling ? (
-              <Loader2 className="size-4 animate-spin" />
-            ) : (
-              <Play className="size-4" />
-            )}
-            Compile
-          </Button>
-        </div>
+        )}
       </div>
 
-      {/* `selectedId` trails the route by one render (the hook mirrors the
-          prop in an effect), so this is a transient state, not the "no
-          document" case the list page owns. */}
-      {doc.selectedId === null ? (
-        <div className="flex-1 animate-pulse rounded-xl bg-muted" />
-      ) : (
-        <div className="relative flex flex-1 overflow-hidden rounded-xl border border-border">
-          {treeCollapsed ? (
-            /* A rail, not nothing: with the tree gone there would otherwise
-               be no control anywhere on screen to bring it back. */
-            <div className="flex w-9 shrink-0 flex-col items-center border-r border-border pt-2">
-              <Button
-                size="icon-sm"
-                variant="ghost"
-                title="Show file tree"
-                aria-label="Show file tree"
-                onClick={() => setTreeCollapsed(false)}
-              >
-                <PanelLeftOpen className="size-3.5" />
-              </Button>
-            </div>
-          ) : (
-            <>
-              <FileTree
-                nodes={buildTree(doc.files)}
-                width={treeWidth}
-                activePath={doc.activePath}
-                mainPath={doc.mainPath}
-                canEdit={canEdit}
-                usedBytes={doc.usedBytes}
-                maxBytes={doc.maxBytes}
-                error={doc.error}
-                onOpen={(path) => void doc.openFile(path)}
-                onCreate={(path) => void withConflicts((p) => doc.createFile(p), path)}
-                onDelete={(path) => void doc.removeFile(path)}
-                onRename={(from, to) => void withConflicts((p) => doc.moveFile(from, p), to)}
-                onRenameDir={(from, to) => void withConflicts((p) => doc.moveDir(from, p), to)}
-                onSetMain={(path) => void doc.setMainPath(path)}
-                onUpload={(path, data) =>
-                  void withConflicts((p) => doc.uploadBinary(p, data), path)
-                }
-                onAddFile={handleAddFile}
-                onCollapse={() => setTreeCollapsed(true)}
-              />
-              {/* Sits OUTSIDE the tree so its drag maths reads the row's own
-                  box -- `beginDrag` measures `parentElement`, and inside the
-                  tree that would be the tree itself, which is the thing
-                  being resized. */}
-              <div
-                onPointerDown={startTreeDrag}
-                className="w-1.5 shrink-0 cursor-col-resize bg-border transition-colors hover:bg-primary/40"
-                role="separator"
-                aria-orientation="vertical"
-                aria-label="Resize file tree"
-              />
-            </>
-          )}
+      <DocumentShareDialog
+        open={shareOpen}
+        onOpenChange={setShareOpen}
+        projectId={projectId}
+        documentId={documentId}
+        canEdit={canEdit}
+        fullAccessUserIds={[ownerId, doc.document?.created_by ?? null].filter(
+          (id): id is string => id !== null
+        )}
+      />
 
-          {/* The editor+preview region. `min-w-0` is load-bearing on a flex
-              child holding a horizontally-scrolling editor: without it the
-              region refuses to shrink below its content and the tree's drag
-              pushes the preview off-screen instead of narrowing anything. */}
-          <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
-            <div className="flex min-h-0 flex-1">
-              {/*
-                Hidden with `display: none`, never unmounted. CodeMirror's
-                undo history, cursor and scroll position live in the editor
-                instance, and pdf.js re-parses the document on mount -- so
-                unmounting would make every flip through the view modes cost
-                the user real state and the browser a full re-render of the
-                PDF.
-              */}
-              <div
-                style={viewMode === "split" ? { width: `${splitPercent}%` } : undefined}
-                className={
-                  viewMode === "pdf"
-                    ? "hidden"
-                    : viewMode === "code"
-                      ? "flex min-w-0 flex-1 flex-col overflow-hidden"
-                      : "flex min-w-0 shrink-0 flex-col overflow-hidden"
-                }
-              >
-                <OpenTabs
-                  paths={doc.openPaths}
-                  activePath={doc.activePath}
-                  dirtyPaths={doc.dirtyPaths}
-                  onSelect={(path) => void doc.openFile(path)}
-                  onClose={doc.closeFile}
-                />
-                <div className="flex items-center justify-end border-b border-border px-3 py-1 text-[11px] text-muted-foreground">
-                  {doc.saveState === "saving" && "Saving…"}
-                  {doc.saveState === "error" && (
-                    <span className="text-destructive">Could not save</span>
-                  )}
-                </div>
-                <div className="flex-1 overflow-hidden">
-                  {activePath === null ? (
-                    <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
-                      Select or create a file to start writing.
-                    </div>
-                  ) : /*
-                      BOTH signals, never `isTexPath` alone. The two answer
-                      DIFFERENT questions (see `isTexPath`'s own comment in
-                      `lib/latex-tree.ts`): `is_binary` is how the backend STORED
-                      the bytes, `isTexPath` is whether a human should be shown a
-                      text buffer. A `.bib`/`.sty`/`.bst` in latin-1 out of a real
-                      Overleaf or arXiv project decodes as binary and is stored
-                      that way, and so is every file uploaded through the file
-                      tree whatever its extension. `openFile` correctly skips the
-                      fetch and the buffer for such a path -- so routing on the
-                      extension alone rendered an EMPTY editor over it, and the
-                      first keystroke PUT that empty buffer through `write_text`,
-                      which sets `is_binary=False` and `blob=None`. The original
-                      bytes were gone permanently and silently. Do not
-                      re-simplify this to one test.
-                    */
-                  isTexPath(activePath) && !activeMeta?.is_binary ? (
-                    <EditorPane
-                      path={activePath}
-                      openPaths={doc.openPaths}
-                      value={doc.buffers[activePath] ?? ""}
-                      onChange={handleChange}
-                      onLineDoubleClick={handleLineDoubleClick}
-                      gotoLine={compile.gotoLine}
-                      readOnly={!canEdit}
-                    />
-                  ) : (
-                    <BinaryPreview
-                      projectId={projectId}
-                      documentId={doc.selectedId}
-                      path={activePath}
-                      sizeBytes={activeMeta?.size_bytes ?? 0}
-                    />
-                  )}
-                </div>
-              </div>
-
-              {viewMode === "split" && (
-                <div
-                  onPointerDown={startSplitDrag}
-                  className="w-1.5 shrink-0 cursor-col-resize bg-border transition-colors hover:bg-primary/40"
-                  role="separator"
-                  aria-orientation="vertical"
-                  aria-label="Resize editor and preview"
-                />
-              )}
-
-              <div
-                className={
-                  viewMode === "code"
-                    ? "hidden"
-                    : "flex min-w-0 flex-1 flex-col overflow-hidden"
-                }
-              >
-                <div className="flex items-center justify-between border-b border-border px-3 py-1.5 text-xs">
-                  <div className="flex items-center gap-2">
-                    <span className="text-muted-foreground">Preview</span>
-                    {compile.pdfBytes && compile.stale && (
-                      <span className="rounded-full bg-amber-500/15 px-2 py-0.5 text-[11px] font-medium text-amber-700 dark:text-amber-400">
-                        {STALE_NOTE}
-                      </span>
-                    )}
-                    {/* `compile.syncNote` is already gated inside the hook: the
-                        "PDF is out of date" message can never render while the
-                        PDF is not, in fact, out of date. Every OTHER message
-                        (declined-sync, "no place matches", "unavailable") passes
-                        through unconditionally. */}
-                    {compile.syncNote && (
-                      <span className="text-[11px] text-muted-foreground">{compile.syncNote}</span>
-                    )}
-                  </div>
-                </div>
-                <div className="flex-1 overflow-hidden">
-                  <PdfViewer
-                    bytes={compile.pdfBytes}
-                    scale={1.25}
-                    highlight={compile.highlight}
-                    scrollToPage={compile.scrollToPage}
-                    onPageDoubleClick={(page, point) => void compile.jumpToSource(page, point)}
-                  />
-                </div>
-              </div>
-            </div>
-
-            {/*
-              Spans BOTH panes rather than living inside the preview, because
-              a compile log is the only place a failed build explains itself
-              -- inside the preview it would be invisible in source-only
-              mode, which is exactly the mode someone fixing an error is in.
-            */}
-            {compile.log !== null && (
-              <LogPanel
-                log={compile.log.text}
-                errorFile={compile.log.file}
-                errorLine={compile.log.line}
-                onClose={() => compile.setLog(null)}
-                onJumpToError={handleJumpToError}
-              />
-            )}
-          </div>
-        </div>
-      )}
+      <EditorNewFileDialog
+        open={newFile.open}
+        initialValue={newFile.initial}
+        busy={newFileBusy}
+        error={newFileError}
+        onOpenChange={(open) => {
+          setNewFile((s) => ({ ...s, open }));
+          if (!open) setNewFileError(null);
+        }}
+        onCreate={(path) => void handleCreateFile(path)}
+      />
 
       <ImportDropzone
         open={importOpen}
@@ -894,26 +839,22 @@ export function LatexWorkspace({ projectId, documentId, ownerId }: LatexWorkspac
         onConfirm={(decisions) => void confirmConflict(decisions)}
       />
 
-      <RenameDialog
-        open={renamingDoc}
-        title="Rename LaTeX project"
-        label="Name"
-        initialValue={doc.document?.name ?? ""}
+      <EditorRenameDialog
+        open={renameOpen}
+        currentName={doc.document?.name ?? ""}
         busy={renameBusy}
         error={renameError}
-        onCancel={() => {
-          setRenamingDoc(false);
-          setRenameError(null);
+        onOpenChange={(open) => {
+          setRenameOpen(open);
+          if (!open) setRenameError(null);
         }}
-        onSubmit={(value) => void handleRenameDocument(value)}
+        onRename={(value) => void handleRenameDocument(value)}
       />
 
-      <ConfirmDialog
-        open={confirmingDelete}
-        title="Delete this LaTeX project?"
-        description={`"${doc.document?.name ?? "This project"}" and all of its files will be deleted. This cannot be undone.`}
-        confirmLabel="Delete"
-        onCancel={() => setConfirmingDelete(false)}
+      <EditorDeleteDialog
+        open={deleteOpen}
+        docName={doc.document?.name ?? "This document"}
+        onOpenChange={setDeleteOpen}
         onConfirm={() => void handleDeleteDocument()}
       />
     </div>

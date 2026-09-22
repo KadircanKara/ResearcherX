@@ -9,7 +9,13 @@ import {
   synctexReverse,
   PdfNotFoundError,
 } from "@/lib/latex";
-import { isStale, type CompiledState, type TexPoint } from "@/lib/latex-sync";
+import {
+  compileStatus,
+  isStale,
+  type CompiledState,
+  type CompileStatus,
+  type TexPoint,
+} from "@/lib/latex-sync";
 
 // Both sync directions answer for the LAST COMPILED source; after an edit
 // the line numbers have drifted, so a jump is still shown but labelled
@@ -42,9 +48,18 @@ export interface CompileLog {
 
 export interface UseLatexCompile {
   compiling: boolean;
+  /** One status for the compile bar and the PDF pane; see `compileStatus`. */
+  status: CompileStatus;
   compiled: CompiledState | null;
   pdfBytes: Uint8Array | null;
+  /** The FAILED build's log, with its error location. Null after a success. */
   log: CompileLog | null;
+  /**
+   * The last SUCCESSFUL build's log text, for the compile bar's expandable
+   * view. Kept apart from `log` so `log !== null` keeps meaning exactly "the
+   * latest build failed" -- a success log must never offer a jump.
+   */
+  buildLog: string | null;
   setLog: (log: CompileLog | null) => void;
   highlight: PdfHighlight | null;
   scrollToPage: number | null;
@@ -114,6 +129,7 @@ export function useLatexCompile(args: {
   const [compiled, setCompiled] = useState<CompiledState | null>(null);
   const [pdfBytes, setPdfBytes] = useState<Uint8Array | null>(null);
   const [log, setLog] = useState<CompileLog | null>(null);
+  const [buildLog, setBuildLog] = useState<string | null>(null);
   const [highlight, setHighlight] = useState<PdfHighlight | null>(null);
   const [scrollToPage, setScrollToPage] = useState<number | null>(null);
   const [gotoLine, setGotoLine] = useState<{ line: number; nonce: number } | null>(
@@ -249,6 +265,7 @@ export function useLatexCompile(args: {
       setPdfBytes(bytes);
       setCompiled({ revision: result.revision, hash: result.pdf_hash });
       setLog(null);
+      setBuildLog(result.log);
       // A fresh PDF invalidates both: `highlight` marks coordinates in the
       // PREVIOUS build, meaningless against this one, and `syncNote` may
       // still be the "PDF is out of date" message from a jump made while
@@ -284,6 +301,7 @@ export function useLatexCompile(args: {
     setCompiled(null);
     setPdfBytes(null);
     setLog(null);
+    setBuildLog(null);
     setHighlight(null);
     setScrollToPage(null);
     setGotoLine(null);
@@ -410,9 +428,11 @@ export function useLatexCompile(args: {
 
   return {
     compiling,
+    status: compileStatus({ compiling, failed: log !== null, built: compiled !== null }),
     compiled,
     pdfBytes,
     log,
+    buildLog,
     setLog,
     highlight,
     scrollToPage,
