@@ -29,10 +29,16 @@ export function Nav() {
 
   return (
     <header
+      // No backdrop blur while the menu is open: `backdrop-filter` makes the
+      // header the containing block for its fixed descendants, so the
+      // full-screen menu would shrink to the header's own box and the hero
+      // would show through behind the links.
       className={`fixed inset-x-0 top-0 z-50 transition-colors duration-300 ${
-        scrolled || open
-          ? "bg-lp-ink/90 backdrop-blur-md border-b border-lp-paper/15"
-          : "bg-transparent border-b border-transparent"
+        open
+          ? "bg-lp-ink border-b border-lp-paper/15"
+          : scrolled
+            ? "bg-lp-ink/90 backdrop-blur-md border-b border-lp-paper/15"
+            : "bg-transparent border-b border-transparent"
       }`}
     >
       <div className="mx-auto flex h-16 max-w-[1240px] items-center justify-between px-5 sm:px-8">
