@@ -1,224 +1,175 @@
 "use client"
 
-import { useState, useEffect, useCallback } from "react"
-import { XIcon, Share2 } from "lucide-react"
+import { useCallback, useEffect, useRef, useState } from "react"
+import { Button } from "@/components/ui/button"
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
   DialogHeader,
   DialogTitle,
-  DialogDescription,
-  DialogFooter,
-  DialogTrigger,
 } from "@/components/ui/dialog"
-import { Button } from "@/components/ui/button"
-import { Avatar, AvatarFallback } from "@/components/ui/avatar"
-import { useIdentity } from "@/lib/identity"
 import {
-  listMembers,
-  addMember,
-  removeMember,
-} from "@/lib/projects"
-import type { Member, Role, Project } from "@/lib/types"
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
+import { InitialsAvatar } from "@/components/initials-avatar"
+import { useIdentity } from "@/lib/identity"
+import { addMember, listMembers, removeMember } from "@/lib/projects"
+import type { Member, Project } from "@/lib/types"
 
-function initials(name: string) {
-  return name
-    .split(" ")
-    .map((p) => p[0])
-    .join("")
-    .toUpperCase()
-    .slice(0, 2)
-}
-
-interface ShareDialogProps {
+/**
+ * The prototype's "Share project" dialog on the real membership API.
+ *
+ * Project sharing is binary (owner / member); finer access lives on each
+ * LaTeX document's own share dialog. Only an owner can add or remove, so the
+ * Remove buttons and the add row render for owners only -- for anyone else
+ * the server would refuse both. The member list is re-read on every open and
+ * after every change, and reported through `onMembersChange` so the header's
+ * member count follows it.
+ */
+export function ShareProjectDialog({
+  open,
+  onOpenChange,
+  project,
+  members: initialMembers,
+  onMembersChange,
+}: {
+  open: boolean
+  onOpenChange: (open: boolean) => void
   project: Project
-  initialMembers: Member[]
-}
-
-export function ShareDialog({ project, initialMembers }: ShareDialogProps) {
+  members: Member[]
+  onMembersChange?: (members: Member[]) => void
+}) {
   const { me, users } = useIdentity()
-  const [open, setOpen] = useState(false)
   const [members, setMembers] = useState<Member[]>(initialMembers)
-  const [loading, setLoading] = useState(false)
+  const [pending, setPending] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  // Add collaborator form state. Sharing is binary now (owner/member), so
-  // this row is just a user picker -- there is no role to select.
-  const [addUserId, setAddUserId] = useState("")
-  const [adding, setAdding] = useState(false)
+  // Read through a ref: a caller's inline callback is a new function every
+  // render, and `refresh` depending on it would re-run the open effect after
+  // every report -- a fetch loop.
+  const report = useRef(onMembersChange)
+  report.current = onMembersChange
 
   const refresh = useCallback(async () => {
-    setLoading(true)
     try {
       const fresh = await listMembers(project.id)
       setMembers(fresh)
+      report.current?.(fresh)
     } catch {
-      // silently keep stale data
-    } finally {
-      setLoading(false)
+      // Keep the list we have; a failed re-read is not worth an error line.
     }
   }, [project.id])
 
-  // Re-fetch on open
   useEffect(() => {
-    if (open) refresh()
+    if (open) {
+      setError(null)
+      setPending(null)
+      void refresh()
+    }
   }, [open, refresh])
 
-  // Determine acting user's role in this project
-  const myRole: Role | null = me
-    ? (members.find((m) => m.user.id === me.id)?.role ?? null)
-    : null
-  const isOwner = myRole === "owner"
+  const isOwner = !!me && members.some((m) => m.user.id === me.id && m.role === "owner")
+  const candidates = users.filter((u) => !members.some((m) => m.user.id === u.id))
 
-  // Count owners for last-owner protection
-  const ownerCount = members.filter((m) => m.role === "owner").length
-
-  // Users not yet members (for picker)
-  const memberIds = new Set(members.map((m) => m.user.id))
-  const nonMembers = users.filter((u) => !memberIds.has(u.id))
-
-  // Reset add-form when members change
-  useEffect(() => {
-    if (nonMembers.length > 0 && !nonMembers.find((u) => u.id === addUserId)) {
-      setAddUserId(nonMembers[0]?.id ?? "")
-    }
-    if (nonMembers.length === 0) setAddUserId("")
-  }, [members]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  async function handleRemove(userId: string) {
+  async function remove(userId: string) {
+    setBusy(true)
     setError(null)
     try {
       await removeMember(project.id, userId)
       await refresh()
     } catch {
       setError("Failed to remove member.")
+    } finally {
+      setBusy(false)
     }
   }
 
-  async function handleAdd() {
-    if (!addUserId) return
-    setAdding(true)
+  async function add() {
+    if (!pending) return
+    setBusy(true)
     setError(null)
     try {
-      await addMember(project.id, { user_id: addUserId, role: "member" })
+      await addMember(project.id, { user_id: pending, role: "member" })
+      setPending(null)
       await refresh()
     } catch {
-      setError("Failed to add collaborator.")
+      setError("Failed to add member.")
     } finally {
-      setAdding(false)
+      setBusy(false)
     }
   }
 
   return (
-    <Dialog open={open} onOpenChange={setOpen}>
-      <DialogTrigger render={<Button variant="outline" />}>
-        <Share2 className="size-4" />
-        Share
-      </DialogTrigger>
-
+    <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-lg">
         <DialogHeader>
-          <DialogTitle>Share &ldquo;{project.title}&rdquo;</DialogTitle>
+          <DialogTitle>Share project</DialogTitle>
           <DialogDescription>
-            Manage collaborators and their access to chats, papers and LaTeX docs.
+            Everyone here can open every conversation, paper and LaTeX project in{" "}
+            {project.title}.
           </DialogDescription>
         </DialogHeader>
 
-        {/* Project sharing is binary. Finer access lives on individual LaTeX
-            projects, in each document's own share dialog. */}
-        {/* Members list */}
-        <div className="flex flex-col gap-1">
-          {loading && members.length === 0 && (
-            <p className="py-2 text-sm text-muted-foreground">Loading…</p>
-          )}
-          {members.map((member) => {
-            const isThisOwner = member.role === "owner"
-            const canRemove =
-              isOwner && !isThisOwner && !(isThisOwner && ownerCount <= 1)
-
-            return (
-              <div
-                key={member.user.id}
-                className="flex items-center gap-3 rounded-lg py-1.5"
-              >
-                {/* Avatar + presence dot (decorative) */}
-                <span className="relative shrink-0">
-                  <Avatar size="sm">
-                    <AvatarFallback
-                      style={{ backgroundColor: member.user.avatar_color }}
-                      className="text-white"
-                    >
-                      {initials(member.user.name)}
-                    </AvatarFallback>
-                  </Avatar>
-                  <span className="absolute -bottom-0.5 -right-0.5 size-2.5 rounded-full border-2 border-card bg-emerald-500" />
-                </span>
-
-                {/* Name + email */}
-                <div className="min-w-0 flex-1">
-                  <p className="truncate text-sm font-medium leading-tight">
-                    {member.user.name}
-                  </p>
-                  <p className="truncate text-xs text-muted-foreground">
-                    {member.user.email}
-                  </p>
-                </div>
-
-                {/* Role display -- binary now, so there is nothing to pick. */}
-                <span className="shrink-0 text-xs text-muted-foreground">
-                  {isThisOwner ? "Owner" : "Member"}
-                </span>
-
-                {/* Remove button — owners only, not for owners */}
-                {canRemove ? (
-                  <button
-                    type="button"
-                    aria-label={`Remove ${member.user.name}`}
-                    onClick={() => handleRemove(member.user.id)}
-                    className="ml-1 shrink-0 rounded p-0.5 text-muted-foreground transition-colors hover:text-destructive focus:outline-none focus:ring-2 focus:ring-ring/50"
-                  >
-                    <XIcon className="size-3.5" />
-                  </button>
-                ) : (
-                  /* spacer to keep layout stable */
-                  <span className="ml-1 size-5 shrink-0" />
-                )}
+        <ul className="divide-y rounded-md border">
+          {members.map((member) => (
+            <li key={member.user.id} className="flex items-center gap-3 px-3 py-2.5">
+              <InitialsAvatar person={member.user} size={28} />
+              <div className="min-w-0 flex-1">
+                <p className="truncate text-[13px] font-medium">{member.user.name}</p>
+                <p className="truncate text-[12px] text-muted-foreground">{member.user.email}</p>
               </div>
-            )
-          })}
-        </div>
+              <span className="text-[12px] capitalize text-muted-foreground">{member.role}</span>
+              {isOwner && member.role !== "owner" && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  disabled={busy}
+                  onClick={() => void remove(member.user.id)}
+                >
+                  Remove
+                </Button>
+              )}
+            </li>
+          ))}
+        </ul>
 
-        {/* Add collaborator row — owner only, only if non-members exist */}
-        {isOwner && nonMembers.length > 0 && (
-          <div className="flex items-center gap-2 border-t border-border pt-3">
-            <label className="sr-only" htmlFor="pick-user">
-              Add collaborator
-            </label>
-            <select
-              id="pick-user"
-              value={addUserId}
-              onChange={(e) => setAddUserId(e.target.value)}
-              className="min-w-0 flex-1 rounded-md border border-border bg-background px-2 py-1.5 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring/50"
-            >
-              {nonMembers.map((u) => (
-                <option key={u.id} value={u.id}>
-                  {u.name} ({u.email})
-                </option>
-              ))}
-            </select>
-
-            <Button
-              disabled={!addUserId || adding}
-              onClick={handleAdd}
-            >
-              {adding ? "Adding…" : "Add"}
+        {isOwner && (
+          <div className="flex items-end gap-2">
+            <div className="flex-1 space-y-1.5">
+              <p className="text-[12px] font-medium">Add a member</p>
+              <Select
+                value={pending}
+                onValueChange={(value) => setPending(value as string | null)}
+                disabled={candidates.length === 0}
+                items={candidates.map((p) => ({ value: p.id, label: p.name }))}
+              >
+                <SelectTrigger aria-label="Choose a person to add">
+                  <SelectValue
+                    placeholder={candidates.length ? "Choose a person" : "Everyone is already here"}
+                  />
+                </SelectTrigger>
+                <SelectContent>
+                  {candidates.map((p) => (
+                    <SelectItem key={p.id} value={p.id}>
+                      {p.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <Button disabled={!pending || busy} onClick={() => void add()}>
+              Add
             </Button>
           </div>
         )}
 
         {error && <p className="text-sm text-destructive">{error}</p>}
-
-        <DialogFooter showCloseButton />
       </DialogContent>
     </Dialog>
   )

@@ -1,13 +1,13 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { ArrowLeft, PanelRight, RefreshCw, Square } from "lucide-react";
-import Link from "next/link";
+import { Menu, RefreshCw, Square } from "lucide-react";
 import { Answer } from "@/components/explorer/answer";
 import { CandidateCard } from "@/components/explorer/candidate-card";
 import { Composer } from "@/components/explorer/composer";
 import { ProcessTrail } from "@/components/explorer/process-trail";
 import { Rail } from "@/components/explorer/rail";
+import { ThemeToggle } from "@/components/theme-toggle";
 import { Button } from "@/components/ui/button";
 import {
   Sheet,
@@ -21,7 +21,6 @@ import {
   replaySchedule,
 } from "@/lib/explorer";
 import type { Candidate, ExplorationThread } from "@/lib/explorer-data";
-import { routes } from "@/lib/routes";
 
 /**
  * The user's own question. `@`-mentioned papers are rendered as chips: the
@@ -109,16 +108,10 @@ export function ThreadView({ thread }: { thread: ExplorationThread }) {
   const rail = <Rail thread={thread} added={added} candidates={candidates} />;
 
   return (
-    <div className="min-h-full">
-      {/* `top-12` clears the app shell's own sticky topbar, which is h-12. */}
-      <header className="sticky top-12 z-20 flex h-14 items-center gap-2 border-b bg-background/95 px-4 backdrop-blur">
-        <Link
-          href={routes.explorer()}
-          aria-label="All explorations"
-          className="shrink-0 rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-        >
-          <ArrowLeft className="size-4" />
-        </Link>
+    <div className="min-h-screen">
+      {/* `top-14` below `lg` clears the app shell's own sticky mobile header
+          (h-14); from `lg` the shell has no header and this one pins to 0. */}
+      <header className="sticky top-14 z-20 flex h-14 items-center gap-3 border-b bg-background/95 px-4 backdrop-blur lg:top-0">
         <div className="min-w-0 flex-1">
           <p className="truncate text-sm font-semibold">{thread.title}</p>
           <p className="hidden text-[11px] text-muted-foreground sm:block">
@@ -131,11 +124,11 @@ export function ThreadView({ thread }: { thread: ExplorationThread }) {
               <Button variant="outline" size="sm" className="rounded-full xl:hidden" />
             }
           >
-            <PanelRight />
+            <Menu />
             Details
           </SheetTrigger>
-          <SheetContent side="bottom">
-            <SheetTitle>Exploration details</SheetTitle>
+          <SheetContent side="bottom" className="max-h-[85vh] overflow-y-auto rounded-t-lg">
+            <SheetTitle className="mb-4">Exploration details</SheetTitle>
             {rail}
           </SheetContent>
         </Sheet>
@@ -150,6 +143,9 @@ export function ThreadView({ thread }: { thread: ExplorationThread }) {
             Replay
           </Button>
         )}
+        <div className="hidden lg:block">
+          <ThemeToggle />
+        </div>
       </header>
 
       <div className="grid xl:grid-cols-[minmax(0,1fr)_320px]">
@@ -214,7 +210,7 @@ export function ThreadView({ thread }: { thread: ExplorationThread }) {
           <Composer value={draft} onChange={setDraft} onSubmit={start} />
         </main>
         <aside className="hidden border-l bg-card/30 p-4 xl:block">
-          <div className="sticky top-[104px]">{rail}</div>
+          <div className="sticky top-[72px]">{rail}</div>
         </aside>
       </div>
     </div>

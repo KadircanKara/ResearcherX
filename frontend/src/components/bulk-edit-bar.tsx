@@ -1,15 +1,24 @@
 "use client";
 
-import { Loader2, Trash2 } from "lucide-react";
+import { Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
 interface BulkEditBarProps {
-  active: boolean;
-  count: number;
-  total: number;
-  allSelected: boolean;
-  busy: boolean;
-  onEnter: () => void;
+  /** Whether the list is in edit mode. (`active` is the older name.) */
+  editing?: boolean;
+  active?: boolean;
+  /** How many rows are selected. (`count` is the older name.) */
+  selectedCount?: number;
+  count?: number;
+  /** Rows available to select; 0 disables Edit and Select all. Optional. */
+  total?: number;
+  /** Accepted for older callers; the prototype's bar shows both buttons. */
+  allSelected?: boolean;
+  /** A delete in flight: Delete shows a spinner and every button waits. */
+  busy?: boolean;
+  /** Enter edit mode. (`onEnter` is the older name.) */
+  onStart?: () => void;
+  onEnter?: () => void;
   onSelectAll: () => void;
   onClear: () => void;
   onDelete: () => void;
@@ -17,45 +26,58 @@ interface BulkEditBarProps {
 }
 
 /**
+ * The selection bar shared by the conversation list, the paper table and the
+ * LaTeX project list, drawn as the prototype's.
+ *
  * Presentational only. Every list owns its own selection state -- the bar
  * renders it and reports intent, so the three lists cannot drift into three
  * different edit-mode behaviours.
  */
 export function BulkEditBar({
+  editing,
   active,
+  selectedCount,
   count,
   total,
-  allSelected,
-  busy,
+  busy = false,
+  onStart,
   onEnter,
   onSelectAll,
   onClear,
   onDelete,
   onDone,
 }: BulkEditBarProps) {
-  if (!active) {
+  const isEditing = editing ?? active ?? false;
+  const selected = selectedCount ?? count ?? 0;
+  const empty = total === 0;
+
+  if (!isEditing) {
     return (
-      <Button variant="outline" disabled={total === 0} onClick={onEnter}>
+      <Button variant="outline" size="sm" disabled={empty} onClick={onStart ?? onEnter}>
         Edit
       </Button>
     );
   }
 
   return (
-    <div className="flex items-center gap-2">
-      <span className="text-sm text-muted-foreground">{count} selected</span>
-      <Button
-        variant="ghost"
-        onClick={allSelected ? onClear : onSelectAll}
-        disabled={total === 0}
-      >
-        {allSelected ? "Clear" : "Select all"}
+    <div className="fade-block flex flex-wrap items-center gap-2">
+      <span className="text-[13px] tabular-nums text-muted-foreground">{selected} selected</span>
+      <Button variant="ghost" size="sm" disabled={empty || busy} onClick={onSelectAll}>
+        Select all
       </Button>
-      <Button variant="destructive" disabled={count === 0 || busy} onClick={onDelete}>
-        {busy ? <Loader2 className="size-4 animate-spin" /> : <Trash2 className="size-4" />}
+      <Button variant="ghost" size="sm" disabled={busy} onClick={onClear}>
+        Clear
+      </Button>
+      <Button
+        variant="destructive"
+        size="sm"
+        disabled={selected === 0 || busy}
+        onClick={onDelete}
+      >
+        {busy && <Loader2 className="animate-spin" />}
         Delete
       </Button>
-      <Button variant="outline" onClick={onDone} disabled={busy}>
+      <Button variant="outline" size="sm" disabled={busy} onClick={onDone}>
         Done
       </Button>
     </div>

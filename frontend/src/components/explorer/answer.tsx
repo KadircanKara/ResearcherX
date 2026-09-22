@@ -43,6 +43,7 @@ function Citation({ source }: { source: Source }) {
         finalFocus={false}
         onMouseEnter={() => setOpen(true)}
         onMouseLeave={() => setOpen(false)}
+        className="w-72 p-3"
       >
         <p className="text-xs font-semibold">{source.title}</p>
         <p className="mt-1 text-[11px] text-muted-foreground">

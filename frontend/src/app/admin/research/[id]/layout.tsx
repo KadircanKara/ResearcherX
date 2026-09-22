@@ -1,15 +1,23 @@
 "use client"
 
-import { routes } from "@/lib/routes";
-import { useEffect, useState } from "react"
+import { useCallback, useEffect, useState } from "react"
+import Link from "next/link"
 import { useParams, usePathname } from "next/navigation"
 import { ProjectHeader } from "@/components/project-header"
 import { ProjectTabs } from "@/components/project-tabs"
+import { ThemeToggle } from "@/components/theme-toggle"
 import { getProject } from "@/lib/projects"
 import { useIdentity } from "@/lib/identity"
+import { projectTab, routes } from "@/lib/routes"
 import { cn } from "@/lib/utils"
-import type { ProjectDetail } from "@/lib/types"
+import type { Member, ProjectDetail } from "@/lib/types"
 
+/**
+ * The project shell, ported from the prototype's `research.$id.tsx`: the top
+ * bar with the theme toggle, a bordered band holding the project header and
+ * its tabs, and the tab's content below. Chat reads as a column (`max-w-4xl`);
+ * every other tab takes the full `110rem`.
+ */
 export default function ProjectLayout({ children }: { children: React.ReactNode }) {
   const { id } = useParams<{ id: string }>()
   const pathname = usePathname()
@@ -35,51 +43,78 @@ export default function ProjectLayout({ children }: { children: React.ReactNode 
       .finally(() => setLoading(false))
   }, [id, me?.id])
 
+  const onMembersChange = useCallback((members: Member[]) => {
+    setDetail((prev) => (prev ? { ...prev, members } : prev))
+  }, [])
+
+  const topBar = (
+    <div className="hidden h-14 items-center justify-end border-b px-6 lg:flex">
+      <ThemeToggle />
+    </div>
+  )
+
   if (loading) {
     return (
-      <div className="mx-auto w-full max-w-5xl px-6 py-10">
-        <div className="h-24 animate-pulse rounded-xl bg-muted" />
-        <div className="mt-2 h-10 animate-pulse rounded-xl bg-muted" />
-      </div>
+      <>
+        {topBar}
+        <div className="border-b">
+          <div className="mx-auto w-full max-w-[110rem] space-y-4 px-4 py-5 sm:px-8" aria-busy>
+            <div className="space-y-2">
+              <div className="h-4 w-28 animate-pulse rounded-md bg-muted" />
+              <div className="h-6 w-72 max-w-full animate-pulse rounded-md bg-muted" />
+              <div className="h-4 w-96 max-w-full animate-pulse rounded-md bg-muted" />
+            </div>
+            <div className="h-9 w-full max-w-md animate-pulse rounded-lg bg-muted" />
+          </div>
+        </div>
+      </>
     )
   }
 
   if (notFound || !detail) {
     return (
-      <div className="mx-auto w-full max-w-5xl px-6 py-10">
-        <div className="flex flex-col items-center gap-3 py-32 text-center">
-          <p className="text-base font-medium text-foreground">Project not found</p>
-          <p className="text-sm text-muted-foreground">
-            This project may have been deleted or you may not have access.
-          </p>
+      <>
+        {topBar}
+        <div className="flex min-h-[60vh] items-center justify-center px-4">
+          <div className="max-w-md text-center">
+            <h1 className="text-xl font-semibold tracking-tight text-foreground">
+              Project not found
+            </h1>
+            <p className="mt-2 text-sm text-muted-foreground">
+              This project may have been deleted or you may not have access.
+            </p>
+            <div className="mt-6">
+              <Link
+                href={routes.research()}
+                className="inline-flex items-center justify-center rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90"
+              >
+                Back to research
+              </Link>
+            </div>
+          </div>
         </div>
-      </div>
+      </>
     )
   }
 
-  // Only Chat is a reading column and stays at 5xl. The other three are not,
-  // and each states its own cap for its own reason: the LaTeX tab is a
-  // three-pane editor and 5xl is roughly one pane wide; the Graph tab is a
-  // canvas beside a rail that has to sit within one eye span, which the
-  // concept puts at 2080px (130rem). Papers is a table beside a 20rem rail
-  // and caps at 90rem: its four columns are fixed-width apart from the
-  // title, so past that the row is mostly the gap between a title and the
-  // State cell that belongs to it.
-  const tabWidth = pathname.startsWith(routes.latex(id))
-    ? "max-w-[110rem]"
-    : pathname.startsWith(routes.graph(id))
-      ? "max-w-[130rem]"
-      : pathname.startsWith(routes.papers(id))
-        ? "max-w-[90rem]"
-        : "max-w-5xl"
+  const tab = projectTab(pathname, id)
+  // Chat reads as a column; every other tab wants the full width.
+  const wide = tab !== "chat"
 
   return (
-    <div className={cn("mx-auto w-full px-6 py-8", tabWidth)}>
-      <ProjectHeader detail={detail} />
-      <div className="mt-5">
-        <ProjectTabs projectId={id} />
+    <>
+      {topBar}
+      <div className="border-b">
+        <div className="mx-auto w-full max-w-[110rem] space-y-4 px-4 py-5 sm:px-8">
+          <ProjectHeader detail={detail} onMembersChange={onMembersChange} />
+          <ProjectTabs projectId={id} active={tab} />
+        </div>
       </div>
-      <div className="mt-6">{children}</div>
-    </div>
+      <div
+        className={cn("mx-auto w-full px-4 py-6 sm:px-8", wide ? "max-w-[110rem]" : "max-w-4xl")}
+      >
+        {children}
+      </div>
+    </>
   )
 }

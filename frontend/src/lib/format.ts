@@ -50,3 +50,44 @@ export function previousDay(day: string): string {
 export function plural(n: number, one: string, many = `${one}s`): string {
   return `${n} ${n === 1 ? one : many}`;
 }
+
+/** `2026-09-18` → `18 Sep`: the day without its year, for a column that is
+ *  already scoped to recent activity. Same no-`Date` parsing as `formatDate`. */
+export function formatShortDay(stamp: string): string {
+  const [, m, d] = datePart(stamp).split("-");
+  const month = MONTHS[Number(m) - 1];
+  if (!month) return datePart(stamp);
+  return `${Number(d)} ${month}`;
+}
+
+/**
+ * "just now" / "12 min ago" / "2h ago" / "Yesterday" / "Sep 18" -- how long
+ * ago an ISO timestamp was, relative to `now`.
+ *
+ * Unlike the functions above this one has to parse the stamp: an age is a
+ * difference of instants. It is called from client components only, after
+ * the data has been fetched, so server and browser never both render it.
+ * `now` is a parameter so the thresholds are testable.
+ */
+export function relativeLabel(iso: string, now: Date = new Date()): string {
+  const then = new Date(iso);
+  if (Number.isNaN(then.getTime())) return iso;
+  const mins = Math.round((now.getTime() - then.getTime()) / 60_000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins} min ago`;
+  const hours = Math.round(mins / 60);
+  if (hours < 24) return `${hours}h ago`;
+  if (hours < 48) return "Yesterday";
+  return `${MONTHS[then.getUTCMonth()]} ${then.getUTCDate()}`;
+}
+
+/** `Ada Kim` → `AK`: up to two initials, for an avatar tile. */
+export function initials(name: string): string {
+  return name
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((part) => part[0])
+    .join("")
+    .slice(0, 2)
+    .toUpperCase();
+}

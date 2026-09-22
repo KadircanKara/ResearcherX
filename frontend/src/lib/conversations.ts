@@ -1,55 +1,32 @@
 /**
- * Pure formatting rules for the Chat conversation list and thread header.
+ * Pure rules for the Chat conversation list and thread header.
  *
  * Unlike Explorer's, the stamps here are REAL and come from the backend as UTC
  * ISO-8601 (`2026-08-19T14:02:11.123456+00:00`). They are converted to the
  * reader's own local wall clock exactly once, in `toLocalStamp`, and every rule
- * downstream operates on the `YYYY-MM-DDTHH:MM` string that produces — so
- * "Today" means today where the reader is sitting, and the day-boundary logic
- * in `activityStamp` never has to know about time zones.
+ * downstream formats the `YYYY-MM-DDTHH:MM` string that produces — so a
+ * conversation started late in the evening is dated the day the reader saw it,
+ * not the day it was in UTC.
  *
  * There is no hydration hazard in doing this: both Chat screens are client
  * components that render a skeleton until their fetch lands, so no timestamp
  * is ever part of the server-rendered HTML.
  *
- * The two stamp rules below used to live in `lib/explorer.ts`, back when both
- * screens wanted the same wording. Explorer's redesign wants its own (`Sep 18`,
- * a twelve-hour clock, `12 min ago`), so each screen now owns how its dates
- * read and `lib/format.ts` keeps only what they genuinely share.
+ * The wording is the app prototype's: the list reads `18 Sep 2026` for when a
+ * conversation started and `18 Sep` for its last activity, and the thread
+ * header reads `Started 18 Sep 2026`. Explorer owns different wording for its
+ * own stamps; `lib/format.ts` keeps only the substrate both compose.
  */
 
-import { datePart, formatDate, plural, previousDay, timePart } from "./format";
+import { formatDate, formatShortDay, plural } from "./format";
 import type { ChatMessage } from "./types";
 
 function pad(n: number): string {
   return String(n).padStart(2, "0");
 }
 
-/**
- * Last-activity wording: `Today, 15:10`, `Yesterday, 10:22`, `16 Aug 2026`.
- * Older stamps drop the time — a clock is only meaningful while "today" and
- * "yesterday" still locate it.
- */
-function activityStamp(stamp: string, now: string): string {
-  const day = datePart(stamp);
-  const today = datePart(now);
-  const time = timePart(stamp);
-  if (day === today) return time ? `Today, ${time}` : "Today";
-  if (day === previousDay(today)) return time ? `Yesterday, ${time}` : "Yesterday";
-  return formatDate(stamp);
-}
-
-/** Thread header: `today` / `yesterday` / `2 Aug 2026`. */
-function startedStamp(stamp: string, now: string): string {
-  const day = datePart(stamp);
-  const today = datePart(now);
-  if (day === today) return "today";
-  if (day === previousDay(today)) return "yesterday";
-  return formatDate(stamp);
-}
-
-/** A `Date` as the local-wall-clock `YYYY-MM-DDTHH:MM` string the stamp rules
- *  above (and everything in `lib/format.ts`) are written against. */
+/** A `Date` as the local-wall-clock `YYYY-MM-DDTHH:MM` string the formatters
+ *  in `lib/format.ts` are written against. */
 export function toLocalStamp(date: Date): string {
   return (
     `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}` +
@@ -57,27 +34,36 @@ export function toLocalStamp(date: Date): string {
   );
 }
 
+function localStamp(iso: string): string | null {
+  const at = new Date(iso);
+  return Number.isNaN(at.getTime()) ? null : toLocalStamp(at);
+}
+
 /**
- * Last-activity column: `Today, 14:02`, `Yesterday, 09:41`, `16 Aug 2026`.
+ * The Started column: `18 Sep 2026`.
  * An unparseable stamp yields `""` rather than `Invalid Date` — a broken cell
  * must not be louder than a correct one.
  */
-export function activityLabel(iso: string, now: Date = new Date()): string {
-  const at = new Date(iso);
-  if (Number.isNaN(at.getTime())) return "";
-  return activityStamp(toLocalStamp(at), toLocalStamp(now));
+export function startedDay(iso: string): string {
+  const stamp = localStamp(iso);
+  return stamp ? formatDate(stamp) : "";
 }
 
-/** Thread header: `started today` / `started yesterday` / `started 2 Aug 2026`. */
-export function startedAt(iso: string, now: Date = new Date()): string {
-  const at = new Date(iso);
-  if (Number.isNaN(at.getTime())) return "";
-  return `started ${startedStamp(toLocalStamp(at), toLocalStamp(now))}`;
+/** The Last activity column: `18 Sep`, the day without its year. */
+export function activityDay(iso: string): string {
+  const stamp = localStamp(iso);
+  return stamp ? formatShortDay(stamp) : "";
 }
 
-/** List header count. Zero is spelled out — "0 conversations" reads as a bug. */
+/** Thread header: `Started 18 Sep 2026`, or `""` for a broken stamp. */
+export function startedAt(iso: string): string {
+  const day = startedDay(iso);
+  return day ? `Started ${day}` : "";
+}
+
+/** List header count: `0 conversations`, `1 conversation`, `5 conversations`. */
 export function conversationCount(total: number): string {
-  return total === 0 ? "No conversations yet" : plural(total, "conversation");
+  return plural(total, "conversation");
 }
 
 /**
@@ -99,28 +85,47 @@ export function questionCount(
   );
 }
 
+/** The parts of a click that decide what a conversation row does with it. */
+export interface RowClick {
+  /** The list is in bulk-select (edit) mode. */
+  editing: boolean;
+  /** `MouseEvent.button`: 0 is the primary button. */
+  button: number;
+  metaKey: boolean;
+  ctrlKey: boolean;
+  shiftKey: boolean;
+  altKey: boolean;
+}
+
 /**
- * The Started column: `Today`, `Yesterday`, `16 Aug 2026`.
+ * What a click anywhere on a conversation row does.
  *
- * Date only, never a clock — unlike Last activity. When a thread began is a
- * day; the minute it began is not something anyone returns to a list to read.
+ * The whole row is one real link (the title's, stretched over the row), so
+ * outside edit mode every click is left to the browser: a plain click opens
+ * the conversation, and cmd/ctrl/shift/middle-click open it in a new tab or
+ * window exactly as they would on any link.
+ *
+ * In edit mode a PLAIN primary click selects the row instead — the list is
+ * being picked from, not read. A modified click still navigates: it can only
+ * mean "open this somewhere else", and swallowing it would make the row the
+ * one link on the page that ignores cmd-click.
  */
-export function startedDay(iso: string, now: Date = new Date()): string {
-  const at = new Date(iso);
-  if (Number.isNaN(at.getTime())) return "";
-  // Slicing the time off is what makes `activityStamp` drop the clock.
-  return activityStamp(toLocalStamp(at).slice(0, 10), toLocalStamp(now));
+export function rowClickAction(click: RowClick): "toggle" | "navigate" {
+  if (!click.editing) return "navigate";
+  if (click.button !== 0) return "navigate";
+  if (click.metaKey || click.ctrlKey || click.shiftKey || click.altKey) return "navigate";
+  return "toggle";
 }
 
 /**
  * One question and the answer it got.
  *
- * The reading-column treatment draws a hairline BETWEEN turns, which means the
- * renderer has to know where a turn ends — a flat message list cannot say. The
- * grouping is deliberately forgiving of shapes the backend does not currently
- * produce, because the alternative is dropping a message on the floor: an
- * assistant message with no question before it opens a turn of its own, and a
- * question that somehow got two answers keeps both.
+ * The grouping is deliberately forgiving of shapes the backend does not
+ * currently produce, because the alternative is dropping a message on the
+ * floor: an assistant message with no question before it opens a turn of its
+ * own, and a question that somehow got two answers keeps both. The thread
+ * uses it to hand each answer the question it answered (for highlighting that
+ * question's terms in the citation card).
  */
 export interface ChatTurn {
   /** Stable across re-renders: the id of the first message in the turn. */

@@ -1,173 +1,225 @@
 /**
- * The Graph screen's corpus — SAMPLE DATA FOR A DESIGN PREVIEW.
+ * The Graph screen's corpus. It is SAMPLE DATA for a design preview.
  *
  * There is no similarity backend. Nothing here calls one, stubs one at the
- * network layer, or pretends to. The papers, the distances, the facets and
- * every line of copy below are the approved "Reading Room" concept's own
- * content, kept verbatim so this screen stays consistent with the mockups it
- * came from.
+ * network layer, or pretends to. The papers, the similarities, the facets and
+ * the claims below come verbatim from the app prototype's mock data
+ * (`src/lib/mock/graph.ts` and the Multi-UAV Coordination papers in
+ * `src/lib/mock/papers.ts`, Lovable project 36777114), so this screen shows the
+ * same nodes, links and rail as the prototype.
  *
- * IT IS DELIBERATELY NOT THE PROJECT'S OWN LIBRARY. Drawing these distances
- * between the user's real paper titles would put invented measurements about
- * their real data on screen, which is the one thing this design has refused
- * throughout — a number on screen must be a number something produced. The
- * concept says as much where it explains why it shows four papers and not six:
- * "Showing six would mean inventing two."
+ * It is NOT the project's own library. Drawing these similarities between the
+ * user's real paper titles would put invented measurements about their data on
+ * screen, and the preview note on the page says as much.
  *
  * When a real similarity service exists, this module is the seam: the shapes
  * below are what the components consume.
  */
 
-/** A paper that can be placed on the canvas. */
+/** A paper the rail can offer. The fields the Graph screen reads, and no more. */
 export type GraphPaper = {
   id: string;
-  /** The node label. */
-  short: string;
-  /** The full title, used in the detail panel and as the node's tooltip. */
-  full: string;
-  byline: string;
-  chunks: number;
-  /**
-   * Where this paper lands when it is added, in percent of the canvas box.
-   * A HOME position, not a simulation seed: adding places the node here,
-   * removing frees the spot, and nothing else on the canvas moves. There is no
-   * physics in this screen and nothing settles.
-   */
-  home: { x: number; y: number };
+  title: string;
+  authors: string[];
+  year: number;
+  /** Short topical tags, shown as badges in the detail panel. */
+  facets: string[];
 };
 
-/** A paper the picker offers and refuses, with the real reason. */
-export type UnavailablePaper = { title: string; why: string };
+/** A paper placed on the canvas. `x`/`y` are in canvas units (900 x 520). */
+export type GraphNode = {
+  paperId: string;
+  /** Short label: first author + year. */
+  label: string;
+  x: number;
+  y: number;
+};
 
-/** An edge. `distance` is a cosine distance: smaller is nearer. */
 export type GraphEdge = {
+  id: string;
+  /** paperId */
   a: string;
+  /** paperId */
   b: string;
-  distance: number;
-  facet: string;
-  /** What else the pair shares, or that this is their only link. */
-  also: string;
-  /** The two papers' claims on the shared facet. */
+  similarity: number;
+  sharedFacet: string;
   claimA: string;
   claimB: string;
-  /** What separates them anyway. */
-  separates: string;
+  separation: string;
 };
 
+/** A paper the rail lists but refuses to place, with the reason. */
+export type UnavailablePaper = {
+  paperId: string;
+  reason: string;
+};
+
+/** The sample library, in the prototype's order (the rail lists it in this order). */
 export const GRAPH_PAPERS: readonly GraphPaper[] = [
   {
-    id: "p1",
-    short: "Cooperative Multi-Target Search",
-    full: "Cooperative Multi-Target Search with UAV Swarms",
-    byline: "Yanmaz & Kandemir, 2021",
-    chunks: 67,
-    home: { x: 21, y: 24 },
+    id: "p-coverage",
+    title: "Resilient Coverage Control for Heterogeneous Drone Teams",
+    authors: ["L. Ferrer", "M. Oyelaran", "D. Strand"],
+    year: 2024,
+    facets: ["coverage recovery", "heterogeneous fleets", "Voronoi"],
   },
   {
-    id: "p2",
-    short: "Decentralised Task Reallocation",
-    full: "Decentralised Task Reallocation under Agent Failure in Aerial Teams",
-    byline: "Güven & Okumuş, 2023",
-    chunks: 108,
-    home: { x: 67, y: 70 },
+    id: "p-bandwidth",
+    title: "Bandwidth-Aware Consensus for Distributed Path Planning",
+    authors: ["T. Nowak", "S. Beaumont"],
+    year: 2023,
+    facets: ["consensus", "bandwidth", "scheduling"],
   },
   {
-    id: "p3",
-    short: "Hybrid Split-Federated Learning",
-    full: "Hybrid Split-Federated Learning for Bandwidth-Constrained Edge Fleets",
-    byline: "Nakamura & Adeyemi, 2024",
-    chunks: 96,
-    home: { x: 17, y: 72 },
+    id: "p-reward",
+    title: "Reward Shaping for Multi-Agent Patrol under Partial Observability",
+    authors: ["P. Raman", "H. Adeyemi"],
+    year: 2025,
+    facets: ["reward design", "patrol", "partial observability"],
   },
   {
-    id: "p4",
-    short: "Voronoi Partitioning",
-    full: "Voronoi Partitioning for Persistent Area Coverage",
-    byline: "Halvorsen & Ruiz, 2022",
-    chunks: 141,
-    home: { x: 63, y: 21 },
+    id: "p-mobility",
+    title: "Trace-Driven Mobility Models for Low-Power Aerial Fleets",
+    authors: ["D. Strand", "K. Imaoka"],
+    year: 2024,
+    facets: ["mobility", "link uptime", "traces"],
+  },
+  {
+    id: "p-formation",
+    title: "Recovering Formation after Vehicle Loss: A Field Study",
+    authors: ["L. Ferrer", "J. Okonkwo"],
+    year: 2024,
+    facets: ["coverage recovery", "field study", "formation"],
+  },
+  {
+    id: "p-allocation",
+    title: "Decentralised Task Allocation with Intermittent Links",
+    authors: ["T. Nowak", "A. Villalba"],
+    year: 2023,
+    facets: ["task allocation", "auctions", "partitions"],
+  },
+  {
+    id: "p-schedules",
+    title: "Learning Communication Schedules for Swarm Relays",
+    authors: ["S. Beaumont", "P. Raman"],
+    year: 2025,
+    facets: ["relays", "scheduling", "learning"],
+  },
+  {
+    id: "p-fusion",
+    title: "Sensor Fusion under Wind Disturbance for Quadrotor Teams",
+    authors: ["K. Imaoka", "M. Oyelaran"],
+    year: 2022,
+    facets: ["sensor fusion", "wind", "estimation"],
+  },
+  {
+    id: "p-benchmark",
+    title: "A Benchmark for Coverage Loss Scenarios",
+    authors: ["H. Adeyemi", "L. Ferrer", "T. Nowak"],
+    year: 2025,
+    facets: ["benchmark", "coverage recovery", "evaluation"],
+  },
+  {
+    id: "p-hierarchical",
+    title: "Hierarchical Planning for Search-and-Rescue Drones",
+    authors: ["J. Okonkwo", "A. Villalba"],
+    year: 2023,
+    facets: ["hierarchical planning", "search and rescue"],
+  },
+  {
+    id: "p-relay",
+    title: "Energy-Aware Relay Placement for Aerial Meshes",
+    authors: ["A. Villalba", "D. Strand"],
+    year: 2024,
+    facets: ["relays", "energy", "placement"],
+  },
+  {
+    id: "p-safe",
+    title: "Safe Exploration for Multi-Robot Mapping",
+    authors: ["M. Oyelaran", "P. Raman"],
+    year: 2025,
+    facets: ["safe exploration", "mapping"],
   },
 ];
 
-export const GRAPH_UNAVAILABLE: readonly UnavailablePaper[] = [
-  {
-    title: "NeMo-Mobility: Trace-Driven Models for Low-Power IoT Fleets",
-    why: "Still ingesting, 41%. With no embeddings it has no distance to anything, so it cannot be placed.",
-  },
-  {
-    title: "Deep RL Subagent Decomposition for Multi-Robot Patrol",
-    why: "No extractable text, so nothing was ever embedded. Upload a readable copy to place it here.",
-  },
+/** The papers on the canvas at first load, with their starting positions. */
+export const GRAPH_NODES: readonly GraphNode[] = [
+  { paperId: "p-coverage", label: "Ferrer 2024", x: 240, y: 150 },
+  { paperId: "p-formation", label: "Ferrer 2024b", x: 520, y: 110 },
+  { paperId: "p-bandwidth", label: "Nowak 2023", x: 330, y: 340 },
+  { paperId: "p-reward", label: "Raman 2025", x: 640, y: 300 },
 ];
 
 export const GRAPH_EDGES: readonly GraphEdge[] = [
   {
-    a: "p1",
-    b: "p4",
-    distance: 0.59,
-    facet: "setting",
-    also: "Also share method at 0.62 and problem at 0.68 — the only pair here linked on three facets.",
-    claimA: "Six quadrotors, broadcast over 802.11, single operator.",
-    claimB: "Up to 30 fixed-wing vehicles, 3 s beacon, no operator in the loop.",
-    separates:
-      "The nearest pair in your library — and they are nearest because they describe similar fleets in similar words, not because they argue the same thing.",
+    id: "e1",
+    a: "p-coverage",
+    b: "p-formation",
+    similarity: 0.82,
+    sharedFacet: "coverage recovery",
+    claimA: "Recovery time is dominated by traversal, not by re-partitioning.",
+    claimB: "Reassignment latency explained under four seconds of a minute-long recovery.",
+    separation:
+      "One derives the bound analytically from the partition update; the other measures it in the field and never states a bound.",
   },
   {
-    a: "p1",
-    b: "p2",
-    distance: 0.74,
-    facet: "problem",
-    also: "Their only link above the cut.",
-    claimA: "Keep a multi-target search covered when a vehicle stops reporting.",
-    claimB: "Keep tasks moving when an agent stops bidding for them.",
-    separates:
-      "Same problem, incompatible units: one measures area held, the other tasks completed. That is why 0.79 and 0.91 are not comparable figures.",
+    id: "e2",
+    a: "p-coverage",
+    b: "p-bandwidth",
+    similarity: 0.67,
+    sharedFacet: "distributed coordination",
+    claimA: "The weighted partition converges within a bounded number of rounds.",
+    claimB: "Budgeted gossip keeps the disagreement bound of full gossip.",
+    separation:
+      "They bound different quantities — area assignment versus state disagreement — and neither paper relates the two.",
   },
   {
-    a: "p2",
-    b: "p4",
-    distance: 0.7,
-    facet: "evidence",
-    also: "Also share problem at 0.72.",
-    claimA: "40 runs on a 12-robot ground testbed; agents removed by switching them off.",
-    claimB: "30 outdoor flights; a vehicle commanded to land mid-mission on 11 of them.",
-    separates:
-      "Both use real hardware. Only one is airborne when it loses a member, which is the distinction your last chat turn turned on.",
+    id: "e3",
+    a: "p-formation",
+    b: "p-bandwidth",
+    similarity: 0.61,
+    sharedFacet: "fleet coordination",
+    claimA: "The inheriting vehicle's climb profile predicts the slow tail.",
+    claimB: "A slower first round is the price of a scheduled link budget.",
+    separation:
+      "The field study treats communication as free; the consensus paper treats flight dynamics as absent.",
   },
   {
-    a: "p1",
-    b: "p3",
-    distance: 0.66,
-    facet: "evidence",
-    also: "Their only link above the cut.",
-    claimA: "Bernoulli link loss in the authors’ own simulator.",
-    claimB: "Replayed fleet traces, no hardware in the loop.",
-    separates:
-      "The one thing Split-Federated Learning shares with anything in your library is how it was evaluated, not what it claims.",
+    id: "e4",
+    a: "p-bandwidth",
+    b: "p-reward",
+    similarity: 0.72,
+    sharedFacet: "partial information",
+    claimA: "Agents act on a stale view when their slot has not come round.",
+    claimB: "Patrol policies collapse when the observation is partial.",
+    separation:
+      "One staleness is imposed by the schedule and known; the other is a property of the environment and is not.",
+  },
+  {
+    id: "e5",
+    a: "p-coverage",
+    b: "p-reward",
+    similarity: 0.64,
+    sharedFacet: "area persistence",
+    claimA: "A residual hole can persist after the fleet stops moving.",
+    claimB: "Staleness-keyed shaping stops the policy abandoning quiet regions.",
+    separation:
+      "The coverage paper treats persistence geometrically; the patrol paper treats it as a reward-design problem.",
   },
 ];
 
-/** The cut. The same figure governs retrieval in Chat, which is why it is
- *  stated on the screen rather than hidden in a config. */
-export const GRAPH_CUT = 0.75;
+/** Papers the rail lists under "Not available", in this order. */
+export const GRAPH_UNAVAILABLE: readonly UnavailablePaper[] = [
+  { paperId: "p-fusion", reason: "no indexed text" },
+  { paperId: "p-allocation", reason: "not checked yet" },
+  { paperId: "p-hierarchical", reason: "added before the similarity index existed" },
+  { paperId: "p-relay", reason: "not checked yet" },
+];
 
-/** Screen copy, verbatim from the concept. */
-export const GRAPH_COPY = {
-  eyebrow: "Multi-UAV coordination",
-  title: "A graph you built",
-  meta: ["Curated by you, not laid out for you", "Nodes stay where you put them"],
-  derived:
-    "Edges come from similarity between the papers’ embeddings, and every edge carries its distance and the facet the two papers actually share. Two papers can sit close in that space and argue about different things, so read an edge as a place to look rather than as a finding. Smaller distances are nearer; nothing looser than 0.75 is drawn.",
-  /* The claim the reader meets before any number: stated once, where the
-     numbers are introduced, and not repeated on every row. */
-  preview:
-    "Design preview — ResearcherX has no similarity backend yet. The six papers, the distances and the facets below are sample data from the design concept, not your library.",
-  emptyTitle: "An empty graph",
-  emptyBody:
-    "Add a paper from the list on the right and it lands on the canvas. Add a second and any link closer than 0.75 is drawn between them, labelled with the distance and what the two papers share. Drag a node and it stays where you put it.",
-  thresholdHeading: "Threshold",
-  thresholdValue: "Cut at 0.75",
-  thresholdNote:
-    "The same 0.75 governs retrieval in Chat, so an edge you can see here is a link a question can reach.",
-  pickerHeading: "Add a paper",
-} as const;
+/** Papers available to add to the canvas but not placed at first load. */
+export const GRAPH_SPARE_NODES: readonly GraphNode[] = [
+  { paperId: "p-benchmark", label: "Adeyemi 2025", x: 420, y: 230 },
+  { paperId: "p-schedules", label: "Beaumont 2025", x: 180, y: 380 },
+  { paperId: "p-safe", label: "Oyelaran 2025", x: 700, y: 180 },
+  { paperId: "p-mobility", label: "Strand 2024", x: 560, y: 420 },
+];

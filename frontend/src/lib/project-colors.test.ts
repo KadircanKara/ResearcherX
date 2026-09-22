@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { colorFor, isProjectColor, PROJECT_COLORS } from "./project-colors";
+import { colorFor, isProjectColor, PROJECT_COLORS, PROJECT_PALETTE } from "./project-colors";
 
 describe("colorFor", () => {
   it("uses the project's own colour when it is in the palette", () => {
@@ -32,5 +32,14 @@ describe("isProjectColor", () => {
     // enumerates, so a lowercase copy is not the same value.
     expect(isProjectColor("#3b82f6")).toBe(false);
     expect(isProjectColor("red")).toBe(false);
+  });
+});
+
+describe("PROJECT_PALETTE", () => {
+  it("names every palette colour, in picker order", () => {
+    expect(PROJECT_PALETTE.map((s) => s.hex)).toEqual([...PROJECT_COLORS]);
+    expect(PROJECT_PALETTE.map((s) => s.label)).toEqual([
+      "Blue", "Violet", "Pink", "Red", "Orange", "Amber", "Green", "Teal", "Cyan", "Slate",
+    ]);
   });
 });

@@ -13,6 +13,9 @@
      here and nowhere else; the variable itself comes from next/font on the
      same element. */
   --font-serif: var(--font-instrument-serif), Georgia, serif;
+  /* globals.css sets the app's 14px body size; the landing keeps the
+     browser's 16px it was designed on. */
+  font-size: 1rem;
   overflow-x: clip;
   -webkit-font-smoothing: antialiased;
 }

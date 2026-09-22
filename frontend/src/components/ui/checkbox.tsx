@@ -1,34 +1,33 @@
 "use client";
 
+/**
+ * Checkbox, with the prototype's class strings on Base UI's Checkbox.
+ *
+ * A primitive rather than a bare `<input type="checkbox">`: the native control
+ * paints itself from the OS accent colour and ignores the theme entirely.
+ *
+ * Radix → Base UI: Radix's `checked="indeterminate"` is Base UI's separate
+ * `indeterminate` boolean, and `onCheckedChange` receives a plain boolean.
+ * Base UI marks state with `data-checked` / `data-indeterminate` rather than
+ * `data-state`.
+ */
 import { Checkbox as CheckboxPrimitive } from "@base-ui/react/checkbox";
-import { Check } from "lucide-react";
+import { Check, Minus } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 
-/**
- * The tick box the bulk-edit tables select rows with.
- *
- * A primitive rather than a bare `<input type="checkbox">`: the native
- * control paints itself from the OS accent colour and ignores the theme
- * entirely, so on the dark theme it renders a light box on a dark row. Base
- * UI keeps the semantics (it renders a real input underneath) and hands us
- * the box to style.
- */
 function Checkbox({ className, ...props }: CheckboxPrimitive.Root.Props) {
   return (
     <CheckboxPrimitive.Root
       data-slot="checkbox"
       className={cn(
-        "peer flex size-4 shrink-0 items-center justify-center rounded-[4px] border border-input bg-background outline-none transition-colors",
-        "focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50",
-        "data-[checked]:border-primary data-[checked]:bg-primary data-[checked]:text-primary-foreground",
-        "disabled:cursor-not-allowed disabled:opacity-50 dark:bg-input/30",
+        "peer grid h-4 w-4 shrink-0 cursor-pointer place-content-center rounded-sm border border-primary shadow focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50 data-[checked]:bg-primary data-[checked]:text-primary-foreground data-[indeterminate]:bg-primary data-[indeterminate]:text-primary-foreground",
         className
       )}
       {...props}
     >
-      <CheckboxPrimitive.Indicator className="flex items-center justify-center text-current">
-        <Check className="size-3" strokeWidth={3} />
+      <CheckboxPrimitive.Indicator className="grid place-content-center text-current">
+        {props.indeterminate ? <Minus className="h-4 w-4" /> : <Check className="h-4 w-4" />}
       </CheckboxPrimitive.Indicator>
     </CheckboxPrimitive.Root>
   );

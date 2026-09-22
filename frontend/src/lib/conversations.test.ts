@@ -1,9 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
-  activityLabel,
+  activityDay,
   conversationCount,
   groupTurns,
   questionCount,
+  rowClickAction,
   startedAt,
   startedDay,
   toLocalStamp,
@@ -32,48 +33,83 @@ describe("toLocalStamp", () => {
   });
 });
 
-describe("activityLabel", () => {
-  const now = local(2026, 8, 19, 16, 30);
-
-  it("uses the clock only while today and yesterday still locate it", () => {
-    expect(activityLabel(local(2026, 8, 19, 14, 2).toISOString(), now)).toBe("Today, 14:02");
-    expect(activityLabel(local(2026, 8, 18, 9, 41).toISOString(), now)).toBe(
-      "Yesterday, 09:41"
-    );
-    expect(activityLabel(local(2026, 8, 16, 9, 41).toISOString(), now)).toBe("16 Aug 2026");
+describe("startedDay", () => {
+  it("is the prototype's day, month and year, never a clock", () => {
+    expect(startedDay(local(2026, 9, 18, 8, 5).toISOString())).toBe("18 Sep 2026");
+    expect(startedDay(local(2026, 1, 2, 23, 59).toISOString())).toBe("2 Jan 2026");
   });
 
-  it("reads the reader's own wall clock, not UTC", () => {
-    // The same instant, expressed as a local Date: whatever the runner's
-    // offset, this must land on "today" and on the local hour and minute.
-    const at = local(2026, 8, 19, 23, 59);
-    expect(activityLabel(at.toISOString(), now)).toBe("Today, 23:59");
+  it("dates the reader's own wall clock, not UTC", () => {
+    // Built from local components: whatever the runner's offset, a late
+    // evening start stays on the local day it happened.
+    expect(startedDay(local(2026, 9, 18, 23, 59).toISOString())).toBe("18 Sep 2026");
+    expect(startedDay(local(2026, 9, 19, 0, 1).toISOString())).toBe("19 Sep 2026");
   });
 
   it("renders nothing rather than Invalid Date for a broken stamp", () => {
-    expect(activityLabel("not a date", now)).toBe("");
+    expect(startedDay("nope")).toBe("");
+    expect(startedDay("")).toBe("");
+  });
+});
+
+describe("activityDay", () => {
+  it("drops the year — the column is already about recent activity", () => {
+    expect(activityDay(local(2026, 9, 18, 14, 2).toISOString())).toBe("18 Sep");
+    expect(activityDay(local(2025, 12, 31, 23, 59).toISOString())).toBe("31 Dec");
+  });
+
+  it("renders nothing for a broken stamp", () => {
+    expect(activityDay("not a date")).toBe("");
   });
 });
 
 describe("startedAt", () => {
-  const now = local(2026, 8, 19, 16, 30);
-
-  it("drops the clock entirely — a thread's start is a day, not a moment", () => {
-    expect(startedAt(local(2026, 8, 19, 8, 5).toISOString(), now)).toBe("started today");
-    expect(startedAt(local(2026, 8, 18, 8, 5).toISOString(), now)).toBe("started yesterday");
-    expect(startedAt(local(2026, 8, 2, 8, 5).toISOString(), now)).toBe("started 2 Aug 2026");
+  it("reads as the thread header's Started line", () => {
+    expect(startedAt(local(2026, 9, 18, 8, 5).toISOString())).toBe("Started 18 Sep 2026");
   });
 
   it("renders nothing for a broken stamp", () => {
-    expect(startedAt("", now)).toBe("");
+    expect(startedAt("")).toBe("");
   });
 });
 
 describe("conversationCount", () => {
-  it("spells out the empty case", () => {
-    expect(conversationCount(0)).toBe("No conversations yet");
+  it("counts every case the same way, zero included", () => {
+    expect(conversationCount(0)).toBe("0 conversations");
     expect(conversationCount(1)).toBe("1 conversation");
     expect(conversationCount(5)).toBe("5 conversations");
+  });
+});
+
+describe("rowClickAction", () => {
+  const plain = {
+    editing: false,
+    button: 0,
+    metaKey: false,
+    ctrlKey: false,
+    shiftKey: false,
+    altKey: false,
+  };
+
+  it("leaves every click to the link outside edit mode", () => {
+    expect(rowClickAction(plain)).toBe("navigate");
+    expect(rowClickAction({ ...plain, metaKey: true })).toBe("navigate");
+    expect(rowClickAction({ ...plain, button: 1 })).toBe("navigate");
+  });
+
+  it("selects the row on a plain click in edit mode", () => {
+    expect(rowClickAction({ ...plain, editing: true })).toBe("toggle");
+  });
+
+  it("still opens a new tab or window on a modified click in edit mode", () => {
+    for (const key of ["metaKey", "ctrlKey", "shiftKey", "altKey"] as const) {
+      expect(rowClickAction({ ...plain, editing: true, [key]: true })).toBe("navigate");
+    }
+  });
+
+  it("never treats a non-primary button as a selection", () => {
+    expect(rowClickAction({ ...plain, editing: true, button: 1 })).toBe("navigate");
+    expect(rowClickAction({ ...plain, editing: true, button: 2 })).toBe("navigate");
   });
 });
 
@@ -89,17 +125,6 @@ describe("questionCount", () => {
   it("adds turns sent since the snapshot was fetched", () => {
     expect(questionCount([msg("user"), msg("assistant")], 2)).toBe("3 questions");
     expect(questionCount([], 1)).toBe("1 question");
-  });
-});
-
-describe("startedDay", () => {
-  const now = local(2026, 8, 19, 16, 30);
-
-  it("is a day, never a clock", () => {
-    expect(startedDay(local(2026, 8, 19, 8, 5).toISOString(), now)).toBe("Today");
-    expect(startedDay(local(2026, 8, 18, 23, 59).toISOString(), now)).toBe("Yesterday");
-    expect(startedDay(local(2026, 8, 16, 8, 5).toISOString(), now)).toBe("16 Aug 2026");
-    expect(startedDay("nope", now)).toBe("");
   });
 });
 

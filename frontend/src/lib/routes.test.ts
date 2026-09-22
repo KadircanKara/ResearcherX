@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ADMIN_BASE, routes } from "./routes";
+import { ADMIN_BASE, projectTab, routes } from "./routes";
 
 describe("routes", () => {
   it("puts every page under the admin base", () => {
@@ -30,5 +30,22 @@ describe("routes", () => {
   it("leaves the root for the landing page", () => {
     expect(ADMIN_BASE).not.toBe("/");
     expect(routes.home()).toBe("/admin");
+  });
+});
+
+describe("projectTab", () => {
+  it("reads the tab from a project path", () => {
+    expect(projectTab(routes.papers("p1"), "p1")).toBe("papers");
+    expect(projectTab(routes.graph("p1"), "p1")).toBe("graph");
+    expect(projectTab(routes.latexDoc("p1", "d1"), "p1")).toBe("latex");
+    expect(projectTab(routes.conversation("p1", "c1"), "p1")).toBe("chat");
+  });
+
+  it("falls back to chat for the bare project path", () => {
+    expect(projectTab(routes.project("p1"), "p1")).toBe("chat");
+  });
+
+  it("matches whole segments, not prefixes", () => {
+    expect(projectTab(`${routes.papers("p1")}-archive`, "p1")).toBe("chat");
   });
 });

@@ -4,6 +4,8 @@ import {
   insertMention,
   matchPapers,
   reconcileMentions,
+  removeMention,
+  withMention,
   type Mention,
 } from "./mentions";
 import type { Paper } from "./types";
@@ -146,5 +148,53 @@ describe("insertMention – fix round 1", () => {
     const out = insertMention("look at @coop", 8, 13, "Cooperative Search");
     expect(out.text).toBe("look at @Cooperative Search ");
     expect(out.caret).toBe(out.text.length);
+  });
+});
+
+describe("removeMention", () => {
+  const a: Mention = { paperId: "a", title: "Swarm Search" };
+  const b: Mention = { paperId: "b", title: "Voronoi Coverage" };
+
+  it("takes the mention's title out of the text with one adjoining space", () => {
+    const text = "Compare @Swarm Search with @Voronoi Coverage";
+    expect(removeMention(text, [a, b], 0)).toBe("Compare with @Voronoi Coverage");
+  });
+
+  it("takes the space before a title that ends the text", () => {
+    const text = "Compare @Swarm Search with @Voronoi Coverage";
+    expect(removeMention(text, [a, b], 1)).toBe("Compare @Swarm Search with");
+  });
+
+  it("leaves the text alone when the mention no longer stands in it", () => {
+    expect(removeMention("nothing named here", [a], 0)).toBe("nothing named here");
+    expect(removeMention("@Swarm Search", [a], 5)).toBe("@Swarm Search");
+  });
+
+  it("never cuts a shorter title out of a longer one", () => {
+    const short: Mention = { paperId: "s", title: "Search" };
+    const long: Mention = { paperId: "l", title: "Search Methods" };
+    const text = "@Search Methods vs @Search";
+    // Reconcile credits the LONG title with the first span, so removing the
+    // short one must take the second, standalone occurrence.
+    expect(removeMention(text, [short, long], 0)).toBe("@Search Methods vs");
+    expect(reconcileMentions("@Search Methods vs", [short, long])).toEqual([long]);
+  });
+
+  it("removes one of two same-titled papers without touching the other's span", () => {
+    const one: Mention = { paperId: "1", title: "Survey" };
+    const two: Mention = { paperId: "2", title: "Survey" };
+    const next = removeMention("@Survey and @Survey", [one, two], 1);
+    expect(next).toBe("@Survey and");
+    // The caller drops the removed entry itself; the survivor still stands.
+    expect(reconcileMentions(next, [one])).toEqual([one]);
+  });
+});
+
+describe("withMention", () => {
+  it("adds a paper once, however often it is picked", () => {
+    const first = withMention([], paper("p1", "Swarm Search"));
+    expect(first).toEqual([{ paperId: "p1", title: "Swarm Search" }]);
+    expect(withMention(first, paper("p1", "Swarm Search"))).toBe(first);
+    expect(withMention(first, paper("p2", "Other"))).toHaveLength(2);
   });
 });

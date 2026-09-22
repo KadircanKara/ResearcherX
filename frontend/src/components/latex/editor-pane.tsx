@@ -18,21 +18,34 @@ import { latexHighlightStyle, texLanguage } from "@/lib/latex-syntax";
  * channels for Tailwind's `oklch(var(--token) / <alpha>)` form. Defined once
  * at module scope, not per render -- CodeMirror compiles a theme into a
  * stylesheet, and a fresh object each render would mount a new one.
+ *
+ * Metrics follow the prototype's source pane (a borderless mono textarea:
+ * 13px, `leading-relaxed`, `px-3 py-2`, transparent), with CodeMirror's own
+ * extras -- line numbers, the active line -- kept quiet enough to sit inside
+ * that look rather than on top of it.
  */
 const editorTheme = EditorView.theme({
-  "&": { height: "100%", backgroundColor: "transparent", color: "oklch(var(--foreground))" },
-  "&.cm-focused": { outline: "none" },
-  ".cm-scroller": { fontFamily: "var(--font-mono)", lineHeight: "1.6" },
-  ".cm-content": { caretColor: "oklch(var(--foreground))" },
-  ".cm-gutters": {
-    backgroundColor: "transparent",
-    color: "oklch(var(--muted-foreground))",
-    border: "none",
-  },
-  ".cm-activeLine": { backgroundColor: "oklch(var(--muted) / 0.45)" },
-  ".cm-activeLineGutter": {
+  "&": {
+    height: "100%",
     backgroundColor: "transparent",
     color: "oklch(var(--foreground))",
+    fontSize: "13px",
+  },
+  "&.cm-focused": { outline: "none" },
+  ".cm-scroller": { fontFamily: "var(--font-mono)", lineHeight: "1.625" },
+  ".cm-content": { caretColor: "oklch(var(--foreground))", padding: "8px 0" },
+  ".cm-line": { padding: "0 12px 0 6px" },
+  ".cm-gutters": {
+    backgroundColor: "transparent",
+    color: "oklch(var(--muted-foreground) / 0.6)",
+    border: "none",
+    paddingLeft: "6px",
+  },
+  ".cm-lineNumbers .cm-gutterElement": { padding: "0 4px 0 6px" },
+  ".cm-activeLine": { backgroundColor: "oklch(var(--muted) / 0.4)" },
+  ".cm-activeLineGutter": {
+    backgroundColor: "transparent",
+    color: "oklch(var(--muted-foreground))",
   },
   ".cm-selectionBackground, &.cm-focused .cm-selectionBackground": {
     backgroundColor: "oklch(var(--accent))",
@@ -255,5 +268,5 @@ export function EditorPane({
     view.focus();
   }, [gotoLine]);
 
-  return <div ref={hostRef} className="h-full overflow-auto text-sm" />;
+  return <div ref={hostRef} className="h-full min-h-0 flex-1 overflow-auto text-[13px]" />;
 }

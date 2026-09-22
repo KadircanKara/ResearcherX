@@ -51,9 +51,13 @@ const config: Config = {
         },
         destructive: {
           DEFAULT: "oklch(var(--destructive) / <alpha-value>)",
+          foreground: "oklch(var(--destructive-foreground) / <alpha-value>)",
         },
-        border: "oklch(var(--border) / <alpha-value>)",
-        input: "oklch(var(--input) / <alpha-value>)",
+        // These three carry a token-level alpha on the dark theme (the
+        // prototype's `oklch(1 0 0 / 10%)`), multiplied into the utility's own
+        // so `border-border/50` still means half of it. See globals.css.
+        border: "oklch(var(--border) / calc(var(--border-alpha, 1) * <alpha-value>))",
+        input: "oklch(var(--input) / calc(var(--input-alpha, 1) * <alpha-value>))",
         ring: "oklch(var(--ring) / <alpha-value>)",
         positive: "oklch(var(--positive) / <alpha-value>)",
         warning: "oklch(var(--warning) / <alpha-value>)",
@@ -71,7 +75,8 @@ const config: Config = {
           "primary-foreground": "oklch(var(--sidebar-primary-foreground) / <alpha-value>)",
           accent: "oklch(var(--sidebar-accent) / <alpha-value>)",
           "accent-foreground": "oklch(var(--sidebar-accent-foreground) / <alpha-value>)",
-          border: "oklch(var(--sidebar-border) / <alpha-value>)",
+          border:
+            "oklch(var(--sidebar-border) / calc(var(--sidebar-border-alpha, 1) * <alpha-value>))",
           ring: "oklch(var(--sidebar-ring) / <alpha-value>)",
         },
       },

@@ -1,59 +1,160 @@
 "use client";
-import { routes } from "@/lib/routes";
-import { Fragment, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Network, Brain, Compass, PanelLeftClose, PanelLeftOpen } from "lucide-react";
+import { Binoculars, BookOpen, ChevronLeft, ChevronRight, Menu } from "lucide-react";
+import { routes } from "@/lib/routes";
 import { cn } from "@/lib/utils";
 import { listProjects } from "@/lib/projects";
 import { colorFor } from "@/lib/project-colors";
-import { subscribeProjectColor } from "@/lib/project-store";
+import { subscribeProjectColor, subscribeProjectListChanged } from "@/lib/project-store";
+import { initials } from "@/lib/format";
 import { useIdentity } from "@/lib/identity";
 import type { Project } from "@/lib/types";
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from "@/components/ui/tooltip";
+import { Button } from "@/components/ui/button";
+import { Sheet, SheetContent, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
+import { TooltipProvider } from "@/components/ui/tooltip";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { UserMenu } from "@/components/user-menu";
 
-const NAV_LINKS = [
-  { href: routes.research(), label: "Research", icon: Brain },
-  { href: routes.explorer(), label: "Explorer", icon: Compass },
-];
-
-function initials(name: string): string {
-  return name
-    .split(" ")
-    .map((p) => p[0])
-    .join("")
-    .slice(0, 2)
-    .toUpperCase();
-}
-
-/** Gradient brand mark — used in the sidebar and the mobile topbar. */
-function BrandMark() {
-  return (
-    <span className="grid size-7 place-items-center rounded-lg gradient-brand text-white shadow-[0_2px_8px_-2px_#3B82F6]">
-      <Network className="size-4" />
-    </span>
-  );
-}
+/**
+ * The app's frame, ported from the prototype's `app-shell.tsx`: a fixed
+ * sidebar (w-60, or w-16 collapsed) on `lg` and up, a sticky header with a
+ * navigation sheet below it, and the page in `main`.
+ *
+ * The top bar with the theme toggle is NOT here: in the prototype each page
+ * draws its own (`hidden h-14 … lg:flex` with `<ThemeToggle />`), because the
+ * project shell puts its tab band directly under it.
+ */
 
 const COLLAPSE_KEY = "rx.sidebar.collapsed";
 
-function breadcrumbLabel(pathname: string): string {
-  if (pathname.startsWith(routes.research())) return "Research";
-  if (pathname.startsWith(routes.explorer())) return "Explorer";
-  return "ResearcherX";
+/** Whether `pathname` is `href` or somewhere below it. */
+function within(pathname: string, href: string): boolean {
+  return pathname === href || pathname.startsWith(`${href}/`);
+}
+
+function SidebarContent({
+  compact = false,
+  projects,
+  close,
+}: {
+  compact?: boolean;
+  projects: Project[];
+  close?: () => void;
+}) {
+  const pathname = usePathname();
+  const { me } = useIdentity();
+  const onResearch = within(pathname, routes.research());
+
+  return (
+    <div className="flex h-full flex-col">
+      <div
+        className={cn(
+          "flex h-14 items-center border-b border-sidebar-border",
+          compact ? "justify-center" : "px-4",
+        )}
+      >
+        <span className="grid size-7 place-items-center rounded-md bg-primary text-xs font-bold text-primary-foreground">
+          R
+        </span>
+        {!compact && <span className="ml-2.5 text-sm font-semibold">ResearcherX</span>}
+      </div>
+
+      <nav className="space-y-1 p-2" aria-label="Primary">
+        <Button
+          variant="ghost"
+          render={<Link href={routes.research()} onClick={close} />}
+          aria-label={compact ? "Research" : undefined}
+          className={cn(
+            "w-full justify-start rounded-md",
+            onResearch ? "bg-sidebar-accent text-sidebar-accent-foreground" : "text-muted-foreground",
+            compact && "justify-center px-0",
+          )}
+        >
+          <BookOpen />
+          {!compact && "Research"}
+        </Button>
+        <Button
+          variant="ghost"
+          render={<Link href={routes.explorer()} onClick={close} />}
+          aria-label={compact ? "Explorer" : undefined}
+          className={cn(
+            "w-full justify-start rounded-md",
+            !onResearch ? "bg-sidebar-accent text-sidebar-accent-foreground" : "text-muted-foreground",
+            compact && "justify-center px-0",
+          )}
+        >
+          <Binoculars />
+          {!compact && "Explorer"}
+        </Button>
+      </nav>
+
+      {!compact && (
+        // `min-h-0 overflow-y-auto`: the prototype's list is short mock data;
+        // a real library can outgrow the rail, and the user block below must
+        // stay on screen.
+        <div className="mt-4 min-h-0 overflow-y-auto px-4">
+          <p className="mb-2 text-[11px] font-semibold uppercase text-muted-foreground">Projects</p>
+          <div className="space-y-0.5">
+            {projects.map((project) => {
+              const active = within(pathname, routes.project(project.id));
+              return (
+                <Link
+                  key={project.id}
+                  href={routes.chat(project.id)}
+                  onClick={close}
+                  className={cn(
+                    "flex items-center gap-2 truncate rounded-md px-2 py-1.5 text-[13px] transition-colors hover:bg-sidebar-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring",
+                    active
+                      ? "bg-sidebar-accent font-medium text-sidebar-accent-foreground"
+                      : "text-muted-foreground",
+                  )}
+                >
+                  {/* `colorFor`, never the raw field: it is the guard that
+                      keeps an unknown string out of the style attribute. */}
+                  <span
+                    aria-hidden
+                    className="size-2 shrink-0 rounded-full"
+                    style={{ backgroundColor: colorFor(project) }}
+                  />
+                  <span className="truncate">{project.title}</span>
+                </Link>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      <div className="mt-auto border-t border-sidebar-border p-3">
+        {!compact &&
+          (me ? (
+            // The user block opens the dev identity switcher; sharing is only
+            // exercisable because a second teammate can be picked there.
+            <UserMenu className="-m-1 flex w-[calc(100%+0.5rem)] items-center gap-2 rounded-md p-1 transition-colors hover:bg-sidebar-accent">
+              <span className="grid size-7 shrink-0 place-items-center rounded-full bg-secondary text-xs font-semibold">
+                {initials(me.name)}
+              </span>
+              <div className="min-w-0">
+                <p className="truncate text-xs font-medium">{me.name}</p>
+                <p className="truncate text-[11px] text-muted-foreground">{me.email}</p>
+              </div>
+            </UserMenu>
+          ) : (
+            <div className="flex items-center gap-2" aria-hidden>
+              <span className="size-7 rounded-full bg-secondary" />
+              <span className="h-3 w-24 rounded bg-secondary" />
+            </div>
+          ))}
+      </div>
+    </div>
+  );
 }
 
 export function AppShell({ children }: { children: React.ReactNode }) {
-  const pathname = usePathname();
   const { me } = useIdentity();
   const [projects, setProjects] = useState<Project[]>([]);
+  const [mobileOpen, setMobileOpen] = useState(false);
   // Seeded in an effect rather than from a `useState` initializer: the server
   // render has no localStorage, so reading it during the first render would
   // produce markup the client immediately contradicts -- a hydration
@@ -75,239 +176,86 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     let cancelled = false;
-    listProjects()
-      .then((rows) => {
-        if (!cancelled) setProjects(rows);
-      })
-      .catch(() => {
-        if (!cancelled) setProjects([]);
-      });
+    const load = () =>
+      listProjects()
+        .then((rows) => {
+          if (!cancelled) setProjects(rows);
+        })
+        .catch(() => {
+          if (!cancelled) setProjects([]);
+        });
+    void load();
+    // A project created elsewhere (the projects page) must reach the rail
+    // without a reload; the rail owns no other refresh trigger.
+    const off = subscribeProjectListChanged(() => void load());
     return () => {
       cancelled = true;
+      off();
     };
   }, [me?.id]);
 
-  // The rail's copy of the project list is fetched once, so an edit made on
+  // The rail's copy of the project list is fetched once, so a colour picked on
   // the project page has no other way to reach it.
   useEffect(
     () =>
       subscribeProjectColor(({ id, color }) => {
-        setProjects((prev) =>
-          prev.map((p) => (p.id === id ? { ...p, color } : p))
-        );
+        setProjects((prev) => prev.map((p) => (p.id === id ? { ...p, color } : p)));
       }),
-    []
+    [],
   );
 
   return (
-    <div className="flex min-h-screen font-sans">
-      {/* Sidebar */}
-      <aside
-        className={cn(
-          "sticky top-0 hidden h-screen shrink-0 flex-col border-r border-border bg-sidebar text-sidebar-foreground transition-[width] duration-200 md:flex",
-          collapsed ? "w-14" : "w-60"
-        )}
-      >
-        {/* Brand */}
-        <Link
-          href={routes.research()}
-          title={collapsed ? "ResearcherX" : undefined}
+    <TooltipProvider delayDuration={300}>
+      <div className="min-h-screen bg-background text-foreground">
+        <aside
           className={cn(
-            "flex items-center gap-2 py-3",
-            collapsed ? "justify-center px-0" : "px-3"
+            "fixed inset-y-0 left-0 z-30 hidden border-r border-sidebar-border bg-sidebar transition-[width] duration-200 lg:block",
+            collapsed ? "w-16" : "w-60",
           )}
         >
-          <BrandMark />
-          {!collapsed && (
-            <span className="text-sm font-semibold tracking-tight">ResearcherX</span>
-          )}
-        </Link>
+          <SidebarContent compact={collapsed} projects={projects} />
+          <Button
+            variant="outline"
+            size="icon"
+            aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+            aria-expanded={!collapsed}
+            onClick={toggleCollapsed}
+            className="absolute -right-3 top-20 size-6 rounded-full bg-background"
+          >
+            {collapsed ? <ChevronRight className="size-3" /> : <ChevronLeft className="size-3" />}
+          </Button>
+        </aside>
 
-        {/* Primary nav */}
-        <nav className="flex flex-col gap-0.5 px-2">
-          {NAV_LINKS.map(({ href, label, icon: Icon }) => {
-            const active = pathname === href || pathname.startsWith(href + "/");
-            return (
-              <Link
-                key={href}
-                href={href}
-                // The label is the only thing naming this link once it is an
-                // icon, so the tooltip is not decoration -- it is the
-                // accessible name a collapsed rail would otherwise lose.
-                title={collapsed ? label : undefined}
-                aria-label={collapsed ? label : undefined}
-                className={cn(
-                  "flex items-center gap-2.5 rounded-md py-2 text-sm font-medium transition-colors",
-                  collapsed ? "justify-center px-0" : "px-2.5",
-                  active
-                    ? "bg-accent text-accent-foreground"
-                    : "text-muted-foreground hover:bg-muted hover:text-foreground"
-                )}
-              >
-                <Icon className="size-[17px] shrink-0" />
-                {!collapsed && label}
-              </Link>
-            );
-          })}
-        </nav>
-
-        {/* Projects */}
-        {collapsed ? (
-          <div className="mx-auto mt-4 mb-1 h-px w-6 bg-border" />
-        ) : (
-          <div className="px-2.5 pt-4 pb-1 font-mono text-[11px] font-medium text-muted-foreground">
-            Projects
-          </div>
-        )}
-        {/* `delay={0}`: in the collapsed rail a project's name is not
-            supplementary detail, so a hover-intent delay would read as the
-            tooltip being broken. */}
-        <TooltipProvider delay={0}>
-          <div className="flex min-h-0 flex-col gap-0.5 overflow-y-auto px-2">
-            {projects.length === 0 ? (
-              collapsed ? null : (
-                <span className="px-2.5 py-1.5 text-[13px] text-muted-foreground">
-                  No projects yet
-                </span>
-              )
-            ) : (
-              projects.slice(0, 8).map((p) => {
-                const href = routes.project(p.id);
-                const active = pathname.startsWith(href);
-                const link = (
-                  <Link
-                    href={href}
-                    // Expanded, the label is on screen and the native tooltip
-                    // is all a truncated one needs. Collapsed, the link is a
-                    // bare coloured dot, so the name moves to the hover card
-                    // below -- `title` would still fire on top of it.
-                    title={collapsed ? undefined : p.title}
-                    aria-label={collapsed ? p.title : undefined}
-                    className={cn(
-                      "flex items-center gap-2.5 rounded-md py-1.5 text-[13px] transition-colors",
-                      collapsed ? "justify-center px-0" : "px-2.5",
-                      active
-                        ? "bg-accent font-medium text-accent-foreground"
-                        : "text-muted-foreground hover:bg-muted hover:text-foreground"
-                    )}
-                  >
-                    {/* The project's own colour, not the brand gradient:
-                        telling projects apart is the dot's entire job once the
-                        labels are gone. `colorFor` guarantees a palette entry
-                        even for a response that predates the field. */}
-                    <span
-                      className={cn("shrink-0 rounded-full", collapsed ? "size-2.5" : "size-1.5")}
-                      style={{ backgroundColor: colorFor(p) }}
-                    />
-                    {!collapsed && <span className="truncate">{p.title}</span>}
-                  </Link>
-                );
-
-                // A keyed Fragment so the expanded rail gains no wrapper
-                // element: the list is a flex column and an extra div would
-                // absorb the gap between rows.
-                //
-                // The hover card is not the browser's own `title`: that waits
-                // about a second before it appears, and in the collapsed rail
-                // the name is not supplementary detail -- it is the only way
-                // to tell one dot from another.
-                return (
-                  <Fragment key={p.id}>
-                    {collapsed ? (
-                      <Tooltip>
-                        <TooltipTrigger render={link} />
-                        <TooltipContent side="right">{p.title}</TooltipContent>
-                      </Tooltip>
-                    ) : (
-                      link
-                    )}
-                  </Fragment>
-                );
-              })
-            )}
-          </div>
-        </TooltipProvider>
-
-        {/* Identity footer */}
-        <div
-          className={cn(
-            "mt-auto flex items-center gap-2 border-t border-sidebar-border py-3",
-            collapsed ? "justify-center px-0" : "px-2"
-          )}
-          title={collapsed && me ? `${me.name} · ${me.email}` : undefined}
-        >
-          {me ? (
-            <>
-              <span
-                className={cn(
-                  "grid size-7 shrink-0 place-items-center rounded-full text-[11px] font-semibold text-white",
-                  !me.avatar_color && "gradient-brand"
-                )}
-                style={me.avatar_color ? { backgroundColor: me.avatar_color } : undefined}
-              >
-                {initials(me.name)}
-              </span>
-              {!collapsed && (
-                <div className="min-w-0 flex-1">
-                  <div className="truncate text-[13px] font-medium text-foreground">
-                    {me.name}
-                  </div>
-                  <div className="truncate text-[11px] text-muted-foreground">
-                    {me.email}
-                  </div>
-                </div>
-              )}
-            </>
-          ) : (
-            <>
-              <span className="size-7 shrink-0 rounded-full bg-muted" />
-              {!collapsed && (
-                <div className="min-w-0 flex-1">
-                  <div className="h-3 w-20 rounded bg-muted" />
-                </div>
-              )}
-            </>
-          )}
-        </div>
-      </aside>
-
-      {/* Content column */}
-      <div className="flex min-w-0 flex-1 flex-col">
-        {/* Sticky glass topbar */}
-        <header className="sticky top-0 z-30 flex h-12 items-center justify-between gap-4 border-b border-border bg-background/80 px-4 backdrop-blur-md">
-          <div className="flex items-center gap-2">
-            <Link href={routes.research()} className="md:hidden">
-              <BrandMark />
-            </Link>
-            {/* `md:` only -- below that breakpoint the sidebar is not
-                rendered at all, so a toggle there would control nothing. */}
-            <button
-              type="button"
-              onClick={toggleCollapsed}
-              aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-              aria-expanded={!collapsed}
-              title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-              className="hidden rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground md:inline-flex"
+        <header className="sticky top-0 z-30 flex h-14 items-center justify-between border-b bg-background/95 px-3 backdrop-blur lg:hidden">
+          <Sheet open={mobileOpen} onOpenChange={setMobileOpen}>
+            <SheetTrigger
+              render={<Button variant="ghost" size="icon" aria-label="Open navigation" />}
             >
-              {collapsed ? (
-                <PanelLeftOpen className="size-4" />
-              ) : (
-                <PanelLeftClose className="size-4" />
-              )}
-            </button>
-            <span className="text-sm text-muted-foreground">
-              <b className="font-medium text-foreground">{breadcrumbLabel(pathname)}</b>
+              <Menu />
+            </SheetTrigger>
+            <SheetContent side="left" className="w-60 p-0">
+              <SheetTitle className="sr-only">Navigation</SheetTitle>
+              <SidebarContent projects={projects} close={() => setMobileOpen(false)} />
+            </SheetContent>
+          </Sheet>
+          <div className="flex items-center gap-2 text-sm font-semibold">
+            <span className="grid size-7 place-items-center rounded-md bg-primary text-xs text-primary-foreground">
+              R
             </span>
+            ResearcherX
           </div>
-
-          <div className="flex items-center gap-1">
-            <ThemeToggle />
-            <UserMenu />
-          </div>
+          <ThemeToggle />
         </header>
 
-        <main className="flex-1">{children}</main>
+        <main
+          className={cn(
+            "min-h-screen transition-[margin] duration-200",
+            collapsed ? "lg:ml-16" : "lg:ml-60",
+          )}
+        >
+          {children}
+        </main>
       </div>
-    </div>
+    </TooltipProvider>
   );
 }

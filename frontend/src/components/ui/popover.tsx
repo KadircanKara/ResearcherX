@@ -1,5 +1,15 @@
 "use client"
 
+/**
+ * Popover, with the prototype's class strings on Base UI's Popover.
+ *
+ * Radix → Base UI: `<PopoverTrigger asChild><button …/></PopoverTrigger>` is
+ * `<PopoverTrigger render={<button …/>} />`. Defaults follow Radix (the
+ * prototype's): `side="bottom"`, `align="center"`, `sideOffset={4}`.
+ * `PopoverAnchor` has no Base UI part; pass `anchor` to `PopoverContent`
+ * (forwarded to the positioner) instead.
+ */
+import * as React from "react"
 import { Popover as PopoverPrimitive } from "@base-ui/react/popover"
 
 import { cn } from "@/lib/utils"
@@ -16,13 +26,14 @@ function PopoverContent({
   className,
   align = "center",
   alignOffset = 0,
-  side = "top",
-  sideOffset = 6,
+  side = "bottom",
+  sideOffset = 4,
+  anchor,
   ...props
 }: PopoverPrimitive.Popup.Props &
   Pick<
     PopoverPrimitive.Positioner.Props,
-    "align" | "alignOffset" | "side" | "sideOffset"
+    "align" | "alignOffset" | "side" | "sideOffset" | "anchor"
   >) {
   return (
     <PopoverPrimitive.Portal>
@@ -32,11 +43,12 @@ function PopoverContent({
         alignOffset={alignOffset}
         side={side}
         sideOffset={sideOffset}
+        anchor={anchor}
       >
         <PopoverPrimitive.Popup
           data-slot="popover-content"
           className={cn(
-            "z-50 w-72 origin-[var(--transform-origin)] rounded-lg bg-popover p-3 text-popover-foreground shadow-md ring-1 ring-foreground/10 outline-none duration-100 data-[open]:animate-in data-[open]:fade-in-0 data-[open]:zoom-in-95 data-[closed]:animate-out data-[closed]:fade-out-0 data-[closed]:zoom-out-95",
+            "z-50 w-72 origin-[var(--transform-origin)] rounded-md border bg-popover p-4 text-popover-foreground shadow-md outline-none data-[open]:animate-in data-[closed]:animate-out data-[closed]:fade-out-0 data-[open]:fade-in-0 data-[closed]:zoom-out-95 data-[open]:zoom-in-95 data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2",
             className
           )}
           {...props}

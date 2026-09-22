@@ -1,9 +1,10 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { FileText, UploadCloud } from "lucide-react";
+import { useEffect, useId, useState } from "react";
+import { FileText, UploadCloud, type LucideIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import {
   Dialog,
   DialogContent,
@@ -12,7 +13,6 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { cn } from "@/lib/utils";
 
 interface NewDocumentDialogProps {
   open: boolean;
@@ -30,6 +30,13 @@ interface NewDocumentDialogProps {
 
 type Choice = "blank" | null;
 
+/**
+ * "New project" on the LaTeX list: a blank paper or an imported .zip.
+ *
+ * The prototype's button opens the import dialog directly and has no blank
+ * option; the real app can create a blank project, so this chooser sits in
+ * front of the import dialog, drawn in the prototype's dialog vocabulary.
+ */
 export function NewDocumentDialog({
   open,
   onClose,
@@ -38,6 +45,7 @@ export function NewDocumentDialog({
 }: NewDocumentDialogProps) {
   const [choice, setChoice] = useState<Choice>(null);
   const [name, setName] = useState("");
+  const nameId = useId();
 
   // Reset on close so the next open starts at the choice screen rather than
   // wherever the last one was abandoned.
@@ -66,17 +74,17 @@ export function NewDocumentDialog({
         </DialogHeader>
 
         {choice === null ? (
-          <div className="flex flex-col gap-2">
-            <ChoiceCard
-              icon={<FileText className="size-5" />}
+          <div className="space-y-2">
+            <ChoiceRow
+              icon={FileText}
               title="Blank project"
               detail="One main.tex with a minimal IEEEtran skeleton."
               onClick={() => setChoice("blank")}
             />
-            <ChoiceCard
-              icon={<UploadCloud className="size-5" />}
-              title="Import .zip"
-              detail="A LaTeX project exported from Overleaf or elsewhere."
+            <ChoiceRow
+              icon={UploadCloud}
+              title="Import a .zip"
+              detail="A LaTeX project exported from Overleaf or another editor."
               onClick={() => {
                 onClose();
                 onChooseImport();
@@ -84,14 +92,14 @@ export function NewDocumentDialog({
             />
           </div>
         ) : (
-          <div className="flex flex-col gap-1">
-            <label className="text-xs font-medium text-muted-foreground">
-              Project name
-            </label>
+          <div className="space-y-2">
+            <Label htmlFor={nameId}>Name</Label>
             <Input
+              id={nameId}
               autoFocus
               value={name}
-              placeholder="paper"
+              maxLength={200}
+              placeholder="Project name"
               onChange={(e) => setName(e.target.value)}
               onKeyDown={(e) => {
                 if (e.key === "Enter") submitBlank();
@@ -115,13 +123,13 @@ export function NewDocumentDialog({
   );
 }
 
-function ChoiceCard({
-  icon,
+function ChoiceRow({
+  icon: Icon,
   title,
   detail,
   onClick,
 }: {
-  icon: React.ReactNode;
+  icon: LucideIcon;
   title: string;
   detail: string;
   onClick: () => void;
@@ -130,15 +138,12 @@ function ChoiceCard({
     <button
       type="button"
       onClick={onClick}
-      className={cn(
-        "flex items-start gap-3 rounded-lg border border-input px-3 py-3 text-left transition-colors",
-        "hover:border-primary/50 hover:bg-muted/60"
-      )}
+      className="flex w-full items-start gap-3 rounded-md border p-3 text-left transition-colors hover:bg-muted/40"
     >
-      <span className="mt-0.5 text-muted-foreground">{icon}</span>
+      <Icon className="mt-0.5 size-4 shrink-0 text-muted-foreground" aria-hidden />
       <span className="min-w-0">
-        <span className="block text-sm font-medium text-foreground">{title}</span>
-        <span className="block text-xs text-muted-foreground">{detail}</span>
+        <span className="block text-[13px] font-medium">{title}</span>
+        <span className="mt-0.5 block text-[12px] text-muted-foreground">{detail}</span>
       </span>
     </button>
   );

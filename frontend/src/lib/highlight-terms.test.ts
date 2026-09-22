@@ -18,7 +18,7 @@ function childrenOf(tree: Root): unknown[] {
 const MARK = {
   type: "element",
   tagName: "mark",
-  properties: { className: ["rounded", "bg-amber-300/30", "px-0.5", "text-inherit"] },
+  properties: { className: ["rounded", "bg-primary/20", "px-0.5", "text-foreground"] },
 };
 
 describe("highlightTerms", () => {

@@ -4,12 +4,14 @@ import { routes } from "@/lib/routes";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
-import { Download, FileCode2, Pencil, Plus, Trash2 } from "lucide-react";
+import { Download, FileCode2, Pencil, Plus, Search, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Input } from "@/components/ui/input";
 import { BulkEditBar } from "@/components/bulk-edit-bar";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
+import { EmptyState, NoMatchState } from "@/components/ui/empty-state";
 import { RenameDialog } from "@/components/ui/rename-dialog";
-import { SearchInput } from "@/components/ui/search-input";
 import { ConflictDialog } from "@/components/latex/conflict-dialog";
 import { ImportDropzone } from "@/components/latex/import-dropzone";
 import { NewDocumentDialog } from "@/components/latex/new-document-dialog";
@@ -25,26 +27,16 @@ import {
   type LatexDocument,
 } from "@/lib/latex";
 import { getProject } from "@/lib/projects";
-import {
-  clear,
-  isAllSelected,
-  retainVisible,
-  selectAll,
-  toggle,
-} from "@/lib/selection";
+import { clear, retainVisible, selectAll, toggle } from "@/lib/selection";
 import { matchesQuery } from "@/lib/search";
+import { datePart, plural } from "@/lib/format";
 import { STARTER } from "@/lib/latex-starter";
 import type { Role } from "@/lib/types";
 
 const CAN_EDIT: Role[] = ["owner", "member"];
 
-function fmtDate(iso: string) {
-  return new Date(iso).toLocaleDateString("en-GB", {
-    day: "numeric",
-    month: "short",
-    year: "numeric",
-  });
-}
+/** Name and main file -- the two things the row shows. */
+const searchable = (doc: LatexDocument) => [doc.name, doc.main_path];
 
 export default function LatexIndexPage() {
   const { id: projectId } = useParams<{ id: string }>();
@@ -76,8 +68,7 @@ export default function LatexIndexPage() {
   // a duplicate document NAME.
   const [importOpen, setImportOpen] = useState(false);
 
-  // The duplicate document-NAME question, rendered through the same shared
-  // dialog every other duplicate on this branch uses.
+  // The duplicate document-NAME question.
   // Carries the action to RETRY with the chosen name, not just the rows:
   // creating and renaming collide identically and answer the same dialog,
   // and hardwiring it to one of them would mean a second dialog for the
@@ -124,21 +115,13 @@ export default function LatexIndexPage() {
 
   const canEdit = role !== null && CAN_EDIT.includes(role);
 
-  // "Select all" means every row the user can actually act on -- which is
-  // what the disabled checkboxes on view-only rows already say on screen.
-  // Handing selectAll/isAllSelected the full doc list would select rows the
-  // checkbox itself refuses to let the user check, guaranteeing a partial-
-  // failure banner and making "all selected" unreachable by clicking.
-  /** Name and main file -- the two things the row shows. */
-  const searchable = (doc: LatexDocument) => [doc.name, doc.main_path];
   const visible = docs.filter((d) => matchesQuery(query, searchable(d)));
 
   // "Select all" means every row the user can actually act on -- which is
   // what the disabled checkboxes on view-only rows already say on screen --
-  // AND that the search has left on screen. Handing selectAll/isAllSelected
-  // the full doc list would select rows the checkbox itself refuses to let
-  // the user check, guaranteeing a partial-failure banner and making "all
-  // selected" unreachable by clicking.
+  // AND that the search has left on screen. Handing selectAll the full doc
+  // list would select rows the checkbox itself refuses to let the user
+  // check, guaranteeing a partial-failure banner.
   const deletableIds = visible
     .filter((d) => d.my_access === "editor")
     .map((d) => d.id);
@@ -153,9 +136,13 @@ export default function LatexIndexPage() {
     setSelected((prev) => retainVisible(prev, stillVisible));
   }
 
+  /** One taken-name row, built from the server's own suggestion. */
+  function nameRow(err: NameCollisionError): LatexCollision[] {
+    return [{ path: err.takenName, existing: err.takenName, suggestion: err.suggestion }];
+  }
+
   /**
-   * Create, and turn a duplicate NAME into the same Keep both / Rename /
-   * Cancel question a duplicate FILE already gets.
+   * Create, and turn a duplicate NAME into the Keep both / Rename question.
    *
    * `createDocument` rethrows `NameCollisionError` unchanged for exactly
    * this: the dialog is built from the server's own `suggestion`, which
@@ -170,19 +157,7 @@ export default function LatexIndexPage() {
       router.push(routes.latexDoc(projectId, doc.id));
     } catch (err) {
       if (err instanceof NameCollisionError) {
-        // One row, the same shape `import-dropzone.tsx` renders a duplicate
-        // document name as -- same question, same server-computed
-        // suggestion, so the same control rather than a second dialog.
-        setNameConflict({
-          collisions: [
-            {
-              path: err.takenName,
-              existing: err.takenName,
-              suggestion: err.suggestion,
-            },
-          ],
-          retry: createNamed,
-        });
+        setNameConflict({ collisions: nameRow(err), retry: createNamed });
         return;
       }
       setError(errorText(err));
@@ -191,11 +166,12 @@ export default function LatexIndexPage() {
 
   const [renaming, setRenaming] = useState<LatexDocument | null>(null);
   const [renameBusy, setRenameBusy] = useState(false);
+  const [renameError, setRenameError] = useState<string | null>(null);
 
   async function renameTo(name: string) {
     const target = renaming;
     if (!target) return;
-    setError(null);
+    setRenameError(null);
     try {
       await renameDocument(target, name);
       setRenaming(null);
@@ -206,20 +182,14 @@ export default function LatexIndexPage() {
         // exactly this one with the server's suggestion in hand.
         setRenaming(null);
         setNameConflict({
-          collisions: [
-            {
-              path: err.takenName,
-              existing: err.takenName,
-              suggestion: err.suggestion,
-            },
-          ],
+          collisions: nameRow(err),
           // Bound to THIS document, not to whatever `renaming` holds by the
           // time the user answers -- the dialog above has already cleared it.
           retry: (chosen) => renameDocument(target, chosen),
         });
         return;
       }
-      setError(errorText(err));
+      setRenameError(errorText(err));
     }
   }
 
@@ -244,6 +214,10 @@ export default function LatexIndexPage() {
       // open), and that action replaces the dialog's row with the newer
       // collision.
       await pending.retry(chosen);
+    } catch (err) {
+      // A retry that fails for any OTHER reason closes the question and
+      // says why on the page.
+      setError(errorText(err));
     } finally {
       setNameBusy(false);
     }
@@ -315,164 +289,148 @@ export default function LatexIndexPage() {
 
   if (loading) {
     return (
-      <div className="space-y-3">
+      <div className="space-y-2">
         {[1, 2, 3].map((i) => (
-          <div key={i} className="h-20 animate-pulse rounded-xl bg-muted" />
+          <div key={i} className="h-[74px] animate-pulse rounded-md bg-muted" />
         ))}
       </div>
     );
   }
 
+  const heading = query
+    ? `${visible.length} of ${docs.length} projects`
+    : docs.length
+      ? plural(docs.length, "project")
+      : "No LaTeX projects yet";
+
   return (
-    <div>
-      {/* Count and actions on one line, the search box on its own beneath
-          them at full width -- see the papers page for why. */}
-      <div className="mb-4 flex flex-col gap-2">
-        <div className="flex items-center justify-between gap-3">
-          <p className="text-sm text-muted-foreground">
-            {docs.length === 0
-              ? "No LaTeX projects yet"
-              : query
-                ? `${visible.length} of ${docs.length} projects`
-                : `${docs.length} project${docs.length !== 1 ? "s" : ""}`}
-          </p>
-          <div className="flex shrink-0 items-center gap-2">
-            <BulkEditBar
-              active={editingMode}
-              count={selected.size}
-              total={deletableIds.length}
-              allSelected={isAllSelected(selected, deletableIds)}
-              busy={bulkBusy}
-              onEnter={() => setEditingMode(true)}
-              onSelectAll={() => setSelected(selectAll(selected, deletableIds))}
-              onClear={() => setSelected(clear())}
-              onDelete={() => void handleBulkDelete()}
-              onDone={() => {
-                setEditingMode(false);
-                // A selection that survives invisibly is a delete waiting to
-                // hit the wrong rows.
-                setSelected(clear());
-              }}
-            />
-            {canEdit && (
-              <Button onClick={() => setNewOpen(true)}>
-                <Plus className="size-4" />
-                New project
-              </Button>
-            )}
-          </div>
-        </div>
-        {docs.length > 0 && (
-          <SearchInput
-            value={query}
-            onChange={changeQuery}
-            placeholder="Search projects…"
-            label="Search LaTeX projects by name or main file"
+    <div className="fade-block space-y-4">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <h1 className="text-xl font-semibold">{heading}</h1>
+        <div className="flex flex-wrap gap-2">
+          <BulkEditBar
+            editing={editingMode}
+            selectedCount={selected.size}
+            total={deletableIds.length}
+            busy={bulkBusy}
+            onStart={() => setEditingMode(true)}
+            onSelectAll={() => setSelected(selectAll(selected, deletableIds))}
+            onClear={() => setSelected(clear())}
+            onDelete={() => setPendingBulkDelete(true)}
+            onDone={() => {
+              setEditingMode(false);
+              // A selection that survives invisibly is a delete waiting to
+              // hit the wrong rows.
+              setSelected(clear());
+            }}
           />
-        )}
+          {canEdit && (
+            <Button size="sm" onClick={() => setNewOpen(true)}>
+              <Plus className="size-4" /> New project
+            </Button>
+          )}
+        </div>
+      </div>
+
+      <div className="relative">
+        <Search className="absolute left-3 top-2.5 size-4 text-muted-foreground" />
+        <Input
+          className="pl-9"
+          placeholder="Search projects…"
+          aria-label="Search LaTeX projects by name or main file"
+          value={query}
+          onChange={(e) => changeQuery(e.target.value)}
+        />
       </div>
 
       {error && (
-        <p className="mb-3 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+        <p className="break-words rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
           {error}
         </p>
       )}
 
       {bulkError && (
-        <p className="mb-3 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+        <p className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
           {bulkError}
         </p>
       )}
 
-      {docs.length === 0 ? (
-        <div className="flex flex-col items-center gap-3 py-24 text-center">
-          <FileCode2 className="size-8 text-muted-foreground/40" />
-          <p className="text-sm text-muted-foreground">
-            {canEdit
-              ? "Start a blank paper, or import a .zip from Overleaf."
-              : "No LaTeX projects have been created yet."}
-          </p>
-        </div>
-      ) : visible.length === 0 ? (
-        /* A query that matches nothing needs saying: an empty list under a
-           filled search box otherwise reads as the projects having gone. */
-        <p className="rounded-xl border border-dashed border-border px-4 py-6 text-center text-sm text-muted-foreground">
-          No projects match “{query}”.
-        </p>
+      {!docs.length ? (
+        canEdit ? (
+          <EmptyState
+            icon={FileCode2}
+            title="Start a blank paper, or import a .zip from Overleaf."
+            body="Your LaTeX projects will appear here."
+          />
+        ) : (
+          <EmptyState icon={FileCode2} title="No LaTeX projects have been created yet." />
+        )
+      ) : !visible.length ? (
+        <NoMatchState query={query} noun="projects" />
       ) : (
         <div className="space-y-2">
-          {visible.map((doc) => (
-            <div
-              key={doc.id}
-              className="flex items-center gap-3 rounded-xl border border-border bg-card px-4 py-3"
-            >
-              {editingMode && (
-                <input
-                  type="checkbox"
-                  checked={selected.has(doc.id)}
-                  disabled={doc.my_access !== "editor"}
-                  onChange={() => setSelected(toggle(selected, doc.id))}
-                  aria-label={`Select ${doc.name}`}
-                  title={
-                    doc.my_access === "editor"
-                      ? undefined
-                      : "You need edit access to delete this project"
-                  }
-                  className="mt-1 size-4 shrink-0 disabled:opacity-40"
-                />
-              )}
-              {/* The whole name is the link, but the row's buttons are not
-                  inside it -- an <a> wrapping the actions would make Export
-                  navigate as well as download. */}
-              <Link
-                href={routes.latexDoc(projectId, doc.id)}
-                className="min-w-0 flex-1"
-              >
-                <p className="line-clamp-1 text-sm font-medium text-foreground">
-                  {doc.name}
-                </p>
-                <p className="mt-1 truncate font-mono text-xs text-muted-foreground">
-                  {doc.main_path}
-                </p>
-                <p className="mt-1.5 text-xs text-muted-foreground/60">
-                  {doc.engine} · updated {fmtDate(doc.updated_at)}
-                </p>
-              </Link>
-
-              <button
-                onClick={() => void handleExport(doc)}
-                disabled={busyId === doc.id}
-                title="Download .zip"
-                aria-label={`Download ${doc.name} as .zip`}
-                className="shrink-0 rounded p-1 text-muted-foreground/50 transition-colors hover:bg-accent hover:text-foreground disabled:opacity-40"
-              >
-                <Download className="size-4" />
-              </button>
-
-              {doc.my_access === "editor" && (
-                <>
-                  <button
-                    onClick={() => setRenaming(doc)}
-                    className="shrink-0 rounded p-1 text-muted-foreground/50 transition-colors hover:bg-muted hover:text-foreground"
-                    aria-label={`Rename project: ${doc.name}`}
-                    title="Rename"
-                  >
-                    <Pencil className="size-3.5" />
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setPendingDelete(doc)}
+          {visible.map((doc) => {
+            const isEditor = doc.my_access === "editor";
+            return (
+              <div key={doc.id} className="group flex items-center gap-3 rounded-md border p-3">
+                {editingMode && (
+                  <Checkbox
+                    checked={selected.has(doc.id)}
+                    disabled={!isEditor}
+                    aria-label={`Select ${doc.name}`}
+                    title={isEditor ? undefined : "You need edit access to delete this project"}
+                    onCheckedChange={() => setSelected(toggle(selected, doc.id))}
+                  />
+                )}
+                {/* The name block is the link, but the row's buttons are not
+                    inside it -- an <a> wrapping the actions would make
+                    Download navigate as well as download. */}
+                <Link className="min-w-0 flex-1" href={routes.latexDoc(projectId, doc.id)}>
+                  <p className="truncate font-medium hover:underline">{doc.name}</p>
+                  <p className="truncate font-mono text-[12px] text-muted-foreground">
+                    {doc.main_path}
+                  </p>
+                  <p className="text-[12px] text-muted-foreground">
+                    {doc.engine} · updated {datePart(doc.updated_at)}
+                  </p>
+                </Link>
+                <div className="flex opacity-100 sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100">
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    aria-label="Download zip"
                     disabled={busyId === doc.id}
-                    title="Delete project"
-                    aria-label={`Delete ${doc.name}`}
-                    className="shrink-0 rounded p-1 text-muted-foreground/50 transition-colors hover:bg-destructive/10 hover:text-destructive disabled:opacity-40"
+                    onClick={() => void handleExport(doc)}
+                  >
+                    <Download className="size-4" />
+                  </Button>
+                  {/* Rename and Delete need edit access on the document; a
+                      viewer sees them, disabled, rather than a 403. */}
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    aria-label="Rename"
+                    disabled={!isEditor}
+                    onClick={() => {
+                      setRenameError(null);
+                      setRenaming(doc);
+                    }}
+                  >
+                    <Pencil className="size-4" />
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    aria-label="Delete"
+                    disabled={!isEditor || busyId === doc.id}
+                    onClick={() => setPendingDelete(doc)}
                   >
                     <Trash2 className="size-4" />
-                  </button>
-                </>
-              )}
-            </div>
-          ))}
+                  </Button>
+                </div>
+              </div>
+            );
+          })}
         </div>
       )}
 
@@ -496,9 +454,8 @@ export default function LatexIndexPage() {
 
       <ConflictDialog
         open={nameConflict !== null}
+        variant="name"
         busy={nameBusy}
-        title="That name is taken"
-        description="This project already has a LaTeX project with that name. Keep both, or choose a different name."
         collisions={nameConflict?.collisions ?? []}
         taken={docs.map((d) => d.name)}
         onCancel={() => setNameConflict(null)}
@@ -507,10 +464,10 @@ export default function LatexIndexPage() {
 
       <RenameDialog
         open={renaming !== null}
-        title="Rename LaTeX project"
         label="Name"
         initialValue={renaming?.name ?? ""}
         busy={renameBusy}
+        error={renameError}
         onCancel={() => setRenaming(null)}
         onSubmit={(value) => {
           setRenameBusy(true);
@@ -521,9 +478,8 @@ export default function LatexIndexPage() {
       <ConfirmDialog
         open={pendingDelete !== null}
         title="Delete this LaTeX project?"
-        description={`"${pendingDelete?.name ?? ""}" and all of its files will be deleted. This cannot be undone.`}
-        confirmLabel="Delete"
-        busy={busyId === pendingDelete?.id}
+        description={`“${pendingDelete?.name ?? "Project"}” and all of its files will be deleted. This cannot be undone.`}
+        busy={busyId !== null && busyId === pendingDelete?.id}
         onCancel={() => setPendingDelete(null)}
         onConfirm={() => {
           if (pendingDelete) void handleDelete(pendingDelete);
@@ -532,9 +488,8 @@ export default function LatexIndexPage() {
 
       <ConfirmDialog
         open={pendingBulkDelete}
-        title={`Delete ${selected.size} LaTeX project${selected.size !== 1 ? "s" : ""}?`}
-        description="Every selected project and all of its files will be deleted. This cannot be undone."
-        confirmLabel="Delete"
+        title={`Delete ${plural(selected.size, "project")}?`}
+        description="This cannot be undone."
         busy={bulkBusy}
         onCancel={() => setPendingBulkDelete(false)}
         onConfirm={() => void handleBulkDelete()}

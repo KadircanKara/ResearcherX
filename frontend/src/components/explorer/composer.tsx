@@ -34,7 +34,7 @@ function ScopePicker({ className }: { className?: string }) {
       <SelectTrigger
         aria-label="Library to score against"
         className={cn(
-          "h-8 w-auto max-w-60 rounded-full border-0 bg-secondary text-xs shadow-none hover:bg-secondary/80",
+          "h-8 w-auto max-w-60 rounded-full border-0 bg-secondary text-xs shadow-none",
           className
         )}
       >
@@ -117,9 +117,11 @@ export function Composer({
           }}
           placeholder={placeholder}
           className={cn(
-            "resize-none border-0 pr-20 text-base shadow-none focus-visible:ring-0",
+            "resize-none border-0 text-base shadow-none focus-visible:ring-0",
             minHeightClass,
-            variant === "page" && "px-3"
+            // The sticky variant's send buttons sit inside the field; the
+            // page variant's sit in the row below it.
+            variant === "sticky" ? "pr-20" : "px-3"
           )}
         />
         {mentions ? (

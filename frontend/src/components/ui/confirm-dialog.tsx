@@ -3,27 +3,38 @@
 import { Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
+  AlertDialog,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 
 interface ConfirmDialogProps {
   open: boolean;
   title: string;
   description: string;
   /** The destructive action's own verb -- "Delete", not "OK". */
-  confirmLabel: string;
+  confirmLabel?: string;
+  /** While true both buttons are disabled and the dialog cannot be dismissed. */
   busy?: boolean;
-  onCancel: () => void;
+  /** Called when the dialog is dismissed (Cancel, Escape). */
+  onCancel?: () => void;
+  /**
+   * The prototype's API. When given, it is told `false` on dismissal AND
+   * after `onConfirm`, as Radix's `AlertDialogAction` closes on click. A
+   * caller whose confirm is async and closes the dialog itself should pass
+   * `onCancel` instead.
+   */
+  onOpenChange?: (open: boolean) => void;
   onConfirm: () => void;
 }
 
 /**
- * The confirmation every destructive action in this app uses.
+ * The confirmation every destructive action in this app uses, drawn as the
+ * prototype's alert dialog.
  *
  * It replaces `window.confirm`, which is not merely unstyled but
  * UNRELIABLE: Chrome offers "Prevent this page from creating additional
@@ -43,31 +54,41 @@ export function ConfirmDialog({
   open,
   title,
   description,
-  confirmLabel,
+  confirmLabel = "Delete",
   busy = false,
   onCancel,
+  onOpenChange,
   onConfirm,
 }: ConfirmDialogProps) {
+  function dismiss() {
+    onCancel?.();
+    onOpenChange?.(false);
+  }
+
   return (
-    <Dialog open={open} onOpenChange={(next) => !next && !busy && onCancel()}>
-      {/* Same overflow discipline as every other dialog in this app: a
-          flex column capped at the viewport with the body in its own
-          scroller, so a long name can never push the footer out of reach. */}
-      <DialogContent className="flex max-h-[90vh] flex-col sm:max-w-md">
-        <DialogHeader>
-          <DialogTitle>{title}</DialogTitle>
-          <DialogDescription className="break-words">{description}</DialogDescription>
-        </DialogHeader>
-        <DialogFooter>
-          <Button variant="outline" onClick={onCancel} disabled={busy}>
-            Cancel
-          </Button>
-          <Button variant="destructive" onClick={onConfirm} disabled={busy}>
-            {busy && <Loader2 className="size-3.5 animate-spin" />}
+    <AlertDialog open={open} onOpenChange={(next) => !next && !busy && dismiss()}>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>{title}</AlertDialogTitle>
+          <AlertDialogDescription className="break-words">{description}</AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel disabled={busy}>Cancel</AlertDialogCancel>
+          {/* A plain Button, not AlertDialogAction: an action that closes on
+              click could not keep the dialog up while an async delete runs. */}
+          <Button
+            variant="destructive"
+            disabled={busy}
+            onClick={() => {
+              onConfirm();
+              onOpenChange?.(false);
+            }}
+          >
+            {busy && <Loader2 className="animate-spin" />}
             {confirmLabel}
           </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
   );
 }

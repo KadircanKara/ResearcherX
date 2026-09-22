@@ -38,16 +38,18 @@ export default function LatexDocumentPage() {
     };
   }, [projectId]);
 
+  // Both states take the editor frame's own box (the prototype's `75vh`,
+  // `rounded-lg`), so the page does not jump when the workspace lands.
   if (error) {
     return (
-      <div className="flex h-[70vh] items-center justify-center text-sm text-destructive">
+      <div className="flex h-[75vh] items-center justify-center rounded-lg border text-[13px] text-destructive">
         {error}
       </div>
     );
   }
 
   if (!loaded) {
-    return <div className="h-[70vh] animate-pulse rounded-xl bg-muted" />;
+    return <div className="h-[75vh] animate-pulse rounded-lg bg-muted" />;
   }
 
   return <LatexWorkspace projectId={projectId} documentId={docId} ownerId={ownerId} />;
