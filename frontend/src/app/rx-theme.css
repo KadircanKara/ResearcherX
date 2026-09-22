@@ -76,6 +76,23 @@
   -webkit-font-smoothing: antialiased;
 }
 
+/* The app's own type, for screens that sit inside a project (see `RxTheme`'s
+   `typeface` prop). Every face on those screens is read through these three
+   variables, so re-pointing them here is the whole switch. The mono stack is
+   the one globals.css gives the rest of the app, so dates and counts stay in
+   aligned columns without a second monospace family. */
+.rx-theme.rx-app-type {
+  --rx-sans: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+  --font-serif: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+/* The same weight and tracking as every other page title in the app
+   (`text-3xl font-semibold tracking-tight`). The size stays the screen's own. */
+.rx-app-type .rx-head h1 {
+  font-weight: 600;
+  letter-spacing: -0.025em;
+}
+
 .dark .rx-theme {
   color-scheme: dark;
 

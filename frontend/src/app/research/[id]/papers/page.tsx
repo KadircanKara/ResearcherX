@@ -230,7 +230,7 @@ export default function PapersPage() {
   );
 
   return (
-    <RxTheme className="rx-pp">
+    <RxTheme className="rx-pp" typeface="app">
       <div className="rx-shell">
         <header className="rx-head">
           <div>
