@@ -25,6 +25,24 @@ export const PROJECT_COLORS = [
 
 export type ProjectColor = (typeof PROJECT_COLORS)[number];
 
+/** A swatch's accessible name, in picker order. */
+const COLOR_LABELS: Record<ProjectColor, string> = {
+  "#3B82F6": "Blue",
+  "#8B5CF6": "Violet",
+  "#EC4899": "Pink",
+  "#EF4444": "Red",
+  "#F97316": "Orange",
+  "#EAB308": "Amber",
+  "#22C55E": "Green",
+  "#14B8A6": "Teal",
+  "#06B6D4": "Cyan",
+  "#64748B": "Slate",
+};
+
+/** The picker's swatches: every palette colour with the name it is announced by. */
+export const PROJECT_PALETTE: readonly { hex: ProjectColor; label: string }[] =
+  PROJECT_COLORS.map((hex) => ({ hex, label: COLOR_LABELS[hex] }));
+
 export function isProjectColor(value: string): value is ProjectColor {
   return (PROJECT_COLORS as readonly string[]).includes(value);
 }

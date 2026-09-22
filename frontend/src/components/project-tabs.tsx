@@ -1,47 +1,48 @@
 "use client"
 
-import { routes } from "@/lib/routes";
 import Link from "next/link"
 import { usePathname } from "next/navigation"
-import { MessageSquare, FileText, Network, FileCode } from "lucide-react"
+import { FileCode2, Library, MessageSquare, Share2 } from "lucide-react"
+import { projectTab, routes, type ProjectTab } from "@/lib/routes"
 import { cn } from "@/lib/utils"
 
-const TABS = [
-  { slug: "chat",   label: "Chat",   icon: MessageSquare },
-  { slug: "papers", label: "Papers", icon: FileText },
-  { slug: "graph",  label: "Graph",  icon: Network },
-  { slug: "latex",  label: "LaTeX",  icon: FileCode },
-] as const
+const TABS: { key: ProjectTab; label: string; icon: typeof MessageSquare }[] = [
+  { key: "chat", label: "Chat", icon: MessageSquare },
+  { key: "papers", label: "Papers", icon: Library },
+  { key: "graph", label: "Graph", icon: Share2 },
+  { key: "latex", label: "LaTeX", icon: FileCode2 },
+]
 
-interface ProjectTabsProps {
-  projectId: string
-}
-
-export function ProjectTabs({ projectId }: ProjectTabsProps) {
+/**
+ * The project's section switcher, ported from the prototype: a segmented
+ * strip of links. `active` defaults to the tab the current URL is on.
+ */
+export function ProjectTabs({ projectId, active }: { projectId: string; active?: ProjectTab }) {
   const pathname = usePathname()
+  const current = active ?? projectTab(pathname, projectId)
 
   return (
     <nav
-      className="inline-flex items-center gap-0.5 rounded-md bg-muted p-0.5"
-      aria-label="Project tabs"
+      aria-label="Project sections"
+      className="inline-flex w-full max-w-md items-center gap-1 rounded-lg bg-muted p-1 sm:w-auto"
     >
-      {TABS.map(({ slug, label, icon: Icon }) => {
-        const href = `${routes.project(projectId)}/${slug}`
-        const active = pathname === href || pathname.startsWith(href + "/")
+      {TABS.map((tab) => {
+        const Icon = tab.icon
+        const isActive = tab.key === current
         return (
           <Link
-            key={slug}
-            href={href}
+            key={tab.key}
+            href={routes[tab.key](projectId)}
+            aria-current={isActive ? "page" : undefined}
             className={cn(
-              "flex items-center gap-1.5 rounded-[5px] px-3 py-1.5 text-sm font-medium transition-colors",
-              active
-                ? "bg-card text-accent-foreground shadow-sm dark:bg-secondary dark:text-foreground"
-                : "text-muted-foreground hover:text-foreground"
+              "flex flex-1 items-center justify-center gap-1.5 rounded-md px-3 py-1.5 text-[13px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+              isActive
+                ? "bg-card text-foreground shadow-sm"
+                : "text-muted-foreground hover:text-foreground",
             )}
-            aria-current={active ? "page" : undefined}
           >
-            <Icon className="size-3.5" />
-            {label}
+            <Icon className="size-3.5" aria-hidden />
+            {tab.label}
           </Link>
         )
       })}
