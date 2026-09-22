@@ -1,11 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
-  formatAdded,
+  abstractExcerpt,
   hasText,
+  hostOf,
   lastAddedLabel,
   libraryHeadline,
   paperState,
-  railTotal,
   retrieverLabel,
   sourceLine,
   stateDetail,
@@ -87,14 +87,23 @@ describe("summarize", () => {
     expect(summarize(papers, probes)).toEqual({
       total: 5,
       searchable: 2,
-      unchecked: 2,
+      unchecked: 1,
       attention: 1,
     });
   });
 
-  it("puts a no-text manual paper with the unchecked, not with the failures", () => {
-    expect(summarize([paper({ source: "manual" })], {}).attention).toBe(0);
-    expect(summarize([paper({ source: "manual" })], {}).unchecked).toBe(1);
+  it("counts a probe in flight as not checked yet", () => {
+    expect(summarize([paper()], { p1: "checking" }).unchecked).toBe(1);
+  });
+
+  it("puts a no-text manual paper in no bucket: nothing to check, nothing wrong", () => {
+    const s = summarize([paper({ source: "manual" })], {});
+    expect(s).toEqual({ total: 1, searchable: 0, unchecked: 0, attention: 0 });
+  });
+
+  it("puts a failed probe in no bucket: it says nothing about the paper", () => {
+    const s = summarize([paper()], { p1: "unavailable" });
+    expect(s).toEqual({ total: 1, searchable: 0, unchecked: 0, attention: 0 });
   });
 });
 
@@ -123,13 +132,8 @@ describe("libraryHeadline", () => {
     });
     expect(libraryHeadline(s)).toBe("2 papers, all searchable");
     expect(libraryHeadline(summarize([paper({ id: "a" })], { a: "indexed" }))).toBe(
-      "One paper, searchable"
+      "1 paper, all searchable"
     );
-  });
-
-  it("agrees with the rail total", () => {
-    expect(railTotal(summarize([paper()], {}))).toBe("1 paper");
-    expect(railTotal(summarize([], {}))).toBe("Nothing here yet");
   });
 });
 
@@ -140,15 +144,28 @@ describe("row secondary line", () => {
     expect(sourceLine(paper({ source: "link", pdf_url: "https://www.arxiv.org/abs/1" }))).toBe(
       "Linked · arxiv.org"
     );
-    expect(sourceLine(paper({ source: "link", pdf_url: "not a url" }))).toBe("Linked · link");
-    expect(sourceLine(paper({ source: "link" }))).toBe("Linked PDF");
+    expect(sourceLine(paper({ source: "link", pdf_url: "not a url" }))).toBe(
+      "Linked · unknown host"
+    );
+    expect(sourceLine(paper({ source: "link" }))).toBe("Linked · unknown host");
+  });
+
+  it("reads a host without inventing one", () => {
+    expect(hostOf("https://www.arxiv.org/abs/1")).toBe("arxiv.org");
+    expect(hostOf("not a url")).toBeNull();
+    expect(hostOf(null)).toBeNull();
   });
 });
 
-describe("formatAdded", () => {
-  it("formats an ISO date and refuses to invent one", () => {
-    expect(formatAdded("2026-08-14T09:30:00Z")).toBe("14 Aug 2026");
-    expect(formatAdded("nonsense")).toBe("—");
+describe("abstractExcerpt", () => {
+  it("leaves a short abstract alone", () => {
+    expect(abstractExcerpt("Short.")).toBe("Short.");
+    expect(abstractExcerpt("x".repeat(320))).toBe("x".repeat(320));
+  });
+
+  it("cuts at 320 characters, trims the cut and marks it", () => {
+    const cut = abstractExcerpt(`${"a".repeat(318)}  ${"b".repeat(40)}`);
+    expect(cut).toBe(`${"a".repeat(318)}…`);
   });
 });
 

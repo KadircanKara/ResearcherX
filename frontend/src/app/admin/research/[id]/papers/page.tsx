@@ -2,30 +2,23 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams } from "next/navigation";
-import { Plus } from "lucide-react";
+import { Plus, Search } from "lucide-react";
 import { BulkEditBar } from "@/components/bulk-edit-bar";
 import { PageHeader } from "@/components/page-header";
+import { AddPaperDialog } from "@/components/papers/add-paper-dialog";
 import { LibraryRail } from "@/components/papers/library-rail";
-import { PaperDialog } from "@/components/papers/paper-dialog";
 import { PaperTable } from "@/components/papers/paper-table";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { EmptyState, NoMatchState } from "@/components/ui/empty-state";
-import { SearchInput } from "@/components/ui/search-input";
+import { Input } from "@/components/ui/input";
+import { RenameDialog } from "@/components/ui/rename-dialog";
 import { saveBlob } from "@/lib/download";
-import {
-  deletePaper,
-  fetchPaperPdf,
-  getProject,
-  listPapers,
-  probePaperIndexed,
-} from "@/lib/projects";
+import { deletePaper, fetchPaperPdf, listPapers, patchPaper, probePaperIndexed } from "@/lib/projects";
 import { lastAddedLabel, libraryHeadline, summarize, type ProbeMap } from "@/lib/papers";
 import { matchesQuery } from "@/lib/search";
-import { clear, isAllSelected, retainVisible, selectAll, toggle } from "@/lib/selection";
-import type { Paper, Role } from "@/lib/types";
-
-const CAN_ADD: Role[] = ["owner", "member"];
+import { clear, retainVisible, selectAll, toggle } from "@/lib/selection";
+import type { Paper } from "@/lib/types";
 
 /** Title and abstract -- the two things a row shows once opened, so every
  * match is visible and nothing reads as a false positive. */
@@ -34,59 +27,57 @@ const searchable = (paper: Paper) => [paper.title, paper.abstract];
 export default function PapersPage() {
   const { id: projectId } = useParams<{ id: string }>();
   const [papers, setPapers] = useState<Paper[]>([]);
-  const [myRole, setMyRole] = useState<Role | null>(null);
   const [loading, setLoading] = useState(true);
-  const [deleting, setDeleting] = useState<string | null>(null);
-  const [editing, setEditing] = useState<Paper | null>(null);
-  const [downloading, setDownloading] = useState<string | null>(null);
   const [query, setQuery] = useState("");
+  const [editing, setEditing] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [error, setError] = useState<string | null>(null);
 
-  const [editingMode, setEditingMode] = useState(false);
-  const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [bulkBusy, setBulkBusy] = useState(false);
-  const [bulkError, setBulkError] = useState<string | null>(null);
-  // Asked through a real dialog, never `window.confirm` -- see
-  // `ConfirmDialog`: Chrome suppresses repeated native dialogs, after which
-  // `confirm()` returns false without opening and the delete silently fails.
-  const [pendingBulkDelete, setPendingBulkDelete] = useState(false);
-  const [pendingRemove, setPendingRemove] = useState<Paper | null>(null);
-
-  // One row open at a time, like the concept: the opened body is wide and two
-  // of them stacked push the rest of the table off screen.
+  // One row open at a time: the opened body is wide and two of them stacked
+  // push the rest of the table off screen.
   const [openId, setOpenId] = useState<string | null>(null);
   // What the retriever answered about each paper, keyed by id. Never fetched
   // in a sweep -- one request, when a row is opened. See `lib/papers.ts`.
   const [probes, setProbes] = useState<ProbeMap>({});
 
   const [addOpen, setAddOpen] = useState(false);
-  // A fresh array per drop, deliberately: `PaperUploadScreen` consumes it on
+  // A fresh array per open, deliberately: the upload tab consumes it on
   // identity change, so reusing one would swallow the second drop.
   const [droppedFiles, setDroppedFiles] = useState<File[]>([]);
 
-  // `silent` skips the full-page loading skeleton. The skeleton branch below
-  // doesn't render <PaperDialog>, so a non-silent reload while the Add Paper
-  // dialog is open unmounts it out from under the user — e.g. PaperUploadScreen
-  // calls onSaved (this function) mid-batch, and an open dialog would vanish
-  // instead of staying open to show a failed row.
+  const [renamePaper, setRenamePaper] = useState<Paper | null>(null);
+  const [renameBusy, setRenameBusy] = useState(false);
+  const [renameError, setRenameError] = useState<string | null>(null);
+
+  // Asked through a real dialog, never `window.confirm` -- see
+  // `ConfirmDialog`: Chrome suppresses repeated native dialogs, after which
+  // `confirm()` returns false without opening and the delete silently fails.
+  const [removePaper, setRemovePaper] = useState<Paper | null>(null);
+  const [bulkDeleteOpen, setBulkDeleteOpen] = useState(false);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const [downloadingId, setDownloadingId] = useState<string | null>(null);
+
+  // `silent` skips the loading skeleton. The skeleton replaces the table, so
+  // a non-silent reload after a single write would flash the whole list away
+  // and lose the scroll position.
   //
-  // `loadSeq` guards against out-of-order resolution: onSaved (batch
-  // completion) and handleDelete's error-path resync can both be in flight at
-  // once, and a slower earlier request resolving after a faster later one
-  // would otherwise overwrite fresher state with stale data.
+  // `loadSeq` guards against out-of-order resolution: an add batch finishing
+  // and a delete's error-path resync can both be in flight at once, and a
+  // slower earlier request resolving after a faster later one would
+  // otherwise overwrite fresher state with stale data.
   const loadSeq = useRef(0);
 
   const load = useCallback(
     (opts: { silent?: boolean } = {}) => {
       const seq = ++loadSeq.current;
       if (!opts.silent) setLoading(true);
-      Promise.all([listPapers(projectId), getProject(projectId)])
-        .then(([ps, detail]) => {
+      listPapers(projectId)
+        .then((ps) => {
           if (seq !== loadSeq.current) return; // a newer load already won
           setPapers(ps);
-          setMyRole(detail.my_role);
           // A probe is a claim about a paper that still exists. Dropping the
-          // rest keeps a deleted paper's answer from being reused by a new
-          // paper that happens to reuse nothing but the shape of the map.
+          // rest keeps a deleted paper's answer from lingering in the map.
           setProbes((prev) => {
             const live: ProbeMap = {};
             for (const p of ps) if (prev[p.id]) live[p.id] = prev[p.id];
@@ -100,6 +91,10 @@ export default function PapersPage() {
     },
     [projectId]
   );
+
+  useEffect(() => {
+    load();
+  }, [load]);
 
   const probe = useCallback(
     (paperId: string) => {
@@ -116,32 +111,8 @@ export default function PapersPage() {
     [projectId]
   );
 
-  function toggleRow(paper: Paper) {
-    const next = openId === paper.id ? null : paper.id;
-    setOpenId(next);
-    // Asked on open, and again only if the previous attempt failed outright.
-    const seen = probes[paper.id];
-    if (next && (seen === undefined || seen === "unavailable")) probe(paper.id);
-  }
-
-  async function handleDelete(paperId: string) {
-    setPendingRemove(null);
-    setDeleting(paperId);
-    try {
-      await deletePaper(projectId, paperId);
-      setPapers((prev) => prev.filter((p) => p.id !== paperId));
-      setProbes((prev) => {
-        const next = { ...prev };
-        delete next[paperId];
-        return next;
-      });
-      if (openId === paperId) setOpenId(null);
-    } catch {
-      load({ silent: true });
-    } finally {
-      setDeleting(null);
-    }
-  }
+  const visible = papers.filter((p) => matchesQuery(query, searchable(p)));
+  const summary = summarize(papers, probes);
 
   function changeQuery(next: string) {
     setQuery(next);
@@ -150,11 +121,94 @@ export default function PapersPage() {
     const stillVisible = papers
       .filter((p) => matchesQuery(next, searchable(p)))
       .map((p) => p.id);
-    setSelected((prev) => retainVisible(prev, stillVisible));
+    setSelectedIds((prev) => retainVisible(prev, stillVisible));
   }
 
-  async function handleDownloadPdf(paper: Paper) {
-    setDownloading(paper.id);
+  function toggleOpen(paper: Paper) {
+    const next = openId === paper.id ? null : paper.id;
+    setOpenId(next);
+    // Asked on open, and again only if the previous attempt failed outright.
+    const seen = probes[paper.id];
+    if (next && (seen === undefined || seen === "unavailable")) probe(paper.id);
+  }
+
+  function openAdd(files: File[]) {
+    setDroppedFiles(files);
+    setAddOpen(true);
+  }
+
+  async function handleRename(value: string) {
+    if (!renamePaper) return;
+    setRenameBusy(true);
+    setRenameError(null);
+    try {
+      // A title-only PATCH re-embeds nothing, so the row's probe still holds.
+      const updated = await patchPaper(projectId, renamePaper.id, { title: value });
+      setPapers((prev) => prev.map((p) => (p.id === updated.id ? updated : p)));
+      setRenamePaper(null);
+    } catch {
+      setRenameError("Could not rename this paper. Please try again.");
+    } finally {
+      setRenameBusy(false);
+    }
+  }
+
+  async function handleRemoveConfirmed() {
+    if (!removePaper) return;
+    const paperId = removePaper.id;
+    setRemovePaper(null);
+    setDeletingId(paperId);
+    setError(null);
+    try {
+      await deletePaper(projectId, paperId);
+      setPapers((prev) => prev.filter((p) => p.id !== paperId));
+      setSelectedIds((prev) => {
+        const next = new Set(prev);
+        next.delete(paperId);
+        return next;
+      });
+      setProbes((prev) => {
+        const next = { ...prev };
+        delete next[paperId];
+        return next;
+      });
+      if (openId === paperId) setOpenId(null);
+    } catch {
+      setError("Could not remove that paper. Please try again.");
+      load({ silent: true });
+    } finally {
+      setDeletingId(null);
+    }
+  }
+
+  async function handleBulkDelete() {
+    setBulkDeleteOpen(false);
+    setBulkBusy(true);
+    setError(null);
+    const ids = [...selectedIds];
+    const results = await Promise.allSettled(ids.map((id) => deletePaper(projectId, id)));
+    const failed = ids.filter((_, i) => results[i].status === "rejected");
+    if (openId !== null && ids.includes(openId) && !failed.includes(openId)) {
+      setOpenId(null);
+    }
+    if (failed.length > 0) {
+      // Stay in edit mode with exactly the rows that survived selected, so
+      // the retry is one click away.
+      setSelectedIds(new Set(failed));
+      setError(`${failed.length} of ${ids.length} could not be deleted.`);
+    } else {
+      setSelectedIds(clear());
+      setEditing(false);
+    }
+    setBulkBusy(false);
+    // Re-fetched unconditionally: what just proved unreliable is precisely
+    // this client's idea of what exists.
+    load({ silent: true });
+  }
+
+  async function handleDownload(paper: Paper) {
+    setDownloadingId(paper.id);
+    setError(null);
     try {
       const blob = await fetchPaperPdf(projectId, paper.id);
       // Named for the paper, not its id: an id names nothing in a downloads
@@ -166,104 +220,71 @@ export default function PapersPage() {
           .slice(0, 80) || "paper";
       saveBlob(blob, `${safe}.pdf`);
     } catch {
-      setBulkError("Could not download that PDF. Please try again.");
+      setError("Could not download that PDF. Please try again.");
     } finally {
-      setDownloading(null);
+      setDownloadingId(null);
     }
   }
-
-  async function handleBulkDelete() {
-    setPendingBulkDelete(false);
-    setBulkBusy(true);
-    setBulkError(null);
-    const ids = [...selected];
-    const results = await Promise.allSettled(ids.map((id) => deletePaper(projectId, id)));
-    const failed = ids.filter((_, i) => results[i].status === "rejected");
-    setSelected(new Set(failed));
-    if (failed.length > 0) {
-      setBulkError(`${failed.length} of ${ids.length} could not be deleted.`);
-    }
-    if (openId !== null && ids.includes(openId) && !failed.includes(openId)) {
-      setOpenId(null);
-    }
-    setBulkBusy(false);
-    // Re-fetched unconditionally: what just proved unreliable is precisely
-    // this client's idea of what exists.
-    load({ silent: true });
-  }
-
-  function openDialogWith(files: File[]) {
-    setDroppedFiles(files);
-    setAddOpen(true);
-  }
-
-  useEffect(() => {
-    load();
-  }, [load]);
-
-  const canAdd = myRole !== null && CAN_ADD.includes(myRole);
-  const visible = papers.filter((p) => matchesQuery(query, searchable(p)));
-  const visibleIds = visible.map((p) => p.id);
-  const summary = summarize(papers, probes);
 
   return (
-    <div className="fade-block space-y-5">
+    <div className="space-y-5">
       <PageHeader
         eyebrow="Library"
         title={loading ? "Reading the library" : libraryHeadline(summary)}
-        meta={lastAddedLabel(papers)}
+        meta={loading ? undefined : lastAddedLabel(papers)}
         actions={
-          canAdd ? (
-            <Button size="sm" onClick={() => openDialogWith([])}>
-              <Plus className="size-4" aria-hidden />
-              Add papers
-            </Button>
-          ) : undefined
+          <Button size="sm" onClick={() => openAdd([])}>
+            <Plus className="size-4" aria-hidden />
+            Add papers
+          </Button>
         }
       />
 
       <div className="flex flex-col gap-6 lg:flex-row">
         <div className="min-w-0 flex-1 space-y-4">
-          <p className="max-w-2xl text-[13px] text-muted-foreground">
-            Open a paper to see what the retriever holds for it. Only papers the retriever
-            holds text for can be searched or mentioned in a question.
-          </p>
-
-          {papers.length > 0 && (
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <div className="w-full sm:w-72">
-                <SearchInput
-                  value={query}
-                  onChange={changeQuery}
-                  placeholder="Search papers…"
-                  label="Search papers by title or abstract"
-                />
-              </div>
-              {canAdd && (
-                <BulkEditBar
-                  active={editingMode}
-                  count={selected.size}
-                  total={visibleIds.length}
-                  allSelected={isAllSelected(selected, visibleIds)}
-                  busy={bulkBusy}
-                  onEnter={() => setEditingMode(true)}
-                  onSelectAll={() => setSelected(selectAll(selected, visibleIds))}
-                  onClear={() => setSelected(clear())}
-                  onDelete={() => setPendingBulkDelete(true)}
-                  onDone={() => {
-                    setEditingMode(false);
-                    // A selection that survives invisibly is a delete
-                    // waiting to hit the wrong rows.
-                    setSelected(clear());
-                  }}
-                />
-              )}
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="relative w-full sm:w-72">
+              <Search
+                className="absolute left-3 top-2.5 size-4 text-muted-foreground"
+                aria-hidden
+              />
+              <Input
+                value={query}
+                onChange={(e) => changeQuery(e.target.value)}
+                placeholder="Search papers…"
+                className="pl-9"
+                aria-label="Search papers"
+              />
             </div>
-          )}
+            {papers.length > 0 && (
+              <BulkEditBar
+                editing={editing}
+                selectedCount={selectedIds.size}
+                busy={bulkBusy}
+                onStart={() => setEditing(true)}
+                onSelectAll={() =>
+                  setSelectedIds(
+                    selectAll(
+                      selectedIds,
+                      visible.map((p) => p.id)
+                    )
+                  )
+                }
+                onClear={() => setSelectedIds(clear())}
+                onDelete={() => setBulkDeleteOpen(true)}
+                onDone={() => {
+                  setEditing(false);
+                  // A selection that survives invisibly is a delete waiting
+                  // to hit the wrong rows.
+                  setSelectedIds(clear());
+                }}
+              />
+            )}
+          </div>
 
-          {bulkError && (
+          {error && (
             <p role="alert" className="text-[13px] text-destructive">
-              {bulkError}
+              {error}
             </p>
           )}
 
@@ -276,46 +297,40 @@ export default function PapersPage() {
           ) : papers.length === 0 ? (
             <EmptyState
               title="No papers yet"
-              body={
-                canAdd
-                  ? "Add a paper and it is read, split and embedded on arrival — then it can be searched and mentioned in a question."
-                  : "No papers have been added to this project yet."
-              }
+              body="Add a paper and it is read, split and embedded on arrival — then it can be searched and mentioned in a question."
             >
-              {canAdd && (
-                <Button size="sm" onClick={() => openDialogWith([])}>
-                  Add papers
-                </Button>
-              )}
+              <Button size="sm" onClick={() => openAdd([])}>
+                Add papers
+              </Button>
             </EmptyState>
           ) : visible.length === 0 ? (
-            // A query that matches nothing needs saying: an empty table under
-            // a filled search box otherwise reads as the library emptying.
             <NoMatchState query={query} noun="papers" />
           ) : (
             <PaperTable
               papers={visible}
               probes={probes}
-              editing={editingMode}
-              selectedIds={selected}
+              editing={editing}
+              selectedIds={selectedIds}
+              onToggleSelect={(paper) => setSelectedIds(toggle(selectedIds, paper.id))}
               openId={openId}
-              canEdit={canAdd}
-              downloadingId={downloading}
-              deletingId={deleting}
-              onToggleSelect={(paper) => setSelected(toggle(selected, paper.id))}
-              onToggleOpen={toggleRow}
+              onToggleOpen={toggleOpen}
+              downloadingId={downloadingId}
+              deletingId={deletingId}
               onCheckAgain={(paper) => probe(paper.id)}
-              onRename={setEditing}
-              onRemove={setPendingRemove}
-              onDownload={(paper) => void handleDownloadPdf(paper)}
+              onRename={(paper) => {
+                setRenameError(null);
+                setRenamePaper(paper);
+              }}
+              onRemove={setRemovePaper}
+              onDownload={(paper) => void handleDownload(paper)}
             />
           )}
         </div>
 
-        <LibraryRail summary={summary} canAdd={canAdd} onOpenAdd={openDialogWith} />
+        <LibraryRail summary={summary} onOpenAdd={openAdd} />
       </div>
 
-      <PaperDialog
+      <AddPaperDialog
         projectId={projectId}
         open={addOpen}
         onOpenChange={setAddOpen}
@@ -323,50 +338,34 @@ export default function PapersPage() {
         onSaved={() => load({ silent: true })}
       />
 
-      <ConfirmDialog
-        open={pendingRemove !== null}
-        title="Remove this paper?"
-        description={`“${pendingRemove?.title ?? ""}” will be removed from this library. This cannot be undone.`}
-        confirmLabel="Remove"
-        busy={deleting !== null}
-        onCancel={() => setPendingRemove(null)}
-        onConfirm={() => pendingRemove && void handleDelete(pendingRemove.id)}
+      <RenameDialog
+        open={renamePaper !== null}
+        title="Rename paper"
+        label="Title"
+        initialValue={renamePaper?.title ?? ""}
+        busy={renameBusy}
+        error={renameError}
+        onCancel={() => setRenamePaper(null)}
+        onSubmit={(value) => void handleRename(value)}
       />
 
       <ConfirmDialog
-        open={pendingBulkDelete}
-        title={`Delete ${selected.size} paper${selected.size !== 1 ? "s" : ""}?`}
+        open={removePaper !== null}
+        title="Remove this paper?"
+        description={`"${removePaper?.title ?? ""}" will be removed from this library. This can't be undone.`}
+        confirmLabel="Remove"
+        onCancel={() => setRemovePaper(null)}
+        onConfirm={() => void handleRemoveConfirmed()}
+      />
+
+      <ConfirmDialog
+        open={bulkDeleteOpen}
+        title={`Delete ${selectedIds.size} ${selectedIds.size === 1 ? "paper" : "papers"}?`}
         description="This cannot be undone."
         confirmLabel="Delete"
-        busy={bulkBusy}
-        onCancel={() => setPendingBulkDelete(false)}
+        onCancel={() => setBulkDeleteOpen(false)}
         onConfirm={() => void handleBulkDelete()}
       />
-
-      {editing && (
-        <PaperDialog
-          projectId={projectId}
-          paper={editing}
-          open={!!editing}
-          onOpenChange={(o) => !o && setEditing(null)}
-          onSaved={() => {
-            const editedId = editing.id;
-            setEditing(null);
-            // A manual paper's text is re-embedded by the PATCH, so anything
-            // this screen already knew about the retriever's contents for it
-            // is now a claim about the previous text.
-            setProbes((prev) => {
-              const next = { ...prev };
-              delete next[editedId];
-              return next;
-            });
-            // Silent: a non-silent load flips `loading` true, and that branch
-            // replaces the whole table with skeletons — flashing the entire
-            // list away for a single-field edit and losing scroll position.
-            load({ silent: true });
-          }}
-        />
-      )}
     </div>
   );
 }

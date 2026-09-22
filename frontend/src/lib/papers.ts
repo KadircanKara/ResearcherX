@@ -1,3 +1,4 @@
+import { formatDate, plural } from "./format";
 import type { Paper } from "./types";
 
 /**
@@ -113,12 +114,22 @@ export function stateDetail(state: PaperState): string {
 
 export interface LibrarySummary {
   total: number;
-  /** States this module can stand behind, in rail order. */
+  /** Probed indexed, or a manual paper indexed inside its own create. */
   searchable: number;
+  /** Nobody has asked the retriever yet, or the question is in flight. */
   unchecked: number;
+  /** The retriever answered, and holds nothing. */
   attention: number;
 }
 
+/**
+ * The rail's three counts.
+ *
+ * They do NOT always sum to `total`, on purpose: a hand-typed paper with no
+ * text has nothing to check and nothing wrong with it, and a failed probe is
+ * a claim about the check rather than about the paper — neither is "not
+ * checked yet" and neither needs the reader's attention.
+ */
 export function summarize(papers: Paper[], probes: ProbeMap): LibrarySummary {
   let searchable = 0;
   let unchecked = 0;
@@ -126,14 +137,10 @@ export function summarize(papers: Paper[], probes: ProbeMap): LibrarySummary {
   for (const paper of papers) {
     const { kind } = paperState(paper, probes[paper.id]);
     if (kind === "indexed" || kind === "expected") searchable += 1;
+    else if (kind === "unchecked" || kind === "checking") unchecked += 1;
     else if (kind === "empty") attention += 1;
-    else unchecked += 1;
   }
   return { total: papers.length, searchable, unchecked, attention };
-}
-
-function plural(n: number, word: string): string {
-  return `${n} ${word}${n === 1 ? "" : "s"}`;
 }
 
 /**
@@ -146,15 +153,8 @@ export function libraryHeadline(summary: LibrarySummary): string {
   if (summary.total === 0) return "No papers yet";
   const papers = plural(summary.total, "paper");
   if (summary.searchable === 0) return `${papers} in this library`;
-  if (summary.searchable === summary.total) {
-    return summary.total === 1 ? "One paper, searchable" : `${papers}, all searchable`;
-  }
+  if (summary.searchable === summary.total) return `${papers}, all searchable`;
   return `${papers}, ${summary.searchable} of them searchable`;
-}
-
-/** The rail's total line. Chunk counts are not in the API, so this is papers. */
-export function railTotal(summary: LibrarySummary): string {
-  return summary.total === 0 ? "Nothing here yet" : plural(summary.total, "paper");
 }
 
 /**
@@ -195,30 +195,35 @@ export function lastAddedLabel(papers: readonly Paper[]): string {
       newest === null || paper.created_at > newest ? paper.created_at : newest,
     null
   );
-  return latest === null ? "Nothing added yet" : `Last added ${formatAdded(latest)}`;
+  return latest === null ? "Nothing added yet" : `Last added ${formatDate(latest)}`;
 }
 
+/** The row's second line: where the paper came from. */
 export function sourceLine(paper: Paper): string {
   switch (paper.source) {
     case "upload":
       return "Uploaded PDF";
     case "link":
-      return paper.pdf_url ? `Linked · ${hostOf(paper.pdf_url)}` : "Linked PDF";
+      return `Linked · ${hostOf(paper.pdf_url) ?? "unknown host"}`;
     default:
       return "Entered by hand";
   }
 }
 
-function hostOf(url: string): string {
+/** `https://www.arxiv.org/abs/1` → `arxiv.org`; null when there is no host. */
+export function hostOf(url: string | null | undefined): string | null {
+  if (!url) return null;
   try {
-    return new URL(url).hostname.replace(/^www\./, "");
+    return new URL(url).hostname.replace(/^www\./, "") || null;
   } catch {
-    return "link";
+    return null;
   }
 }
 
-export function formatAdded(iso: string): string {
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return "—";
-  return d.toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
+const ABSTRACT_MAX = 320;
+
+/** The opened row's abstract quote: the first 320 characters, then "…". */
+export function abstractExcerpt(abstract: string): string {
+  if (abstract.length <= ABSTRACT_MAX) return abstract;
+  return `${abstract.slice(0, ABSTRACT_MAX).trimEnd()}…`;
 }

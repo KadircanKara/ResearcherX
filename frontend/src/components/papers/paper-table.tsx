@@ -8,20 +8,18 @@ import type { Paper } from "@/lib/types";
  * The library table.
  *
  * Four columns — Paper, Added, Retriever, State — because that is what the
- * API carries: `PaperOut` has no authors and no year, so the concept's
- * Authors/Year columns have no source and are not invented here.
+ * API carries: `PaperOut` has no authors and no year.
  */
 export function PaperTable({
   papers,
   probes,
   editing,
   selectedIds,
+  onToggleSelect,
   openId,
-  canEdit,
+  onToggleOpen,
   downloadingId,
   deletingId,
-  onToggleSelect,
-  onToggleOpen,
   onCheckAgain,
   onRename,
   onRemove,
@@ -31,20 +29,19 @@ export function PaperTable({
   probes: ProbeMap;
   editing: boolean;
   selectedIds: ReadonlySet<string>;
+  onToggleSelect: (paper: Paper) => void;
   openId: string | null;
-  canEdit: boolean;
+  onToggleOpen: (paper: Paper) => void;
   downloadingId: string | null;
   deletingId: string | null;
-  onToggleSelect: (paper: Paper) => void;
-  onToggleOpen: (paper: Paper) => void;
   onCheckAgain: (paper: Paper) => void;
   onRename: (paper: Paper) => void;
   onRemove: (paper: Paper) => void;
   onDownload: (paper: Paper) => void;
 }) {
   return (
-    <div className="overflow-hidden rounded-lg border">
-      <div className="hidden grid-cols-[minmax(0,1fr)_110px_120px_150px] gap-4 border-b bg-muted/40 px-4 py-2 text-[11px] font-medium tracking-wide text-muted-foreground uppercase md:grid">
+    <div className="rounded-lg border">
+      <div className="hidden grid-cols-[1fr_110px_120px_150px] gap-4 border-b bg-muted/40 px-4 py-2 text-[11px] font-medium uppercase tracking-wide text-muted-foreground md:grid">
         <div>Paper</div>
         <div>Added</div>
         <div>Retriever</div>
@@ -58,13 +55,11 @@ export function PaperTable({
             state={paperState(paper, probes[paper.id])}
             editing={editing}
             selected={selectedIds.has(paper.id)}
-            open={openId === paper.id}
-            canEdit={canEdit}
-            checking={probes[paper.id] === "checking"}
+            onToggleSelect={() => onToggleSelect(paper)}
+            isOpen={openId === paper.id}
+            onToggleOpen={() => onToggleOpen(paper)}
             downloading={downloadingId === paper.id}
             deleting={deletingId === paper.id}
-            onToggleSelect={() => onToggleSelect(paper)}
-            onToggleOpen={() => onToggleOpen(paper)}
             onCheckAgain={() => onCheckAgain(paper)}
             onRename={() => onRename(paper)}
             onRemove={() => onRemove(paper)}
