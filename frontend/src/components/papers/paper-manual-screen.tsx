@@ -1,7 +1,7 @@
 "use client";
 
 import { Input } from "@/components/ui/input";
-import { TITLE_MAX } from "@/components/paper-row-fields";
+import { TITLE_MAX } from "@/components/papers/paper-row-fields";
 
 const TITLE_WARN = 120;
 

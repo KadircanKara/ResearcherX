@@ -1,26 +1,17 @@
 "use client";
 
-import { routes } from "@/lib/routes";
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useParams, useSearchParams } from "next/navigation";
-import { ChatStream } from "@/components/chat-stream";
-import { MentionTextarea } from "@/components/mention-textarea";
-import { RxTheme } from "@/components/rx-theme";
+import { ArrowLeft } from "lucide-react";
+import { ChatStream } from "@/components/chat/chat-stream";
+import { Composer } from "@/components/chat/composer";
 import { getConversation } from "@/lib/chat";
 import { questionCount, startedAt } from "@/lib/conversations";
 import type { Mention } from "@/lib/mentions";
 import { listPapers } from "@/lib/projects";
+import { routes } from "@/lib/routes";
 import type { ChatConversationDetail, Paper } from "@/lib/types";
-import "../chat.css";
-
-function BackGlyph() {
-  return (
-    <svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
-      <path d="M9.5 6h-7M5.5 3l-3 3 3 3" />
-    </svg>
-  );
-}
 
 export default function ConversationPage() {
   const { id: projectId, cid } = useParams<{ id: string; cid: string }>();
@@ -86,78 +77,70 @@ export default function ConversationPage() {
   }
 
   return (
-    <RxTheme className="rx-ch" typeface="app">
-      <div className="rx-shell">
-        <header className="rx-head">
-          <div>
-            <Link href={routes.chat(projectId)} className="rx-backlink">
-              <BackGlyph />
-              All conversations
-            </Link>
-            <h1>{loading ? "Opening the conversation" : (detail?.title ?? "Conversation not found")}</h1>
-          </div>
-          {detail && (
-            <div className="rx-meta">
+    <div className="fade-block space-y-6 pb-4">
+      <header className="flex flex-wrap items-start justify-between gap-4 border-b pb-5">
+        <div className="min-w-0">
+          <Link
+            href={routes.chat(projectId)}
+            className="mb-2 inline-flex items-center gap-1 text-[12px] text-muted-foreground transition-colors hover:text-foreground"
+          >
+            <ArrowLeft className="size-3.5" aria-hidden />
+            All conversations
+          </Link>
+          <h1 className="text-xl font-semibold tracking-tight">
+            {loading ? "Opening the conversation" : (detail?.title ?? "Conversation not found")}
+          </h1>
+        </div>
+        {detail && (
+          <div className="text-right text-[12px] leading-5 text-muted-foreground">
+            <p>
               {questionCount(detail.messages, sentHere)} · {startedAt(detail.created_at)}
-              <br />
-              Every answer is written from this project&rsquo;s papers alone
-            </div>
-          )}
-        </header>
-
-        {loading ? (
-          <div className="rx-chcol" aria-hidden="true">
-            {[0, 1, 2].map((i) => (
-              <div key={i} className="rx-chskel" />
-            ))}
-          </div>
-        ) : !detail ? (
-          <p className="rx-lede">
-            This conversation may have been deleted, or you may not have access to it.
-          </p>
-        ) : (
-          <div className="rx-chcol">
-            <ChatStream
-              projectId={projectId}
-              conversationId={cid}
-              initialMessages={detail.messages}
-              pendingContent={pendingContent}
-              pendingMentions={pendingMentions}
-              papers={papers}
-              onDone={() => setPendingContent(undefined)}
-              onError={handleSendFailed}
-            />
-
-            {/* The composer sits at the END of the column, in normal page
-                flow, exactly as in the concept — the page scrolls, the thread
-                does not scroll inside a box of its own. */}
-            <div className="rx-composer">
-              <MentionTextarea
-                value={input}
-                onChange={setInput}
-                mentions={mentions}
-                onMentionsChange={setMentions}
-                papers={papers}
-                disabled={!!pendingContent}
-                onSubmit={handleSend}
-              />
-              <div className="rx-bar">
-                <span>
-                  Type <b>@</b> to name a paper and search only inside it
-                </span>
-                <button
-                  type="button"
-                  className="rx-btn rx-push"
-                  onClick={handleSend}
-                  disabled={!input.trim() || !!pendingContent}
-                >
-                  Ask
-                </button>
-              </div>
-            </div>
+            </p>
+            <p>Every answer is written from this project&rsquo;s papers alone</p>
           </div>
         )}
-      </div>
-    </RxTheme>
+      </header>
+
+      {loading ? (
+        <div className="space-y-4" aria-hidden="true">
+          {[0, 1, 2].map((i) => (
+            <div key={i} className="h-16 animate-pulse rounded-lg bg-muted" />
+          ))}
+        </div>
+      ) : !detail ? (
+        <p className="text-[13px] text-muted-foreground">
+          This conversation may have been deleted, or you may not have access to it.
+        </p>
+      ) : (
+        <>
+          <ChatStream
+            projectId={projectId}
+            conversationId={cid}
+            initialMessages={detail.messages}
+            pendingContent={pendingContent}
+            pendingMentions={pendingMentions}
+            papers={papers}
+            onDone={() => setPendingContent(undefined)}
+            onError={handleSendFailed}
+          />
+
+          {/* The composer sits at the END of the page, in normal flow — the
+              page scrolls, the thread does not scroll inside a box of its
+              own — but sticks to the bottom of the viewport so a follow-up
+              is always one click away in a long conversation. */}
+          <Composer
+            className="sticky bottom-3 shadow-sm"
+            papers={papers}
+            value={input}
+            onChange={setInput}
+            mentions={mentions}
+            onMentionsChange={setMentions}
+            onSubmit={handleSend}
+            disabled={!!pendingContent}
+            submitLabel={pendingContent ? "Asking…" : "Ask"}
+          />
+        </>
+      )}
+    </div>
   );
 }

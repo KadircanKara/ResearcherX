@@ -11,7 +11,7 @@ import {
   TITLE_MAX,
   withTimeout,
   type BatchItem,
-} from "@/components/paper-row-fields";
+} from "@/components/papers/paper-row-fields";
 import { runBatch } from "@/lib/batch-queue";
 import {
   createPaper,

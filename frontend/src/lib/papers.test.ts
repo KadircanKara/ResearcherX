@@ -2,9 +2,11 @@ import { describe, expect, it } from "vitest";
 import {
   formatAdded,
   hasText,
+  lastAddedLabel,
   libraryHeadline,
   paperState,
   railTotal,
+  retrieverLabel,
   sourceLine,
   stateDetail,
   summarize,
@@ -147,5 +149,46 @@ describe("formatAdded", () => {
   it("formats an ISO date and refuses to invent one", () => {
     expect(formatAdded("2026-08-14T09:30:00Z")).toBe("14 Aug 2026");
     expect(formatAdded("nonsense")).toBe("—");
+  });
+});
+
+describe("retrieverLabel", () => {
+  it("says the retriever holds text only once a probe has said so", () => {
+    expect(retrieverLabel(paperState(paper(), "indexed"))).toBe("holds text");
+  });
+
+  it("stays silent about a paper nobody has asked the retriever about", () => {
+    expect(retrieverLabel(paperState(paper(), undefined))).toBe("—");
+    expect(retrieverLabel(paperState(paper(), "checking"))).toBe("—");
+    expect(retrieverLabel(paperState(paper(), "unavailable"))).toBe("—");
+  });
+
+  it("does NOT promote an indexed-on-save paper, which no probe has confirmed", () => {
+    const expected = paperState(paper({ source: "manual", abstract: "a" }), undefined);
+    expect(expected.kind).toBe("expected");
+    expect(retrieverLabel(expected)).toBe("—");
+  });
+
+  it("says holds nothing for both ways of holding nothing", () => {
+    expect(retrieverLabel(paperState(paper(), "empty"))).toBe("holds nothing");
+    expect(retrieverLabel(paperState(paper({ source: "manual" }), undefined))).toBe(
+      "holds nothing"
+    );
+  });
+});
+
+describe("lastAddedLabel", () => {
+  it("names the newest paper's day", () => {
+    expect(
+      lastAddedLabel([
+        paper({ id: "a", created_at: "2026-08-14T09:30:00Z" }),
+        paper({ id: "b", created_at: "2026-08-29T11:00:00Z" }),
+        paper({ id: "c", created_at: "2026-07-01T11:00:00Z" }),
+      ])
+    ).toBe("Last added 29 Aug 2026");
+  });
+
+  it("says nothing was added rather than formatting a date it does not have", () => {
+    expect(lastAddedLabel([])).toBe("Nothing added yet");
   });
 });

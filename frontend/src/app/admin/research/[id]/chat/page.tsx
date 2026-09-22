@@ -1,12 +1,14 @@
 "use client";
 
-import { routes } from "@/lib/routes";
 import { useCallback, useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
+import { MessageSquare } from "lucide-react";
 import { BulkEditBar } from "@/components/bulk-edit-bar";
-import { MentionTextarea } from "@/components/mention-textarea";
-import { RxTheme } from "@/components/rx-theme";
+import { Composer } from "@/components/chat/composer";
+import { ConversationTable } from "@/components/chat/conversation-table";
+import { PageHeader } from "@/components/page-header";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
+import { EmptyState, NoMatchState } from "@/components/ui/empty-state";
 import { RenameDialog } from "@/components/ui/rename-dialog";
 import { SearchInput } from "@/components/ui/search-input";
 import {
@@ -17,49 +19,19 @@ import {
   renameConversation,
 } from "@/lib/chat";
 import { conversationFilename, conversationToMarkdown } from "@/lib/chat-export";
-import { activityLabel, conversationCount, startedDay } from "@/lib/conversations";
+import { conversationCount } from "@/lib/conversations";
 import { saveBlob } from "@/lib/download";
 import type { Mention } from "@/lib/mentions";
 import { getProject, listPapers } from "@/lib/projects";
-import {
-  clear,
-  isAllSelected,
-  retainVisible,
-  selectAll,
-  toggle,
-} from "@/lib/selection";
+import { routes } from "@/lib/routes";
 import { matchesQuery } from "@/lib/search";
+import { clear, isAllSelected, retainVisible, selectAll, toggle } from "@/lib/selection";
 import type { ChatConversation, Paper, Role } from "@/lib/types";
-import "./chat.css";
 
 // Project sharing is binary now: any member may delete a conversation.
 // Creating a conversation and sending a message need membership alone, which
 // is why the composer below is not gated on anything.
 const CAN_DELETE: Role[] = ["owner", "member"];
-
-function TrashGlyph() {
-  return (
-    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" aria-hidden="true">
-      <path d="M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.6 8h5.8l.6-8" />
-    </svg>
-  );
-}
-
-function DownloadGlyph() {
-  return (
-    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" aria-hidden="true">
-      <path d="M8 2.5v8M4.8 7.3 8 10.5l3.2-3.2M3 13.5h10" />
-    </svg>
-  );
-}
-
-function PencilGlyph() {
-  return (
-    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" aria-hidden="true">
-      <path d="M10.5 2.8l2.7 2.7L6 12.7l-3.2.5.5-3.2z" />
-    </svg>
-  );
-}
 
 export default function ChatPage() {
   const { id: projectId } = useParams<{ id: string }>();
@@ -106,10 +78,17 @@ export default function ChatPage() {
       .catch(() => {});
   }, [projectId]);
 
-  // Deletes immediately, no confirmation — deliberate for now, matching the
-  // papers list. Unlike a paper, a deleted conversation cannot be restored from
-  // any source, so this should become a confirm step before production.
+  // Asked through a real dialog, never `window.confirm` -- see
+  // `ConfirmDialog`: a page that fires several native dialogs gets them
+  // SUPPRESSED by Chrome, after which `confirm()` returns false without
+  // opening anything and the delete silently does nothing. A conversation
+  // cannot be restored from any source, so a single one is confirmed too,
+  // not just a bulk selection.
+  const [pendingDelete, setPendingDelete] = useState<ChatConversation | null>(null);
+  const [pendingBulkDelete, setPendingBulkDelete] = useState(false);
+
   async function handleDelete(conversationId: string) {
+    setPendingDelete(null);
     setDeleting(conversationId);
     try {
       await deleteConversation(projectId, conversationId);
@@ -178,12 +157,6 @@ export default function ChatPage() {
     }
   }
 
-  // Asked through a real dialog, never `window.confirm` -- see
-  // `ConfirmDialog`: a page that fires several native dialogs gets them
-  // SUPPRESSED by Chrome, after which `confirm()` returns false without
-  // opening anything and the delete silently does nothing.
-  const [pendingBulkDelete, setPendingBulkDelete] = useState(false);
-
   async function handleBulkDelete() {
     setPendingBulkDelete(false);
     setBulkBusy(true);
@@ -229,34 +202,58 @@ export default function ChatPage() {
   const visibleIds = visible.map((c) => c.id);
 
   return (
-    <RxTheme className="rx-ch" typeface="app">
-      <div className="rx-shell">
-        <header className="rx-head">
-          <div>
-            <div className="rx-eyebrow">Chat</div>
-            <h1>Conversations</h1>
-          </div>
-          <div className="rx-meta">
-            {loading ? "Reading the conversations" : conversationCount(conversations.length)}
-            {canDelete && (
-              <>
-                <br />
-                You can delete any of them
-              </>
-            )}
-          </div>
-        </header>
+    <div className="fade-block space-y-5">
+      <PageHeader
+        eyebrow="Chat"
+        title="Conversations"
+        meta={
+          <>
+            <p>{loading ? "Reading the conversations" : conversationCount(conversations.length)}</p>
+            {canDelete && <p>You can delete any of them.</p>}
+          </>
+        }
+      />
 
-        {!empty && (
-          <p className="rx-lede">
-            Ask something new below, or reopen a conversation to carry on where you left
-            off. Each one keeps its own citations.
-          </p>
-        )}
+      <p className="max-w-2xl text-[13px] text-muted-foreground">
+        Ask something new below, or reopen a conversation to carry on where you left off.
+        Each one keeps its own citations.
+      </p>
 
-        {!empty && (
-          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
-            <div style={{ flex: 1 }}>
+      <Composer
+        papers={papers}
+        value={content}
+        onChange={setContent}
+        mentions={mentions}
+        onMentionsChange={setMentions}
+        onSubmit={handleStart}
+        disabled={submitting}
+        submitLabel={submitting ? "Starting…" : "Start the conversation"}
+        placeholder="Ask a question about this project's papers…  Type @ to mention one"
+        error={submitError}
+      />
+
+      {bulkError && (
+        <p role="alert" className="text-[13px] text-destructive">
+          {bulkError}
+        </p>
+      )}
+
+      {loading ? (
+        <div className="space-y-2" aria-hidden="true">
+          {[0, 1, 2].map((i) => (
+            <div key={i} className="h-14 animate-pulse rounded-lg bg-muted" />
+          ))}
+        </div>
+      ) : empty ? (
+        <EmptyState
+          icon={MessageSquare}
+          title="Nothing asked yet. Start with what you actually want to know."
+          body="Answers here are built only from the papers in this project, and every sentence carries the excerpt it came from. Type @ to search inside one paper instead of all of them."
+        />
+      ) : (
+        <div className="space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="w-full sm:w-72">
               <SearchInput
                 value={query}
                 onChange={changeQuery}
@@ -284,150 +281,31 @@ export default function ChatPage() {
               />
             )}
           </div>
-        )}
 
-        {bulkError && (
-          <p role="alert" className="rx-cherror" style={{ margin: "0 0 12px" }}>
-            {bulkError}
-          </p>
-        )}
-
-        <div className="rx-newq">
-          <div className="rx-composer">
-            <MentionTextarea
-              value={content}
-              onChange={setContent}
-              mentions={mentions}
-              onMentionsChange={setMentions}
-              papers={papers}
-              disabled={submitting}
-              onSubmit={handleStart}
+          {visible.length === 0 ? (
+            // A query that matches nothing needs saying: an empty list under a
+            // filled search box otherwise reads as the chats having disappeared.
+            <NoMatchState query={query} noun="conversations" />
+          ) : (
+            <ConversationTable
+              conversations={visible}
+              projectId={projectId}
+              editing={editingMode}
+              selectedIds={selected}
+              canDelete={canDelete}
+              downloadingId={downloading}
+              deletingId={deleting}
+              onToggleSelect={(conv) => setSelected(toggle(selected, conv.id))}
+              onDownload={(conv) => void handleDownload(conv)}
+              onRename={(conv) => {
+                setRenameError(null);
+                setRenaming(conv);
+              }}
+              onDelete={setPendingDelete}
             />
-            <div className="rx-bar">
-              <span>
-                Type <b>@</b> to name a paper and search only inside it
-              </span>
-              {submitError && (
-                <span role="status" className="rx-cherr">
-                  {submitError}
-                </span>
-              )}
-              <button
-                type="button"
-                className="rx-btn rx-push"
-                onClick={handleStart}
-                disabled={!content.trim() || submitting}
-              >
-                {submitting ? "Starting…" : "Start the conversation"}
-              </button>
-            </div>
-          </div>
+          )}
         </div>
-
-        {loading ? (
-          <div className="rx-clist" aria-hidden="true">
-            {[0, 1, 2].map((i) => (
-              <div key={i} className="rx-chskel" />
-            ))}
-          </div>
-        ) : empty ? (
-          <div className="rx-empty">
-            <h2>Nothing asked yet. Start with what you actually want to know.</h2>
-            <p>
-              Answers here are built only from the papers in this project, and every
-              sentence carries the excerpt it came from. Type @ to search inside one
-              paper instead of all of them.
-            </p>
-          </div>
-        ) : visible.length === 0 ? (
-          // A query that matches nothing needs saying: an empty list under a
-          // filled search box otherwise reads as the chats having disappeared.
-          <p className="rx-lede">No conversations match “{query}”.</p>
-        ) : (
-          <div className="rx-clist">
-            {/* The concept's row also carries the last question asked, the
-                conversation's scope and its length. `GET
-                /projects/{id}/conversations` returns id, project_id, title,
-                created_by, created_at and updated_at — no messages, no counts,
-                no scope — so those three columns have no source and are left
-                out rather than invented. */}
-            <div className="rx-ccols" aria-hidden="true">
-              <span>Conversation</span>
-              <span>Started</span>
-              <span>Last activity</span>
-              <span />
-            </div>
-            {visible.map((conv) => (
-              // A div, not a button: the delete control is itself a button and
-              // nesting one inside another is invalid HTML. `.rx-copen::after`
-              // is what makes the whole row clickable anyway.
-              <div key={conv.id} className="rx-crow">
-                <span style={{ display: "flex", alignItems: "baseline", gap: 10, minWidth: 0 }}>
-                  {editingMode && (
-                    // Above the row's click-through overlay, so ticking the
-                    // box never opens the conversation.
-                    <input
-                      type="checkbox"
-                      checked={selected.has(conv.id)}
-                      onChange={() => setSelected(toggle(selected, conv.id))}
-                      aria-label={`Select ${conv.title}`}
-                      style={{ position: "relative", zIndex: 1, flexShrink: 0 }}
-                    />
-                  )}
-                  <button
-                    type="button"
-                    onClick={() => router.push(routes.conversation(projectId, conv.id))}
-                    className="rx-copen"
-                  >
-                    <span className="rx-ct">{conv.title}</span>
-                  </button>
-                </span>
-                <span className="rx-cmeta">
-                  <span className="rx-cd">{startedDay(conv.created_at)}</span>
-                  <span className="rx-cd">{activityLabel(conv.updated_at)}</span>
-                </span>
-                <span style={{ display: "flex", gap: 2, justifySelf: "end" }}>
-                  <button
-                    type="button"
-                    onClick={() => void handleDownload(conv)}
-                    disabled={downloading === conv.id}
-                    className="rx-cdel rx-ctool"
-                    aria-label={`Download conversation as Markdown: ${conv.title}`}
-                    title="Download as .md"
-                  >
-                    <DownloadGlyph />
-                  </button>
-                  {canDelete && (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setRenameError(null);
-                        setRenaming(conv);
-                      }}
-                      className="rx-cdel rx-ctool"
-                      aria-label={`Rename conversation: ${conv.title}`}
-                      title="Rename"
-                    >
-                      <PencilGlyph />
-                    </button>
-                  )}
-                  {canDelete && (
-                    <button
-                      type="button"
-                      onClick={() => void handleDelete(conv.id)}
-                      disabled={deleting === conv.id}
-                      className="rx-cdel"
-                      aria-label={`Delete conversation: ${conv.title}`}
-                    >
-                      <TrashGlyph />
-                    </button>
-                  )}
-                </span>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
+      )}
 
       <RenameDialog
         open={renaming !== null}
@@ -444,6 +322,16 @@ export default function ChatPage() {
       />
 
       <ConfirmDialog
+        open={pendingDelete !== null}
+        title="Delete this conversation?"
+        description={`“${pendingDelete?.title ?? ""}” and its answers will be deleted. This cannot be undone.`}
+        confirmLabel="Delete"
+        busy={deleting !== null}
+        onCancel={() => setPendingDelete(null)}
+        onConfirm={() => pendingDelete && void handleDelete(pendingDelete.id)}
+      />
+
+      <ConfirmDialog
         open={pendingBulkDelete}
         title={`Delete ${selected.size} conversation${selected.size !== 1 ? "s" : ""}?`}
         description="This cannot be undone."
@@ -452,6 +340,6 @@ export default function ChatPage() {
         onCancel={() => setPendingBulkDelete(false)}
         onConfirm={() => void handleBulkDelete()}
       />
-    </RxTheme>
+    </div>
   );
 }

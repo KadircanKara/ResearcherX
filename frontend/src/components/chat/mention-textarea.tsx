@@ -12,6 +12,7 @@ interface Props {
   papers: Paper[];
   disabled?: boolean;
   onSubmit: () => void;
+  placeholder?: string;
 }
 
 const LISTBOX_ID = "mention-listbox";
@@ -25,6 +26,7 @@ export function MentionTextarea({
   papers,
   disabled,
   onSubmit,
+  placeholder = "Ask a follow-up question…  Type @ to scope to a paper",
 }: Props) {
   const ref = useRef<HTMLTextAreaElement>(null);
   const [query, setQuery] = useState<{ query: string; start: number } | null>(null);
@@ -83,7 +85,7 @@ export function MentionTextarea({
           id={LISTBOX_ID}
           role="listbox"
           aria-label="Papers"
-          className="absolute bottom-full mb-1 max-h-60 w-full overflow-y-auto rounded-xl border border-border bg-popover p-1 shadow-lg"
+          className="absolute bottom-full z-20 mb-1 max-h-60 w-full overflow-y-auto rounded-md border border-border bg-popover p-1 shadow-md"
         >
           {options.map((paper, i) => (
             <li key={paper.id}>
@@ -96,8 +98,8 @@ export function MentionTextarea({
                   e.preventDefault();
                   choose(paper);
                 }}
-                className={`w-full truncate rounded-lg px-2 py-1.5 text-left text-sm ${
-                  i === active ? "bg-muted" : "hover:bg-muted"
+                className={`w-full truncate rounded px-2 py-1.5 text-left text-[13px] ${
+                  i === active ? "bg-accent text-accent-foreground" : "hover:bg-muted"
                 }`}
               >
                 {paper.title}
@@ -106,9 +108,14 @@ export function MentionTextarea({
           ))}
         </ul>
       )}
+      {/* A raw <textarea> wearing the `Textarea` primitive's classes, rather
+          than the primitive itself: `choose` reads
+          `ref.current.selectionStart` to place an inserted title, so this ref
+          has to land on the DOM node and not on whatever a wrapper decides to
+          forward. Styling is worth sharing; that is not. */}
       <textarea
         ref={ref}
-        rows={2}
+        rows={3}
         value={value}
         disabled={disabled}
         role="combobox"
@@ -151,8 +158,8 @@ export function MentionTextarea({
         }}
         onClick={(e) => setQuery(findMentionQuery(value, e.currentTarget.selectionStart))}
         onBlur={() => setQuery(null)}
-        placeholder="Ask a follow-up question…  Type @ to scope to a paper"
-        className="w-full resize-none rounded-xl border border-border bg-background px-3 py-2 text-sm outline-none placeholder:text-muted-foreground disabled:opacity-50"
+        placeholder={placeholder}
+        className="min-h-16 w-full resize-none rounded-lg border border-input bg-transparent px-2.5 py-1.5 text-sm outline-none transition-colors placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-input/30"
       />
       {capped && (
         // role="status" so the refusal is announced, not just drawn — a pick
