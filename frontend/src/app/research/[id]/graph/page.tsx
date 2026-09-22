@@ -15,7 +15,7 @@ import "./graph.css";
  */
 export default function GraphPage() {
   return (
-    <RxTheme className="rx-gr">
+    <RxTheme className="rx-gr" typeface="app">
       <div className="rx-shell">
         <GraphScreen />
       </div>

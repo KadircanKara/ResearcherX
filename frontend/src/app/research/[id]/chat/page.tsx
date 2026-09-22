@@ -228,7 +228,7 @@ export default function ChatPage() {
   const visibleIds = visible.map((c) => c.id);
 
   return (
-    <RxTheme className="rx-ch">
+    <RxTheme className="rx-ch" typeface="app">
       <div className="rx-shell">
         <header className="rx-head">
           <div>

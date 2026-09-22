@@ -85,7 +85,7 @@ export default function ConversationPage() {
   }
 
   return (
-    <RxTheme className="rx-ch">
+    <RxTheme className="rx-ch" typeface="app">
       <div className="rx-shell">
         <header className="rx-head">
           <div>

@@ -13,6 +13,11 @@ import "@/app/rx-theme.css";
  * Screens pass their own class (`rx-ex`, `rx-gr`) for the differences that are
  * genuinely theirs: the shell cap, page padding, layout.
  *
+ * `typeface="app"` keeps the palette and drops the concept's typefaces for the
+ * app's own: Inter for text and headings, the system monospace for numbers and
+ * code. The project screens (Chat, Papers, Graph) use it so they read as part
+ * of the app around them; Explorer keeps the concept's type.
+ *
  * The font loaders live here rather than in each route's layout because
  * next/font deduplicates per call site, not per family: two modules asking for
  * Spectral produce two font instances with two sets of CSS variables.
@@ -40,17 +45,19 @@ const spectral = Spectral({
 
 export function RxTheme({
   className,
+  typeface = "reading-room",
   children,
 }: {
   className?: string;
+  typeface?: "reading-room" | "app";
   children: React.ReactNode;
 }) {
+  const fonts =
+    typeface === "app"
+      ? "rx-app-type"
+      : `${plexSans.variable} ${plexMono.variable} ${spectral.variable}`;
   return (
-    <div
-      className={`rx-theme ${plexSans.variable} ${plexMono.variable} ${spectral.variable}${
-        className ? ` ${className}` : ""
-      }`}
-    >
+    <div className={`rx-theme ${fonts}${className ? ` ${className}` : ""}`}>
       {children}
     </div>
   );
