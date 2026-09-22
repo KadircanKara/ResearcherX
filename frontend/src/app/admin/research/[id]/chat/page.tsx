@@ -4,7 +4,7 @@ import { routes } from "@/lib/routes";
 import { useCallback, useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { BulkEditBar } from "@/components/bulk-edit-bar";
-import { MentionTextarea } from "@/components/mention-textarea";
+import { MentionTextarea } from "@/components/chat/mention-textarea";
 import { RxTheme } from "@/components/rx-theme";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { RenameDialog } from "@/components/ui/rename-dialog";

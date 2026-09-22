@@ -6,7 +6,7 @@ import remarkGfm from "remark-gfm";
 import type { ChatCitation, ChatEvent, ChatMessage, Paper } from "@/lib/types";
 import { chatMessagesUrl, getConversation } from "@/lib/chat";
 import { getDevUserId } from "@/lib/api";
-import { CitationHoverCard, queryTermsFrom, resetChunkCache } from "@/components/citation-hover-card";
+import { CitationHoverCard, queryTermsFrom, resetChunkCache } from "@/components/chat/citation-hover-card";
 import { citationMarks } from "@/lib/citation-marks";
 import { groupTurns } from "@/lib/conversations";
 import {
