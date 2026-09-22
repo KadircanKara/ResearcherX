@@ -3,22 +3,26 @@
 import { Checkbox } from "@/components/ui/checkbox";
 import { PaperRowBody } from "@/components/papers/paper-row-body";
 import { PaperStateDot } from "@/components/papers/paper-state-dot";
-import { formatAdded, retrieverLabel, sourceLine, type PaperState } from "@/lib/papers";
+import { formatDate } from "@/lib/format";
+import { retrieverLabel, sourceLine, type PaperState } from "@/lib/papers";
 import type { Paper } from "@/lib/types";
 
-/** One library row, closed or opened. The grid is the table's header grid. */
+/**
+ * One library row, closed or opened. The grid is the table header's grid.
+ *
+ * In edit mode the whole row selects rather than opens: the checkbox is a
+ * 16px target, and the row is the thing the reader is pointing at.
+ */
 export function PaperRow({
   paper,
   state,
   editing,
   selected,
-  open,
-  canEdit,
-  checking,
+  onToggleSelect,
+  isOpen,
+  onToggleOpen,
   downloading,
   deleting,
-  onToggleSelect,
-  onToggleOpen,
   onCheckAgain,
   onRename,
   onRemove,
@@ -28,13 +32,11 @@ export function PaperRow({
   state: PaperState;
   editing: boolean;
   selected: boolean;
-  open: boolean;
-  canEdit: boolean;
-  checking: boolean;
+  onToggleSelect: () => void;
+  isOpen: boolean;
+  onToggleOpen: () => void;
   downloading: boolean;
   deleting: boolean;
-  onToggleSelect: () => void;
-  onToggleOpen: () => void;
   onCheckAgain: () => void;
   onRename: () => void;
   onRemove: () => void;
@@ -55,10 +57,10 @@ export function PaperRow({
         )}
         <button
           type="button"
-          onClick={onToggleOpen}
-          aria-expanded={open}
+          className="grid flex-1 grid-cols-1 gap-1 rounded-sm text-left outline-none focus-visible:ring-2 focus-visible:ring-ring md:grid-cols-[1fr_110px_120px_150px] md:items-center md:gap-4"
+          onClick={editing ? onToggleSelect : onToggleOpen}
+          aria-expanded={isOpen}
           aria-controls={bodyId}
-          className="grid flex-1 grid-cols-1 gap-1 rounded-sm text-left outline-none focus-visible:ring-2 focus-visible:ring-ring md:grid-cols-[minmax(0,1fr)_110px_120px_150px] md:items-center md:gap-4"
         >
           <div className="min-w-0">
             <p className="truncate text-[14px] font-medium">{paper.title}</p>
@@ -66,36 +68,31 @@ export function PaperRow({
               {sourceLine(paper)}
             </p>
           </div>
-          {/* Each cell names itself below the table's breakpoint, where the
-              header row is gone and a bare date or a bare "—" says nothing. */}
           <div className="text-[13px] text-muted-foreground">
-            <span className="md:hidden">Added: </span>
-            {formatAdded(paper.created_at)}
+            <span className="text-muted-foreground md:hidden">Added: </span>
+            {formatDate(paper.created_at)}
           </div>
           <div className="text-[13px] text-muted-foreground">
-            <span className="md:hidden">Retriever: </span>
+            <span className="text-muted-foreground md:hidden">Retriever: </span>
             {retrieverLabel(state)}
           </div>
           <div>
-            <span className="text-[13px] text-muted-foreground md:hidden">State: </span>
+            <span className="text-muted-foreground md:hidden">State: </span>
             <PaperStateDot state={state} />
           </div>
         </button>
       </div>
-
       {/* A 0fr → 1fr grid row, which animates a height nobody has to measure. */}
       <div
         id={bodyId}
         className="grid transition-[grid-template-rows] duration-200 ease-out"
-        style={{ gridTemplateRows: open ? "1fr" : "0fr" }}
+        style={{ gridTemplateRows: isOpen ? "1fr" : "0fr" }}
       >
         <div className="overflow-hidden">
-          {open && (
+          {isOpen && (
             <PaperRowBody
               paper={paper}
               state={state}
-              canEdit={canEdit}
-              checking={checking}
               downloading={downloading}
               deleting={deleting}
               onCheckAgain={onCheckAgain}
