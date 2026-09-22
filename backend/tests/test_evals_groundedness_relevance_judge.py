@@ -128,3 +128,80 @@ def test_a_relevance_score_outside_zero_to_one_is_a_malformed_response():
 
     with pytest.raises(ValidationError):
         AnswerRelevance(score=1.4, reason="")
+
+
+# -- tolerant JSON parsing --------------------------------------------------
+#
+# The judge's endpoint is not guaranteed to have a real JSON mode. Through
+# `tools/claude-proxy`, `response_format` is emulated by a line appended to the
+# system prompt, so the model sometimes answers with the object and then keeps
+# talking. Measured on the 51-case run of 2026-09-20: two of fifty cases died
+# with `Invalid JSON: trailing characters at line 3 column 1`, losing those
+# cases their context-relevance column for a sentence of prose after the
+# closing brace.
+
+
+class FakeCompletions:
+    def __init__(self, content):
+        self.content = content
+        self.calls = 0
+
+    async def create(self, **kwargs):
+        self.calls += 1
+
+        class _Message:
+            content = self.content
+
+        class _Choice:
+            message = _Message()
+
+        class _Response:
+            choices = [_Choice()]
+
+        return _Response()
+
+
+def _judge_with_content(content: str) -> tuple[Judge, FakeCompletions]:
+    judge = Judge(model="sonnet")
+    completions = FakeCompletions(content)
+    judge._client.chat.completions = completions
+    return judge, completions
+
+
+async def test_prose_after_the_closing_brace_is_tolerated():
+    """The exact shape that failed live: a valid object, then a sentence."""
+    judge, _ = _judge_with_content(
+        '{"verdicts": [{"n": 1, "relevant": true}]}\n\n'
+        "I have judged every excerpt, keyed by number as given."
+    )
+    relevant = await judge.judge_context_relevance(question="q", excerpts=[(1, "A", "x")])
+    assert relevant == frozenset({1})
+
+
+async def test_a_fenced_object_is_tolerated():
+    judge, _ = _judge_with_content('```json\n{"score": 0.5, "reason": "ok"}\n```')
+    assert (await judge.judge_answer_relevance(question="q", answer="a")).score == 0.5
+
+
+async def test_a_reasoning_block_before_the_object_is_tolerated():
+    judge, _ = _judge_with_content(
+        '<think>weighing this</think>{"stance": "refused", "reason": ""}'
+    )
+    assert (await judge.judge_stance(question="q", answer="a")).stance == "refused"
+
+
+async def test_the_raw_content_is_still_preferred_when_it_parses():
+    """Extraction is a FALLBACK, not a rewrite: a clean response must not be
+    reshaped by the brace-slicer on its way through."""
+    judge, completions = _judge_with_content('{"score": 1.0, "reason": "a {brace} inside"}')
+    result = await judge.judge_answer_relevance(question="q", answer="a")
+    assert result.reason == "a {brace} inside"
+    assert completions.calls == 1
+
+
+async def test_content_with_no_object_at_all_still_raises():
+    """A judge that answered in prose has not judged. Salvaging nothing from it
+    is correct -- the case becomes an error row and leaves the denominator."""
+    judge, _ = _judge_with_content("I cannot grade these excerpts.")
+    with pytest.raises(Exception):
+        await judge.judge_stance(question="q", answer="a")

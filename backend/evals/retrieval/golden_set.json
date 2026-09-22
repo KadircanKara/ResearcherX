@@ -407,6 +407,15 @@
    "expect_substrings": [
     "the total average AoI decreases"
    ]
+  },
+  {
+   "id": "uav-search-reward-weights",
+   "kind": "content",
+   "question": "What reward function does the reinforcement learning planner proposed in the paper where reinforcement learning methods and evolutionary algorithm methods were compared in the multi-UAV path planning missions?",
+   "paper_title_contains": "Cooperative Multi-Target Search with UAV Swarms",
+   "expect_substrings": [
+    "weighted sum designed to promote"
+   ]
   }
  ]
 }

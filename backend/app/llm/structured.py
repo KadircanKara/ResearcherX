@@ -15,8 +15,13 @@ _CODE_FENCE = re.compile(r"^```(?:json)?\s*|\s*```$", re.MULTILINE)
 _THINK_BLOCK = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
 
 
-def _extract_json(text: str) -> str:
+def extract_json(text: str) -> str:
     """Best-effort JSON extraction from LLM output.
+
+    PUBLIC because `evals/groundedness/judge.py` needs the same tolerance and
+    must not carry a second copy of it -- it deliberately does not ride
+    `create_chat_completion`, but "what counts as extractable JSON" is text
+    handling, not provider routing.
 
     LLM output is noisy: models sometimes wrap JSON in fences, prepend
     reasoning, or append trailing prose. Reasoning models additionally emit
@@ -116,7 +121,7 @@ async def parse_structured(
     composed_system = f"{system}\n\n{schema_block}"
 
     content = await _one_shot(system=composed_system, user=user, max_tokens=max_tokens)
-    for candidate in (content, _extract_json(content)):
+    for candidate in (content, extract_json(content)):
         if not candidate:
             continue
         try:
@@ -134,7 +139,7 @@ async def parse_structured(
         "Your previous response was empty or invalid. Return ONLY the JSON object now."
     )
     content = await _one_shot(system=retry_system, user=user, max_tokens=max_tokens)
-    for candidate in (content, _extract_json(content)):
+    for candidate in (content, extract_json(content)):
         if not candidate:
             continue
         try:

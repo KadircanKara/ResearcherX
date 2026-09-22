@@ -6,7 +6,7 @@ import pytest
 from pydantic import BaseModel
 
 import app.llm.structured as structured
-from app.llm.structured import _extract_json, parse_structured
+from app.llm.structured import extract_json, parse_structured
 
 EXTRACT_CASES = [
     pytest.param('{"a": 1}', {"a": 1}, id="plain-object"),
@@ -30,16 +30,16 @@ EXTRACT_CASES = [
 
 @pytest.mark.parametrize(("raw", "expected"), EXTRACT_CASES)
 def test_extract_json(raw: str, expected: dict):
-    assert json.loads(_extract_json(raw)) == expected
+    assert json.loads(extract_json(raw)) == expected
 
 
 def test_extract_json_no_braces_passes_through():
-    assert _extract_json("no json here at all") == "no json here at all"
+    assert extract_json("no json here at all") == "no json here at all"
 
 
 def test_extract_json_unbalanced_returns_tail():
     # Slice-from-start fallback: still hands the parser its best shot.
-    assert _extract_json('prefix {"a": 1') == '{"a": 1'
+    assert extract_json('prefix {"a": 1') == '{"a": 1'
 
 
 class _Out(BaseModel):

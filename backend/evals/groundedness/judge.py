@@ -35,9 +35,10 @@ from dataclasses import dataclass
 from typing import Literal
 
 from openai import AsyncOpenAI, BadRequestError, RateLimitError
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from app.core.config import settings
+from app.llm.structured import extract_json
 
 DEFAULT_JUDGE_MODEL = "gpt-4.1"
 
@@ -289,7 +290,6 @@ def _merge(verdicts: list[dict[int, ClaimVerdict]]) -> dict[int, ClaimVerdict]:
     return merged
 
 
-@dataclass
 # Output budget per judge call. 4000 was enough for gpt-4.1, which reports zero
 # reasoning tokens and writes terse `reason` strings -- and far too small for a
 # reasoning model. Measured 2026-08-23 on stealth/ox-alpha: 23 of 40 cases
@@ -306,6 +306,7 @@ def _merge(verdicts: list[dict[int, ClaimVerdict]]) -> dict[int, ClaimVerdict]:
 DEFAULT_JUDGE_MAX_TOKENS = 12_000
 
 
+@dataclass
 class Judge:
     model: str = DEFAULT_JUDGE_MODEL
     max_tokens: int = DEFAULT_JUDGE_MAX_TOKENS
@@ -382,7 +383,24 @@ class Judge:
                 await asyncio.sleep(_retry_after_seconds(exc, attempt))
                 continue
             content = response.choices[0].message.content or ""
-            return model_cls.model_validate_json(content)
+            # Raw first, extracted second. `response_format` is only a hint
+            # and some endpoints do not implement it at all: through
+            # `tools/claude-proxy` it is a LINE APPENDED TO THE SYSTEM PROMPT,
+            # so the model can answer with the object and then keep talking.
+            # Measured on the 51-case run of 2026-09-20 -- two cases died on
+            # `Invalid JSON: trailing characters` and lost their
+            # context-relevance column to one sentence of prose.
+            #
+            # Preferring the raw string matters: the extractor slices to the
+            # first balanced object, and a response that already parses must
+            # not be reshaped on its way through. The fallback never invents a
+            # verdict -- content carrying no object at all still raises, and
+            # the case becomes an error row, because a judge that answered in
+            # prose has not judged.
+            try:
+                return model_cls.model_validate_json(content)
+            except ValidationError:
+                return model_cls.model_validate_json(extract_json(content))
         raise AssertionError("unreachable: the loop either returns or raises")
 
     async def judge_claims(
