@@ -50,3 +50,41 @@ export function isStale(
   if (revision === null) return true;
   return revision !== compiled.revision;
 }
+
+/**
+ * A SyncTeX point as a PERCENTAGE of its page box.
+ *
+ * The preview draws each page at one fixed resolution and lets CSS scale it
+ * to whatever width the pane has, so no single "render scale" describes what
+ * is on screen. A position stated as a fraction of the page is true at every
+ * displayed width, which is what keeps the highlight overlay pinned to the
+ * right line through a pane resize with no re-render.
+ */
+export function texToPercent(
+  p: TexPoint,
+  page: { width: number; height: number }
+): TexPoint {
+  return { x: (p.x / page.width) * 100, y: (p.y / page.height) * 100 };
+}
+
+/** What the compile bar and the PDF pane say about the last build. */
+export type CompileStatus = "idle" | "compiling" | "success" | "failed";
+
+/**
+ * One status from the compile hook's three facts.
+ *
+ * Precedence is load-bearing: a compile in flight outranks the previous
+ * result, and a failure outranks an older success -- the last good PDF stays
+ * on screen after a broken edit, but the bar must still say the LATEST build
+ * failed rather than reporting the older one as current.
+ */
+export function compileStatus(state: {
+  compiling: boolean;
+  failed: boolean;
+  built: boolean;
+}): CompileStatus {
+  if (state.compiling) return "compiling";
+  if (state.failed) return "failed";
+  if (state.built) return "success";
+  return "idle";
+}
