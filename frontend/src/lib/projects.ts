@@ -204,7 +204,7 @@ export interface PaperChunk {
    * Where this chunk sits in the paper, as the chunk is indexed TODAY.
    *
    * The hover card deliberately shows the citation's own snapshot of these
-   * instead (see citation-hover-card.tsx): a citation records where the
+   * instead (see components/chat/citation-chip.tsx): a citation records where the
    * excerpt was when the answer was written, and a re-index can move it.
    * Declared here because the API returns them and a type that omits half a
    * response is a type that lies.
