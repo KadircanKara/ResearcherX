@@ -5,7 +5,7 @@ import Link from "next/link";
 import { useParams, useSearchParams } from "next/navigation";
 import { ArrowLeft } from "lucide-react";
 import { ChatStream } from "@/components/chat/chat-stream";
-import { Composer } from "@/components/chat/composer";
+import { MentionComposer } from "@/components/chat/mention-composer";
 import { getConversation } from "@/lib/chat";
 import { questionCount, startedAt } from "@/lib/conversations";
 import type { Mention } from "@/lib/mentions";
@@ -19,7 +19,7 @@ export default function ConversationPage() {
 
   const [detail, setDetail] = useState<ChatConversationDetail | null>(null);
   const [loading, setLoading] = useState(true);
-  const [input, setInput] = useState("");
+  const [draft, setDraft] = useState("");
   // ?q= carries the initial question from the new-chat form.
   const [pendingContent, setPendingContent] = useState<string | undefined>(
     searchParams.get("q") ?? undefined
@@ -54,11 +54,13 @@ export default function ConversationPage() {
   // user typed and tells them nothing.
   const [lastSent, setLastSent] = useState<{ text: string; mentions: Mention[] } | null>(null);
 
-  function handleSend() {
-    const q = input.trim();
-    if (!q || pendingContent) return;
+  const asking = !!pendingContent;
+
+  function send() {
+    const q = draft.trim();
+    if (!q || asking) return;
     setLastSent({ text: q, mentions });
-    setInput("");
+    setDraft("");
     setPendingMentions(mentions.map((m) => m.paperId));
     setMentions([]);
     setPendingContent(q);
@@ -70,33 +72,32 @@ export default function ConversationPage() {
     // Only into an empty composer. The textarea is disabled while a turn is in
     // flight so this is the normal case, but restoring over something the user
     // did manage to type would be a second way to lose text.
-    setInput((current) => (current.trim() ? current : lastSent.text));
+    setDraft((current) => (current.trim() ? current : lastSent.text));
     setMentions((current) => (current.length ? current : lastSent.mentions));
     // The turn never landed, so it was never a question.
     setSentHere((n) => Math.max(0, n - 1));
   }
 
   return (
-    <div className="fade-block space-y-6 pb-4">
+    <div className="fade-block space-y-6 pb-8">
       <header className="flex flex-wrap items-start justify-between gap-4 border-b pb-5">
         <div className="min-w-0">
           <Link
             href={routes.chat(projectId)}
-            className="mb-2 inline-flex items-center gap-1 text-[12px] text-muted-foreground transition-colors hover:text-foreground"
+            className="mb-2 inline-flex items-center gap-1 text-[12px] text-muted-foreground hover:text-foreground"
           >
-            <ArrowLeft className="size-3.5" aria-hidden />
-            All conversations
+            <ArrowLeft className="size-3.5" aria-hidden /> All conversations
           </Link>
-          <h1 className="text-xl font-semibold tracking-tight">
+          <h1 className="text-xl font-semibold">
             {loading ? "Opening the conversation" : (detail?.title ?? "Conversation not found")}
           </h1>
         </div>
         {detail && (
-          <div className="text-right text-[12px] leading-5 text-muted-foreground">
+          <div className="text-right text-[12px] text-muted-foreground">
             <p>
               {questionCount(detail.messages, sentHere)} · {startedAt(detail.created_at)}
             </p>
-            <p>Every answer is written from this project&rsquo;s papers alone</p>
+            <p>Every answer is written from this project&apos;s papers alone</p>
           </div>
         )}
       </header>
@@ -127,18 +128,22 @@ export default function ConversationPage() {
           {/* The composer sits at the END of the page, in normal flow — the
               page scrolls, the thread does not scroll inside a box of its
               own — but sticks to the bottom of the viewport so a follow-up
-              is always one click away in a long conversation. */}
-          <Composer
-            className="sticky bottom-3 shadow-sm"
-            papers={papers}
-            value={input}
-            onChange={setInput}
-            mentions={mentions}
-            onMentionsChange={setMentions}
-            onSubmit={handleSend}
-            disabled={!!pendingContent}
-            submitLabel={pendingContent ? "Asking…" : "Ask"}
-          />
+              is always one click away in a long conversation. Pinned there,
+              its @ list opens upward. */}
+          <div className="sticky bottom-3 space-y-2 rounded-md border bg-background p-2 shadow-sm">
+            <MentionComposer
+              papers={papers}
+              value={draft}
+              onChange={setDraft}
+              mentions={mentions}
+              onMentionsChange={setMentions}
+              onSubmit={send}
+              submitting={asking}
+              submitLabel="Ask"
+              helperText="Type @ to name a paper and search only inside it"
+              popupPlacement="above"
+            />
+          </div>
         </>
       )}
     </div>

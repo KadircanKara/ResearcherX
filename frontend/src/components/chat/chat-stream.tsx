@@ -4,18 +4,19 @@ import { useEffect, useRef, useState } from "react";
 import type { ChatCitation, ChatEvent, ChatMessage, Paper } from "@/lib/types";
 import { chatMessagesUrl, getConversation } from "@/lib/chat";
 import { getDevUserId } from "@/lib/api";
-import { AssistantAnswer, StreamingAnswer } from "@/components/chat/assistant-answer";
-import { resetChunkCache } from "@/components/chat/citation-hover-card";
-import { ScopeBanner } from "@/components/chat/scope-banner";
-import { StatusLine } from "@/components/chat/status-line";
+import { AssistantAnswer } from "@/components/chat/assistant-answer";
+import { resetChunkCache } from "@/components/chat/citation-chip";
+import { StreamingTurn } from "@/components/chat/streaming-turn";
 import { UserTurn } from "@/components/chat/user-turn";
 import { groupTurns } from "@/lib/conversations";
 import {
   emptyMentionsNote,
+  isPersistentScope,
   scopeLine,
   statusLabel,
   type ChatStatus,
   type RetrievingInfo,
+  type ScopeSegment,
 } from "@/lib/chat-scope";
 
 // The live SSE consumer. A `fetch` POST with a manual frame parse, NOT an
@@ -61,6 +62,15 @@ export function sendFailureMessage(status: number, mentionCount: number): string
   return "Request failed.";
 }
 
+/**
+ * The thread's turns, laid out as the app prototype's: one flat column of
+ * question bubbles and answers, the turn in flight at the end of it, and a
+ * failure line under the column.
+ *
+ * Renders a FRAGMENT — the column and the failure line — so both sit directly
+ * in the page's own vertical rhythm, between the header and the composer,
+ * exactly where the prototype puts them.
+ */
 export function ChatStream({
   projectId,
   conversationId,
@@ -76,6 +86,11 @@ export function ChatStream({
   const [status, setStatus] = useState<ChatStatus>("idle");
   const [retrievingInfo, setRetrievingInfo] = useState<RetrievingInfo | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // The scope line of a turn answered in THIS view, by assistant message id,
+  // kept only when `isPersistentScope` says it must outlive the turn. The
+  // scope is not persisted with the message, so a reload loses it; the
+  // durable record is the answer, which the model is told to qualify.
+  const [keptScopes, setKeptScopes] = useState<Record<string, ScopeSegment[]>>({});
   const bottomRef = useRef<HTMLDivElement>(null);
 
   // Re-seed messages if initialMessages prop changes (navigating between convs)
@@ -84,6 +99,7 @@ export function ChatStream({
     setStreamingText("");
     setStatus("idle");
     setError(null);
+    setKeptScopes({});
     // Bound the citation chunk cache to a single conversation view: a chunk
     // fetched under a stale chunk_index (paper re-ingested after it was
     // cached) must not leak into a different conversation's citations.
@@ -99,12 +115,39 @@ export function ChatStream({
     if (!pendingContent) return;
     // Start SSE stream for the pending message
     let cancelled = false;
+    // The retrieving payload as this stream saw it. A local, not the state
+    // above: the `done` branch runs inside this closure, where the state
+    // value is still the one captured when the effect started.
+    let info: RetrievingInfo | null = null;
     setStreamingText("");
     setStatus("thinking");
     // Stale scope from a PRIOR turn must not survive into this one — a badge
     // claiming a scope the current turn doesn't have is worse than no badge.
     setRetrievingInfo(null);
     setError(null);
+
+    // The answer is finished: swap the streamed draft for the stored message.
+    // The live turn stays on screen until the refreshed messages are in hand
+    // and both change in ONE update — clearing it first left the question and
+    // its answer missing from the thread for the length of the refetch.
+    async function settle(citations: ChatCitation[]) {
+      let detail = null;
+      try {
+        detail = await getConversation(projectId, conversationId);
+      } catch {
+        // Keep the snapshot we have; the next load shows the answer.
+      }
+      if (cancelled) return;
+      if (detail) {
+        setMessages(detail.messages);
+        const answer = [...detail.messages].reverse().find((m) => m.role === "assistant");
+        const kept = isPersistentScope(info) ? scopeLine(info) : null;
+        if (answer && kept) setKeptScopes((prev) => ({ ...prev, [answer.id]: kept }));
+      }
+      setStatus("idle");
+      setStreamingText("");
+      onDone?.(citations);
+    }
 
     const controller = new AbortController();
     const url = chatMessagesUrl(projectId, conversationId);
@@ -147,8 +190,7 @@ export function ChatStream({
             if (ev.type === "thinking") {
               setStatus("thinking");
             } else if (ev.type === "retrieving") {
-              setStatus("retrieving");
-              setRetrievingInfo({
+              info = {
                 paper_count: ev.paper_count,
                 history_hits: ev.history_hits,
                 scoped: ev.scoped,
@@ -157,18 +199,14 @@ export function ChatStream({
                 empty_mentions: ev.empty_mentions ?? [],
                 scope_source: ev.scope_source ?? "mention",
                 scope_evidence: ev.scope_evidence ?? [],
-              });
+              };
+              setStatus("retrieving");
+              setRetrievingInfo(info);
             } else if (ev.type === "delta") {
               setStatus("streaming");
               setStreamingText((prev) => prev + ev.text);
             } else if (ev.type === "done") {
-              setStatus("idle");
-              setStreamingText("");
-              // Refresh messages from snapshot
-              getConversation(projectId, conversationId)
-                .then((detail) => setMessages(detail.messages))
-                .catch(() => {});
-              onDone?.(ev.citations);
+              void settle(ev.citations);
             } else if (ev.type === "error") {
               setError(ev.message);
               setStatus("idle");
@@ -193,65 +231,63 @@ export function ChatStream({
     return () => { cancelled = true; controller.abort(); };
   }, [pendingContent, pendingMentions, projectId, conversationId]);
 
-  // Turns, not messages: a question and the answer it got are one unit of
-  // reading, which a flat list cannot locate. `groupTurns` is pure and
-  // tested; see lib/conversations.ts.
+  // Each answer is handed the question it answered, for highlighting that
+  // question's terms in its citation cards; see `groupTurns`.
   const turns = groupTurns(messages);
 
   // The question currently in flight, or null. Written as a value rather than
-  // a boolean so the JSX below narrows it: same condition as before
-  // (`pendingContent && status !== "idle"`), it just carries the string.
+  // a boolean so the JSX below narrows it.
   const live = pendingContent && status !== "idle" ? pendingContent : null;
-  const scope = live ? scopeLine(retrievingInfo) : null;
-  const emptyNote = live ? emptyMentionsNote(retrievingInfo) : null;
-  const working = live ? statusLabel(status, retrievingInfo) : null;
 
   return (
-    <div className="space-y-7">
-      {turns.map((turn) => (
-        <article key={turn.key} className="space-y-4">
-          {turn.question && (
+    <>
+      <div className="space-y-7">
+        {turns.map((turn) => [
+          turn.question ? (
             <UserTurn
+              key={turn.question.id}
               content={turn.question.content}
               mentions={turn.question.mentions}
               papers={papers}
             />
-          )}
-          {turn.answers.map((answer) => (
+          ) : null,
+          ...turn.answers.map((answer) => (
             <AssistantAnswer
               key={answer.id}
               message={answer}
               question={turn.question?.content ?? ""}
               projectId={projectId}
+              scope={keptScopes[answer.id] ?? null}
             />
-          ))}
-        </article>
-      ))}
+          )),
+        ])}
 
-      {live !== null && (
-        <article className="space-y-4">
-          {/* Optimistic user bubble. The mentions are ids the composer just
-              handed over, so the same resolve-on-render rule applies. */}
+        {live !== null && (
+          // Optimistic user bubble. The mentions are ids the composer just
+          // handed over, so the same resolve-on-render rule applies.
           <UserTurn content={live} mentions={pendingMentions ?? []} papers={papers} />
+        )}
+        {live !== null && (
+          <StreamingTurn
+            status={status}
+            label={statusLabel(status, retrievingInfo)}
+            scope={scopeLine(retrievingInfo)}
+            note={emptyMentionsNote(retrievingInfo)}
+            text={streamingText}
+            projectId={projectId}
+          />
+        )}
 
-          {/* The scope line survives into streaming on purpose: on a resolved
-              scope the user clicked nothing, and this is the only place they
-              learn the search was narrowed. */}
-          {scope && <ScopeBanner segments={scope} note={emptyNote} />}
-
-          {working && <StatusLine label={working} />}
-
-          {streamingText && <StreamingAnswer text={streamingText} />}
-        </article>
-      )}
+        {/* Scroll target. Zero height and no margin, so it adds nothing to
+            the column's spacing. */}
+        <div ref={bottomRef} aria-hidden className="!mt-0" />
+      </div>
 
       {error && (
         <p role="alert" className="border-l-2 border-destructive pl-3 text-[13px] text-destructive">
           {error}
         </p>
       )}
-
-      <div ref={bottomRef} />
-    </div>
+    </>
   );
 }

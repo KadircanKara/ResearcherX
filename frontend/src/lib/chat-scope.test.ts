@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   emptyMentionsNote,
+  isPersistentScope,
   scopeLine,
   statusLabel,
   type RetrievingInfo,
@@ -40,9 +41,15 @@ describe("scopeLine", () => {
     expect(flat(segs)).toBe(
       "Matched “Cooperative Multi-Target Search with UAV Swarms” in your question — searching 1 paper only."
     );
-    // The phrase, and only the phrase, is emphasised.
+    // The phrase, and only the phrase, is emphasised — the quote marks
+    // belong to the sentence around it.
     expect(segs?.filter((s) => s.emphasis).map((s) => s.text)).toEqual([
-      "“Cooperative Multi-Target Search with UAV Swarms”",
+      "Cooperative Multi-Target Search with UAV Swarms",
+    ]);
+    expect(segs?.map((s) => s.text)).toEqual([
+      "Matched “",
+      "Cooperative Multi-Target Search with UAV Swarms",
+      "” in your question — searching 1 paper only.",
     ]);
   });
 
@@ -58,7 +65,10 @@ describe("scopeLine", () => {
     expect(flat(segs)).toBe(
       "Matched “by Yanmaz”, “Voronoi Partitioning for Persistent Area” in your question — searching 2 papers only."
     );
-    expect(segs?.filter((s) => s.emphasis)).toHaveLength(2);
+    expect(segs?.filter((s) => s.emphasis).map((s) => s.text)).toEqual([
+      "by Yanmaz",
+      "Voronoi Partitioning for Persistent Area",
+    ]);
   });
 
   it("reports a widened resolved scope as read, not as attempted", () => {
@@ -127,9 +137,40 @@ describe("emptyMentionsNote", () => {
   });
 
   it("names the papers that came back with nothing", () => {
+    expect(emptyMentionsNote(info({ empty_mentions: ["Voronoi Partitioning"] }))).toBe(
+      "No excerpts from Voronoi Partitioning."
+    );
     expect(
       emptyMentionsNote(info({ empty_mentions: ["Voronoi Partitioning", "NeMo-Mobility"] }))
-    ).toBe("No excerpts from Voronoi Partitioning, NeMo-Mobility.");
+    ).toBe("No excerpts from Voronoi Partitioning and NeMo-Mobility.");
+    expect(emptyMentionsNote(info({ empty_mentions: ["A", "B", "C"] }))).toBe(
+      "No excerpts from A, B and C."
+    );
+  });
+});
+
+describe("isPersistentScope", () => {
+  it("keeps only a resolved scope under the finished answer", () => {
+    expect(
+      isPersistentScope(
+        info({ scoped: true, scoped_count: 1, scope_source: "resolved", scope_evidence: ["x"] })
+      )
+    ).toBe(true);
+    // Resolved without evidence still narrowed the search the user never chose.
+    expect(
+      isPersistentScope(info({ scoped: true, scoped_count: 2, scope_source: "resolved" }))
+    ).toBe(true);
+  });
+
+  it("drops every other scope when the answer finishes", () => {
+    expect(isPersistentScope(null)).toBe(false);
+    expect(isPersistentScope(info())).toBe(false);
+    expect(isPersistentScope(info({ scoped: true, scoped_count: 2 }))).toBe(false);
+    expect(
+      isPersistentScope(
+        info({ scoped: true, scoped_count: 0, widened: true, scope_source: "resolved" })
+      )
+    ).toBe(false);
   });
 });
 

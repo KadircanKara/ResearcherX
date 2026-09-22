@@ -1,8 +1,8 @@
 import type { Element, Root, RootContent } from "hast";
 
-// Kept identical to the class list the card used before markdown rendering,
-// so the highlight looks the same as it always has.
-const MARK_CLASS = ["rounded", "bg-amber-300/30", "px-0.5", "text-inherit"];
+// The app prototype's citation-card highlight: a primary tint, and the hit
+// lifted to the foreground colour out of the passage's muted text.
+const MARK_CLASS = ["rounded", "bg-primary/20", "px-0.5", "text-foreground"];
 
 /** Rehype plugin wrapping query terms in <mark>.
  *

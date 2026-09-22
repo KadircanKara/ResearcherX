@@ -69,6 +69,18 @@ export function insertMention(
  * are still matched by count — both need separate occurrences to survive.
  */
 export function reconcileMentions(text: string, mentions: Mention[]): Mention[] {
+  const spans = claimSpans(text, mentions);
+  // Return mentions in original order
+  return mentions.filter((_, i) => spans.has(i));
+}
+
+/**
+ * The `@title` span each mention stands on, keyed by its index in `mentions`.
+ * A mention with no free occurrence has no entry. This is `reconcileMentions`'
+ * matching rule, shared so that removing a mention deletes exactly the span
+ * reconcile would have credited to it.
+ */
+function claimSpans(text: string, mentions: Mention[]): Map<number, [number, number]> {
   // Track which character spans have been claimed by matches
   const consumed: Array<[start: number, end: number]> = [];
 
@@ -76,8 +88,7 @@ export function reconcileMentions(text: string, mentions: Mention[]): Mention[] 
   const indexed = mentions.map((m, i) => ({ mention: m, index: i }));
   indexed.sort((a, b) => b.mention.title.length - a.mention.title.length);
 
-  // Track which original indices to keep
-  const kept = new Set<number>();
+  const claimed = new Map<number, [number, number]>();
 
   for (const { mention, index } of indexed) {
     const needle = `@${mention.title}`;
@@ -92,7 +103,7 @@ export function reconcileMentions(text: string, mentions: Mention[]): Mention[] 
 
       if (!overlaps) {
         consumed.push([at, end]);
-        kept.add(index);
+        claimed.set(index, [at, end]);
         break;
       }
 
@@ -100,8 +111,36 @@ export function reconcileMentions(text: string, mentions: Mention[]): Mention[] 
     }
   }
 
-  // Return mentions in original order
-  return mentions.filter((_, i) => kept.has(i));
+  return claimed;
+}
+
+/**
+ * The text with one mention taken out — what the chip's remove button does.
+ *
+ * The chip only mirrors a title that is IN the text, so removing it has to
+ * delete that `@title` from the text: the text is what gets sent and what the
+ * user bubble shows, and a mention the text still spells out would simply be
+ * re-derived on the next keystroke. The span removed is the one
+ * `reconcileMentions` credits to this mention, so a shorter title sitting
+ * inside a longer one ("@Search" in "@Search Methods") is never cut out of
+ * the longer one. One adjoining space goes with it, so no double space is
+ * left behind. `index` rather than a paper id, because two papers can share a
+ * title and the chip removed is one specific mention.
+ */
+export function removeMention(text: string, mentions: Mention[], index: number): string {
+  const span = claimSpans(text, mentions).get(index);
+  if (!span) return text;
+  let [start, end] = span;
+  if (/\s/.test(text[end] ?? "")) end += 1;
+  else if (start > 0 && /\s/.test(text[start - 1])) start -= 1;
+  return text.slice(0, start) + text.slice(end);
+}
+
+/** The mention list with `paper` added, unless it is already there — the same
+ *  paper picked twice is one scope entry, however often the text names it. */
+export function withMention(mentions: Mention[], paper: Pick<Paper, "id" | "title">): Mention[] {
+  if (mentions.some((m) => m.paperId === paper.id)) return mentions;
+  return [...mentions, { paperId: paper.id, title: paper.title }];
 }
 
 /** Papers whose title contains `query`, earliest match first. */

@@ -62,7 +62,7 @@ function MentionedContent({
         part.startsWith("@") && titles.some((t) => part === `@${t}`) ? (
           // Tinted from the bubble's OWN foreground: a tint mixed from the
           // page accent is blue-on-blue in here and renders invisible.
-          <span key={i} className="rounded bg-primary-foreground/25 px-1 font-medium">
+          <span key={i} className="rounded bg-primary-foreground/20 px-1 font-medium">
             {part}
           </span>
         ) : (
