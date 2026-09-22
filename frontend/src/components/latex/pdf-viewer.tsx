@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { flushSync } from "react-dom";
 import { FileWarning, Loader2 } from "lucide-react";
 import {
   canvasToTex,
@@ -150,12 +151,20 @@ export function PdfViewer({
           const natural = page.getViewport({ scale: 1 });
           const viewport = page.getViewport({ scale: RENDER_CSS_WIDTH / natural.width });
           laid.push({ pageNumber: n, width: natural.width, height: natural.height });
-          setPages([...laid]);
-
-          // The canvas for page n only exists after React has flushed the
-          // element for it, so wait a frame before drawing into it.
-          await new Promise((r) => requestAnimationFrame(() => r(null)));
-          if (cancelled || seq !== renderSeq.current) return;
+          // Commit page n's card SYNCHRONOUSLY, so its <canvas> is in
+          // canvasRefs before the lookup below. This used to be a plain
+          // setPages followed by waiting one animation frame, on the
+          // assumption React would have committed by then. It often had
+          // not: the lookup came back empty, the loop skipped the page, and
+          // it stayed a blank white card for good -- a different set of
+          // pages on every compile (measured: 2+4, then 2+4+6, then 4, then
+          // 2 of a six-page PDF). Safe here: this runs after an await, never
+          // inside React's own render or effect execution.
+          //
+          // Pages past n keep the PREVIOUS render's cards until this pass
+          // reaches them, so a recompile redraws the preview in place rather
+          // than collapsing it to one page and losing the scroll position.
+          flushSync(() => setPages((prev) => [...laid, ...prev.slice(laid.length)]));
 
           const canvas = canvasRefs.current.get(n);
           const ctx = canvas?.getContext("2d");
@@ -183,7 +192,12 @@ export function PdfViewer({
             tasks.delete(n);
           }
         }
-        if (!cancelled && seq === renderSeq.current) setError(null);
+        if (!cancelled && seq === renderSeq.current) {
+          // A shorter PDF than the last one: drop the previous render's
+          // leftover cards past the new last page.
+          setPages(laid);
+          setError(null);
+        }
       } catch (err) {
         if (cancelled || seq !== renderSeq.current) return;
         // Cancelling a RenderTask makes it REJECT its promise with a
