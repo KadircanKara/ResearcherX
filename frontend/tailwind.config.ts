@@ -9,6 +9,19 @@ const config: Config = {
         // Legacy tokens kept for backward compat with existing components
         ink: "#0f1115",
         paper: "#f7f7f5",
+        // Landing page palette (`src/components/landing`): strictly
+        // monochrome, pure black and white. Its own namespace so the legacy
+        // off-black `ink` / off-white `paper` above keep their meaning.
+        lp: {
+          ink: "oklch(0 0 0 / <alpha-value>)",
+          paper: "oklch(1 0 0 / <alpha-value>)",
+          gray: {
+            "1": "oklch(0.96 0 0 / <alpha-value>)",
+            "2": "oklch(0.86 0 0 / <alpha-value>)",
+            "3": "oklch(0.62 0 0 / <alpha-value>)",
+            "4": "oklch(0.34 0 0 / <alpha-value>)",
+          },
+        },
         // shadcn semantic tokens
         background: "oklch(var(--background) / <alpha-value>)",
         foreground: "oklch(var(--foreground) / <alpha-value>)",
