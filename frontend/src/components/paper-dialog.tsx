@@ -67,6 +67,7 @@ export function PaperDialog({
   paper,
   open: controlledOpen,
   onOpenChange,
+  initialFiles,
   children,
 }: {
   projectId: string;
@@ -74,6 +75,8 @@ export function PaperDialog({
   paper?: Paper;
   open?: boolean;
   onOpenChange?: (o: boolean) => void;
+  /** Passed straight through to the upload screen — see its own note. */
+  initialFiles?: File[];
   children?: React.ReactElement;
 }) {
   const isEdit = !!paper;
@@ -177,6 +180,7 @@ export function PaperDialog({
         onSaved={onSaved}
         onClose={() => setOpen(false)}
         onBusyChange={setScreenBusy}
+        initialFiles={initialFiles}
       />
     ) : (
       <PaperLinkScreen

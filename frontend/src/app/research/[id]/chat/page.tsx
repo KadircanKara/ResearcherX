@@ -2,19 +2,12 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
-import {
-  Download,
-  MessageSquarePlus,
-  Pencil,
-  Plus,
-  Trash2,
-} from "lucide-react";
-import { Button } from "@/components/ui/button";
 import { BulkEditBar } from "@/components/bulk-edit-bar";
+import { MentionTextarea } from "@/components/mention-textarea";
+import { RxTheme } from "@/components/rx-theme";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { RenameDialog } from "@/components/ui/rename-dialog";
 import { SearchInput } from "@/components/ui/search-input";
-import { MentionTextarea } from "@/components/mention-textarea";
 import {
   createConversation,
   deleteConversation,
@@ -22,10 +15,8 @@ import {
   listConversations,
   renameConversation,
 } from "@/lib/chat";
-import {
-  conversationFilename,
-  conversationToMarkdown,
-} from "@/lib/chat-export";
+import { conversationFilename, conversationToMarkdown } from "@/lib/chat-export";
+import { activityLabel, conversationCount, startedDay } from "@/lib/conversations";
 import { saveBlob } from "@/lib/download";
 import type { Mention } from "@/lib/mentions";
 import { getProject, listPapers } from "@/lib/projects";
@@ -38,16 +29,35 @@ import {
 } from "@/lib/selection";
 import { matchesQuery } from "@/lib/search";
 import type { ChatConversation, Paper, Role } from "@/lib/types";
+import "./chat.css";
 
 // Project sharing is binary now: any member may delete a conversation.
+// Creating a conversation and sending a message need membership alone, which
+// is why the composer below is not gated on anything.
 const CAN_DELETE: Role[] = ["owner", "member"];
 
-function fmtDate(iso: string): string {
-  return new Date(iso).toLocaleDateString("en-GB", {
-    day: "numeric",
-    month: "short",
-    year: "numeric",
-  });
+function TrashGlyph() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" aria-hidden="true">
+      <path d="M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.6 8h5.8l.6-8" />
+    </svg>
+  );
+}
+
+function DownloadGlyph() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" aria-hidden="true">
+      <path d="M8 2.5v8M4.8 7.3 8 10.5l3.2-3.2M3 13.5h10" />
+    </svg>
+  );
+}
+
+function PencilGlyph() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" aria-hidden="true">
+      <path d="M10.5 2.8l2.7 2.7L6 12.7l-3.2.5.5-3.2z" />
+    </svg>
+  );
 }
 
 export default function ChatPage() {
@@ -58,7 +68,6 @@ export default function ChatPage() {
   const [myRole, setMyRole] = useState<Role | null>(null);
   const [loading, setLoading] = useState(true);
   const [deleting, setDeleting] = useState<string | null>(null);
-  const [showForm, setShowForm] = useState(false);
   const [content, setContent] = useState("");
   const [mentions, setMentions] = useState<Mention[]>([]);
   const [papers, setPapers] = useState<Paper[]>([]);
@@ -212,195 +221,211 @@ export default function ChatPage() {
     }
   }
 
-  if (loading) {
-    return (
-      <div className="space-y-3 py-4">
-        {[1, 2, 3].map((i) => (
-          <div key={i} className="h-14 animate-pulse rounded-xl bg-muted" />
-        ))}
-      </div>
-    );
-  }
+  const canDelete = myRole !== null && CAN_DELETE.includes(myRole);
+  const empty = !loading && conversations.length === 0;
 
   const visible = conversations.filter((c) => matchesQuery(query, [c.title]));
   const visibleIds = visible.map((c) => c.id);
 
   return (
-    <div>
-      {/* Count and actions on one line, the search box on its own beneath
-          them at full width -- see the papers page for why. */}
-      <div className="mb-4 flex flex-col gap-2">
-        <div className="flex items-center justify-between gap-3">
-          <p className="text-sm text-muted-foreground">
-            {conversations.length === 0
-              ? "No conversations yet"
-              : query
-                ? `${visible.length} of ${conversations.length} conversations`
-                : `${conversations.length} conversation${conversations.length !== 1 ? "s" : ""}`}
-          </p>
-          <div className="flex shrink-0 items-center gap-2">
-            <BulkEditBar
-              active={editingMode}
-              count={selected.size}
-              total={visibleIds.length}
-              allSelected={isAllSelected(selected, visibleIds)}
-              busy={bulkBusy}
-              onEnter={() => setEditingMode(true)}
-              onSelectAll={() => setSelected(selectAll(selected, visibleIds))}
-              onClear={() => setSelected(clear())}
-              onDelete={() => setPendingBulkDelete(true)}
-              onDone={() => {
-                setEditingMode(false);
-                // A selection that survives invisibly is a delete waiting to
-                // hit the wrong rows.
-                setSelected(clear());
-              }}
-            />
-            {!showForm && (
-              <Button onClick={() => setShowForm(true)}>
-                <Plus className="size-4" />
-                New Chat
-              </Button>
+    <RxTheme className="rx-ch">
+      <div className="rx-shell">
+        <header className="rx-head">
+          <div>
+            <div className="rx-eyebrow">Chat</div>
+            <h1>Conversations</h1>
+          </div>
+          <div className="rx-meta">
+            {loading ? "Reading the conversations" : conversationCount(conversations.length)}
+            {canDelete && (
+              <>
+                <br />
+                You can delete any of them
+              </>
             )}
           </div>
-        </div>
-        {conversations.length > 0 && (
-          <SearchInput
-            value={query}
-            onChange={changeQuery}
-            placeholder="Search conversations…"
-            label="Search conversations by title"
-          />
-        )}
-      </div>
+        </header>
 
-      {bulkError && (
-        <p className="mb-3 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-          {bulkError}
-        </p>
-      )}
-
-      {showForm && (
-        <div className="mb-4 rounded-xl border border-border bg-card p-4">
-          <MentionTextarea
-            value={content}
-            onChange={setContent}
-            mentions={mentions}
-            onMentionsChange={setMentions}
-            papers={papers}
-            disabled={submitting}
-            onSubmit={handleStart}
-          />
-          {submitError && (
-            <p className="mt-1 text-xs text-destructive">{submitError}</p>
-          )}
-          <div className="mt-3 flex gap-2">
-            <Button
-              onClick={handleStart}
-              disabled={!content.trim() || submitting}
-            >
-              <MessageSquarePlus className="size-4" />
-              {submitting ? "Starting…" : "Start Chat"}
-            </Button>
-            <Button
-              variant="ghost"
-              onClick={() => {
-                setShowForm(false);
-                setContent("");
-                setMentions([]);
-                setSubmitError(null);
-              }}
-            >
-              Cancel
-            </Button>
-          </div>
-        </div>
-      )}
-
-      {conversations.length === 0 && !showForm && (
-        <div className="flex flex-col items-center gap-2 py-24 text-center">
-          <p className="text-sm text-muted-foreground">
-            Start a conversation to ask questions about the assigned papers.
+        {!empty && (
+          <p className="rx-lede">
+            Ask something new below, or reopen a conversation to carry on where you left
+            off. Each one keeps its own citations.
           </p>
-        </div>
-      )}
+        )}
 
-      {/* A query that matches nothing needs saying: an empty list under a
-          filled search box otherwise reads as the chats having disappeared. */}
-      {conversations.length > 0 && visible.length === 0 && (
-        <p className="rounded-xl border border-dashed border-border px-4 py-6 text-center text-sm text-muted-foreground">
-          No conversations match “{query}”.
-        </p>
-      )}
-
-      <div className="space-y-2">
-        {visible.map((conv) => (
-          // A div, not a button: the delete control is itself a button and
-          // nesting one inside another is invalid HTML.
-          <div
-            key={conv.id}
-            className="group flex w-full items-start gap-2 rounded-xl border border-border bg-card px-4 py-3 transition-colors hover:bg-muted"
-          >
-            {editingMode && (
-              <input
-                type="checkbox"
-                checked={selected.has(conv.id)}
-                onChange={() => setSelected(toggle(selected, conv.id))}
-                aria-label={`Select ${conv.title}`}
-                className="mt-1 size-4 shrink-0"
+        {!empty && (
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
+            <div style={{ flex: 1 }}>
+              <SearchInput
+                value={query}
+                onChange={changeQuery}
+                placeholder="Search conversations…"
+                label="Search conversations by title"
+              />
+            </div>
+            {canDelete && (
+              <BulkEditBar
+                active={editingMode}
+                count={selected.size}
+                total={visibleIds.length}
+                allSelected={isAllSelected(selected, visibleIds)}
+                busy={bulkBusy}
+                onEnter={() => setEditingMode(true)}
+                onSelectAll={() => setSelected(selectAll(selected, visibleIds))}
+                onClear={() => setSelected(clear())}
+                onDelete={() => setPendingBulkDelete(true)}
+                onDone={() => {
+                  setEditingMode(false);
+                  // A selection that survives invisibly is a delete waiting
+                  // to hit the wrong rows.
+                  setSelected(clear());
+                }}
               />
             )}
-            <button
-              type="button"
-              onClick={() =>
-                router.push(`/research/${projectId}/chat/${conv.id}`)
-              }
-              className="min-w-0 flex-1 text-left"
-            >
-              <p className="line-clamp-2 text-sm font-medium text-foreground">
-                {conv.title}
-              </p>
-              <p className="mt-0.5 text-xs text-muted-foreground">
-                {fmtDate(conv.updated_at)}
-              </p>
-            </button>
-            <button
-              type="button"
-              onClick={() => void handleDownload(conv)}
-              disabled={downloading === conv.id}
-              className="mt-0.5 shrink-0 rounded p-1 text-muted-foreground/50 transition-colors hover:bg-muted hover:text-foreground disabled:opacity-40"
-              aria-label={`Download conversation as Markdown: ${conv.title}`}
-              title="Download as .md"
-            >
-              <Download className="size-3.5" />
-            </button>
-            {myRole && CAN_DELETE.includes(myRole) && (
-              <button
-                type="button"
-                onClick={() => {
-                  setRenameError(null);
-                  setRenaming(conv);
-                }}
-                className="mt-0.5 shrink-0 rounded p-1 text-muted-foreground/50 transition-colors hover:bg-muted hover:text-foreground"
-                aria-label={`Rename conversation: ${conv.title}`}
-                title="Rename"
-              >
-                <Pencil className="size-3.5" />
-              </button>
-            )}
-            {myRole && CAN_DELETE.includes(myRole) && (
-              <button
-                type="button"
-                onClick={() => handleDelete(conv.id)}
-                disabled={deleting === conv.id}
-                className="mt-0.5 shrink-0 rounded p-1 text-muted-foreground/50 transition-colors hover:bg-destructive/10 hover:text-destructive disabled:opacity-40"
-                aria-label={`Delete conversation: ${conv.title}`}
-              >
-                <Trash2 className="size-3.5" />
-              </button>
-            )}
           </div>
-        ))}
+        )}
+
+        {bulkError && (
+          <p role="alert" className="rx-cherror" style={{ margin: "0 0 12px" }}>
+            {bulkError}
+          </p>
+        )}
+
+        <div className="rx-newq">
+          <div className="rx-composer">
+            <MentionTextarea
+              value={content}
+              onChange={setContent}
+              mentions={mentions}
+              onMentionsChange={setMentions}
+              papers={papers}
+              disabled={submitting}
+              onSubmit={handleStart}
+            />
+            <div className="rx-bar">
+              <span>
+                Type <b>@</b> to name a paper and search only inside it
+              </span>
+              {submitError && (
+                <span role="status" className="rx-cherr">
+                  {submitError}
+                </span>
+              )}
+              <button
+                type="button"
+                className="rx-btn rx-push"
+                onClick={handleStart}
+                disabled={!content.trim() || submitting}
+              >
+                {submitting ? "Starting…" : "Start the conversation"}
+              </button>
+            </div>
+          </div>
+        </div>
+
+        {loading ? (
+          <div className="rx-clist" aria-hidden="true">
+            {[0, 1, 2].map((i) => (
+              <div key={i} className="rx-chskel" />
+            ))}
+          </div>
+        ) : empty ? (
+          <div className="rx-empty">
+            <h2>Nothing asked yet. Start with what you actually want to know.</h2>
+            <p>
+              Answers here are built only from the papers in this project, and every
+              sentence carries the excerpt it came from. Type @ to search inside one
+              paper instead of all of them.
+            </p>
+          </div>
+        ) : visible.length === 0 ? (
+          // A query that matches nothing needs saying: an empty list under a
+          // filled search box otherwise reads as the chats having disappeared.
+          <p className="rx-lede">No conversations match “{query}”.</p>
+        ) : (
+          <div className="rx-clist">
+            {/* The concept's row also carries the last question asked, the
+                conversation's scope and its length. `GET
+                /projects/{id}/conversations` returns id, project_id, title,
+                created_by, created_at and updated_at — no messages, no counts,
+                no scope — so those three columns have no source and are left
+                out rather than invented. */}
+            <div className="rx-ccols" aria-hidden="true">
+              <span>Conversation</span>
+              <span>Started</span>
+              <span>Last activity</span>
+              <span />
+            </div>
+            {visible.map((conv) => (
+              // A div, not a button: the delete control is itself a button and
+              // nesting one inside another is invalid HTML. `.rx-copen::after`
+              // is what makes the whole row clickable anyway.
+              <div key={conv.id} className="rx-crow">
+                <span style={{ display: "flex", alignItems: "baseline", gap: 10, minWidth: 0 }}>
+                  {editingMode && (
+                    // Above the row's click-through overlay, so ticking the
+                    // box never opens the conversation.
+                    <input
+                      type="checkbox"
+                      checked={selected.has(conv.id)}
+                      onChange={() => setSelected(toggle(selected, conv.id))}
+                      aria-label={`Select ${conv.title}`}
+                      style={{ position: "relative", zIndex: 1, flexShrink: 0 }}
+                    />
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => router.push(`/research/${projectId}/chat/${conv.id}`)}
+                    className="rx-copen"
+                  >
+                    <span className="rx-ct">{conv.title}</span>
+                  </button>
+                </span>
+                <span className="rx-cmeta">
+                  <span className="rx-cd">{startedDay(conv.created_at)}</span>
+                  <span className="rx-cd">{activityLabel(conv.updated_at)}</span>
+                </span>
+                <span style={{ display: "flex", gap: 2, justifySelf: "end" }}>
+                  <button
+                    type="button"
+                    onClick={() => void handleDownload(conv)}
+                    disabled={downloading === conv.id}
+                    className="rx-cdel rx-ctool"
+                    aria-label={`Download conversation as Markdown: ${conv.title}`}
+                    title="Download as .md"
+                  >
+                    <DownloadGlyph />
+                  </button>
+                  {canDelete && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setRenameError(null);
+                        setRenaming(conv);
+                      }}
+                      className="rx-cdel rx-ctool"
+                      aria-label={`Rename conversation: ${conv.title}`}
+                      title="Rename"
+                    >
+                      <PencilGlyph />
+                    </button>
+                  )}
+                  {canDelete && (
+                    <button
+                      type="button"
+                      onClick={() => void handleDelete(conv.id)}
+                      disabled={deleting === conv.id}
+                      className="rx-cdel"
+                      aria-label={`Delete conversation: ${conv.title}`}
+                    >
+                      <TrashGlyph />
+                    </button>
+                  )}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       <RenameDialog
@@ -426,6 +451,6 @@ export default function ChatPage() {
         onCancel={() => setPendingBulkDelete(false)}
         onConfirm={() => void handleBulkDelete()}
       />
-    </div>
+    </RxTheme>
   );
 }

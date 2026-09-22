@@ -2,44 +2,56 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams } from "next/navigation";
-import {
-  Download,
-  ExternalLink,
-  FileText,
-  Pencil,
-  Plus,
-  Trash2,
-} from "lucide-react";
-import { Button } from "@/components/ui/button";
 import { BulkEditBar } from "@/components/bulk-edit-bar";
+import { PaperDialog } from "@/components/paper-dialog";
+import { RxTheme } from "@/components/rx-theme";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { SearchInput } from "@/components/ui/search-input";
-import { PaperDialog } from "@/components/paper-dialog";
-import {
-  getProject,
-  listPapers,
-  deletePaper,
-  fetchPaperPdf,
-} from "@/lib/projects";
 import { saveBlob } from "@/lib/download";
 import {
-  clear,
-  isAllSelected,
-  retainVisible,
-  selectAll,
-  toggle,
-} from "@/lib/selection";
+  deletePaper,
+  fetchPaperPdf,
+  getProject,
+  listPapers,
+  probePaperIndexed,
+} from "@/lib/projects";
+import {
+  formatAdded,
+  libraryHeadline,
+  paperState,
+  railTotal,
+  sourceLine,
+  stateDetail,
+  summarize,
+  type ProbeMap,
+} from "@/lib/papers";
 import { matchesQuery } from "@/lib/search";
+import { clear, isAllSelected, retainVisible, selectAll, toggle } from "@/lib/selection";
 import type { Paper, Role } from "@/lib/types";
+import "./papers.css";
 
 const CAN_ADD: Role[] = ["owner", "member"];
 
-function fmtDate(iso: string) {
-  return new Date(iso).toLocaleDateString("en-GB", {
-    day: "numeric",
-    month: "short",
-    year: "numeric",
-  });
+/** Title and abstract -- the two things a row shows once opened, so every
+ * match is visible and nothing reads as a false positive. */
+const searchable = (paper: Paper) => [paper.title, paper.abstract];
+
+function UploadGlyph() {
+  return (
+    <svg
+      width="20"
+      height="20"
+      viewBox="0 0 20 20"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.3"
+      aria-hidden="true"
+      style={{ margin: "0 auto", color: "oklch(var(--muted-foreground))" }}
+    >
+      <path d="M10 13.5V3.8M6.5 7.3 10 3.8l3.5 3.5" />
+      <path d="M3.5 12.5v2.7a1.3 1.3 0 0 0 1.3 1.3h10.4a1.3 1.3 0 0 0 1.3-1.3v-2.7" />
+    </svg>
+  );
 }
 
 export default function PapersPage() {
@@ -48,6 +60,7 @@ export default function PapersPage() {
   const [myRole, setMyRole] = useState<Role | null>(null);
   const [loading, setLoading] = useState(true);
   const [deleting, setDeleting] = useState<string | null>(null);
+  const [editing, setEditing] = useState<Paper | null>(null);
   const [downloading, setDownloading] = useState<string | null>(null);
   const [query, setQuery] = useState("");
 
@@ -55,10 +68,99 @@ export default function PapersPage() {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [bulkBusy, setBulkBusy] = useState(false);
   const [bulkError, setBulkError] = useState<string | null>(null);
+  // Asked through a real dialog, never `window.confirm` -- see
+  // `ConfirmDialog`: Chrome suppresses repeated native dialogs, after which
+  // `confirm()` returns false without opening and the delete silently fails.
+  const [pendingBulkDelete, setPendingBulkDelete] = useState(false);
 
-  /** Title and abstract -- the two things the row actually shows, so every
-   * match is visible and nothing reads as a false positive. */
-  const searchable = (paper: Paper) => [paper.title, paper.abstract];
+  // One row open at a time, like the concept: the opened body is wide and two
+  // of them stacked push the rest of the table off screen.
+  const [openId, setOpenId] = useState<string | null>(null);
+  // What the retriever answered about each paper, keyed by id. Never fetched
+  // in a sweep -- one request, when a row is opened. See `lib/papers.ts`.
+  const [probes, setProbes] = useState<ProbeMap>({});
+
+  const [addOpen, setAddOpen] = useState(false);
+  // A fresh array per drop, deliberately: `PaperUploadScreen` consumes it on
+  // identity change, so reusing one would swallow the second drop.
+  const [droppedFiles, setDroppedFiles] = useState<File[]>([]);
+  const [dragOver, setDragOver] = useState(false);
+
+  // `silent` skips the full-page loading skeleton. The skeleton branch below
+  // doesn't render <PaperDialog>, so a non-silent reload while the Add Paper
+  // dialog is open unmounts it out from under the user — e.g. PaperUploadScreen
+  // calls onSaved (this function) mid-batch, and an open dialog would vanish
+  // instead of staying open to show a failed row.
+  //
+  // `loadSeq` guards against out-of-order resolution: onSaved (batch
+  // completion) and handleDelete's error-path resync can both be in flight at
+  // once, and a slower earlier request resolving after a faster later one
+  // would otherwise overwrite fresher state with stale data.
+  const loadSeq = useRef(0);
+
+  const load = useCallback((opts: { silent?: boolean } = {}) => {
+    const seq = ++loadSeq.current;
+    if (!opts.silent) setLoading(true);
+    Promise.all([listPapers(projectId), getProject(projectId)])
+      .then(([ps, detail]) => {
+        if (seq !== loadSeq.current) return; // a newer load already won
+        setPapers(ps);
+        setMyRole(detail.my_role);
+        // A probe is a claim about a paper that still exists. Dropping the
+        // rest keeps a deleted paper's answer from being reused by a new
+        // paper that happens to reuse nothing but the shape of the map.
+        setProbes((prev) => {
+          const live: ProbeMap = {};
+          for (const p of ps) if (prev[p.id]) live[p.id] = prev[p.id];
+          return live;
+        });
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (seq === loadSeq.current) setLoading(false);
+      });
+  }, [projectId]);
+
+  const probe = useCallback(
+    (paperId: string) => {
+      setProbes((prev) => ({ ...prev, [paperId]: "checking" }));
+      void probePaperIndexed(projectId, paperId).then((result) => {
+        setProbes((prev) =>
+          // Only write back if this paper is still being tracked: a delete
+          // between the request and its answer already pruned the map, and
+          // re-adding the key would resurrect a row's state in `summarize`.
+          prev[paperId] === undefined ? prev : { ...prev, [paperId]: result }
+        );
+      });
+    },
+    [projectId]
+  );
+
+  function toggleRow(paper: Paper) {
+    const next = openId === paper.id ? null : paper.id;
+    setOpenId(next);
+    // Asked on open, and again only if the previous attempt failed outright.
+    const seen = probes[paper.id];
+    if (next && (seen === undefined || seen === "unavailable")) probe(paper.id);
+  }
+
+  async function handleDelete(paperId: string) {
+    setDeleting(paperId);
+    try {
+      await deletePaper(projectId, paperId);
+      setPapers((prev) => prev.filter((p) => p.id !== paperId));
+      setProbes((prev) => {
+        const next = { ...prev };
+        delete next[paperId];
+        return next;
+      });
+      if (openId === paperId) setOpenId(null);
+    } catch {
+      load({ silent: true });
+    } finally {
+      setDeleting(null);
+    }
+  }
 
   function changeQuery(next: string) {
     setQuery(next);
@@ -74,9 +176,8 @@ export default function PapersPage() {
     setDownloading(paper.id);
     try {
       const blob = await fetchPaperPdf(projectId, paper.id);
-      // Named for the paper, not its id: the file lands in a downloads
-      // folder where an id names nothing. Same character rules as the chat
-      // transcript export, for the same filesystems.
+      // Named for the paper, not its id: an id names nothing in a downloads
+      // folder. Same character rules as the chat transcript export.
       const safe =
         paper.title
           .replace(/[\\/:*?"<>|]/g, "-")
@@ -89,68 +190,20 @@ export default function PapersPage() {
       setDownloading(null);
     }
   }
-  const [editing, setEditing] = useState<Paper | null>(null);
-
-  // `silent` skips the full-page loading skeleton. The skeleton branch below
-  // doesn't render <PaperDialog>, so a non-silent reload while the Add Paper
-  // dialog is open unmounts it out from under the user — e.g. PaperUploadScreen
-  // calls onSaved (this function) mid-batch, and an open dialog would vanish
-  // instead of staying open to show a failed row.
-  //
-  // `loadSeq` guards against out-of-order resolution: onSaved (batch
-  // completion) and handleDelete's error-path resync can both be in flight at
-  // once, and a slower earlier request resolving after a faster later one
-  // would otherwise overwrite fresher state with stale data.
-  const loadSeq = useRef(0);
-
-  const load = useCallback(
-    (opts: { silent?: boolean } = {}) => {
-      const seq = ++loadSeq.current;
-      if (!opts.silent) setLoading(true);
-      Promise.all([listPapers(projectId), getProject(projectId)])
-        .then(([ps, detail]) => {
-          if (seq !== loadSeq.current) return; // a newer load already won
-          setPapers(ps);
-          setMyRole(detail.my_role);
-        })
-        .catch(() => {})
-        .finally(() => {
-          if (seq === loadSeq.current) setLoading(false);
-        });
-    },
-    [projectId],
-  );
-
-  async function handleDelete(paperId: string) {
-    setDeleting(paperId);
-    try {
-      await deletePaper(projectId, paperId);
-      setPapers((prev) => prev.filter((p) => p.id !== paperId));
-    } catch {
-      load({ silent: true });
-    } finally {
-      setDeleting(null);
-    }
-  }
-
-  // Asked through a real dialog, never `window.confirm` -- see
-  // `ConfirmDialog`: a page that fires several native dialogs gets them
-  // SUPPRESSED by Chrome, after which `confirm()` returns false without
-  // opening anything and the delete silently does nothing.
-  const [pendingBulkDelete, setPendingBulkDelete] = useState(false);
 
   async function handleBulkDelete() {
     setPendingBulkDelete(false);
     setBulkBusy(true);
     setBulkError(null);
     const ids = [...selected];
-    const results = await Promise.allSettled(
-      ids.map((id) => deletePaper(projectId, id)),
-    );
+    const results = await Promise.allSettled(ids.map((id) => deletePaper(projectId, id)));
     const failed = ids.filter((_, i) => results[i].status === "rejected");
     setSelected(new Set(failed));
     if (failed.length > 0) {
       setBulkError(`${failed.length} of ${ids.length} could not be deleted.`);
+    }
+    if (openId !== null && ids.includes(openId) && !failed.includes(openId)) {
+      setOpenId(null);
     }
     setBulkBusy(false);
     // Re-fetched unconditionally: what just proved unreliable is precisely
@@ -158,206 +211,291 @@ export default function PapersPage() {
     load({ silent: true });
   }
 
+  function openDialogWith(files: File[]) {
+    setDroppedFiles(files);
+    setAddOpen(true);
+  }
+
   useEffect(() => {
     load();
   }, [load]);
 
-  if (loading) {
-    return (
-      <div className="space-y-3">
-        {[1, 2, 3].map((i) => (
-          <div key={i} className="h-20 animate-pulse rounded-xl bg-muted" />
-        ))}
-      </div>
-    );
-  }
-
   const canAdd = myRole !== null && CAN_ADD.includes(myRole);
   const visible = papers.filter((p) => matchesQuery(query, searchable(p)));
   const visibleIds = visible.map((p) => p.id);
+  const summary = summarize(papers, probes);
+  const lastAdded = papers.reduce<string | null>(
+    (latest, p) => (latest === null || p.created_at > latest ? p.created_at : latest),
+    null
+  );
 
   return (
-    <div>
-      {/* Count and actions on one line, the search box on its own beneath
-          them at full width. The box is the widest thing a user types into
-          on this page, and a paper title is long -- squeezing it into the
-          action row left it narrower than the text it searches. */}
-      <div className="mb-4 flex flex-col gap-2">
-        <div className="flex items-center justify-between gap-3">
-          <p className="text-sm text-muted-foreground">
-            {papers.length === 0
-              ? "No papers yet"
-              : query
-                ? `${visible.length} of ${papers.length} papers`
-                : `${papers.length} paper${papers.length !== 1 ? "s" : ""}`}
-          </p>
-          <div className="flex shrink-0 items-center gap-2">
-            <BulkEditBar
-              active={editingMode}
-              count={selected.size}
-              total={visibleIds.length}
-              allSelected={isAllSelected(selected, visibleIds)}
-              busy={bulkBusy}
-              onEnter={() => setEditingMode(true)}
-              onSelectAll={() => setSelected(selectAll(selected, visibleIds))}
-              onClear={() => setSelected(clear())}
-              onDelete={() => setPendingBulkDelete(true)}
-              onDone={() => {
-                setEditingMode(false);
-                // A selection that survives invisibly is a delete waiting to
-                // hit the wrong rows.
-                setSelected(clear());
-              }}
-            />
-            {canAdd && (
-              <PaperDialog
-                projectId={projectId}
-                onSaved={() => load({ silent: true })}
-              >
-                <Button>
-                  <Plus className="size-4" />
-                  Add Paper
-                </Button>
-              </PaperDialog>
-            )}
+    <RxTheme className="rx-pp">
+      <div className="rx-shell">
+        <header className="rx-head">
+          <div>
+            <div className="rx-eyebrow">Library</div>
+            <h1>{loading ? "Reading the library" : libraryHeadline(summary)}</h1>
           </div>
-        </div>
-        {papers.length > 0 && (
-          <SearchInput
-            value={query}
-            onChange={changeQuery}
-            placeholder="Search papers…"
-            label="Search papers by title or abstract"
-          />
-        )}
-      </div>
+          <div className="rx-meta">
+            {lastAdded ? `Last added ${formatAdded(lastAdded)}` : "Nothing added yet"}
+          </div>
+        </header>
 
-      {bulkError && (
-        <p className="mb-3 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-          {bulkError}
-        </p>
-      )}
+        <div className="rx-pgrid">
+          <div>
+            <p className="rx-pintro">
+              Open a paper to see what the retriever holds for it. Only papers the retriever
+              holds text for can be searched or mentioned in a question.
+            </p>
 
-      {papers.length === 0 && (
-        <div className="flex flex-col items-center gap-3 py-24 text-center">
-          <FileText className="size-8 text-muted-foreground/40" />
-          <p className="text-sm text-muted-foreground">
-            {canAdd
-              ? "Add papers to enable RAG chat on this project."
-              : "No papers have been added yet."}
-          </p>
-        </div>
-      )}
-
-      {/* A query that matches nothing needs saying: an empty list under a
-          filled search box otherwise reads as the library having emptied. */}
-      {papers.length > 0 && visible.length === 0 && (
-        <p className="rounded-xl border border-dashed border-border px-4 py-6 text-center text-sm text-muted-foreground">
-          No papers match “{query}”.
-        </p>
-      )}
-
-      <div className="space-y-2">
-        {visible.map((paper) => (
-          <div
-            key={paper.id}
-            className="flex items-start gap-3 rounded-xl border border-border bg-card px-4 py-3"
-          >
-            {editingMode && (
-              <input
-                type="checkbox"
-                checked={selected.has(paper.id)}
-                onChange={() => setSelected(toggle(selected, paper.id))}
-                aria-label={`Select ${paper.title}`}
-                className="mt-1 size-4 shrink-0"
-              />
+            {papers.length > 0 && (
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 8,
+                  marginBottom: 12,
+                }}
+              >
+                <div style={{ flex: 1 }}>
+                  <SearchInput
+                    value={query}
+                    onChange={changeQuery}
+                    placeholder="Search papers…"
+                    label="Search papers by title or abstract"
+                  />
+                </div>
+                {canAdd && (
+                  <BulkEditBar
+                    active={editingMode}
+                    count={selected.size}
+                    total={visibleIds.length}
+                    allSelected={isAllSelected(selected, visibleIds)}
+                    busy={bulkBusy}
+                    onEnter={() => setEditingMode(true)}
+                    onSelectAll={() => setSelected(selectAll(selected, visibleIds))}
+                    onClear={() => setSelected(clear())}
+                    onDelete={() => setPendingBulkDelete(true)}
+                    onDone={() => {
+                      setEditingMode(false);
+                      // A selection that survives invisibly is a delete
+                      // waiting to hit the wrong rows.
+                      setSelected(clear());
+                    }}
+                  />
+                )}
+              </div>
             )}
-            <div className="min-w-0 flex-1">
-              <p className="line-clamp-1 text-sm font-medium text-foreground">
-                {paper.title}
+
+            {bulkError && (
+              <p className="rx-pempty" role="alert">
+                {bulkError}
               </p>
-              {paper.abstract && (
-                <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">
-                  {paper.abstract}
-                </p>
-              )}
-              <p className="mt-1.5 text-xs text-muted-foreground/60">
-                {fmtDate(paper.created_at)}
-              </p>
+            )}
+
+            <div className="rx-pcols" aria-hidden="true">
+              <span>Paper</span>
+              <span>Added</span>
+              <span>Retriever</span>
+              <span>State</span>
             </div>
-            {/* Three states, one slot. A paper we hold the PDF for is
-                downloadable; a link-sourced one opens where it lives; and a
-                paper with neither -- every row ingested before PDFs were
-                kept -- says so rather than leaving an unexplained gap where
-                its neighbours have a control. */}
-            {paper.has_pdf ? (
-              <button
-                onClick={() => void handleDownloadPdf(paper)}
-                disabled={downloading === paper.id}
-                title="Download PDF"
-                aria-label={`Download PDF: ${paper.title}`}
-                className="mt-0.5 shrink-0 rounded p-1 text-muted-foreground/50 transition-colors hover:bg-accent hover:text-foreground disabled:opacity-40"
-              >
-                <Download className="size-3.5" />
-              </button>
-            ) : paper.resolved_pdf_url || paper.pdf_url ? (
-              <a
-                href={paper.resolved_pdf_url ?? paper.pdf_url ?? undefined}
-                target="_blank"
-                rel="noopener noreferrer"
-                title="Open the paper's link"
-                aria-label={`Open link: ${paper.title}`}
-                className="mt-0.5 shrink-0 rounded p-1 text-muted-foreground/50 transition-colors hover:bg-accent hover:text-foreground"
-              >
-                <ExternalLink className="size-3.5" />
-              </a>
+
+            {loading ? (
+              <div>
+                {[0, 1, 2].map((i) => (
+                  <div key={i} className="rx-pskel" />
+                ))}
+              </div>
+            ) : papers.length === 0 ? (
+              <p className="rx-pempty">
+                {canAdd
+                  ? "Add a paper and it is read, split and embedded on arrival — then it can be searched and mentioned in a question."
+                  : "No papers have been added to this project yet."}
+              </p>
+            ) : visible.length === 0 ? (
+              // A query that matches nothing needs saying: an empty table under
+              // a filled search box otherwise reads as the library emptying.
+              <p className="rx-pempty">No papers match “{query}”.</p>
             ) : (
-              <span
-                title="No PDF stored — this paper was added before PDFs were kept."
-                className="mt-0.5 shrink-0 cursor-default rounded p-1 text-muted-foreground/25"
-                aria-label="No PDF stored"
-              >
-                <Download className="size-3.5" />
-              </span>
-            )}
-            {canAdd && (
-              <button
-                onClick={() => setEditing(paper)}
-                className="mt-0.5 shrink-0 rounded p-1 text-muted-foreground/50 transition-colors hover:bg-accent hover:text-foreground"
-                aria-label="Edit paper"
-              >
-                <Pencil className="size-3.5" />
-              </button>
-            )}
-            {canAdd && (
-              <button
-                onClick={() => handleDelete(paper.id)}
-                disabled={deleting === paper.id}
-                className="mt-0.5 shrink-0 rounded p-1 text-muted-foreground/50 transition-colors hover:bg-destructive/10 hover:text-destructive disabled:opacity-40"
-                aria-label="Delete paper"
-              >
-                <Trash2 className="size-3.5" />
-              </button>
+              visible.map((paper) => {
+                const state = paperState(paper, probes[paper.id]);
+                const open = openId === paper.id;
+                const bodyId = `rx-paper-${paper.id}`;
+                return (
+                  <div key={paper.id} className="rx-paper">
+                    <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                    {editingMode && (
+                      <input
+                        type="checkbox"
+                        checked={selected.has(paper.id)}
+                        onChange={() => setSelected(toggle(selected, paper.id))}
+                        aria-label={`Select ${paper.title}`}
+                        style={{ flexShrink: 0 }}
+                      />
+                    )}
+                    <button
+                      style={{ flex: 1, minWidth: 0 }}
+                      className="rx-prow"
+                      aria-expanded={open}
+                      aria-controls={bodyId}
+                      onClick={() => toggleRow(paper)}
+                    >
+                      <span className="rx-pid">
+                        <span className="rx-pttl">{paper.title}</span>
+                        <span className="rx-pby">{sourceLine(paper)}</span>
+                      </span>
+                      <span className="rx-padd">{formatAdded(paper.created_at)}</span>
+                      <span className="rx-pnum">
+                        {state.kind === "indexed"
+                          ? "holds text"
+                          : state.kind === "empty"
+                            ? "holds nothing"
+                            : "—"}
+                      </span>
+                      <span
+                        className={`rx-pst${state.tone === "bad" ? " rx-pst-bad" : ""}`}
+                      >
+                        <span
+                          className={`rx-dot${
+                            state.tone === "idle"
+                              ? " rx-dot-idle"
+                              : state.tone === "bad"
+                                ? " rx-dot-bad"
+                                : ""
+                          }`}
+                        />
+                        {state.label}
+                      </span>
+                    </button>
+                    </div>
+
+                    <div id={bodyId} className={`rx-reveal${open ? " rx-reveal-open" : ""}`}>
+                      <div>
+                        <div
+                          className={`rx-reveal-body${state.tone === "bad" ? " rx-bad" : ""}`}
+                        >
+                          <div className="rx-psrc">
+                            <b>{state.label}</b>{" "}
+                            <span className="rx-mono">
+                              {sourceLine(paper)} · added {formatAdded(paper.created_at)}
+                            </span>
+                          </div>
+                          {stateDetail(state)}
+                          {paper.abstract && (
+                            <q style={{ display: "block", marginTop: 10 }}>
+                              {paper.abstract.slice(0, 320)}
+                              {paper.abstract.length > 320 ? "…" : ""}
+                            </q>
+                          )}
+                          <div className="rx-pfoot">
+                            <button
+                              onClick={() => probe(paper.id)}
+                              disabled={probes[paper.id] === "checking"}
+                            >
+                              Check the retriever again
+                            </button>
+                            {/* A paper we hold the PDF for downloads; a link-
+                                sourced one opens where it lives; a paper with
+                                neither was added before PDFs were kept. */}
+                            {paper.has_pdf ? (
+                              <button
+                                onClick={() => void handleDownloadPdf(paper)}
+                                disabled={downloading === paper.id}
+                              >
+                                {downloading === paper.id ? "Downloading…" : "Download PDF"}
+                              </button>
+                            ) : paper.resolved_pdf_url || paper.pdf_url ? (
+                              <a
+                                href={paper.resolved_pdf_url ?? paper.pdf_url ?? undefined}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                              >
+                                Open the paper&apos;s link
+                              </a>
+                            ) : null}
+                            {canAdd && (
+                              <button onClick={() => setEditing(paper)}>Rename</button>
+                            )}
+                            {canAdd && (
+                              <button
+                                className="rx-danger"
+                                disabled={deleting === paper.id}
+                                onClick={() => void handleDelete(paper.id)}
+                              >
+                                {deleting === paper.id ? "Removing…" : "Remove from library"}
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })
             )}
           </div>
-        ))}
+
+          <aside className="rx-rail rx-prail" aria-label="Library summary">
+            <div className="rx-flank-h">This library</div>
+            <div className="rx-tot">{railTotal(summary)}</div>
+            <ul className="rx-fl-list">
+              <li>
+                <span className="rx-ttl">Searchable</span>
+                <span className="rx-d">{summary.searchable}</span>
+              </li>
+              <li>
+                <span className="rx-ttl">Not checked yet</span>
+                <span className="rx-d">{summary.unchecked}</span>
+              </li>
+              <li>
+                <span className="rx-ttl">Needs your attention</span>
+                <span className="rx-d">{summary.attention}</span>
+              </li>
+            </ul>
+
+            {canAdd && (
+              <button
+                type="button"
+                className={`rx-drop${dragOver ? " rx-drop-over" : ""}`}
+                onClick={() => openDialogWith([])}
+                onDragOver={(e) => {
+                  e.preventDefault();
+                  setDragOver(true);
+                }}
+                onDragLeave={() => setDragOver(false)}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  setDragOver(false);
+                  // Handed STRAIGHT to the add dialog rather than filtered
+                  // here: PaperUploadScreen already drops non-PDFs and caps
+                  // the batch, and says so — a second copy of that rule here
+                  // would silently drop files with no message at all.
+                  openDialogWith(Array.from(e.dataTransfer.files));
+                }}
+              >
+                <UploadGlyph />
+                <span className="rx-drop-h">Drop a PDF here to add it to the library</span>
+                <small>
+                  Papers are read, split and embedded on arrival — usually under a minute for
+                  20 pages.
+                </small>
+              </button>
+            )}
+          </aside>
+        </div>
       </div>
 
-      {editing && (
-        <PaperDialog
-          projectId={projectId}
-          paper={editing}
-          open={!!editing}
-          onOpenChange={(o) => !o && setEditing(null)}
-          onSaved={() => {
-            setEditing(null);
-            // Silent: a non-silent load flips `loading` true, and that branch
-            // replaces the whole page with skeletons — flashing the entire list
-            // away for a single-field edit and losing scroll position.
-            load({ silent: true });
-          }}
-        />
-      )}
+      {/* Both dialogs render in a portal, OUTSIDE this wrapper, so they keep
+          the app's own tokens and typeface. That is deliberate: the palette is
+          scoped to the screen, and a dialog is chrome. */}
+      <PaperDialog
+        projectId={projectId}
+        open={addOpen}
+        onOpenChange={setAddOpen}
+        initialFiles={droppedFiles}
+        onSaved={() => load({ silent: true })}
+      />
 
       <ConfirmDialog
         open={pendingBulkDelete}
@@ -368,6 +506,31 @@ export default function PapersPage() {
         onCancel={() => setPendingBulkDelete(false)}
         onConfirm={() => void handleBulkDelete()}
       />
-    </div>
+
+      {editing && (
+        <PaperDialog
+          projectId={projectId}
+          paper={editing}
+          open={!!editing}
+          onOpenChange={(o) => !o && setEditing(null)}
+          onSaved={() => {
+            const editedId = editing.id;
+            setEditing(null);
+            // A manual paper's text is re-embedded by the PATCH, so anything
+            // this screen already knew about the retriever's contents for it
+            // is now a claim about the previous text.
+            setProbes((prev) => {
+              const next = { ...prev };
+              delete next[editedId];
+              return next;
+            });
+            // Silent: a non-silent load flips `loading` true, and that branch
+            // replaces the whole table with skeletons — flashing the entire
+            // list away for a single-field edit and losing scroll position.
+            load({ silent: true });
+          }}
+        />
+      )}
+    </RxTheme>
   );
 }
