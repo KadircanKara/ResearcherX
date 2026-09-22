@@ -290,9 +290,25 @@ def _merge(verdicts: list[dict[int, ClaimVerdict]]) -> dict[int, ClaimVerdict]:
 
 
 @dataclass
+# Output budget per judge call. 4000 was enough for gpt-4.1, which reports zero
+# reasoning tokens and writes terse `reason` strings -- and far too small for a
+# reasoning model. Measured 2026-08-23 on stealth/ox-alpha: 23 of 40 cases
+# failed, half with EMPTY content (thinking consumed the whole budget) and half
+# with JSON truncated mid-array ("EOF while parsing a string at line 61").
+#
+# Raising it is close to free: an API bills GENERATED tokens, not the cap, so a
+# model that answers in 900 tokens costs the same at 12000 as at 4000. The cap
+# only has to be large enough that a correct answer is never cut off.
+#
+# This is the same failure CLAUDE.md records for chat_answer_max_tokens on
+# gemini-3.6-flash -- thinking billed against max_tokens, invisible in
+# completion_tokens, answer truncated with no error anywhere.
+DEFAULT_JUDGE_MAX_TOKENS = 12_000
+
+
 class Judge:
     model: str = DEFAULT_JUDGE_MODEL
-    max_tokens: int = 4000
+    max_tokens: int = DEFAULT_JUDGE_MAX_TOKENS
     excerpt_chars_per_request: int = _EXCERPT_CHARS_PER_REQUEST
 
     def __post_init__(self) -> None:

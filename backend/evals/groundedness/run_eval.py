@@ -31,13 +31,19 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from evals.groundedness.agreement import pair_verdicts, verdict_shift
 from evals.groundedness.claims import extract_claims, marker_count
 from evals.groundedness.generate import AnswerGenerator, Generated
-from evals.groundedness.judge import DEFAULT_JUDGE_MODEL, Judge, QuotaExhausted
+from evals.groundedness.judge import (
+    DEFAULT_JUDGE_MAX_TOKENS,
+    DEFAULT_JUDGE_MODEL,
+    Judge,
+    QuotaExhausted,
+)
 from evals.groundedness.replay import load_generations, save_generations
 from evals.groundedness.metrics import (
     CaseOutcome,
@@ -551,6 +557,16 @@ async def main() -> None:
     parser.add_argument("--set", type=Path, default=_DEFAULT_SET)
     parser.add_argument("--judge-model", default=DEFAULT_JUDGE_MODEL)
     parser.add_argument(
+        "--judge-max-tokens",
+        type=int,
+        default=DEFAULT_JUDGE_MAX_TOKENS,
+        help=(
+            "output budget per judge call. Reasoning models bill thinking against it "
+            "and fail with EMPTY content or truncated JSON when it is too small; "
+            "raising it bills nothing extra, since APIs charge generated tokens"
+        ),
+    )
+    parser.add_argument(
         "--concurrency",
         type=int,
         default=_DEFAULT_CONCURRENCY,
@@ -647,8 +663,12 @@ async def main() -> None:
         raise SystemExit(str(exc)) from None
 
     generator = AnswerGenerator()
-    judge = Judge(model=args.judge_model)
-    second_judge = Judge(model=args.compare_judge) if args.compare_judge else None
+    judge = Judge(model=args.judge_model, max_tokens=args.judge_max_tokens)
+    second_judge = (
+        Judge(model=args.compare_judge, max_tokens=args.judge_max_tokens)
+        if args.compare_judge
+        else None
+    )
 
     replayed: dict[str, Generated] = {}
     replay_model = None
@@ -683,18 +703,37 @@ async def main() -> None:
     # already known to be terminal.
     abort = asyncio.Event()
 
+    # Progress to STDERR, one line per finished case. A screening run against a
+    # slow free endpoint takes the better part of an hour and printed nothing
+    # until it ended, which is indistinguishable from a hang -- on 2026-08-22 a
+    # run that was probably nearly finished got killed on that misreading.
+    # stderr so `> out.txt` still captures a clean report.
+    done = 0
+    total = len(cases)
+
+    async def _tracked(coro, case_id: str):
+        nonlocal done
+        result = await coro
+        done += 1
+        stage = result.stage if isinstance(result, CaseError) else "ok"
+        print(f"  [{done}/{total}] {case_id} {stage}", file=sys.stderr, flush=True)
+        return result
+
     results = await asyncio.gather(
         *(
-            _run_case(
-                case=case,
-                project_id=args.project_id,
-                generator=generator,
-                judge=judge,
-                semaphore=semaphore,
-                abort=abort,
-                replayed=replayed.get(case.id),
-                second_judge=second_judge,
-                metrics=metrics,
+            _tracked(
+                _run_case(
+                    case=case,
+                    project_id=args.project_id,
+                    generator=generator,
+                    judge=judge,
+                    semaphore=semaphore,
+                    abort=abort,
+                    replayed=replayed.get(case.id),
+                    second_judge=second_judge,
+                    metrics=metrics,
+                ),
+                case.id,
             )
             for case in cases
         )
