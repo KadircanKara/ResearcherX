@@ -1,365 +1,278 @@
 import { describe, expect, it } from "vitest";
 import {
-  BOUNDS,
-  addPaper,
-  clampPosition,
-  clearGraph,
-  countLabel,
-  degree,
-  degreeLabel,
-  edgeAriaLabel,
-  edgeGeometry,
-  edgeId,
-  edgeLabel,
-  edgeWeight,
-  formatDistance,
-  initialGraphState,
-  isEmpty,
-  liveEdges,
-  nodeEdgeRows,
-  nudge,
-  onCanvas,
-  paperById,
-  pickerRows,
-  pointerToPercent,
-  movedEnough,
-  select,
-  summarize,
-  removePaper,
-  type GraphState,
+  CANVAS_H,
+  CANVAS_W,
+  GRAPH_LINK_THRESHOLD,
+  NODE_H,
+  NODE_W,
+  STEP,
+  STEP_SHIFT,
+  addNode,
+  arrowDelta,
+  clampToCanvas,
+  edgeStrokeWidth,
+  edgesOnCanvas,
+  formatSimilarity,
+  homeNode,
+  moveNode,
+  railPapers,
+  removeNode,
+  selectionAfterRemove,
+  summariseGraph,
 } from "./graph";
-import { GRAPH_EDGES, GRAPH_PAPERS } from "./graph-data";
+import {
+  GRAPH_EDGES,
+  GRAPH_NODES,
+  GRAPH_PAPERS,
+  GRAPH_UNAVAILABLE,
+  type GraphEdge,
+  type GraphNode,
+  type GraphPaper,
+} from "./graph-data";
 
-/** A canvas holding exactly these papers, each at its home position. */
-function withOnly(...ids: string[]): GraphState {
-  return ids.reduce((s, id) => addPaper(s, id), clearGraph());
+const PAPERS_BY_ID = new Map(GRAPH_PAPERS.map((p) => [p.id, p]));
+
+function node(paperId: string, label = paperId, x = 100, y = 100): GraphNode {
+  return { paperId, label, x, y };
 }
 
-describe("the corpus", () => {
-  it("is the concept's four placeable papers", () => {
-    expect(GRAPH_PAPERS.map((p) => p.id)).toEqual(["p1", "p2", "p3", "p4"]);
+function edge(id: string, a: string, b: string, similarity: number): GraphEdge {
+  return {
+    id,
+    a,
+    b,
+    similarity,
+    sharedFacet: "f",
+    claimA: "",
+    claimB: "",
+    separation: "",
+  };
+}
+
+describe("clampToCanvas", () => {
+  it("leaves a point well inside the canvas alone", () => {
+    expect(clampToCanvas(450, 260)).toEqual({ x: 450, y: 260 });
   });
 
-  it("draws no edge looser than the stated cut", () => {
-    for (const e of GRAPH_EDGES) expect(e.distance).toBeLessThan(0.75);
+  it("keeps the whole node box inside every edge", () => {
+    expect(clampToCanvas(-50, -50)).toEqual({ x: NODE_W / 2, y: NODE_H / 2 });
+    expect(clampToCanvas(5000, 5000)).toEqual({
+      x: CANVAS_W - NODE_W / 2,
+      y: CANVAS_H - NODE_H / 2,
+    });
+  });
+});
+
+describe("arrowDelta", () => {
+  it("maps each arrow key to one step on its axis", () => {
+    expect(arrowDelta("ArrowUp", false)).toEqual({ dx: 0, dy: -STEP });
+    expect(arrowDelta("ArrowDown", false)).toEqual({ dx: 0, dy: STEP });
+    expect(arrowDelta("ArrowLeft", false)).toEqual({ dx: -STEP, dy: 0 });
+    expect(arrowDelta("ArrowRight", false)).toEqual({ dx: STEP, dy: 0 });
   });
 
-  it("has both endpoints of every edge in the corpus", () => {
-    for (const e of GRAPH_EDGES) {
-      expect(paperById(e.a)).toBeDefined();
-      expect(paperById(e.b)).toBeDefined();
+  it("takes the larger step with Shift", () => {
+    expect(arrowDelta("ArrowRight", true)).toEqual({ dx: STEP_SHIFT, dy: 0 });
+  });
+
+  it("returns null for any other key, so the event is left alone", () => {
+    expect(arrowDelta("Enter", false)).toBeNull();
+    expect(arrowDelta("a", true)).toBeNull();
+  });
+});
+
+describe("edgesOnCanvas", () => {
+  it("draws every sample edge at first load", () => {
+    expect(edgesOnCanvas(GRAPH_NODES, GRAPH_EDGES).map((e) => e.id)).toEqual([
+      "e1",
+      "e2",
+      "e3",
+      "e4",
+      "e5",
+    ]);
+  });
+
+  it("drops an edge as soon as either endpoint leaves", () => {
+    const nodes = removeNode(GRAPH_NODES, "p-reward");
+    expect(edgesOnCanvas(nodes, GRAPH_EDGES).map((e) => e.id)).toEqual(["e1", "e2", "e3"]);
+  });
+
+  it("draws nothing on an empty canvas", () => {
+    expect(edgesOnCanvas([], GRAPH_EDGES)).toEqual([]);
+  });
+});
+
+describe("railPapers", () => {
+  it("offers every sample paper that is not refused, in library order", () => {
+    const { available } = railPapers(GRAPH_PAPERS, GRAPH_UNAVAILABLE);
+    expect(available.map((p) => p.id)).toEqual([
+      "p-coverage",
+      "p-bandwidth",
+      "p-reward",
+      "p-mobility",
+      "p-formation",
+      "p-schedules",
+      "p-benchmark",
+      "p-safe",
+    ]);
+  });
+
+  it("lists refusals in their own order, each with its paper and reason", () => {
+    const { unavailable } = railPapers(GRAPH_PAPERS, GRAPH_UNAVAILABLE);
+    expect(unavailable.map((u) => [u.paper.id, u.reason])).toEqual([
+      ["p-fusion", "no indexed text"],
+      ["p-allocation", "not checked yet"],
+      ["p-hierarchical", "added before the similarity index existed"],
+      ["p-relay", "not checked yet"],
+    ]);
+  });
+
+  it("drops a refusal that names no paper in the library", () => {
+    const { unavailable } = railPapers(GRAPH_PAPERS, [{ paperId: "nope", reason: "x" }]);
+    expect(unavailable).toEqual([]);
+  });
+});
+
+describe("moveNode / removeNode", () => {
+  it("moves only the named node", () => {
+    const moved = moveNode(GRAPH_NODES, "p-bandwidth", 10, 20);
+    expect(moved.find((n) => n.paperId === "p-bandwidth")).toMatchObject({ x: 10, y: 20 });
+    expect(moved.filter((n) => n.paperId !== "p-bandwidth")).toEqual(
+      GRAPH_NODES.filter((n) => n.paperId !== "p-bandwidth")
+    );
+  });
+
+  it("removes only the named node and keeps the rest in order", () => {
+    expect(removeNode(GRAPH_NODES, "p-formation").map((n) => n.paperId)).toEqual([
+      "p-coverage",
+      "p-bandwidth",
+      "p-reward",
+    ]);
+  });
+});
+
+describe("selectionAfterRemove", () => {
+  it("clears the selection when the selected node leaves", () => {
+    expect(selectionAfterRemove({ kind: "node", paperId: "a" }, "a")).toBeNull();
+  });
+
+  it("keeps a different node or an edge selected", () => {
+    expect(selectionAfterRemove({ kind: "node", paperId: "b" }, "a")).toEqual({
+      kind: "node",
+      paperId: "b",
+    });
+    expect(selectionAfterRemove({ kind: "edge", edgeId: "e1" }, "a")).toEqual({
+      kind: "edge",
+      edgeId: "e1",
+    });
+    expect(selectionAfterRemove(null, "a")).toBeNull();
+  });
+});
+
+describe("addNode", () => {
+  it("puts a spare paper at its home spot under its label", () => {
+    const nodes = addNode(GRAPH_NODES, "p-benchmark", PAPERS_BY_ID);
+    expect(nodes.at(-1)).toEqual({ paperId: "p-benchmark", label: "Adeyemi 2025", x: 420, y: 230 });
+  });
+
+  it("puts a paper that started on the canvas back where it started, under its label", () => {
+    const nodes = addNode([], "p-coverage", PAPERS_BY_ID);
+    expect(nodes).toEqual([{ paperId: "p-coverage", label: "Ferrer 2024", x: 240, y: 150 }]);
+  });
+
+  it("does not duplicate a paper already on the canvas", () => {
+    expect(addNode(GRAPH_NODES, "p-coverage", PAPERS_BY_ID)).toEqual(GRAPH_NODES);
+  });
+
+  it("falls back to the first free spare spot and a 16-character title for a paper with no home", () => {
+    const paper: GraphPaper = {
+      id: "p-new",
+      title: "An Entirely New Paper About Swarms",
+      authors: ["A. B."],
+      year: 2026,
+      facets: [],
+    };
+    const byId = new Map([[paper.id, paper]]);
+    const nodes = addNode([node("p-benchmark")], "p-new", byId);
+    expect(nodes.at(-1)).toEqual({ paperId: "p-new", label: "An Entirely New ", x: 180, y: 380 });
+  });
+
+  it("falls back to the centre once every spare spot is taken", () => {
+    const taken = ["p-benchmark", "p-schedules", "p-safe", "p-mobility"].map((id) => node(id));
+    expect(addNode(taken, "ghost", new Map()).at(-1)).toEqual({
+      paperId: "ghost",
+      label: "ghost",
+      x: 450,
+      y: 260,
+    });
+  });
+});
+
+describe("homeNode", () => {
+  it("knows every paper the rail can place", () => {
+    for (const p of railPapers(GRAPH_PAPERS, GRAPH_UNAVAILABLE).available) {
+      expect(homeNode(p.id), p.id).toBeDefined();
     }
   });
 
-  it("gives every edge a stable id that does not move with the live list", () => {
-    const ids = GRAPH_EDGES.map(edgeId);
-    expect(new Set(ids).size).toBe(ids.length);
-    // p1--p2 keeps its id when the canvas loses a paper it has nothing to do with
-    const full = initialGraphState();
-    const without = removePaper(full, "p3");
-    const before = liveEdges(full).find((e) => e.a === "p1" && e.b === "p2");
-    const after = liveEdges(without).find((e) => e.a === "p1" && e.b === "p2");
-    expect(edgeId(before!)).toBe(edgeId(after!));
+  it("knows no refused paper", () => {
+    for (const u of GRAPH_UNAVAILABLE) expect(homeNode(u.paperId)).toBeUndefined();
   });
 });
 
-describe("canvas membership", () => {
-  it("starts with every embedded paper at its home position", () => {
-    const s = initialGraphState();
-    expect(onCanvas(s).map((p) => p.id)).toEqual(["p1", "p2", "p3", "p4"]);
-    expect(s.positions.p1).toEqual({ x: 21, y: 24 });
-    expect(s.selection).toBeNull();
+describe("edge presentation", () => {
+  it("thickens the stroke with similarity", () => {
+    expect(edgeStrokeWidth(0)).toBe(1);
+    expect(edgeStrokeWidth(1)).toBe(4);
+    expect(edgeStrokeWidth(0.5)).toBeCloseTo(2.5);
   });
 
-  it("reports empty ONLY when nothing is on the canvas", () => {
-    expect(isEmpty(clearGraph())).toBe(true);
-    expect(isEmpty(initialGraphState())).toBe(false);
-    expect(isEmpty(withOnly("p3"))).toBe(false);
-    // and a canvas emptied one node at a time is empty again
-    const drained = GRAPH_PAPERS.reduce(
-      (s, p) => removePaper(s, p.id),
-      initialGraphState()
-    );
-    expect(isEmpty(drained)).toBe(true);
-  });
-
-  it("orders nodes by the corpus, not by the clicks that produced them", () => {
-    expect(onCanvas(withOnly("p4", "p1", "p3")).map((p) => p.id)).toEqual([
-      "p1",
-      "p3",
-      "p4",
-    ]);
-  });
-
-  it("places an added paper at its home position", () => {
-    const s = addPaper(clearGraph(), "p2");
-    expect(s.positions.p2).toEqual({ x: 67, y: 70 });
-  });
-
-  it("does not snap a dragged node home when its paper is added again", () => {
-    const dragged: GraphState = {
-      positions: { p1: { x: 50, y: 50 } },
-      selection: null,
-    };
-    expect(addPaper(dragged, "p1").positions.p1).toEqual({ x: 50, y: 50 });
-  });
-
-  it("ignores an id no paper claims", () => {
-    const s = clearGraph();
-    expect(addPaper(s, "nope")).toBe(s);
-  });
-
-  it("copies the home position rather than aliasing it", () => {
-    const s = addPaper(clearGraph(), "p1");
-    s.positions.p1.x = 99;
-    expect(GRAPH_PAPERS[0].home.x).toBe(21);
+  it("prints similarity to two decimals", () => {
+    expect(formatSimilarity(0.82)).toBe("0.82");
+    expect(formatSimilarity(0.7)).toBe("0.70");
   });
 });
 
-describe("removing a node", () => {
-  it("takes its edges with it", () => {
-    const full = initialGraphState();
-    expect(liveEdges(full)).toHaveLength(4);
-    const without = removePaper(full, "p1");
-    expect(liveEdges(without).map(edgeId)).toEqual(["p2--p4"]);
-  });
-
-  it("moves nothing else", () => {
-    const dragged: GraphState = {
-      positions: {
-        p1: { x: 11, y: 12 },
-        p2: { x: 33, y: 34 },
-        p4: { x: 88, y: 66 },
-      },
-      selection: null,
-    };
-    const after = removePaper(dragged, "p2");
-    expect(after.positions).toEqual({
-      p1: { x: 11, y: 12 },
-      p4: { x: 88, y: 66 },
-    });
-  });
-
-  it("closes a detail panel that was open on it", () => {
-    const s = select(initialGraphState(), { kind: "node", id: "p3" });
-    expect(removePaper(s, "p3").selection).toBeNull();
-  });
-
-  it("closes a detail panel open on an edge it just erased", () => {
-    const s = select(initialGraphState(), { kind: "edge", id: "p1--p3" });
-    expect(removePaper(s, "p3").selection).toBeNull();
-  });
-
-  it("leaves a detail panel open on something still drawn", () => {
-    const s = select(initialGraphState(), { kind: "edge", id: "p1--p4" });
-    expect(removePaper(s, "p3").selection).toEqual({ kind: "edge", id: "p1--p4" });
-  });
-
-  it("is a no-op for a paper that is not on the canvas", () => {
-    const s = withOnly("p1");
-    expect(removePaper(s, "p2")).toBe(s);
-  });
-});
-
-describe("edges and degree", () => {
-  it("draws an edge only when both endpoints are on the canvas", () => {
-    expect(liveEdges(withOnly("p1")).map(edgeId)).toEqual([]);
-    expect(liveEdges(withOnly("p1", "p4")).map(edgeId)).toEqual(["p1--p4"]);
-  });
-
-  it("counts the edges touching a node", () => {
-    const full = initialGraphState();
-    expect(degree(full, "p1")).toBe(3);
-    expect(degree(full, "p3")).toBe(1);
-    expect(degree(withOnly("p2", "p3"), "p3")).toBe(0);
-  });
-
-  it("weights an edge by nearness, not by the cut", () => {
-    expect(edgeWeight({ ...GRAPH_EDGES[0], distance: 0.59 })).toBe("near");
-    expect(edgeWeight({ ...GRAPH_EDGES[0], distance: 0.64999 })).toBe("near");
-    expect(edgeWeight({ ...GRAPH_EDGES[0], distance: 0.65 })).toBe("far");
-    expect(edgeWeight({ ...GRAPH_EDGES[0], distance: 0.74 })).toBe("far");
-  });
-
-  it("labels an edge with its distance and facet at a fixed precision", () => {
-    expect(formatDistance(0.7)).toBe("0.70");
-    expect(edgeLabel(GRAPH_EDGES[2])).toBe("0.70 · evidence");
-    expect(edgeLabel(GRAPH_EDGES[0])).toBe("0.59 · setting");
-  });
-
-  it("names both endpoints in the label a screen reader hears", () => {
-    expect(edgeAriaLabel(GRAPH_EDGES[0])).toBe(
-      "Edge: Cooperative Multi-Target Search and Voronoi Partitioning, distance 0.59, shared facet setting"
+describe("summariseGraph", () => {
+  it("says the canvas is empty when nothing is on it", () => {
+    expect(summariseGraph([], GRAPH_EDGES)).toBe(
+      "Nothing on the canvas yet — add a paper from the right."
     );
   });
 
-  it("lists a node's own links for its detail panel", () => {
-    expect(nodeEdgeRows(initialGraphState(), "p3")).toEqual([
-      { title: "Cooperative Multi-Target Search", label: "0.66 · evidence" },
-    ]);
-    expect(nodeEdgeRows(withOnly("p2", "p3"), "p3")).toEqual([]);
-  });
-});
-
-describe("geometry", () => {
-  it("anchors an edge on the SAME numbers the nodes are placed with", () => {
-    const s: GraphState = {
-      positions: { p1: { x: 20, y: 40 }, p4: { x: 60, y: 80 } },
-      selection: null,
-    };
-    const g = edgeGeometry(s, GRAPH_EDGES[0])!;
-    expect(g.x1).toBe(s.positions.p1.x);
-    expect(g.y1).toBe(s.positions.p1.y);
-    expect(g.x2).toBe(s.positions.p4.x);
-    expect(g.y2).toBe(s.positions.p4.y);
+  it("names the weakest link when every paper is linked (the first-load canvas)", () => {
+    expect(summariseGraph(GRAPH_NODES, GRAPH_EDGES)).toBe(
+      "Every paper on the canvas is linked; the weakest link is Ferrer 2024b — Nowak 2023 at 0.61."
+    );
   });
 
-  it("puts an edge's label at the midpoint of its line", () => {
-    const s: GraphState = {
-      positions: { p1: { x: 20, y: 40 }, p4: { x: 60, y: 80 } },
-      selection: null,
-    };
-    expect(edgeGeometry(s, GRAPH_EDGES[0])).toEqual({
-      x1: 20,
-      y1: 40,
-      x2: 60,
-      y2: 80,
-      mx: 40,
-      my: 60,
-    });
+  it("names the first paper with no link at or above the threshold", () => {
+    const nodes = [...GRAPH_NODES, { paperId: "p-benchmark", label: "Adeyemi 2025", x: 0, y: 0 }];
+    expect(summariseGraph(nodes, GRAPH_EDGES)).toBe(
+      "Adeyemi 2025 shares nothing above the threshold with the rest."
+    );
   });
 
-  it("follows a dragged node without anything having to be measured", () => {
-    const before = edgeGeometry(initialGraphState(), GRAPH_EDGES[0])!;
-    const dragged = {
-      ...initialGraphState(),
-      positions: { ...initialGraphState().positions, p1: { x: 80, y: 15 } },
-    };
-    const after = edgeGeometry(dragged, GRAPH_EDGES[0])!;
-    expect(before.x1).toBe(21);
-    expect(after.x1).toBe(80);
-    expect(after.mx).toBe((80 + 63) / 2);
+  it("treats a lone paper as unlinked", () => {
+    expect(summariseGraph([node("a", "Solo 2024")], [])).toBe(
+      "Solo 2024 shares nothing above the threshold with the rest."
+    );
   });
 
-  it("refuses to place a half-anchored line", () => {
-    expect(edgeGeometry(withOnly("p1"), GRAPH_EDGES[0])).toBeNull();
+  it("counts a link exactly at the threshold as linked", () => {
+    const nodes = [node("a", "A"), node("b", "B")];
+    expect(summariseGraph(nodes, [edge("x", "a", "b", GRAPH_LINK_THRESHOLD)])).toBe(
+      "Every paper on the canvas is linked; the weakest link is A — B at 0.65."
+    );
+    expect(summariseGraph(nodes, [edge("x", "a", "b", GRAPH_LINK_THRESHOLD - 0.01)])).toBe(
+      "A shares nothing above the threshold with the rest."
+    );
   });
 
-  it("keeps a dropped node inside the box", () => {
-    expect(clampPosition({ x: -40, y: 200 })).toEqual({
-      x: BOUNDS.minX,
-      y: BOUNDS.maxY,
-    });
-    expect(clampPosition({ x: 50, y: 50 })).toEqual({ x: 50, y: 50 });
-  });
-
-  it("carries a node under the pointer and clamps where it lands", () => {
-    const rect = { left: 100, top: 50, width: 800, height: 400 };
-    expect(pointerToPercent(500, 250, rect)).toEqual({ x: 50, y: 50 });
-    // dragged past the right edge, it stops at the bound rather than leaving
-    expect(pointerToPercent(2000, 250, rect)).toEqual({ x: BOUNDS.maxX, y: 50 });
-  });
-
-  it("tells a drag apart from a click, so a drop does not open a panel", () => {
-    expect(movedEnough({ x: 50, y: 50 }, { x: 50.2, y: 50.1 })).toBe(false);
-    expect(movedEnough({ x: 50, y: 50 }, { x: 51, y: 50 })).toBe(true);
-    expect(movedEnough({ x: 50, y: 50 }, { x: 50, y: 48 })).toBe(true);
-  });
-
-  it("carries the node with the cursor rather than teleporting it", () => {
-    const rect = { left: 0, top: 0, width: 1000, height: 500 };
-    // grabbed 4% left of and 3% above the node's centre
-    expect(pointerToPercent(500, 250, rect, { x: 4, y: 3 })).toEqual({
-      x: 54,
-      y: 53,
-    });
-  });
-
-  it("survives a canvas that has not been measured yet", () => {
-    expect(
-      pointerToPercent(10, 10, { left: 0, top: 0, width: 0, height: 0 })
-    ).toEqual({ x: BOUNDS.minX, y: BOUNDS.minY });
-  });
-});
-
-describe("the keyboard path for moving a node", () => {
-  it("steps in the arrow's direction", () => {
-    expect(nudge({ x: 50, y: 50 }, "ArrowLeft")).toEqual({ x: 48, y: 50 });
-    expect(nudge({ x: 50, y: 50 }, "ArrowRight")).toEqual({ x: 52, y: 50 });
-    expect(nudge({ x: 50, y: 50 }, "ArrowUp")).toEqual({ x: 50, y: 48 });
-    expect(nudge({ x: 50, y: 50 }, "ArrowDown")).toEqual({ x: 50, y: 52 });
-  });
-
-  it("stops at the same bounds a drag does", () => {
-    expect(nudge({ x: BOUNDS.minX, y: 50 }, "ArrowLeft")).toEqual({
-      x: BOUNDS.minX,
-      y: 50,
-    });
-  });
-
-  it("returns null for a key it must not swallow", () => {
-    expect(nudge({ x: 50, y: 50 }, "Tab")).toBeNull();
-    expect(nudge({ x: 50, y: 50 }, "Enter")).toBeNull();
-  });
-});
-
-describe("what the canvas says about itself", () => {
-  it("counts papers and edges, singular and plural", () => {
-    expect(countLabel(4, 4)).toBe("4 papers · 4 edges");
-    expect(countLabel(1, 0)).toBe("1 paper · 0 edges");
-    expect(countLabel(2, 1)).toBe("2 papers · 1 edge");
-  });
-
-  it("spells out a node with no edges rather than showing a zero", () => {
-    expect(degreeLabel(0)).toBe("no edges above the cut");
-    expect(degreeLabel(1)).toBe("1 edge");
-    expect(degreeLabel(3)).toBe("3 edges");
-  });
-
-  it("says nothing about an empty canvas", () => {
-    expect(summarize(clearGraph())).toEqual({ kind: "empty" });
-  });
-
-  it("reports an isolated paper as a finding", () => {
-    const s = summarize(withOnly("p2", "p3"));
-    expect(s.kind).toBe("isolated");
-    if (s.kind !== "isolated") throw new Error("unreachable");
-    expect(s.names).toEqual(["Decentralised Task Reallocation", "Hybrid Split-Federated Learning"]);
-    expect(s.verb).toBe("share nothing");
-    expect(s.tail).toContain("not a rendering failure");
-  });
-
-  it("uses the singular verb for one isolated paper", () => {
-    const s = summarize(withOnly("p2", "p3", "p4"));
-    if (s.kind !== "isolated") throw new Error("expected an isolated summary");
-    expect(s.names).toEqual(["Hybrid Split-Federated Learning"]);
-    expect(s.verb).toBe("shares nothing");
-  });
-
-  it("names the thinnest attachment when everything is connected", () => {
-    const s = summarize(initialGraphState());
-    if (s.kind !== "connected") throw new Error("expected a connected summary");
-    expect(s.weakest).toBe("Hybrid Split-Federated Learning");
-    expect(s.degree).toBe(1);
-    expect(s.tail).toContain("hangs on 1 edge");
-  });
-
-  it("breaks a tie on corpus order, so the same canvas names the same paper", () => {
-    const a = summarize(withOnly("p1", "p4"));
-    const b = summarize(withOnly("p4", "p1"));
-    expect(a).toEqual(b);
-    if (a.kind !== "connected") throw new Error("expected a connected summary");
-    expect(a.weakest).toBe("Cooperative Multi-Target Search");
-  });
-});
-
-describe("the picker", () => {
-  it("offers every embedded paper and marks the ones already placed", () => {
-    expect(pickerRows(withOnly("p2"))).toEqual([
-      { id: "p1", title: "Cooperative Multi-Target Search", onCanvas: false },
-      { id: "p2", title: "Decentralised Task Reallocation", onCanvas: true },
-      { id: "p3", title: "Hybrid Split-Federated Learning", onCanvas: false },
-      { id: "p4", title: "Voronoi Partitioning", onCanvas: false },
-    ]);
+  it("ignores edges whose endpoints are not both on the canvas", () => {
+    const nodes = [node("a", "A")];
+    expect(summariseGraph(nodes, [edge("x", "a", "gone", 0.9)])).toBe(
+      "A shares nothing above the threshold with the rest."
+    );
   });
 });
