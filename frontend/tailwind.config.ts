@@ -56,6 +56,7 @@ const config: Config = {
         input: "oklch(var(--input) / <alpha-value>)",
         ring: "oklch(var(--ring) / <alpha-value>)",
         positive: "oklch(var(--positive) / <alpha-value>)",
+        warning: "oklch(var(--warning) / <alpha-value>)",
         chart: {
           "1": "oklch(var(--chart-1) / <alpha-value>)",
           "2": "oklch(var(--chart-2) / <alpha-value>)",
