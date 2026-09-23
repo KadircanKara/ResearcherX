@@ -37,7 +37,9 @@ from typing import Literal
 from openai import AsyncOpenAI, BadRequestError, RateLimitError
 from pydantic import BaseModel, Field, ValidationError
 
+from app.core import observability
 from app.core.config import settings
+from app.llm.params import adapt_request
 from app.llm.structured import extract_json
 
 DEFAULT_JUDGE_MODEL = "gpt-4.1"
@@ -351,13 +353,30 @@ class Judge:
                 if self._supports_response_format()
                 else {}
             )
+            # Shaped like production's calls, so a gpt-5 judge gets
+            # `max_completion_tokens` instead of the `max_tokens` it rejects.
+            request = adapt_request(
+                model=self.model,
+                base_url=settings.resolved_judge_base_url,
+                kwargs={"max_tokens": self.max_tokens, "messages": messages, **extra},
+            )
             try:
-                response = await self._client.chat.completions.create(
-                    model=self.model,
-                    max_tokens=self.max_tokens,
-                    messages=messages,
-                    **extra,
-                )
+                # A generation span, so the run's usage tally counts the judge.
+                with observability.span(
+                    "judge",
+                    kind="generation",
+                    attributes={"langfuse.observation.model.name": self.model},
+                ) as span:
+                    response = await self._client.chat.completions.create(
+                        model=self.model, **request
+                    )
+                    usage = getattr(response, "usage", None)
+                    details = observability.usage_details(usage)
+                    if details:
+                        observability.set_json(span, "langfuse.observation.usage_details", details)
+                    observability.set_metadata(
+                        span, reasoning_tokens=observability.reasoning_tokens(usage)
+                    )
             except BadRequestError as exc:
                 # Many OpenAI-compatible endpoints reject `response_format`
                 # outright -- of the free OpenRouter models screened on

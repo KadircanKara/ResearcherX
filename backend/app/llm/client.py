@@ -21,6 +21,7 @@ from openai import AsyncOpenAI, RateLimitError
 from app.core import observability
 from app.core.config import settings
 from app.core.logging import log
+from app.llm.params import adapt_request
 
 
 class Provider:
@@ -128,7 +129,7 @@ async def create_chat_completion(*, observation: str = "llm", **kwargs):
     """
     gen = observability.start_span(observation, kind="generation")
     started = time.monotonic()
-    _record_request(gen, kwargs)
+    observability.set_content(gen, "langfuse.observation.input", kwargs.get("messages"))
     try:
         response = await _create_with_failover(gen, **kwargs)
     except BaseException as exc:
@@ -155,9 +156,18 @@ async def _create_with_failover(gen, **kwargs):
             },
         )
         observability.set_metadata(gen, provider_base_url=provider.base_url)
+        # Shaped per provider, not once: a pool can mix a gpt-4.1 primary
+        # with a gpt-5 fallback, and the two accept different parameters.
+        request = adapt_request(
+            model=provider.model,
+            base_url=provider.base_url,
+            kwargs=kwargs,
+            reasoning_effort=settings.llm_reasoning_effort,
+        )
+        _record_parameters(gen, request)
         try:
             return await pool.client(provider).chat.completions.create(
-                model=provider.model, **kwargs
+                model=provider.model, **request
             )
         except RateLimitError as exc:
             log.warning(
@@ -173,15 +183,23 @@ async def _create_with_failover(gen, **kwargs):
     raise last_exc
 
 
-def _record_request(gen, kwargs: dict) -> None:
+def _record_parameters(gen, request: dict) -> None:
+    """The parameters as SENT, after per-model shaping."""
     params = {
-        k: kwargs[k] for k in ("max_tokens", "temperature", "stream") if kwargs.get(k) is not None
+        k: request[k]
+        for k in (
+            "max_tokens",
+            "max_completion_tokens",
+            "reasoning_effort",
+            "temperature",
+            "stream",
+        )
+        if request.get(k) is not None
     }
-    response_format = kwargs.get("response_format")
+    response_format = request.get("response_format")
     if isinstance(response_format, dict):
         params["response_format"] = response_format.get("type")
     observability.set_json(gen, "langfuse.observation.model.parameters", params)
-    observability.set_content(gen, "langfuse.observation.input", kwargs.get("messages"))
 
 
 def _record_response(gen, response) -> None:
@@ -190,9 +208,11 @@ def _record_response(gen, response) -> None:
     except Exception:
         text = None
     observability.set_content(gen, "langfuse.observation.output", text)
-    usage = observability.usage_details(getattr(response, "usage", None))
-    if usage:
-        observability.set_json(gen, "langfuse.observation.usage_details", usage)
+    usage = getattr(response, "usage", None)
+    details = observability.usage_details(usage)
+    if details:
+        observability.set_json(gen, "langfuse.observation.usage_details", details)
+    observability.set_metadata(gen, reasoning_tokens=observability.reasoning_tokens(usage))
 
 
 async def _traced_stream(stream, gen, started: float):
@@ -226,4 +246,5 @@ async def _traced_stream(stream, gen, started: float):
         details = observability.usage_details(usage)
         if details:
             observability.set_json(gen, "langfuse.observation.usage_details", details)
+        observability.set_metadata(gen, reasoning_tokens=observability.reasoning_tokens(usage))
         gen.end()
