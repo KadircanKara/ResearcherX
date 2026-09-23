@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { routes } from "@/lib/routes";
 import { usePrefersReducedMotion } from "@/hooks/use-reveal";
-import { HERO_VIDEO, heroVideoTier, type HeroVideoTier } from "@/lib/landing-video";
+import { HERO_POSTER, HERO_VIDEO, heroVideoTier, type HeroVideoTier } from "@/lib/landing-video";
 import { scrollToHash } from "./scroll-to";
 
 const QUESTIONS = [
@@ -93,6 +93,7 @@ export function Hero() {
             ref={videoRef}
             key={tier}
             src={HERO_VIDEO[tier]}
+            poster={HERO_POSTER}
             autoPlay
             muted
             loop
