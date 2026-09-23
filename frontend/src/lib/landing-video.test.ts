@@ -24,7 +24,8 @@ describe("heroVideoTier", () => {
     );
     expect(new Set(urls).size).toBe(6);
     expect(heroVideoSrc("light", "xl")).toBe("/landing/hero-light-xl.mp4");
-    expect(heroPoster("dark")).toBe("/landing/hero-dark-poster.jpg");
+    expect(heroPoster("dark", "md")).toBe("/landing/hero-dark-poster.jpg");
+    expect(heroPoster("light", "sm")).toBe("/landing/hero-light-sm-poster.jpg");
   });
 });
 

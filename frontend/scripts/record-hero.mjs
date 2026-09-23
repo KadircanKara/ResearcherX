@@ -13,7 +13,8 @@
  *
  *   node scripts/record-hero.mjs
  *
- * Env overrides: APP_URL, API_URL, PROJECT_ID, LATEX_DOC_ID, QUESTION, and
+ * Env overrides: APP_URL, API_URL, PROJECT_ID, LATEX_DOC_ID, QUESTION,
+ * FORMATS (default "desktop,phone"), and
  * THEMES (default "dark,light"): one full recording per theme, so the
  * landing page can play the clip that matches the visitor's theme.
  *
@@ -39,15 +40,35 @@ const LATEX_DOC = process.env.LATEX_DOC_ID ?? "8940cadd-73d4-47f6-8f80-b66685773
 const QUESTION =
   process.env.QUESTION ?? "What reward function do the multi-UAV search agents learn from?";
 
-const VIEWPORT = { width: 1440, height: 900 };
-const DPR = 2;
 const FPS = 30;
 const THEMES = (process.env.THEMES ?? "dark,light").split(",").map((t) => t.trim());
-const OUTPUTS = [
-  { tier: "xl", width: 1920, crf: 21 },
-  { tier: "md", width: 1280, crf: 23 },
-  { tier: "sm", width: 854, crf: 25 },
-];
+/*
+ * Two recordings per theme. Desktop is recorded at 1280 wide so the app's
+ * own text lands near full size in the landing page's ~1180px frame. Phones
+ * get their OWN recording at a phone viewport, where the app lays itself
+ * out for a narrow screen -- a downscaled desktop frame would leave its text
+ * about 3px tall.
+ */
+const FORMATS = {
+  desktop: {
+    viewport: { width: 1280, height: 800 },
+    dpr: 2,
+    outputs: [
+      { tier: "xl", width: 1920, crf: 21 },
+      { tier: "md", width: 1280, crf: 23 },
+    ],
+    poster: (theme) => `hero-${theme}-poster.jpg`,
+    posterWidth: 1280,
+  },
+  phone: {
+    viewport: { width: 400, height: 700 },
+    dpr: 3,
+    outputs: [{ tier: "sm", width: 600, crf: 24 }],
+    poster: (theme) => `hero-${theme}-sm-poster.jpg`,
+    posterWidth: 600,
+  },
+};
+const FORMAT_NAMES = (process.env.FORMATS ?? "desktop,phone").split(",").map((f) => f.trim());
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const OUT_DIR = path.resolve(here, "../public/landing");
@@ -119,7 +140,10 @@ function pageSetup({ hiddenProjects, theme }) {
   }
 }
 
-async function record(theme) {
+async function record(theme, formatName) {
+  const fmt = FORMATS[formatName];
+  const VIEWPORT = fmt.viewport;
+  const DPR = fmt.dpr;
   await rm(FRAME_DIR, { recursive: true, force: true });
   await mkdir(FRAME_DIR, { recursive: true });
   await mkdir(OUT_DIR, { recursive: true });
@@ -187,7 +211,7 @@ async function record(theme) {
     // ── scene 1: the library ─────────────────────────────────────────────────
     await page.goto(`${APP}/admin/research/${PROJECT}/papers`);
     await page.getByText("papers in this library").waitFor();
-    await page.mouse.move(900, 700);
+    await page.mouse.move(VIEWPORT.width * 0.62, VIEWPORT.height * 0.78);
     await hold(600);
     await startCapture();
     await hold(1400);
@@ -233,8 +257,21 @@ async function record(theme) {
     await chip.evaluate((el) => el.scrollIntoView({ block: "center", behavior: "instant" }));
     await hold(400);
     await glideTo(chip, { steps: 32 });
-    await hold(2800);
-    await page.mouse.move(1200, 820, { steps: 20 });
+    await hold(1400);
+    // The poster frame: the cited answer with its passage open -- the moment
+    // the page's caption promises -- without the fake cursor over it.
+    await page.evaluate(() => {
+      const c = document.getElementById("rx-cursor");
+      if (c) c.style.visibility = "hidden";
+    });
+    const posterPng = path.join(FRAME_DIR, "poster.png");
+    await page.screenshot({ path: posterPng });
+    await page.evaluate(() => {
+      const c = document.getElementById("rx-cursor");
+      if (c) c.style.visibility = "";
+    });
+    await hold(1400);
+    await page.mouse.move(VIEWPORT.width * 0.83, VIEWPORT.height * 0.91, { steps: 20 });
     await hold(400);
 
     // ── scene 4: write it up -- compile the manuscript, jump PDF to source ──
@@ -254,9 +291,17 @@ async function record(theme) {
     );
     await hold(1200);
     speed = 1;
+    if (formatName === "phone") {
+      // A phone stacks source over PDF, so the PDF would compile off screen:
+      // switch the editor to its PDF-only view instead of jumping to source.
+      const pdfView = page.getByRole("tab", { name: "PDF", exact: true });
+      await glideTo(pdfView);
+      await hold(200);
+      await pdfView.click();
+    }
     await hold(900);
     const firstPage = page.locator("canvas").first();
-    const pbox = await firstPage.boundingBox();
+    const pbox = formatName === "phone" ? null : await firstPage.boundingBox();
     if (pbox) {
       const x = pbox.x + pbox.width * 0.5;
       const y = pbox.y + pbox.height * 0.1;
@@ -293,7 +338,7 @@ async function record(theme) {
   console.log(`${kept.length} frames, ${total.toFixed(1)} s of playback`);
 
   const fade = theme === "light" ? "white" : "black";
-  for (const { tier, width, crf } of OUTPUTS) {
+  for (const { tier, width, crf } of fmt.outputs) {
     const name = `hero-${theme}-${tier}.mp4`;
     const height = Math.round((width * VIEWPORT.height) / VIEWPORT.width / 2) * 2;
     const vf = [
@@ -312,16 +357,20 @@ async function record(theme) {
     );
     console.log(`wrote public/landing/${name}`);
   }
-  execFileSync("ffmpeg", ["-y", "-loglevel", "error", "-ss", "1", "-i", path.join(OUT_DIR, `hero-${theme}-md.mp4`),
-    "-frames:v", "1", "-q:v", "3", path.join(OUT_DIR, `hero-${theme}-poster.jpg`)]);
+  execFileSync("ffmpeg", ["-y", "-loglevel", "error", "-i", path.join(FRAME_DIR, "poster.png"),
+    "-vf", `scale=${fmt.posterWidth}:-2:flags=lanczos`, "-q:v", "3", path.join(OUT_DIR, fmt.poster(theme))]);
+  console.log(`wrote public/landing/${fmt.poster(theme)}`);
   await rm(FRAME_DIR, { recursive: true, force: true });
 }
 
 async function main() {
   for (const theme of THEMES) {
     if (theme !== "dark" && theme !== "light") throw new Error(`unknown theme ${theme}`);
-    console.log(`recording ${theme}`);
-    await record(theme);
+    for (const formatName of FORMAT_NAMES) {
+      if (!FORMATS[formatName]) throw new Error(`unknown format ${formatName}`);
+      console.log(`recording ${theme} ${formatName}`);
+      await record(theme, formatName);
+    }
   }
 }
 
