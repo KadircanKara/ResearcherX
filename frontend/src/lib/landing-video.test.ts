@@ -29,10 +29,9 @@ describe("heroVideoTier", () => {
 });
 
 describe("heroVideoTheme", () => {
-  it("plays the light take only for an explicitly light theme", () => {
-    expect(heroVideoTheme("light")).toBe("light");
-    expect(heroVideoTheme("dark")).toBe("dark");
-    expect(heroVideoTheme("system")).toBe("dark");
-    expect(heroVideoTheme(undefined)).toBe("dark");
+  it("follows the system setting, dark until it is known", () => {
+    expect(heroVideoTheme(true)).toBe("light");
+    expect(heroVideoTheme(false)).toBe("dark");
+    expect(heroVideoTheme(null)).toBe("dark");
   });
 });

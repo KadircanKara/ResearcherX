@@ -3,7 +3,6 @@
 import { useEffect, useRef, useState } from "react";
 import { routes } from "@/lib/routes";
 import { usePrefersReducedMotion } from "@/hooks/use-reveal";
-import { useTheme } from "next-themes";
 import {
   heroPoster,
   heroVideoSrc,
@@ -69,10 +68,17 @@ export function Hero() {
     return () => window.removeEventListener("resize", pick);
   }, []);
 
-  // resolvedTheme is undefined until next-themes mounts, which maps to the
-  // dark take -- the same file the server rendered, so hydration matches.
-  const { resolvedTheme } = useTheme();
-  const theme = heroVideoTheme(resolvedTheme);
+  // The visitor's OS setting, live: null until read after mount, which maps
+  // to the dark take -- the same file the server rendered.
+  const [prefersLight, setPrefersLight] = useState<boolean | null>(null);
+  useEffect(() => {
+    const query = window.matchMedia("(prefers-color-scheme: light)");
+    const sync = () => setPrefersLight(query.matches);
+    sync();
+    query.addEventListener("change", sync);
+    return () => query.removeEventListener("change", sync);
+  }, []);
+  const theme = heroVideoTheme(prefersLight);
 
   const showVideo = !reduced && videoOk;
 

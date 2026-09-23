@@ -12,15 +12,17 @@
 export type HeroVideoTier = "sm" | "md" | "xl";
 
 /**
- * The clip is recorded twice, once per app theme, so a visitor in light mode
- * sees the app as it looks for them. Anything but an explicit "light" gets
- * the dark take -- including the server render and the first paint, before
- * next-themes has resolved the theme.
+ * The clip is recorded twice, once per app theme. The landing page follows
+ * the VISITOR'S SYSTEM setting (prefers-color-scheme), not the app's theme
+ * toggle: most visitors have never opened the app, and the app's own default
+ * would show every one of them the light take regardless of their OS.
+ * `null` -- the server render and first paint, before the media query is
+ * read -- maps to the dark take, so hydration matches.
  */
 export type HeroVideoTheme = "dark" | "light";
 
-export function heroVideoTheme(resolvedTheme: string | undefined): HeroVideoTheme {
-  return resolvedTheme === "light" ? "light" : "dark";
+export function heroVideoTheme(systemPrefersLight: boolean | null): HeroVideoTheme {
+  return systemPrefersLight === true ? "light" : "dark";
 }
 
 export function heroVideoSrc(theme: HeroVideoTheme, tier: HeroVideoTier): string {
