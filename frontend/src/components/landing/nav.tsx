@@ -10,7 +10,6 @@ import { scrollToHash } from "./scroll-to";
 
 const links = [
   { label: "How it works", href: "#how-it-works" },
-  { label: "Writing", href: "#writing" },
   { label: "Why trust it", href: "#why" },
 ];
 
