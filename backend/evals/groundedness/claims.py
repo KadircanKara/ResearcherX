@@ -181,16 +181,63 @@ def _split_sentences(prose: str) -> list[str]:
     return out
 
 
+# Inline code spans ride INSIDE the sentence as an opaque placeholder while
+# it is split and scanned for markers, then are put back. Private-use
+# characters, so no answer can contain them, and no whitespace, terminator or
+# bracket, so a placeholder can neither end a sentence nor read as a marker.
+_PLACEHOLDER = "\ue000{}\ue001"
+_PLACEHOLDER_RE = re.compile("\ue000(\\d+)\ue001")
+
+
+def _is_fence(code_segment: str) -> bool:
+    return code_segment.startswith(("```", "~~~"))
+
+
+def _prose_runs(answer: str) -> list[tuple[str, list[str]]]:
+    """The answer's prose between FENCED blocks, as (text, inline_spans).
+
+    A fenced block is a block: it ends the prose around it, and it is never a
+    claim. An INLINE span is not. `p` and `t−1` in "the probability `p` at
+    time `t−1`" are the sentence's own words, and cutting the prose at each
+    backtick turned one grounded sentence into fragments ("), so the current
+    cell probability at time") that no judge can support. Measured on the
+    2026-09-23 gpt-5-mini run, which writes variables in backticks where
+    gpt-4.1-mini never did: 12 of its 13 "unsupported" claims were such
+    fragments, 8 of them from one well-cited answer.
+    """
+    runs: list[tuple[str, list[str]]] = []
+    parts: list[str] = []
+    spans: list[str] = []
+    for segment, is_code in split_prose_segments(answer):
+        if is_code and _is_fence(segment):
+            if parts:
+                runs.append(("".join(parts), spans))
+            parts, spans = [], []
+        elif is_code:
+            parts.append(_PLACEHOLDER.format(len(spans)))
+            spans.append(segment)
+        else:
+            parts.append(segment)
+    if parts:
+        runs.append(("".join(parts), spans))
+    return runs
+
+
+def _restore(text: str, spans: list[str]) -> str:
+    return _PLACEHOLDER_RE.sub(lambda m: spans[int(m.group(1))], text)
+
+
 def extract_claims(answer: str) -> list[Claim]:
     """The judgeable sentences of `answer`, in order.
 
-    Code is excluded via `citation_attribution.split_prose_segments` -- the
+    Fenced code is excluded via `citation_attribution.split_prose_segments` -- the
     single owner of "what counts as code" in this codebase, shared rather than
     re-implemented for the same reason the strip and the renumbering share it:
     two copies of that guard drift, and a divergence corrupts exactly the bytes
     that must be treated as code. A fenced block is not a claim about a paper
     and has no truth value to rule on; a `[4]` inside one is an array index,
-    not a citation.
+    not a citation. Inline code stays in its sentence (see `_prose_runs`),
+    but a `[4]` inside it is still never read as a marker.
 
     Markdown structure (headings, list bullets) is left in the claim text
     rather than stripped: the judge reads it as context, and stripping it would
@@ -201,10 +248,11 @@ def extract_claims(answer: str) -> list[Claim]:
     # Latches on: everything after the hand-off is general knowledge, not just
     # the sentence immediately following it.
     handed_off = False
-    for segment, is_code in split_prose_segments(answer):
-        if is_code:
-            continue
-        for sentence in _split_sentences(segment):
+    for run, spans in _prose_runs(answer):
+        for masked in _split_sentences(run):
+            # Markers are read from the MASKED sentence, so an inline span's
+            # `arr[4]` never counts; everything else reads what the reader sees.
+            sentence = _restore(masked, spans)
             lowered = sentence.lower()
             is_handoff = any(marker in lowered for marker in _HANDOFF_MARKERS)
             # A sentence that hands off AND then keeps going is already general
@@ -229,7 +277,7 @@ def extract_claims(answer: str) -> list[Claim]:
             introduces_only = _ENUMERATOR_TAIL_RE.sub("", sentence).rstrip().endswith(":")
             is_refusal = REFUSAL in lowered
             if len(sentence) >= _MIN_CLAIM_CHARS and not introduces_only and not is_refusal:
-                markers = tuple(int(m.group(1)) for m in _MARKER_RE.finditer(sentence))
+                markers = tuple(int(m.group(1)) for m in _MARKER_RE.finditer(masked))
                 claims.append(
                     Claim(
                         index=len(claims),
