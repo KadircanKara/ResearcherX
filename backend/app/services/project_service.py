@@ -7,13 +7,21 @@ Gates:
 
 from __future__ import annotations
 
-from sqlalchemy import delete as sa_delete, select
+from sqlalchemy import delete as sa_delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi import HTTPException
 
 from app.core.permissions import can
 from app.core import palette
-from app.db.models import LatexDocument, LatexDocumentMember, Project, ProjectMember, User
+from app.db.models import (
+    ChatConversation,
+    LatexDocument,
+    LatexDocumentMember,
+    Paper,
+    Project,
+    ProjectMember,
+    User,
+)
 from app.schemas.project import ProjectCreate, ProjectUpdate
 
 
@@ -65,6 +73,29 @@ async def _get_members(db: AsyncSession, project_id: str) -> list[ProjectMember]
 # ── public service functions ────────────────────────────────────────────────
 
 
+async def project_counts(db: AsyncSession, project_ids: list[str]) -> dict[str, dict[str, int]]:
+    """Members, papers and chats per project, in one grouped query each.
+
+    Grouped rather than per project so the list route costs three queries
+    whatever the number of projects. Chats count every conversation in the
+    project, not just the caller's: the Chat tab lists them all.
+    """
+    counts = {pid: {"members": 0, "papers": 0, "chats": 0} for pid in project_ids}
+    if not project_ids:
+        return counts
+    for key, column in (
+        ("members", ProjectMember.project_id),
+        ("papers", Paper.project_id),
+        ("chats", ChatConversation.project_id),
+    ):
+        result = await db.execute(
+            select(column, func.count()).where(column.in_(project_ids)).group_by(column)
+        )
+        for pid, n in result.all():
+            counts[pid][key] = n
+    return counts
+
+
 async def list_projects(db: AsyncSession, user: User) -> list[dict]:
     """Return projects the caller is a member of, with my_role and counts."""
     result = await db.execute(
@@ -74,22 +105,11 @@ async def list_projects(db: AsyncSession, user: User) -> list[dict]:
         .order_by(Project.created_at)
     )
     rows = result.all()
-
-    out = []
-    for membership, project in rows:
-        members = await _get_members(db, project.id)
-        out.append(
-            {
-                "project": project,
-                "my_role": membership.role,
-                "counts": {
-                    "members": len(members),
-                    "papers": 0,
-                    "chats": 0,
-                },
-            }
-        )
-    return out
+    counts = await project_counts(db, [project.id for _, project in rows])
+    return [
+        {"project": project, "my_role": membership.role, "counts": counts[project.id]}
+        for membership, project in rows
+    ]
 
 
 async def create_project(db: AsyncSession, user: User, data: ProjectCreate) -> Project:

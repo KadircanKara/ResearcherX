@@ -55,7 +55,7 @@ async def _member_out(membership: ProjectMember, db: AsyncSession) -> MemberOut:
     return MemberOut(user=UserOut.model_validate(user), role=membership.role)
 
 
-def _project_out(project, my_role: str, members_count: int) -> ProjectOut:
+def _project_out(project, my_role: str, counts: dict[str, int]) -> ProjectOut:
     return ProjectOut(
         id=project.id,
         title=project.title,
@@ -66,7 +66,7 @@ def _project_out(project, my_role: str, members_count: int) -> ProjectOut:
         # column existed.
         color=project.color or palette.color_for(project.id),
         my_role=my_role,
-        counts=Counts(members=members_count, papers=0, chats=0),
+        counts=Counts(**counts),
         created_at=project.created_at,
         updated_at=project.updated_at,
     )
@@ -81,7 +81,7 @@ async def list_projects(
     db: AsyncSession = Depends(get_session),
 ) -> list[ProjectOut]:
     rows = await project_service.list_projects(db, user)
-    return [_project_out(row["project"], row["my_role"], row["counts"]["members"]) for row in rows]
+    return [_project_out(row["project"], row["my_role"], row["counts"]) for row in rows]
 
 
 @router.post("/projects", response_model=ProjectOut, status_code=201)
@@ -91,7 +91,7 @@ async def create_project(
     db: AsyncSession = Depends(get_session),
 ) -> ProjectOut:
     project = await project_service.create_project(db, user, data)
-    return _project_out(project, "owner", 1)
+    return _project_out(project, "owner", {"members": 1, "papers": 0, "chats": 0})
 
 
 @router.get("/projects/{project_id}", response_model=ProjectDetailOut)
@@ -102,8 +102,9 @@ async def get_project(
 ) -> ProjectDetailOut:
     project, members, my_role = await project_service.get_project(db, user, project_id)
     member_outs = [await _member_out(m, db) for m in members]
+    counts = (await project_service.project_counts(db, [project.id]))[project.id]
     return ProjectDetailOut(
-        project=_project_out(project, my_role, len(members)),
+        project=_project_out(project, my_role, counts),
         members=member_outs,
         my_role=my_role,
     )
@@ -118,7 +119,8 @@ async def update_project(
 ) -> ProjectOut:
     project, members, my_role = await project_service.get_project(db, user, project_id)
     project = await project_service.update_project(db, user, project_id, data)
-    return _project_out(project, my_role, len(members))
+    counts = (await project_service.project_counts(db, [project.id]))[project.id]
+    return _project_out(project, my_role, counts)
 
 
 @router.delete("/projects/{project_id}", status_code=204)

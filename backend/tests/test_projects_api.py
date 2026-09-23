@@ -4,7 +4,7 @@ from sqlalchemy import select
 import pytest_asyncio
 
 from app.core.palette import PROJECT_COLORS
-from app.db.models import Project, User
+from app.db.models import ChatConversation, Paper, Project, User
 from app.db.seed import seed_users
 
 
@@ -454,3 +454,36 @@ async def test_a_retired_role_is_refused_on_add(client, users):
         headers={"X-Dev-User-Id": you.id},
     )
     assert r.status_code == 422
+
+
+# ── counts: papers and chats are real, per project ───────────────────────────
+
+
+async def test_list_and_detail_count_each_projects_papers_and_chats(client, db_session, users):
+    """Counts were hardcoded to 0, so every project card read "0 papers · 0
+    chats". Two projects with different contents pin that each count is
+    scoped to its own project, on both the list and the detail route."""
+    you, _, _ = users
+    a = (
+        await client.post("/v1/projects", json={"title": "A"}, headers={"X-Dev-User-Id": you.id})
+    ).json()["id"]
+    b = (
+        await client.post("/v1/projects", json={"title": "B"}, headers={"X-Dev-User-Id": you.id})
+    ).json()["id"]
+
+    for title in ("p1", "p2", "p3"):
+        db_session.add(Paper(project_id=a, title=title, source="manual"))
+    db_session.add(Paper(project_id=b, title="q1", source="manual"))
+    for title in ("c1", "c2"):
+        db_session.add(ChatConversation(project_id=a, title=title, created_by=you.id))
+    await db_session.commit()
+
+    listed = {
+        p["id"]: p["counts"]
+        for p in (await client.get("/v1/projects", headers={"X-Dev-User-Id": you.id})).json()
+    }
+    assert listed[a] == {"members": 1, "papers": 3, "chats": 2}
+    assert listed[b] == {"members": 1, "papers": 1, "chats": 0}
+
+    detail = (await client.get(f"/v1/projects/{a}", headers={"X-Dev-User-Id": you.id})).json()
+    assert detail["project"]["counts"] == {"members": 1, "papers": 3, "chats": 2}
