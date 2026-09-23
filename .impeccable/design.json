@@ -1,0 +1,461 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-09-23T16:02:05+00:00",
+  "title": "Design System: ResearcherX landing",
+  "extensions": {
+    "colorMeta": {
+      "accent": {
+        "role": "primary",
+        "displayName": "Receipt Blue",
+        "canonical": "oklch(53% 0.2 260)",
+        "tonalRamp": [
+          "oklch(15% 0.2 260)",
+          "oklch(26% 0.2 260)",
+          "oklch(37% 0.2 260)",
+          "oklch(48% 0.2 260)",
+          "oklch(60% 0.2 260)",
+          "oklch(72% 0.2 260)",
+          "oklch(84% 0.2 260)",
+          "oklch(95% 0.2 260)"
+        ]
+      },
+      "accent-dark": {
+        "role": "primary",
+        "displayName": "Receipt Blue (dark scheme)",
+        "canonical": "oklch(70% 0.15 256)",
+        "tonalRamp": [
+          "oklch(15% 0.15 256)",
+          "oklch(26% 0.15 256)",
+          "oklch(37% 0.15 256)",
+          "oklch(48% 0.15 256)",
+          "oklch(60% 0.15 256)",
+          "oklch(72% 0.15 256)",
+          "oklch(84% 0.15 256)",
+          "oklch(95% 0.15 256)"
+        ]
+      },
+      "accent-ink": {
+        "role": "primary",
+        "displayName": "Receipt Ink",
+        "canonical": "oklch(99% 0 0)",
+        "tonalRamp": [
+          "oklch(15% 0 0)",
+          "oklch(26% 0 0)",
+          "oklch(37% 0 0)",
+          "oklch(48% 0 0)",
+          "oklch(60% 0 0)",
+          "oklch(72% 0 0)",
+          "oklch(84% 0 0)",
+          "oklch(95% 0 0)"
+        ]
+      },
+      "accent-ink-dark": {
+        "role": "primary",
+        "displayName": "Receipt Ink (dark scheme)",
+        "canonical": "oklch(16% 0.02 260)",
+        "tonalRamp": [
+          "oklch(15% 0.02 260)",
+          "oklch(26% 0.02 260)",
+          "oklch(37% 0.02 260)",
+          "oklch(48% 0.02 260)",
+          "oklch(60% 0.02 260)",
+          "oklch(72% 0.02 260)",
+          "oklch(84% 0.02 260)",
+          "oklch(95% 0.02 260)"
+        ]
+      },
+      "accent-wash": {
+        "role": "primary",
+        "displayName": "Citation Wash",
+        "canonical": "oklch(94% 0.035 258)",
+        "tonalRamp": [
+          "oklch(15% 0.035 258)",
+          "oklch(26% 0.035 258)",
+          "oklch(37% 0.035 258)",
+          "oklch(48% 0.035 258)",
+          "oklch(60% 0.035 258)",
+          "oklch(72% 0.035 258)",
+          "oklch(84% 0.035 258)",
+          "oklch(95% 0.035 258)"
+        ]
+      },
+      "accent-wash-dark": {
+        "role": "primary",
+        "displayName": "Citation Wash (dark scheme)",
+        "canonical": "oklch(30% 0.06 258)",
+        "tonalRamp": [
+          "oklch(15% 0.06 258)",
+          "oklch(26% 0.06 258)",
+          "oklch(37% 0.06 258)",
+          "oklch(48% 0.06 258)",
+          "oklch(60% 0.06 258)",
+          "oklch(72% 0.06 258)",
+          "oklch(84% 0.06 258)",
+          "oklch(95% 0.06 258)"
+        ]
+      },
+      "ground": {
+        "role": "neutral",
+        "displayName": "Proof Ground",
+        "canonical": "oklch(99.2% 0.002 250)",
+        "tonalRamp": [
+          "oklch(15% 0.002 250)",
+          "oklch(26% 0.002 250)",
+          "oklch(37% 0.002 250)",
+          "oklch(48% 0.002 250)",
+          "oklch(60% 0.002 250)",
+          "oklch(72% 0.002 250)",
+          "oklch(84% 0.002 250)",
+          "oklch(95% 0.002 250)"
+        ]
+      },
+      "ground-dark": {
+        "role": "neutral",
+        "displayName": "Proof Ground (dark scheme)",
+        "canonical": "oklch(16.5% 0.008 258)",
+        "tonalRamp": [
+          "oklch(15% 0.008 258)",
+          "oklch(26% 0.008 258)",
+          "oklch(37% 0.008 258)",
+          "oklch(48% 0.008 258)",
+          "oklch(60% 0.008 258)",
+          "oklch(72% 0.008 258)",
+          "oklch(84% 0.008 258)",
+          "oklch(95% 0.008 258)"
+        ]
+      },
+      "ink": {
+        "role": "neutral",
+        "displayName": "Slate Ink",
+        "canonical": "oklch(20% 0.018 258)",
+        "tonalRamp": [
+          "oklch(15% 0.018 258)",
+          "oklch(26% 0.018 258)",
+          "oklch(37% 0.018 258)",
+          "oklch(48% 0.018 258)",
+          "oklch(60% 0.018 258)",
+          "oklch(72% 0.018 258)",
+          "oklch(84% 0.018 258)",
+          "oklch(95% 0.018 258)"
+        ]
+      },
+      "ink-dark": {
+        "role": "neutral",
+        "displayName": "Slate Ink (dark scheme)",
+        "canonical": "oklch(96.5% 0.004 250)",
+        "tonalRamp": [
+          "oklch(15% 0.004 250)",
+          "oklch(26% 0.004 250)",
+          "oklch(37% 0.004 250)",
+          "oklch(48% 0.004 250)",
+          "oklch(60% 0.004 250)",
+          "oklch(72% 0.004 250)",
+          "oklch(84% 0.004 250)",
+          "oklch(95% 0.004 250)"
+        ]
+      },
+      "muted-ink": {
+        "role": "neutral",
+        "displayName": "Margin Grey",
+        "canonical": "oklch(47% 0.02 258)",
+        "tonalRamp": [
+          "oklch(15% 0.02 258)",
+          "oklch(26% 0.02 258)",
+          "oklch(37% 0.02 258)",
+          "oklch(48% 0.02 258)",
+          "oklch(60% 0.02 258)",
+          "oklch(72% 0.02 258)",
+          "oklch(84% 0.02 258)",
+          "oklch(95% 0.02 258)"
+        ]
+      },
+      "muted-ink-dark": {
+        "role": "neutral",
+        "displayName": "Margin Grey (dark scheme)",
+        "canonical": "oklch(72% 0.018 255)",
+        "tonalRamp": [
+          "oklch(15% 0.018 255)",
+          "oklch(26% 0.018 255)",
+          "oklch(37% 0.018 255)",
+          "oklch(48% 0.018 255)",
+          "oklch(60% 0.018 255)",
+          "oklch(72% 0.018 255)",
+          "oklch(84% 0.018 255)",
+          "oklch(95% 0.018 255)"
+        ]
+      },
+      "hairline": {
+        "role": "neutral",
+        "displayName": "Hairline",
+        "canonical": "oklch(91.5% 0.007 255)",
+        "tonalRamp": [
+          "oklch(15% 0.007 255)",
+          "oklch(26% 0.007 255)",
+          "oklch(37% 0.007 255)",
+          "oklch(48% 0.007 255)",
+          "oklch(60% 0.007 255)",
+          "oklch(72% 0.007 255)",
+          "oklch(84% 0.007 255)",
+          "oklch(95% 0.007 255)"
+        ]
+      },
+      "hairline-dark": {
+        "role": "neutral",
+        "displayName": "Hairline (dark scheme)",
+        "canonical": "oklch(28% 0.012 258)",
+        "tonalRamp": [
+          "oklch(15% 0.012 258)",
+          "oklch(26% 0.012 258)",
+          "oklch(37% 0.012 258)",
+          "oklch(48% 0.012 258)",
+          "oklch(60% 0.012 258)",
+          "oklch(72% 0.012 258)",
+          "oklch(84% 0.012 258)",
+          "oklch(95% 0.012 258)"
+        ]
+      },
+      "panel": {
+        "role": "neutral",
+        "displayName": "Panel",
+        "canonical": "oklch(96.8% 0.005 252)",
+        "tonalRamp": [
+          "oklch(15% 0.005 252)",
+          "oklch(26% 0.005 252)",
+          "oklch(37% 0.005 252)",
+          "oklch(48% 0.005 252)",
+          "oklch(60% 0.005 252)",
+          "oklch(72% 0.005 252)",
+          "oklch(84% 0.005 252)",
+          "oklch(95% 0.005 252)"
+        ]
+      },
+      "panel-dark": {
+        "role": "neutral",
+        "displayName": "Panel (dark scheme)",
+        "canonical": "oklch(20.5% 0.01 258)",
+        "tonalRamp": [
+          "oklch(15% 0.01 258)",
+          "oklch(26% 0.01 258)",
+          "oklch(37% 0.01 258)",
+          "oklch(48% 0.01 258)",
+          "oklch(60% 0.01 258)",
+          "oklch(72% 0.01 258)",
+          "oklch(84% 0.01 258)",
+          "oklch(95% 0.01 258)"
+        ]
+      },
+      "pdf-paper": {
+        "role": "neutral",
+        "displayName": "PDF Paper",
+        "canonical": "#ffffff",
+        "tonalRamp": [
+          "oklch(15% 0 0)",
+          "oklch(26% 0 0)",
+          "oklch(37% 0 0)",
+          "oklch(48% 0 0)",
+          "oklch(60% 0 0)",
+          "oklch(72% 0 0)",
+          "oklch(84% 0 0)",
+          "oklch(95% 0 0)"
+        ]
+      }
+    },
+    "typographyMeta": {
+      "display": {
+        "displayName": "Display",
+        "purpose": "Hero headline only."
+      },
+      "headline": {
+        "displayName": "Headline",
+        "purpose": "Section headings; the closing CTA runs larger."
+      },
+      "title": {
+        "displayName": "Title",
+        "purpose": "Step titles."
+      },
+      "lead": {
+        "displayName": "Lead",
+        "purpose": "Section sublines and trust paragraphs."
+      },
+      "body": {
+        "displayName": "Body",
+        "purpose": "Step descriptions."
+      },
+      "label": {
+        "displayName": "Label",
+        "purpose": "Buttons and disclosure summary."
+      },
+      "caption": {
+        "displayName": "Caption",
+        "purpose": "Captions, proof line, footer, mock metadata."
+      },
+      "code": {
+        "displayName": "Code",
+        "purpose": "LaTeX source inside the step-4 visual only."
+      },
+      "pdf-serif": {
+        "displayName": "Pdf Serif",
+        "purpose": "Rendered PDF page inside the step-4 visual only."
+      }
+    },
+    "shadows": [
+      {
+        "name": "product-shot",
+        "value": "0 1px 2px oklch(0.2 0.02 258 / 0.06), 0 24px 60px -24px oklch(0.2 0.02 258 / 0.28)",
+        "purpose": "Hero browser frame, step visuals, citation tooltip. Nothing else lifts."
+      }
+    ],
+    "motion": [
+      {
+        "name": "trace-pulse",
+        "value": "2.2s cubic-bezier(0.16, 1, 0.3, 1)",
+        "purpose": "The followed source pulses once from accent at 50% alpha to the wash when its step is 45% in view."
+      },
+      {
+        "name": "state-transition",
+        "value": "150ms (colors, filter); nav background 200ms",
+        "purpose": "Hover and scrolled-nav state changes."
+      },
+      {
+        "name": "anchor-scroll",
+        "value": "scroll-behavior: smooth",
+        "purpose": "In-page anchors glide while the landing is mounted; off under reduced motion."
+      }
+    ],
+    "breakpoints": [
+      {
+        "name": "sm",
+        "value": "640px"
+      },
+      {
+        "name": "md",
+        "value": "768px"
+      },
+      {
+        "name": "lg",
+        "value": "1024px"
+      }
+    ],
+    "scheme": "Light values are the .rx-landing default; *-dark keys apply under @media (prefers-color-scheme: dark). Consumed via Tailwind `site` palette (oklch channels in landing.css)."
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "The one filled action per row: Open the app.",
+      "html": "<a class=\"ds-btn-primary\" href=\"#\">Open the app <svg width=\"16\" height=\"16\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><path d=\"M5 12h14\"/><path d=\"m12 5 7 7-7 7\"/></svg></a>",
+      "css": ".ds-btn-primary { font-family: Inter, ui-sans-serif, system-ui, sans-serif; display: inline-flex; align-items: center; gap: 8px; height: 48px; padding: 0 24px; border-radius: 8px; background: oklch(53% 0.2 260); color: oklch(99% 0 0); font-size: 15px; font-weight: 500; text-decoration: none; transition: filter 0.15s; } .ds-btn-primary:hover { filter: brightness(1.1); } .ds-btn-primary:focus-visible { outline: 2px solid oklch(53% 0.2 260); outline-offset: 3px; }"
+    },
+    {
+      "name": "Secondary Button",
+      "kind": "button",
+      "refersTo": "button-secondary",
+      "description": "Outlined companion action: See how it works.",
+      "html": "<a class=\"ds-btn-secondary\" href=\"#\">See how it works</a>",
+      "css": ".ds-btn-secondary { font-family: Inter, ui-sans-serif, system-ui, sans-serif; display: inline-flex; align-items: center; height: 48px; padding: 0 24px; border-radius: 8px; border: 1px solid oklch(91.5% 0.007 255); background: transparent; color: oklch(20% 0.018 258); font-size: 15px; font-weight: 500; text-decoration: none; transition: background-color 0.15s; } .ds-btn-secondary:hover { background: oklch(96.8% 0.005 252); } .ds-btn-secondary:focus-visible { outline: 2px solid oklch(53% 0.2 260); outline-offset: 3px; }"
+    },
+    {
+      "name": "Navigation",
+      "kind": "nav",
+      "refersTo": "button-primary-compact",
+      "description": "Fixed 64px header in its scrolled state: logo tile, muted links, compact primary.",
+      "html": "<header class=\"ds-nav\"><a class=\"ds-nav-brand\" href=\"#\"><span class=\"ds-logo\">R</span>ResearcherX</a><nav class=\"ds-nav-links\"><a href=\"#\">How it works</a><a href=\"#\">Writing</a><a href=\"#\">Why trust it</a><a class=\"ds-nav-cta\" href=\"#\">Open the app</a></nav></header>",
+      "css": ".ds-nav { font-family: Inter, ui-sans-serif, system-ui, sans-serif; display: flex; align-items: center; justify-content: space-between; height: 64px; padding: 0 32px; background: oklch(99.2% 0.002 250 / 0.85); backdrop-filter: blur(12px); border-bottom: 1px solid oklch(91.5% 0.007 255); } .ds-nav-brand { display: inline-flex; align-items: center; gap: 10px; color: oklch(20% 0.018 258); font-size: 15px; font-weight: 600; text-decoration: none; } .ds-logo { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 6px; background: oklch(53% 0.2 260); color: oklch(99% 0 0); font-size: 12px; font-weight: 700; } .ds-nav-links { display: flex; align-items: center; gap: 32px; } .ds-nav-links a { color: oklch(47% 0.02 258); font-size: 14px; text-decoration: none; transition: color 0.15s; } .ds-nav-links a:hover { color: oklch(20% 0.018 258); } .ds-nav-links a.ds-nav-cta { display: inline-flex; align-items: center; height: 36px; padding: 0 16px; border-radius: 8px; background: oklch(53% 0.2 260); color: oklch(99% 0 0); font-weight: 500; } .ds-nav-links a.ds-nav-cta:hover { color: oklch(99% 0 0); filter: brightness(1.1); } .ds-nav a:focus-visible { outline: 2px solid oklch(53% 0.2 260); outline-offset: 3px; border-radius: 6px; }"
+    },
+    {
+      "name": "Citation Chip",
+      "kind": "chip",
+      "refersTo": "citation-chip",
+      "description": "Inline [n] marker; hover or tap opens the passage.",
+      "html": "<p class=\"ds-cite-p\">Reward shaping penalizes close pairs<button class=\"ds-cite\" type=\"button\">1</button> and trades coverage against energy<button class=\"ds-cite ds-cite-open\" type=\"button\">2</button>.</p>",
+      "css": ".ds-cite-p { font-family: Inter, ui-sans-serif, system-ui, sans-serif; color: oklch(20% 0.018 258); font-size: 15px; line-height: 1.8; } .ds-cite { font-family: Inter, ui-sans-serif, system-ui, sans-serif; display: inline-flex; align-items: center; justify-content: center; height: 18px; min-width: 18px; margin-left: 4px; padding: 0 4px; border: 0; border-radius: 4px; background: oklch(94% 0.035 258); color: oklch(53% 0.2 260); font-size: 11px; font-weight: 600; font-variant-numeric: tabular-nums; transform: translateY(-3px); cursor: pointer; transition: background-color 0.15s, color 0.15s; } .ds-cite:hover, .ds-cite-open { background: oklch(53% 0.2 260); color: oklch(99% 0 0); } .ds-cite:focus-visible { outline: 2px solid oklch(53% 0.2 260); outline-offset: 3px; }"
+    },
+    {
+      "name": "Citation Tooltip",
+      "kind": "card",
+      "refersTo": "product-frame",
+      "description": "Passage card opened from a marker: title, locator, passage.",
+      "html": "<div class=\"ds-tip\"><span class=\"ds-tip-title\">Cooperative Multi-Target Search with UAV Swarms</span><span class=\"ds-tip-loc\">Method &gt; Reward design · p. 5</span><span class=\"ds-tip-body\">The planner trades coverage against energy, penalizing close pairs.</span></div>",
+      "css": ".ds-tip { font-family: Inter, ui-sans-serif, system-ui, sans-serif; display: block; width: 22rem; padding: 16px; border: 1px solid oklch(91.5% 0.007 255); border-radius: 8px; background: oklch(99.2% 0.002 250); box-shadow: 0 1px 2px oklch(0.2 0.02 258 / 0.06), 0 24px 60px -24px oklch(0.2 0.02 258 / 0.28); } .ds-tip span { display: block; } .ds-tip-title { color: oklch(20% 0.018 258); font-size: 13px; font-weight: 600; line-height: 1.375; } .ds-tip-loc { margin-top: 4px; color: oklch(47% 0.02 258); font-size: 12px; } .ds-tip-body { margin-top: 12px; color: oklch(20% 0.018 258); font-size: 13px; line-height: 1.625; }"
+    },
+    {
+      "name": "User Bubble",
+      "kind": "custom",
+      "refersTo": "user-bubble",
+      "description": "The user's question in a product mock, right-aligned, tucked corner.",
+      "html": "<div class=\"ds-bubble-row\"><p class=\"ds-bubble\">How do the swarm planners trade coverage against energy?</p></div>",
+      "css": ".ds-bubble-row { display: flex; justify-content: flex-end; } .ds-bubble { font-family: Inter, ui-sans-serif, system-ui, sans-serif; max-width: 85%; margin: 0; padding: 10px 16px; border-radius: 16px 16px 6px 16px; background: oklch(53% 0.2 260); color: oklch(99% 0 0); font-size: 14px; line-height: 1.375; }"
+    },
+    {
+      "name": "Product Frame",
+      "kind": "card",
+      "refersTo": "product-frame",
+      "description": "Browser frame for the hero recording; the only lifted material.",
+      "html": "<figure class=\"ds-frame\"><div class=\"ds-frame-bar\"><span class=\"ds-dots\"><i></i><i></i><i></i></span><span class=\"ds-frame-title\">ResearcherX · Multi-UAV Coordination</span><span style=\"width:42px\"></span></div><div class=\"ds-frame-body\"></div></figure>",
+      "css": ".ds-frame { font-family: Inter, ui-sans-serif, system-ui, sans-serif; margin: 0; overflow: hidden; border: 1px solid oklch(91.5% 0.007 255); border-radius: 12px; background: oklch(96.8% 0.005 252); box-shadow: 0 1px 2px oklch(0.2 0.02 258 / 0.06), 0 24px 60px -24px oklch(0.2 0.02 258 / 0.28); } .ds-frame-bar { display: flex; align-items: center; gap: 12px; height: 40px; padding: 0 16px; border-bottom: 1px solid oklch(91.5% 0.007 255); } .ds-dots { display: flex; gap: 6px; } .ds-dots i { width: 10px; height: 10px; border-radius: 9999px; background: oklch(91.5% 0.007 255); } .ds-frame-title { margin: 0 auto; color: oklch(47% 0.02 258); font-size: 12px; } .ds-frame-body { aspect-ratio: 16 / 10; background: oklch(99.2% 0.002 250); }"
+    },
+    {
+      "name": "Followed Source Row",
+      "kind": "custom",
+      "refersTo": "citation-chip",
+      "description": "The followed paper, tinted in every step, pulsing once on scroll-in.",
+      "html": "<ul class=\"ds-lib\"><li>Decentralized Coverage Control for Drone Fleets</li><li class=\"ds-trace\">Cooperative Multi-Target Search with UAV Swarms</li><li>Energy-Aware Path Planning for Multi-UAV Systems</li></ul>",
+      "css": ".ds-lib { font-family: Inter, ui-sans-serif, system-ui, sans-serif; margin: 0; padding: 0; list-style: none; border: 1px solid oklch(91.5% 0.007 255); border-radius: 12px; overflow: hidden; background: oklch(99.2% 0.002 250); } .ds-lib li { padding: 12px 16px; border-bottom: 1px solid oklch(91.5% 0.007 255); color: oklch(20% 0.018 258); font-size: 13px; font-weight: 500; } .ds-lib li:last-child { border-bottom: 0; } .ds-trace { background: oklch(94% 0.035 258); animation: ds-trace 2.2s cubic-bezier(0.16, 1, 0.3, 1) both; } @keyframes ds-trace { 0% { background-color: oklch(53% 0.2 260 / 0.5); } 100% { background-color: oklch(94% 0.035 258); } } @media (prefers-reduced-motion: reduce) { .ds-trace { animation: none; } }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Annotated Proof",
+    "overview": "The landing page is the research-assistant category standard played straight: calm, product-forward, and every claim demonstrated rather than asserted. It reads like a well-set paper with its sources pinned in the margin. A near-white ground, slate ink and hairline rules carry almost everything; one blue accent marks exactly the things that are evidence (citation markers, the user's own question, the followed source, the one primary action). The real app recording, shown full colour in a browser frame, is the proof; the illustrated steps below it follow one paper from library to manuscript.\n\nDensity is low and the rhythm is generous: one 1180px column, large vertical breathing room between sections, left-aligned prose beside framed product visuals. The page follows the visitor's system theme (prefers-color-scheme), not the app's toggle, so every colour exists as a light and a dark channel set.\n\n**Scope.** This file describes the landing world only (route \"/\", everything under `.rx-landing`, the `site` palette). The app under `/admin` has its own token set in `frontend/src/app/globals.css` (ported from the Lovable prototype) and follows its own theme toggle. The two share Inter, the \"R\" logo tile, and a near-identical accent blue on purpose; they do not share tokens. Do not apply landing tokens to app screens, or app tokens to the landing.",
+    "keyCharacteristics": [
+      "Near-white (near-black in dark) ground, slate ink, hairline borders, no decorative colour.",
+      "One blue accent, spent only on evidence and on the primary action.",
+      "Inter for all interface and prose; serif and mono appear only inside rendered artifacts (the PDF page, LaTeX source).",
+      "Product visuals in 12px-radius frames with one soft offset shadow.",
+      "One authored motion: the followed source pulses once as its step scrolls in."
+    ],
+    "rules": [
+      {
+        "name": "The Evidence-Only Accent Rule",
+        "body": "Receipt Blue marks evidence (markers, the user's question, the followed source) and the single primary action. It never fills a section, a card, an icon, or a decorative shape.",
+        "section": "colors"
+      },
+      {
+        "name": "The Paper Stays Paper Rule",
+        "body": "A rendered artifact keeps its own colours: the PDF page is white with neutral type in both themes, because that is what the compiled paper looks like.",
+        "section": "colors"
+      },
+      {
+        "name": "The Artifact Faces Rule",
+        "body": "Serif and mono exist only inside depicted artifacts (the PDF page, a .tex file). Page copy is Inter, always.",
+        "section": "typography"
+      },
+      {
+        "name": "The Bold Lead-In Rule",
+        "body": "Emphasis inside prose is a Slate Ink, 500-weight lead-in sentence set into Margin Grey body text, never a separate label above the paragraph.",
+        "section": "typography"
+      },
+      {
+        "name": "The Only-Product-Lifts Rule",
+        "body": "Only depictions of the product cast a shadow. Buttons, panels, text blocks and the disclosure stay flat.",
+        "section": "elevation"
+      }
+    ],
+    "dos": [
+      "**Do** set colours through the `site` palette (`bg-site-*`, `text-site-*`) so both schemes resolve from the `.rx-landing` channels.",
+      "**Do** show the product legibly and in full colour, in a frame with the product shadow.",
+      "**Do** tint the followed source with Citation Wash in every visual that includes it.",
+      "**Do** use the app's exact wording in demos: the refusal \"The ingested documents do not cover this.\" and the locator `Section > Subsection · p. N`.",
+      "**Do** keep icons to lucide at the default stroke, 16px to 20px, in Margin Grey.",
+      "**Do** scope every landing style under `.rx-landing`."
+    ],
+    "donts": [
+      "**Don't** put a dimmed or atmospheric full-bleed video behind the hero copy.",
+      "**Don't** add eyebrow labels or kickers above headings.",
+      "**Don't** arrange features as a grid of cards; state them once in prose or demonstrate them in a step.",
+      "**Don't** spend Receipt Blue on decoration, section backgrounds, or icons.",
+      "**Don't** use serif or mono outside a depicted artifact.",
+      "**Don't** apply these tokens to the app under `/admin`, or the app's globals.css tokens to the landing."
+    ]
+  }
+}
