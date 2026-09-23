@@ -55,6 +55,7 @@ class ScopeWidenerAgent:
                 user=user,
                 output_model=WidenDecision,
                 max_tokens=settings.scope_widener_max_tokens,
+                observation="chat.widen",
             )
         except Exception as exc:
             log.warning("scope_widener_failed_open", error=str(exc)[:200])

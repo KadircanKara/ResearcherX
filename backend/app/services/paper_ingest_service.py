@@ -19,6 +19,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
+from app.core import observability
 from app.core.logging import log
 from app.db.models import Paper, PaperChunkEmbedding, _now
 from app.services.chunk_header import embed_text, section_path_text
@@ -114,8 +115,26 @@ async def ingest(
     Stores `extracted_text` (plain markdown), `extracted_pages` and `outline`
     BEFORE index_chunks so text and chunks land in one transaction; a later
     re-chunk replays from the stored pages and never needs the PDF again.
+
+    One trace per ingest: extraction, every embedding batch and the metadata
+    call nest under it.
     """
-    ex = extract_document(pdf_bytes)
+    with observability.span(
+        "paper.ingest",
+        attributes={
+            "langfuse.trace.name": "paper.ingest",
+            "langfuse.trace.metadata.paper_id": paper_id,
+            "langfuse.trace.metadata.pdf_bytes": len(pdf_bytes),
+        },
+    ) as span:
+        n = await _ingest(db, paper_id, pdf_bytes, source_url)
+        observability.set_attributes(span, {"langfuse.trace.metadata.chunks": n})
+        return n
+
+
+async def _ingest(db: AsyncSession, paper_id: str, pdf_bytes: bytes, source_url: str | None) -> int:
+    with observability.span("paper.extract"):
+        ex = extract_document(pdf_bytes)
     paper = await db.get(Paper, paper_id)
     title = paper.title if paper is not None else ""
     if paper is not None:

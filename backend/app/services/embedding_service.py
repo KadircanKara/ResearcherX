@@ -8,6 +8,7 @@ from functools import lru_cache
 
 from openai import AsyncOpenAI
 
+from app.core import observability
 from app.core.config import settings
 from app.core.logging import log
 
@@ -52,14 +53,30 @@ class EmbeddingService:
         # so a prefix change requires a manual re-index. Treat these values as
         # part of the provider contract, not a tuning knob.
         payload = [f"{prefix} {t}" for t in texts] if prefix else texts
-        try:
-            create_kwargs: dict = {"model": settings.embedding_model, "input": payload}
-            if settings.embedding_dimensions:
-                create_kwargs["dimensions"] = settings.embedding_dimensions
-            response = await self._client.embeddings.create(**create_kwargs)
-        except Exception as exc:
-            log.error("embedding_failed", error=str(exc)[:200], n_texts=len(texts))
-            raise
+        # One EMBEDDING observation per provider call, priced by Langfuse from
+        # the model name and the provider's own token count. The texts are
+        # never attached: a batch is up to 96 paper chunks.
+        with observability.span(
+            "embedding",
+            kind="embedding",
+            attributes={
+                "langfuse.observation.model.name": settings.embedding_model,
+                "gen_ai.request.model": settings.embedding_model,
+                "langfuse.observation.metadata.task_type": task_type,
+                "langfuse.observation.metadata.n_texts": len(texts),
+            },
+        ) as span:
+            try:
+                create_kwargs: dict = {"model": settings.embedding_model, "input": payload}
+                if settings.embedding_dimensions:
+                    create_kwargs["dimensions"] = settings.embedding_dimensions
+                response = await self._client.embeddings.create(**create_kwargs)
+            except Exception as exc:
+                log.error("embedding_failed", error=str(exc)[:200], n_texts=len(texts))
+                raise
+            usage = observability.usage_details(getattr(response, "usage", None))
+            if usage:
+                observability.set_json(span, "langfuse.observation.usage_details", usage)
         # Sort by index; guard against None indices (some providers omit them)
         data = response.data
         if all(item.index is not None for item in data):

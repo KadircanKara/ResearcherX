@@ -13,10 +13,12 @@ instead of re-burning the dead one's backoff. A process restart resets to
 the primary — uvicorn --reload makes that automatic in dev.
 """
 
+import time
 from functools import lru_cache
 
 from openai import AsyncOpenAI, RateLimitError
 
+from app.core import observability
 from app.core.config import settings
 from app.core.logging import log
 
@@ -109,7 +111,7 @@ def rotate_current() -> Provider:
     return pool.advance_from(pool.current)
 
 
-async def create_chat_completion(**kwargs):
+async def create_chat_completion(*, observation: str = "llm", **kwargs):
     """chat.completions.create against the active provider, with failover.
 
     The active provider's model is injected (each provider names its own).
@@ -118,11 +120,41 @@ async def create_chat_completion(**kwargs):
     For streams, only the initial request can 429 — failover cannot rescue
     a stream that already started, which is fine: quota errors happen at
     request time.
+
+    Every call is one Langfuse GENERATION span named `observation` (e.g.
+    "chat.answer"), a child of whatever span is current. A stream's span
+    stays open until the stream is drained or closed, and records the time
+    of the first token. Tracing never changes what this returns or raises.
     """
+    gen = observability.start_span(observation, kind="generation")
+    started = time.monotonic()
+    _record_request(gen, kwargs)
+    try:
+        response = await _create_with_failover(gen, **kwargs)
+    except BaseException as exc:
+        observability.mark_error(gen, exc)
+        gen.end()
+        raise
+    if kwargs.get("stream"):
+        return _traced_stream(response, gen, started)
+    _record_response(gen, response)
+    gen.end()
+    return response
+
+
+async def _create_with_failover(gen, **kwargs):
     pool = get_pool()
     last_exc: RateLimitError | None = None
     for _ in range(len(pool)):
         provider = pool.current
+        observability.set_attributes(
+            gen,
+            {
+                "gen_ai.request.model": provider.model,
+                "langfuse.observation.model.name": provider.model,
+            },
+        )
+        observability.set_metadata(gen, provider_base_url=provider.base_url)
         try:
             return await pool.client(provider).chat.completions.create(
                 model=provider.model, **kwargs
@@ -134,7 +166,64 @@ async def create_chat_completion(**kwargs):
                 model=provider.model,
                 error=str(exc)[:200],
             )
+            gen.add_event("provider_exhausted", {"base_url": provider.base_url})
             last_exc = exc
             pool.advance_from(provider)
     assert last_exc is not None
     raise last_exc
+
+
+def _record_request(gen, kwargs: dict) -> None:
+    params = {
+        k: kwargs[k] for k in ("max_tokens", "temperature", "stream") if kwargs.get(k) is not None
+    }
+    response_format = kwargs.get("response_format")
+    if isinstance(response_format, dict):
+        params["response_format"] = response_format.get("type")
+    observability.set_json(gen, "langfuse.observation.model.parameters", params)
+    observability.set_content(gen, "langfuse.observation.input", kwargs.get("messages"))
+
+
+def _record_response(gen, response) -> None:
+    try:
+        text = response.choices[0].message.content if response.choices else None
+    except Exception:
+        text = None
+    observability.set_content(gen, "langfuse.observation.output", text)
+    usage = observability.usage_details(getattr(response, "usage", None))
+    if usage:
+        observability.set_json(gen, "langfuse.observation.usage_details", usage)
+
+
+async def _traced_stream(stream, gen, started: float):
+    """Pass every chunk through untouched; close the span when the stream
+    ends, fails, or is abandoned (the `finally` runs on aclose and on GC)."""
+    parts: list[str] = []
+    usage = None
+    try:
+        async for chunk in stream:
+            try:
+                usage = getattr(chunk, "usage", None) or usage
+                delta = chunk.choices[0].delta.content if chunk.choices else None
+                if delta:
+                    if not parts:
+                        observability.set_attributes(
+                            gen,
+                            {"langfuse.observation.completion_start_time": observability.now_iso()},
+                        )
+                        observability.set_metadata(
+                            gen, ttft_ms=round((time.monotonic() - started) * 1000)
+                        )
+                    parts.append(delta)
+            except Exception:
+                pass  # an unexpected chunk shape costs the trace detail, not the stream
+            yield chunk
+    except BaseException as exc:
+        observability.mark_error(gen, exc)
+        raise
+    finally:
+        observability.set_content(gen, "langfuse.observation.output", "".join(parts))
+        details = observability.usage_details(usage)
+        if details:
+            observability.set_json(gen, "langfuse.observation.usage_details", details)
+        gen.end()
