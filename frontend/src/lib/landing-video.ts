@@ -11,14 +11,26 @@
  */
 export type HeroVideoTier = "sm" | "md" | "xl";
 
-export const HERO_VIDEO: Record<HeroVideoTier, string> = {
-  sm: "/landing/hero-sm.mp4",
-  md: "/landing/hero-md.mp4",
-  xl: "/landing/hero-xl.mp4",
-};
+/**
+ * The clip is recorded twice, once per app theme, so a visitor in light mode
+ * sees the app as it looks for them. Anything but an explicit "light" gets
+ * the dark take -- including the server render and the first paint, before
+ * next-themes has resolved the theme.
+ */
+export type HeroVideoTheme = "dark" | "light";
 
-/** First-second still, shown until the clip can play. */
-export const HERO_POSTER = "/landing/hero-poster.jpg";
+export function heroVideoTheme(resolvedTheme: string | undefined): HeroVideoTheme {
+  return resolvedTheme === "light" ? "light" : "dark";
+}
+
+export function heroVideoSrc(theme: HeroVideoTheme, tier: HeroVideoTier): string {
+  return `/landing/hero-${theme}-${tier}.mp4`;
+}
+
+/** First-second still for the theme, shown until the clip can play. */
+export function heroPoster(theme: HeroVideoTheme): string {
+  return `/landing/hero-${theme}-poster.jpg`;
+}
 
 export function heroVideoTier(viewportWidth: number): HeroVideoTier {
   if (viewportWidth < 768) return "sm";

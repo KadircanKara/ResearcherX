@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { HERO_VIDEO, heroVideoTier } from "./landing-video";
+import { heroPoster, heroVideoSrc, heroVideoTheme, heroVideoTier } from "./landing-video";
 
 describe("heroVideoTier", () => {
   it("serves phones the smallest file", () => {
@@ -18,9 +18,21 @@ describe("heroVideoTier", () => {
     expect(heroVideoTier(2560)).toBe("xl");
   });
 
-  it("names a distinct encoding of the same clip for every tier", () => {
-    const urls = Object.values(HERO_VIDEO);
-    expect(new Set(urls).size).toBe(3);
-    for (const url of urls) expect(url).toMatch(/^\/landing\/hero-(sm|md|xl)\.mp4$/);
+  it("names a distinct file for every theme and tier", () => {
+    const urls = (["dark", "light"] as const).flatMap((theme) =>
+      (["sm", "md", "xl"] as const).map((tier) => heroVideoSrc(theme, tier)),
+    );
+    expect(new Set(urls).size).toBe(6);
+    expect(heroVideoSrc("light", "xl")).toBe("/landing/hero-light-xl.mp4");
+    expect(heroPoster("dark")).toBe("/landing/hero-dark-poster.jpg");
+  });
+});
+
+describe("heroVideoTheme", () => {
+  it("plays the light take only for an explicitly light theme", () => {
+    expect(heroVideoTheme("light")).toBe("light");
+    expect(heroVideoTheme("dark")).toBe("dark");
+    expect(heroVideoTheme("system")).toBe("dark");
+    expect(heroVideoTheme(undefined)).toBe("dark");
   });
 });

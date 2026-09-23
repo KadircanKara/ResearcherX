@@ -3,7 +3,14 @@
 import { useEffect, useRef, useState } from "react";
 import { routes } from "@/lib/routes";
 import { usePrefersReducedMotion } from "@/hooks/use-reveal";
-import { HERO_POSTER, HERO_VIDEO, heroVideoTier, type HeroVideoTier } from "@/lib/landing-video";
+import { useTheme } from "next-themes";
+import {
+  heroPoster,
+  heroVideoSrc,
+  heroVideoTheme,
+  heroVideoTier,
+  type HeroVideoTier,
+} from "@/lib/landing-video";
 import { scrollToHash } from "./scroll-to";
 
 const QUESTIONS = [
@@ -62,6 +69,11 @@ export function Hero() {
     return () => window.removeEventListener("resize", pick);
   }, []);
 
+  // resolvedTheme is undefined until next-themes mounts, which maps to the
+  // dark take -- the same file the server rendered, so hydration matches.
+  const { resolvedTheme } = useTheme();
+  const theme = heroVideoTheme(resolvedTheme);
+
   const showVideo = !reduced && videoOk;
 
   // React does not emit the `muted` ATTRIBUTE in server-rendered markup, only
@@ -78,7 +90,7 @@ export function Hero() {
     el.defaultMuted = true;
     const attempt = el.play();
     if (attempt) attempt.catch(() => {});
-  }, [showVideo, tier]);
+  }, [showVideo, tier, theme]);
 
   return (
     <section
@@ -87,13 +99,13 @@ export function Hero() {
     >
       <div className="absolute inset-0">
         {showVideo && (
-          // Remounted per tier so the browser starts the new file cleanly
+          // Remounted per theme and tier so the browser starts the new file cleanly
           // rather than seeking inside a half-buffered one.
           <video
             ref={videoRef}
-            key={tier}
-            src={HERO_VIDEO[tier]}
-            poster={HERO_POSTER}
+            key={`${theme}-${tier}`}
+            src={heroVideoSrc(theme, tier)}
+            poster={heroPoster(theme)}
             autoPlay
             muted
             loop

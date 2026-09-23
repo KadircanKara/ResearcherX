@@ -13,7 +13,9 @@
  *
  *   node scripts/record-hero.mjs
  *
- * Env overrides: APP_URL, API_URL, PROJECT_ID, LATEX_DOC_ID, QUESTION.
+ * Env overrides: APP_URL, API_URL, PROJECT_ID, LATEX_DOC_ID, QUESTION, and
+ * THEMES (default "dark,light"): one full recording per theme, so the
+ * landing page can play the clip that matches the visitor's theme.
  *
  * How it works: Chrome's DevTools screencast delivers a frame on every
  * repaint with its timestamp. Each frame is stamped with the playback SPEED
@@ -40,10 +42,11 @@ const QUESTION =
 const VIEWPORT = { width: 1440, height: 900 };
 const DPR = 2;
 const FPS = 30;
+const THEMES = (process.env.THEMES ?? "dark,light").split(",").map((t) => t.trim());
 const OUTPUTS = [
-  { name: "hero-xl.mp4", width: 1920, crf: 21 },
-  { name: "hero-md.mp4", width: 1280, crf: 23 },
-  { name: "hero-sm.mp4", width: 854, crf: 25 },
+  { tier: "xl", width: 1920, crf: 21 },
+  { tier: "md", width: 1280, crf: 23 },
+  { tier: "sm", width: 854, crf: 25 },
 ];
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -54,10 +57,10 @@ const FRAME_DIR = path.resolve(here, "../.hero-frames");
 // researcher's projects; hidden so the clip shows a believable library.
 const HIDDEN_PROJECTS = String.raw`Task\d|curl export|PerfProbe|Browser Verify`;
 
-/** Runs in the page before any app script: dark theme, fake cursor, no dev chrome. */
-function pageSetup(hiddenProjects) {
+/** Runs in the page before any app script: the theme, a fake cursor, no dev chrome. */
+function pageSetup({ hiddenProjects, theme }) {
   try {
-    localStorage.setItem("theme", "dark");
+    localStorage.setItem("theme", theme);
   } catch {}
   // Passed as a string: a RegExp does not survive serialisation into the page.
   const hide = new RegExp(hiddenProjects, "i");
@@ -116,7 +119,7 @@ function pageSetup(hiddenProjects) {
   }
 }
 
-async function main() {
+async function record(theme) {
   await rm(FRAME_DIR, { recursive: true, force: true });
   await mkdir(FRAME_DIR, { recursive: true });
   await mkdir(OUT_DIR, { recursive: true });
@@ -125,10 +128,10 @@ async function main() {
   const context = await browser.newContext({
     viewport: VIEWPORT,
     deviceScaleFactor: DPR,
-    colorScheme: "dark",
+    colorScheme: theme,
     reducedMotion: "no-preference",
   });
-  await context.addInitScript(pageSetup, HIDDEN_PROJECTS);
+  await context.addInitScript(pageSetup, { hiddenProjects: HIDDEN_PROJECTS, theme });
   const page = await context.newPage();
 
   // ── frame capture on a speed-remapped timeline ─────────────────────────────
@@ -289,13 +292,15 @@ async function main() {
   const total = kept[kept.length - 1].at - kept[0].at + 0.6;
   console.log(`${kept.length} frames, ${total.toFixed(1)} s of playback`);
 
-  for (const { name, width, crf } of OUTPUTS) {
+  const fade = theme === "light" ? "white" : "black";
+  for (const { tier, width, crf } of OUTPUTS) {
+    const name = `hero-${theme}-${tier}.mp4`;
     const height = Math.round((width * VIEWPORT.height) / VIEWPORT.width / 2) * 2;
     const vf = [
       `fps=${FPS}`,
       `scale=${width}:${height}:flags=lanczos`,
-      `fade=t=in:st=0:d=0.4:color=black`,
-      `fade=t=out:st=${(total - 0.5).toFixed(2)}:d=0.5:color=black`,
+      `fade=t=in:st=0:d=0.4:color=${fade}`,
+      `fade=t=out:st=${(total - 0.5).toFixed(2)}:d=0.5:color=${fade}`,
       "format=yuv420p",
     ].join(",");
     execFileSync(
@@ -307,9 +312,17 @@ async function main() {
     );
     console.log(`wrote public/landing/${name}`);
   }
-  execFileSync("ffmpeg", ["-y", "-loglevel", "error", "-ss", "1", "-i", path.join(OUT_DIR, "hero-md.mp4"),
-    "-frames:v", "1", "-q:v", "3", path.join(OUT_DIR, "hero-poster.jpg")]);
+  execFileSync("ffmpeg", ["-y", "-loglevel", "error", "-ss", "1", "-i", path.join(OUT_DIR, `hero-${theme}-md.mp4`),
+    "-frames:v", "1", "-q:v", "3", path.join(OUT_DIR, `hero-${theme}-poster.jpg`)]);
   await rm(FRAME_DIR, { recursive: true, force: true });
+}
+
+async function main() {
+  for (const theme of THEMES) {
+    if (theme !== "dark" && theme !== "light") throw new Error(`unknown theme ${theme}`);
+    console.log(`recording ${theme}`);
+    await record(theme);
+  }
 }
 
 main().catch((err) => {
