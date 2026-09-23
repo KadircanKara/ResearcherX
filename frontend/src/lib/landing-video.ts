@@ -13,18 +13,11 @@
 export type HeroVideoTier = "sm" | "md" | "xl";
 
 /**
- * The clip is recorded twice, once per app theme. The landing page follows
- * the VISITOR'S SYSTEM setting (prefers-color-scheme), not the app's theme
- * toggle: most visitors have never opened the app, and the app's own default
- * would show every one of them the light take regardless of their OS.
- * `null` -- the server render and first paint, before the media query is
- * read -- maps to the dark take, so hydration matches.
+ * The clip is recorded twice, once per theme. Which one plays is the landing
+ * page's resolved theme (lib/landing-theme.ts): the visitor's pick from the
+ * nav toggle, otherwise their system setting.
  */
 export type HeroVideoTheme = "dark" | "light";
-
-export function heroVideoTheme(systemPrefersLight: boolean | null): HeroVideoTheme {
-  return systemPrefersLight === true ? "light" : "dark";
-}
 
 export function heroVideoSrc(theme: HeroVideoTheme, tier: HeroVideoTier): string {
   return `/landing/hero-${theme}-${tier}.mp4`;

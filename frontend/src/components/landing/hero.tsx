@@ -7,11 +7,11 @@ import { usePrefersReducedMotion } from "@/hooks/use-reveal";
 import {
   heroPoster,
   heroVideoSrc,
-  heroVideoTheme,
   heroVideoTier,
   type HeroVideoTier,
 } from "@/lib/landing-video";
 import { scrollToHash } from "./scroll-to";
+import { useLandingTheme } from "./landing-theme";
 
 /**
  * Headline, one-sentence offer, two actions, then the real app at work.
@@ -26,9 +26,9 @@ export function Hero() {
   // "md" on the server and for the first paint, so the markup the client
   // hydrates matches; the real tier lands in the effect below.
   const [tier, setTier] = useState<HeroVideoTier>("md");
-  // The visitor's OS setting, live: null until read after mount, which maps
-  // to the dark take -- the same file the server rendered.
-  const [prefersLight, setPrefersLight] = useState<boolean | null>(null);
+  // The page's resolved theme: the visitor's pick from the nav toggle, else
+  // their system setting; dark until known, the same file the server rendered.
+  const { theme } = useLandingTheme();
 
   useEffect(() => {
     const pick = () => setTier(heroVideoTier(window.innerWidth));
@@ -37,15 +37,6 @@ export function Hero() {
     return () => window.removeEventListener("resize", pick);
   }, []);
 
-  useEffect(() => {
-    const query = window.matchMedia("(prefers-color-scheme: light)");
-    const sync = () => setPrefersLight(query.matches);
-    sync();
-    query.addEventListener("change", sync);
-    return () => query.removeEventListener("change", sync);
-  }, []);
-
-  const theme = heroVideoTheme(prefersLight);
   const showVideo = !reduced && videoOk;
 
   // React does not emit the `muted` ATTRIBUTE in server-rendered markup, only

@@ -4,7 +4,8 @@
  *
  * The page follows the VISITOR'S SYSTEM theme (prefers-color-scheme), not the
  * app's theme toggle: most visitors have never opened the app, and the app's
- * own default is light whatever the OS says. Colours are the `site` palette
+ * own default is light whatever the OS says. The page's own nav toggle
+ * overrides the system through `data-theme` on the root. Colours are the `site` palette
  * in tailwind.config.ts; the channels live here, one set per scheme. The
  * accent is the app's own primary blue, so the page and the product read as
  * one thing.
@@ -26,8 +27,12 @@
   -webkit-font-smoothing: antialiased;
 }
 
+/* Dark: the system's choice unless the visitor picked light with the toggle
+   (data-theme="light"), or an explicit data-theme="dark". The channel list
+   is repeated because a media query cannot share a rule with a plain
+   selector. */
 @media (prefers-color-scheme: dark) {
-  .rx-landing {
+  .rx-landing:not([data-theme="light"]) {
     --site-bg: 0.165 0.008 258;
     --site-fg: 0.965 0.004 250;
     --site-muted: 0.72 0.018 255;
@@ -38,6 +43,17 @@
     --site-accent-soft: 0.3 0.06 258;
     color-scheme: dark;
   }
+}
+.rx-landing[data-theme="dark"] {
+  --site-bg: 0.165 0.008 258;
+  --site-fg: 0.965 0.004 250;
+  --site-muted: 0.72 0.018 255;
+  --site-line: 0.28 0.012 258;
+  --site-panel: 0.205 0.01 258;
+  --site-accent: 0.7 0.15 256;
+  --site-accent-fg: 0.16 0.02 260;
+  --site-accent-soft: 0.3 0.06 258;
+  color-scheme: dark;
 }
 
 .rx-landing h1,

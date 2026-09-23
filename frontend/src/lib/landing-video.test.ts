@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { heroPoster, heroVideoSrc, heroVideoTheme, heroVideoTier } from "./landing-video";
+import { heroPoster, heroVideoSrc, heroVideoTier } from "./landing-video";
 
 describe("heroVideoTier", () => {
   it("serves phones the smallest file", () => {
@@ -26,13 +26,5 @@ describe("heroVideoTier", () => {
     expect(heroVideoSrc("light", "xl")).toBe("/landing/hero-light-xl.mp4");
     expect(heroPoster("dark", "md")).toBe("/landing/hero-dark-poster.jpg");
     expect(heroPoster("light", "sm")).toBe("/landing/hero-light-sm-poster.jpg");
-  });
-});
-
-describe("heroVideoTheme", () => {
-  it("follows the system setting, dark until it is known", () => {
-    expect(heroVideoTheme(true)).toBe("light");
-    expect(heroVideoTheme(false)).toBe("dark");
-    expect(heroVideoTheme(null)).toBe("dark");
   });
 });

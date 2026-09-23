@@ -1,10 +1,11 @@
 "use client";
 
 import { useEffect, useState, type MouseEvent } from "react";
-import { Menu, X } from "lucide-react";
+import { Menu, Moon, Sun, X } from "lucide-react";
 import { usePrefersReducedMotion } from "@/hooks/use-reveal";
 import { routes } from "@/lib/routes";
 import { LogoMark } from "./logo-mark";
+import { useLandingTheme } from "./landing-theme";
 import { scrollToHash } from "./scroll-to";
 
 const links = [
@@ -12,6 +13,22 @@ const links = [
   { label: "Writing", href: "#writing" },
   { label: "Why trust it", href: "#why" },
 ];
+
+function ThemeButton() {
+  const { theme, toggle } = useLandingTheme();
+  const next = theme === "light" ? "dark" : "light";
+  return (
+    <button
+      type="button"
+      onClick={toggle}
+      aria-label={`Switch to ${next} theme`}
+      title={`Switch to ${next} theme`}
+      className="text-site-muted hover:text-site-fg hover:bg-site-panel grid size-11 place-items-center rounded-lg transition-colors md:size-9"
+    >
+      {theme === "light" ? <Moon className="size-[18px]" aria-hidden /> : <Sun className="size-[18px]" aria-hidden />}
+    </button>
+  );
+}
 
 export function Nav() {
   const [scrolled, setScrolled] = useState(false);
@@ -74,24 +91,30 @@ export function Nav() {
               {l.label}
             </a>
           ))}
-          <a
-            href={routes.home()}
-            className="bg-site-accent text-site-accent-fg inline-flex h-9 items-center rounded-lg px-4 text-[14px] font-medium transition-[filter] hover:brightness-110"
-          >
-            Open the app
-          </a>
+          <div className="flex items-center gap-2">
+            <ThemeButton />
+            <a
+              href={routes.home()}
+              className="bg-site-accent text-site-accent-fg inline-flex h-9 items-center rounded-lg px-4 text-[14px] font-medium transition-[filter] hover:brightness-110"
+            >
+              Open the app
+            </a>
+          </div>
         </nav>
 
-        <button
-          type="button"
-          onClick={() => setOpen((v) => !v)}
-          aria-expanded={open}
-          aria-controls="mobile-menu"
-          aria-label={open ? "Close menu" : "Open menu"}
-          className="text-site-fg -mr-2 grid size-11 place-items-center rounded-lg md:hidden"
-        >
-          {open ? <X className="size-5" aria-hidden /> : <Menu className="size-5" aria-hidden />}
-        </button>
+        <div className="-mr-2 flex items-center md:hidden">
+          <ThemeButton />
+          <button
+            type="button"
+            onClick={() => setOpen((v) => !v)}
+            aria-expanded={open}
+            aria-controls="mobile-menu"
+            aria-label={open ? "Close menu" : "Open menu"}
+            className="text-site-fg grid size-11 place-items-center rounded-lg"
+          >
+            {open ? <X className="size-5" aria-hidden /> : <Menu className="size-5" aria-hidden />}
+          </button>
+        </div>
       </div>
 
       {open && (
