@@ -311,6 +311,14 @@ class Settings(BaseSettings):
     # takes ~5.5k of that at 100 papers).
     chat_answer_max_tokens: int = 6000
 
+    # `reasoning_effort` for OpenAI's reasoning models (gpt-5 family, o-series);
+    # ignored for every other model (`app/llm/params.py`). Empty = not sent,
+    # i.e. OpenAI's default ("medium"). Their thinking is billed as OUTPUT and
+    # shares the max-tokens budgets above and below, so this is both the cost
+    # lever and the truncation guard: "low" or "minimal" for this app's
+    # answer-from-excerpts work.
+    llm_reasoning_effort: str = ""
+
     # Output budget for one query reformulation. PROVIDER-SPECIFIC for the
     # same reason as chat_answer_max_tokens above: the output is a single
     # short string, so 600 would be ample on gpt-4.1-mini — but a reasoning

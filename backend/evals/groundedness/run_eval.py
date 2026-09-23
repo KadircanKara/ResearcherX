@@ -35,6 +35,7 @@ import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from evals.groundedness.usage import format_usage, install_tally, summarize
 from evals.groundedness.agreement import pair_verdicts, verdict_shift
 from evals.groundedness.claims import extract_claims, marker_count
 from evals.groundedness.generate import AnswerGenerator, Generated
@@ -662,6 +663,8 @@ async def main() -> None:
     except ValueError as exc:
         raise SystemExit(str(exc)) from None
 
+    # Before any model call, so every paid call of the run is tallied.
+    tally = install_tally()
     generator = AnswerGenerator()
     judge = Judge(model=args.judge_model, max_tokens=args.judge_max_tokens)
     second_judge = (
@@ -795,6 +798,10 @@ async def main() -> None:
             "heavily skewed toward supported, so a judge that stopped discriminating "
             "still scores high raw agreement."
         )
+
+    print()
+    for line in format_usage(summarize(tally.get_finished_spans())):
+        print(line)
 
     if abort.is_set():
         print()

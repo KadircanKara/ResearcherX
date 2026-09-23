@@ -283,6 +283,17 @@ def now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
 
+def reasoning_tokens(usage: Any) -> int | None:
+    """Hidden thinking tokens, when the provider reports them. Already inside
+    `completion_tokens` (billed as output), so this is METADATA, never a
+    usage key: a usage key would be priced a second time."""
+    try:
+        value = usage.completion_tokens_details.reasoning_tokens
+    except Exception:
+        return None
+    return value if isinstance(value, int) else None
+
+
 def usage_details(usage: Any) -> dict[str, int] | None:
     """OpenAI-shaped usage into Langfuse's keys, or None when absent."""
     if usage is None:

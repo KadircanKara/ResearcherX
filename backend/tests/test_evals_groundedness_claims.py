@@ -45,6 +45,32 @@ def test_code_is_never_a_claim_and_its_brackets_are_never_markers():
     assert marker_count(answer) == 2
 
 
+def test_inline_code_stays_inside_its_sentence():
+    """gpt-5-mini writes variables in backticks. Cutting the prose at each span
+    turned grounded sentences into judge-proof fragments ("), so the current
+    cell probability at time") -- 12 of the 13 "unsupported" claims on the
+    2026-09-23 gpt-5-mini run."""
+    answer = (
+        "Probabilities are updated with a Bayesian rule (sensor parameters `p` and `q`), "
+        "so the cell probability at time `t` depends on the prior at `t-1` [1]. "
+        "The mission ends once confidence exceeds `B` [2]."
+    )
+    claims = extract_claims(answer)
+    assert [c.text for c in claims] == [
+        "Probabilities are updated with a Bayesian rule (sensor parameters `p` and `q`), "
+        "so the cell probability at time `t` depends on the prior at `t-1` [1].",
+        "The mission ends once confidence exceeds `B` [2].",
+    ]
+    assert [c.markers for c in claims] == [(1,), (2,)]
+
+
+def test_a_bracket_inside_inline_code_is_not_a_marker_and_cannot_end_a_sentence():
+    claims = extract_claims("The reward reads `arr[4]. next` from the buffer each step [3].")
+    assert len(claims) == 1
+    assert claims[0].text == "The reward reads `arr[4]. next` from the buffer each step [3]."
+    assert claims[0].markers == (3,)
+
+
 def test_an_abbreviation_does_not_end_a_sentence():
     """'et al.' splitting would leave two fragments that are each unjudgeable."""
     claims = extract_claims(
