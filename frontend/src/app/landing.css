@@ -1,137 +1,115 @@
 /*
  * Landing page styles. Every rule is scoped to `.rx-landing` so nothing here
- * reaches the app under /admin: the page is strictly black and white and must
- * not follow the app's light/dark tokens, and the app must not inherit the
- * page's type rules. Colour utilities come from the `lp` palette in
- * tailwind.config.ts; this file holds what Tailwind cannot express as a class.
+ * reaches the app under /admin.
+ *
+ * The page follows the VISITOR'S SYSTEM theme (prefers-color-scheme), not the
+ * app's theme toggle: most visitors have never opened the app, and the app's
+ * own default is light whatever the OS says. The page's own nav toggle
+ * overrides the system through `data-theme` on the root. Colours are the `site` palette
+ * in tailwind.config.ts; the channels live here, one set per scheme. The
+ * accent is the app's own primary blue, so the page and the product read as
+ * one thing.
  */
 
 .rx-landing {
-  --lp-ink: oklch(0 0 0);
-  --lp-paper: oklch(1 0 0);
-  /* Tailwind's `font-serif` reads --font-serif, so the landing's serif is set
-     here and nowhere else; the variable itself comes from next/font on the
-     same element. */
-  --font-serif: var(--font-instrument-serif), Georgia, serif;
-  /* globals.css sets the app's 14px body size; the landing keeps the
-     browser's 16px it was designed on. */
+  --site-bg: 0.992 0.002 250;
+  --site-fg: 0.2 0.018 258;
+  --site-muted: 0.47 0.02 258;
+  --site-line: 0.915 0.007 255;
+  --site-panel: 0.968 0.005 252;
+  --site-accent: 0.53 0.2 260;
+  --site-accent-fg: 0.99 0 0;
+  --site-accent-soft: 0.94 0.035 258;
+  /* globals.css sets the app's 14px body size; the landing reads at 16px. */
   font-size: 1rem;
   overflow-x: clip;
+  color-scheme: light;
   -webkit-font-smoothing: antialiased;
+}
+
+/* Dark: the system's choice unless the visitor picked light with the toggle
+   (data-theme="light"), or an explicit data-theme="dark". The channel list
+   is repeated because a media query cannot share a rule with a plain
+   selector. */
+@media (prefers-color-scheme: dark) {
+  .rx-landing:not([data-theme="light"]) {
+    --site-bg: 0.165 0.008 258;
+    --site-fg: 0.965 0.004 250;
+    --site-muted: 0.72 0.018 255;
+    --site-line: 0.28 0.012 258;
+    --site-panel: 0.205 0.01 258;
+    --site-accent: 0.7 0.15 256;
+    --site-accent-fg: 0.16 0.02 260;
+    --site-accent-soft: 0.3 0.06 258;
+    color-scheme: dark;
+  }
+}
+.rx-landing[data-theme="dark"] {
+  --site-bg: 0.165 0.008 258;
+  --site-fg: 0.965 0.004 250;
+  --site-muted: 0.72 0.018 255;
+  --site-line: 0.28 0.012 258;
+  --site-panel: 0.205 0.01 258;
+  --site-accent: 0.7 0.15 256;
+  --site-accent-fg: 0.16 0.02 260;
+  --site-accent-soft: 0.3 0.06 258;
+  color-scheme: dark;
 }
 
 .rx-landing h1,
 .rx-landing h2,
 .rx-landing h3 {
   letter-spacing: -0.03em;
+  text-wrap: balance;
+}
+
+.rx-landing p {
+  text-wrap: pretty;
+}
+
+.rx-landing ::selection {
+  background-color: oklch(var(--site-accent) / 0.22);
+  color: inherit;
 }
 
 .rx-landing :focus-visible {
-  outline: 2px solid currentColor;
+  outline: 2px solid oklch(var(--site-accent));
   outline-offset: 3px;
+  border-radius: 6px;
 }
 
 /* In-page anchors glide; the root layout has no say in scroll behaviour, so
    it is switched on only while the landing page is mounted. */
 html:has(.rx-landing) {
   scroll-behavior: smooth;
+  scrollbar-color: oklch(var(--site-line)) transparent;
 }
 
-/* Scroll reveal: fade and rise, once. */
-.rx-landing .reveal {
-  opacity: 0;
-  transform: translateY(24px);
-  transition:
-    opacity 700ms cubic-bezier(0.22, 1, 0.36, 1),
-    transform 700ms cubic-bezier(0.22, 1, 0.36, 1);
-}
-.rx-landing .reveal[data-revealed="true"] {
-  opacity: 1;
-  transform: none;
+/* Soft product-shot depth: offset and blur, never a halo. */
+.rx-landing .shot-shadow {
+  box-shadow:
+    0 1px 2px oklch(0.2 0.02 258 / 0.06),
+    0 24px 60px -24px oklch(0.2 0.02 258 / 0.28);
 }
 
-/* Eyebrow / micro label. */
-.rx-landing .label-xs {
-  font-size: 0.6875rem;
-  line-height: 1;
-  letter-spacing: 0.18em;
-  text-transform: uppercase;
+/* The one authored motion: the paper this page follows pulses once when its
+   step scrolls into view, so the eye picks the same source out of every
+   step. Content is visible by default; only the tint animates. */
+.rx-landing [data-lit="true"] .trace {
+  animation: rx-trace 2.2s cubic-bezier(0.16, 1, 0.3, 1) both;
 }
-
-/* The one editorial flourish. */
-.rx-landing .serif-italic {
-  font-family: var(--font-serif);
-  font-style: italic;
-  font-weight: 400;
-  letter-spacing: -0.02em;
-}
-
-/* Film grain over the hero video. */
-.rx-landing .grain {
-  pointer-events: none;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)' opacity='0.5'/%3E%3C/svg%3E");
-  opacity: 0.06;
-  mix-blend-mode: screen;
-}
-
-/* Pill buttons: hover inverts. */
-.rx-landing .pill-light,
-.rx-landing .pill-ghost-light {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 9999px;
-  transition:
-    background-color 220ms ease,
-    color 220ms ease,
-    border-color 220ms ease;
-}
-.rx-landing .pill-light {
-  border: 1px solid var(--lp-paper);
-  background-color: var(--lp-paper);
-  color: var(--lp-ink);
-}
-.rx-landing .pill-light:hover {
-  background-color: transparent;
-  color: var(--lp-paper);
-}
-.rx-landing .pill-ghost-light {
-  border: 1px solid color-mix(in oklab, var(--lp-paper) 45%, transparent);
-  background-color: transparent;
-  color: var(--lp-paper);
-}
-.rx-landing .pill-ghost-light:hover {
-  background-color: var(--lp-paper);
-  color: var(--lp-ink);
-  border-color: var(--lp-paper);
-}
-
-/* Typing cursor under the hero. */
-.rx-landing .caret {
-  display: inline-block;
-  width: 1px;
-  height: 1.1em;
-  translate: 0 0.14em;
-  background-color: currentColor;
-  animation: rx-caret-blink 1.05s step-end infinite;
-}
-@keyframes rx-caret-blink {
-  0%,
-  100% {
-    opacity: 1;
+@keyframes rx-trace {
+  0% {
+    background-color: oklch(var(--site-accent) / 0.5);
   }
-  50% {
-    opacity: 0;
+  100% {
+    background-color: oklch(var(--site-accent-soft));
   }
 }
 
 @media (prefers-reduced-motion: reduce) {
   html:has(.rx-landing) {
     scroll-behavior: auto;
-  }
-  .rx-landing .reveal {
-    opacity: 1;
-    transform: none;
   }
   .rx-landing *,
   .rx-landing *::before,

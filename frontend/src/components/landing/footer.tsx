@@ -1,14 +1,24 @@
-import { HERO_VIDEO_CREDIT } from "@/lib/landing-video";
+import { LogoMark } from "./logo-mark";
 
 export function Footer() {
   return (
-    <footer className="bg-lp-ink text-lp-paper border-lp-paper/15 border-t">
-      <div className="mx-auto flex max-w-[1240px] flex-col gap-3 px-5 py-8 text-[12px] sm:flex-row sm:items-center sm:justify-between sm:px-8">
-        <span className="text-lp-paper font-semibold">ResearcherX</span>
-        <div className="text-lp-paper/45 flex flex-col gap-1 sm:items-end">
-          <span>{HERO_VIDEO_CREDIT}</span>
-          <span>© {new Date().getFullYear()} ResearcherX. All rights reserved.</span>
-        </div>
+    <footer className="border-site-line border-t">
+      <div className="text-site-muted mx-auto flex max-w-[1180px] flex-col gap-3 px-5 py-8 text-[13px] sm:flex-row sm:items-center sm:justify-between sm:px-8">
+        <span className="text-site-fg inline-flex items-center gap-2 font-semibold">
+          <LogoMark />
+          ResearcherX
+        </span>
+        <span>
+          © {new Date().getFullYear()} Kadircan Kara · MIT licensed ·{" "}
+          <a
+            href="https://github.com/KadircanKara/ResearcherX"
+            target="_blank"
+            rel="noreferrer"
+            className="hover:text-site-fg underline underline-offset-4"
+          >
+            GitHub
+          </a>
+        </span>
       </div>
     </footer>
   );
