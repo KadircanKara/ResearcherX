@@ -10,6 +10,7 @@ from app.api.v1.research import cancel_watchers
 from app.api.v1.router import api_router
 from app.core.config import settings
 from app.core.logging import configure_logging, log
+from app.core.observability import init_tracing, shutdown_tracing
 from app.db.migrate import run_migrations
 from app.db.models import ResearchRun, RunStatus
 from app.db.seed import seed_projects, seed_users
@@ -67,6 +68,7 @@ async def _warn_stale_embeddings() -> None:
 async def lifespan(app: FastAPI):
     configure_logging()
     settings.validate_for_environment()
+    init_tracing()
     log.info("app_startup", model=settings.llm_model, environment=settings.environment)
     await run_migrations()
     await _fail_orphaned_runs()
@@ -83,6 +85,8 @@ async def lifespan(app: FastAPI):
     await registry.cancel_all()
     await cancel_watchers()
     await engine.dispose()
+    # Last, so spans the shutdown itself closed (cancelled turns) still ship.
+    await shutdown_tracing()
     log.info("app_shutdown")
 
 

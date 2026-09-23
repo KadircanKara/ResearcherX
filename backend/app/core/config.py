@@ -457,6 +457,19 @@ class Settings(BaseSettings):
     cohere_rerank_model: str = "rerank-v3.5"
     local_rag_dir: str = "./data/local_rag"
 
+    # ── Tracing (app/core/observability.py) ──────────────────────────────
+    # OpenTelemetry spans for the RAG pipeline, exported over OTLP/HTTP to
+    # Langfuse. OFF unless BOTH keys are set: an empty key is the supported
+    # "no tracing" state, not a misconfiguration. EU cloud by default; the US
+    # region is https://us.cloud.langfuse.com.
+    langfuse_public_key: str = ""
+    langfuse_secret_key: str = ""
+    langfuse_host: str = "https://cloud.langfuse.com"
+    # Prompts, excerpts and answers on the spans. They leave the box for
+    # Langfuse, and they are the user's paper text; False keeps timings,
+    # models, token counts and ids only.
+    langfuse_capture_content: bool = True
+
     @field_validator("cors_origins", mode="before")
     @classmethod
     def _split_cors(cls, v: object) -> object:

@@ -50,7 +50,7 @@ async def test_parse_structured_retries_once_then_succeeds(monkeypatch):
     responses = iter(["not json at all", '{"a": 7}'])
     calls = []
 
-    async def fake_one_shot(*, system: str, user: str, max_tokens: int) -> str:
+    async def fake_one_shot(*, system: str, user: str, max_tokens: int, **_: object) -> str:
         calls.append(system)
         return next(responses)
 
@@ -62,7 +62,7 @@ async def test_parse_structured_retries_once_then_succeeds(monkeypatch):
 
 
 async def test_parse_structured_raises_after_two_failures(monkeypatch):
-    async def fake_one_shot(*, system: str, user: str, max_tokens: int) -> str:
+    async def fake_one_shot(*, system: str, user: str, max_tokens: int, **_: object) -> str:
         return "<think>still thinking</think>"
 
     monkeypatch.setattr(structured, "_one_shot", fake_one_shot)
@@ -71,7 +71,7 @@ async def test_parse_structured_raises_after_two_failures(monkeypatch):
 
 
 async def test_parse_structured_accepts_noisy_but_valid(monkeypatch):
-    async def fake_one_shot(*, system: str, user: str, max_tokens: int) -> str:
+    async def fake_one_shot(*, system: str, user: str, max_tokens: int, **_: object) -> str:
         return '<think>hmm</think>```json\n{"a": 3}\n```'
 
     monkeypatch.setattr(structured, "_one_shot", fake_one_shot)

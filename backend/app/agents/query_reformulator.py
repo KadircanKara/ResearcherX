@@ -51,6 +51,7 @@ class QueryReformulatorAgent:
                 user=user,
                 output_model=ReformulatedQuery,
                 max_tokens=settings.query_reformulator_max_tokens,
+                observation="chat.reformulate",
             )
         except Exception as exc:
             log.warning("query_reformulator_failed_open", error=str(exc)[:200])

@@ -22,6 +22,7 @@ from dataclasses import dataclass
 
 import httpx
 
+from app.core import observability
 from app.core.logging import log
 
 DEFAULT_MODEL = "rerank-v3.5"
@@ -77,6 +78,18 @@ class CohereReranker:
             "documents": [d[: self._max_doc_chars] for d in documents],
             "top_n": min(top_n, len(documents)),
         }
+        # A GENERATION so Langfuse can price it: usage is Cohere's own billed
+        # search units, matched against a model definition for this model.
+        span = observability.start_span(
+            "cohere.rerank",
+            kind="generation",
+            attributes={
+                "langfuse.observation.model.name": self._model,
+                "gen_ai.request.model": self._model,
+                "langfuse.observation.metadata.n_documents": len(documents),
+                "langfuse.observation.metadata.top_n": payload["top_n"],
+            },
+        )
         client = self._client or httpx.AsyncClient(timeout=self._timeout_s)
         try:
             response = await client.post(
@@ -86,7 +99,8 @@ class CohereReranker:
                 timeout=self._timeout_s,
             )
             response.raise_for_status()
-            raw = response.json()["results"]
+            body = response.json()
+            raw = body["results"]
             results = [
                 RerankResult(index=int(r["index"]), relevance_score=float(r["relevance_score"]))
                 for r in raw
@@ -94,14 +108,30 @@ class CohereReranker:
                 # list: it would address the wrong candidate.
                 if 0 <= int(r["index"]) < len(documents)
             ]
+            _record_billed_units(span, body)
         except Exception as exc:
             log.warning("rerank_failed_open", error=f"{type(exc).__name__}: {str(exc)[:200]}")
+            observability.mark_error(span, exc)
+            # Failed open: the turn went on with the fused order.
+            observability.set_attributes(span, {"langfuse.observation.level": "WARNING"})
             return None
         finally:
             if self._client is None:
                 await client.aclose()
+            span.end()
 
         # Sorted here rather than trusted: the pipeline's output order IS
         # this list, and a provider that returns unsorted results would
         # silently reorder the model's excerpt catalog.
         return sorted(results, key=lambda r: r.relevance_score, reverse=True)
+
+
+def _record_billed_units(span, body: object) -> None:
+    try:
+        units = body["meta"]["billed_units"]["search_units"]  # type: ignore[index]
+    except Exception:
+        return
+    if isinstance(units, (int, float)):
+        observability.set_json(
+            span, "langfuse.observation.usage_details", {"search_units": int(units)}
+        )

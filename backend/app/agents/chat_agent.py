@@ -295,6 +295,7 @@ class ChatAgent:
         )
 
         stream = await create_chat_completion(
+            observation="chat.answer",
             max_tokens=settings.chat_answer_max_tokens,
             stream=True,
             messages=messages,

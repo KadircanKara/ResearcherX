@@ -74,6 +74,7 @@ async def _one_shot(
     system: str,
     user: str,
     max_tokens: int,
+    observation: str = "llm.structured",
 ) -> str:
     base: dict = {
         "max_tokens": max_tokens,
@@ -84,7 +85,9 @@ async def _one_shot(
     }
     if current_provider().base_url not in _response_format_unsupported:
         try:
-            response = await create_chat_completion(**base, response_format={"type": "json_object"})
+            response = await create_chat_completion(
+                observation=observation, **base, response_format={"type": "json_object"}
+            )
             return response.choices[0].message.content or ""
         except BadRequestError as exc:
             # Attribute to whichever provider actually served the call
@@ -95,7 +98,7 @@ async def _one_shot(
                 error=str(exc),
             )
             _response_format_unsupported.add(current_provider().base_url)
-    response = await create_chat_completion(**base)
+    response = await create_chat_completion(observation=observation, **base)
     return response.choices[0].message.content or ""
 
 
@@ -105,6 +108,7 @@ async def parse_structured(
     user: str,
     output_model: type[T],
     max_tokens: int = 2000,
+    observation: str = "llm.structured",
 ) -> T:
     """Request a JSON object matching output_model's schema and parse it.
 
@@ -120,7 +124,9 @@ async def parse_structured(
     )
     composed_system = f"{system}\n\n{schema_block}"
 
-    content = await _one_shot(system=composed_system, user=user, max_tokens=max_tokens)
+    content = await _one_shot(
+        system=composed_system, user=user, max_tokens=max_tokens, observation=observation
+    )
     for candidate in (content, extract_json(content)):
         if not candidate:
             continue
@@ -138,7 +144,9 @@ async def parse_structured(
         f"{composed_system}\n\n"
         "Your previous response was empty or invalid. Return ONLY the JSON object now."
     )
-    content = await _one_shot(system=retry_system, user=user, max_tokens=max_tokens)
+    content = await _one_shot(
+        system=retry_system, user=user, max_tokens=max_tokens, observation=observation
+    )
     for candidate in (content, extract_json(content)):
         if not candidate:
             continue

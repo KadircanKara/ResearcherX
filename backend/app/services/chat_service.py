@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.agents.chat_agent import ChatAgent, ChatAgentInput, ChunkContext, PaperMetaContext
 from app.agents.query_reformulator import QueryReformulatorAgent, ReformulatorInput
 from app.agents.scope_widener import ScopeWidenerAgent, WidenerInput
+from app.core import observability
 from app.core.config import settings
 from app.core.logging import log
 from app.db.models import Paper
@@ -275,6 +276,15 @@ def _vec_str(embedding: list[float]) -> str:
     return "[" + ",".join(str(x) for x in embedding) + "]"
 
 
+async def _fetch_traced(name: str, db: AsyncSession, sql, params: dict) -> list:
+    """`db.execute(...).fetchall()` inside a RETRIEVER span carrying the row
+    count, so each query's latency shows in the turn's trace."""
+    with observability.span(name, kind="retriever") as span:
+        rows = (await db.execute(sql, params)).fetchall()
+        observability.set_metadata(span, rows=len(rows))
+    return rows
+
+
 class ChatService:
     def __init__(self) -> None:
         self._embedding_svc = EmbeddingService()
@@ -290,24 +300,54 @@ class ChatService:
         user_content: str,
         mentioned_paper_ids: list[str] | None = None,
     ) -> AsyncGenerator[dict, None]:
-        """Yield SSE event dicts for one user message."""
+        """Yield SSE event dicts for one user message.
+
+        The turn is one trace: `turn` is its root span, and it is NEVER the
+        current span across a yield (see `app/core/observability.py`). Each
+        await that opens spans of its own runs `under(turn)` or inside a
+        stage span parented to it explicitly.
+        """
+        turn = observability.start_span(
+            "chat.turn",
+            root=True,
+            attributes={
+                "langfuse.trace.name": "chat.turn",
+                "langfuse.session.id": conversation_id,
+                "langfuse.trace.metadata.mentions": len(mentioned_paper_ids or []),
+            },
+        )
+        observability.set_content(turn, "langfuse.trace.input", user_content)
         try:
             yield {"event": "thinking", "data": "{}"}
 
             async with SessionLocal() as db:
-                conv = await self._conv_svc.get_conversation(db, conversation_id)
+                with observability.span("chat.load", parent=turn):
+                    conv = await self._conv_svc.get_conversation(db, conversation_id)
+                    # Load papers assigned to this project
+                    paper_rows = (
+                        []
+                        if conv is None
+                        else (
+                            await db.execute(
+                                select(Paper).where(Paper.project_id == conv.project_id)
+                            )
+                        )
+                        .scalars()
+                        .all()
+                    )
                 if conv is None:
+                    observability.set_attributes(turn, {"langfuse.observation.level": "WARNING"})
                     yield {
                         "event": "error",
                         "data": json.dumps({"message": "Conversation not found"}),
                     }
                     return
-
-                # Load papers assigned to this project
-                paper_rows = (
-                    (await db.execute(select(Paper).where(Paper.project_id == conv.project_id)))
-                    .scalars()
-                    .all()
+                observability.set_attributes(
+                    turn,
+                    {
+                        "langfuse.trace.metadata.project_id": conv.project_id,
+                        "langfuse.trace.metadata.papers": len(paper_rows),
+                    },
                 )
 
                 # Format prior messages (all except the user's current message)
@@ -337,11 +377,13 @@ class ChatService:
             history_hits: list[dict] = []
             paper_chunks: list = []
             query_embedding: list[float] | None = None
+            reformulated = False
 
             try:
-                query_embedding = await self._embedding_svc.embed(
-                    user_content, task_type="RETRIEVAL_QUERY"
-                )
+                with observability.under(turn):
+                    query_embedding = await self._embedding_svc.embed(
+                        user_content, task_type="RETRIEVAL_QUERY"
+                    )
             except Exception:
                 log.warning("chat_embedding_unavailable_fallback", conversation_id=conversation_id)
 
@@ -386,28 +428,30 @@ class ChatService:
 
             if query_embedding is not None:
                 async with SessionLocal() as db:
-                    history_hits = await self._retrieve_history(
-                        db, conversation_id, query_embedding
-                    )
+                    with observability.under(turn):
+                        history_hits = await self._retrieve_history(
+                            db, conversation_id, query_embedding
+                        )
 
                 if paper_infos:
                     reformulation_context = prior_messages + history_hits
                     retrieval_query = user_content
                     if prior_messages:
-                        retrieval_query = await self._reformulator.run(
-                            ReformulatorInput(
-                                query=user_content,
-                                prior_messages=reformulation_context,
+                        with observability.under(turn):
+                            retrieval_query = await self._reformulator.run(
+                                ReformulatorInput(
+                                    query=user_content,
+                                    prior_messages=reformulation_context,
+                                )
                             )
-                        )
 
-                    retrieval_embedding = (
-                        await self._embedding_svc.embed(
-                            retrieval_query, task_type="RETRIEVAL_QUERY"
-                        )
-                        if retrieval_query != user_content
-                        else query_embedding
-                    )
+                    retrieval_embedding = query_embedding
+                    reformulated = retrieval_query != user_content
+                    if reformulated:
+                        with observability.under(turn):
+                            retrieval_embedding = await self._embedding_svc.embed(
+                                retrieval_query, task_type="RETRIEVAL_QUERY"
+                            )
 
                     by_id = {p.paper_id: p for p in paper_infos}
                     mentioned_infos = [by_id[pid] for pid in mentioned if pid in by_id]
@@ -463,30 +507,33 @@ class ChatService:
                         # that adds the library back would make a resolved
                         # scope STRICTER than the same question with an "@"
                         # mention. That is backwards.
-                        widened = await self._widener.run(
-                            WidenerInput(
-                                query=user_content,
-                                mentioned_titles=[p.title for p in scope_infos],
+                        with observability.under(turn):
+                            widened = await self._widener.run(
+                                WidenerInput(
+                                    query=user_content,
+                                    mentioned_titles=[p.title for p in scope_infos],
+                                )
                             )
-                        )
-                        paper_chunks, widened = await self._retrieve_mentioned_chunks(
-                            scope_infos,
-                            paper_infos,
-                            retrieval_embedding,
-                            retrieval_query,
-                            widened,
-                            reranker=self._reranker,
-                        )
-                        scope = paper_infos if widened else scope_infos
-                    else:
-                        async with SessionLocal() as db:
-                            paper_chunks = await self._retrieve_paper_chunks(
-                                db,
+                        with observability.span("chat.retrieve", kind="retriever", parent=turn):
+                            paper_chunks, widened = await self._retrieve_mentioned_chunks(
+                                scope_infos,
                                 paper_infos,
                                 retrieval_embedding,
                                 retrieval_query,
+                                widened,
                                 reranker=self._reranker,
                             )
+                        scope = paper_infos if widened else scope_infos
+                    else:
+                        async with SessionLocal() as db:
+                            with observability.span("chat.retrieve", kind="retriever", parent=turn):
+                                paper_chunks = await self._retrieve_paper_chunks(
+                                    db,
+                                    paper_infos,
+                                    retrieval_embedding,
+                                    retrieval_query,
+                                    reranker=self._reranker,
+                                )
 
             if mentioned and not mentioned_infos:
                 # The user named papers and NONE of them could be scoped to:
@@ -555,7 +602,12 @@ class ChatService:
 
             # Stream response
             full_response = []
-            async for token in self._chat_agent.stream(agent_input):
+            # The answer's generation span nests under the turn; the turn is
+            # current only while each token is PRODUCED, never across the
+            # yield below.
+            async for token in observability.iterate_under(
+                self._chat_agent.stream(agent_input), turn
+            ):
                 full_response.append(token)
                 yield {"event": "delta", "data": json.dumps({"text": token})}
 
@@ -620,19 +672,45 @@ class ChatService:
             ]
 
             # Persist assistant message
+            # The background message embedding it starts inherits this span.
             async with SessionLocal() as db:
-                await self._conv_svc.save_message(
-                    db, conversation_id, "assistant", clean_response, citations
-                )
+                with observability.span("chat.persist", parent=turn):
+                    await self._conv_svc.save_message(
+                        db, conversation_id, "assistant", clean_response, citations
+                    )
 
+            observability.set_content(turn, "langfuse.trace.output", clean_response)
+            observability.set_attributes(
+                turn,
+                {
+                    "langfuse.trace.metadata.scope_source": scope_source
+                    if scope_infos
+                    else "global",
+                    "langfuse.trace.metadata.scoped_papers": len(scope_infos),
+                    "langfuse.trace.metadata.widened": widened,
+                    "langfuse.trace.metadata.history_hits": len(history_hits),
+                    "langfuse.trace.metadata.reformulated": reformulated,
+                    "langfuse.trace.metadata.chunks": len(paper_chunks),
+                    "langfuse.trace.metadata.citations": len(citations),
+                    "langfuse.trace.metadata.misattributed_stripped": len(misattributed),
+                },
+            )
             yield {"event": "done", "data": json.dumps({"citations": citations})}
 
-        except Exception:
+        except Exception as exc:
             log.exception("chat_service_error", conversation_id=conversation_id)
+            observability.mark_error(turn, exc)
             yield {
                 "event": "error",
                 "data": json.dumps({"message": "Chat failed. Please try again."}),
             }
+        except BaseException as exc:
+            # The reader went away (cancellation, or the generator closed
+            # mid-stream). Recorded as a warning, then re-raised untouched.
+            observability.mark_error(turn, exc)
+            raise
+        finally:
+            turn.end()
 
     async def _retrieve_mentioned_chunks(
         self,
@@ -796,7 +874,9 @@ class ChatService:
             ORDER BY distance ASC
             LIMIT :top_k
         """)
-        result = await db.execute(
+        rows = await _fetch_traced(
+            "retrieval.history",
+            db,
             sql,
             {
                 "qvec": qvec,
@@ -806,7 +886,6 @@ class ChatService:
                 "top_k": _HISTORY_TOP_K,
             },
         )
-        rows = result.fetchall()
         return [{"role": r.role, "content": r.content} for r in rows]
 
     async def _retrieve_paper_chunks(
@@ -1113,7 +1192,9 @@ class ChatService:
             WHERE p_rank <= :guarantee
             ORDER BY p_rank ASC, distance ASC
         """)
-        result = await db.execute(
+        rows = await _fetch_traced(
+            "retrieval.guaranteed",
+            db,
             sql,
             {
                 "qvec": qvec,
@@ -1123,7 +1204,7 @@ class ChatService:
                 "guarantee": guarantee,
             },
         )
-        return result.fetchall()
+        return rows
 
     def _renumber_chunks(self, chunks: list[ChunkContext]) -> list[ChunkContext]:
         """Re-number after the floor and the fill have reordered the list.
@@ -1184,7 +1265,9 @@ class ChatService:
             ORDER BY distance ASC
             LIMIT :max_chunks
         """)
-        result = await db.execute(
+        rows = await _fetch_traced(
+            "retrieval.dense",
+            db,
             sql,
             {
                 "qvec": qvec,
@@ -1194,7 +1277,7 @@ class ChatService:
                 "max_chunks": pool,
             },
         )
-        return result.fetchall()
+        return rows
 
     async def _hybrid_rows(
         self, db: AsyncSession, ids: str, qvec: str, qtext: str, threshold: float, pool: int
@@ -1277,7 +1360,9 @@ class ChatService:
             FROM dense d
             FULL OUTER JOIN sparse sp ON sp.id = d.id
         """)
-        result = await db.execute(
+        rows = await _fetch_traced(
+            "retrieval.hybrid",
+            db,
             sql,
             {
                 "qvec": qvec,
@@ -1289,4 +1374,4 @@ class ChatService:
                 "sparse_pool": settings.hybrid_sparse_pool,
             },
         )
-        return result.fetchall()
+        return rows
