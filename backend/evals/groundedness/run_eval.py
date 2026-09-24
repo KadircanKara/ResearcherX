@@ -33,10 +33,28 @@ import asyncio
 import json
 import sys
 from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 
+from app.core import observability
 from evals.groundedness.usage import format_usage, install_tally, summarize
 from evals.groundedness.agreement import pair_verdicts, verdict_shift
+from evals.groundedness.langfuse_export import (
+    DATASET_NAME,
+    ITEM_EXPECTED_OUTPUT,
+    TRACE_NAME,
+    CaseScores,
+    ExperimentSpanProcessor,
+    LangfuseExporter,
+    LangfuseExportError,
+    case_scores,
+    default_run_name,
+    enter_case,
+    exit_case,
+    experiment_attributes,
+    expected_output_json,
+    new_experiment_id,
+)
 from evals.groundedness.claims import extract_claims, marker_count
 from evals.groundedness.generate import AnswerGenerator, Generated
 from evals.groundedness.judge import (
@@ -178,7 +196,6 @@ async def _run_case(
     project_id: str,
     generator: AnswerGenerator,
     judge: Judge,
-    semaphore: asyncio.Semaphore,
     abort: asyncio.Event,
     replayed: Generated | None = None,
     second_judge: Judge | None = None,
@@ -189,77 +206,195 @@ async def _run_case(
 ):
     if abort.is_set():
         return CaseError(case.id, "skipped", "aborted: the account ran out of credits")
-    async with semaphore:
-        if abort.is_set():
-            return CaseError(case.id, "skipped", "aborted: the account ran out of credits")
-        if replayed is not None:
-            generated = replayed
-        else:
-            try:
-                generated = await generator.generate(project_id=project_id, question=case.question)
-            except Exception as exc:  # noqa: BLE001 - reported, never silently dropped
-                if _is_out_of_credits(exc):
-                    abort.set()
-                    return CaseError(case.id, "generate", "aborted: the account ran out of credits")
-                return CaseError(case.id, "generate", f"{type(exc).__name__}: {exc}")
-
-        claims = extract_claims(generated.answer)
-        paper_of = {c.n: c.paper_id for c in generated.chunks}
-
+    if replayed is not None:
+        generated = replayed
+    else:
         try:
-            verdicts = await judge.judge_claims(
+            generated = await generator.generate(project_id=project_id, question=case.question)
+        except Exception as exc:  # noqa: BLE001 - reported, never silently dropped
+            if _is_out_of_credits(exc):
+                abort.set()
+                return CaseError(case.id, "generate", "aborted: the account ran out of credits")
+            return CaseError(case.id, "generate", f"{type(exc).__name__}: {exc}")
+
+    claims = extract_claims(generated.answer)
+    paper_of = {c.n: c.paper_id for c in generated.chunks}
+
+    try:
+        verdicts = await judge.judge_claims(
+            question=case.question,
+            claims=[(c.index, c.text) for c in claims],
+            excerpts=[(c.n, c.title, c.text) for c in generated.chunks],
+        )
+        stance = await judge.judge_stance(question=case.question, answer=generated.answer)
+        # The candidate judge sees BYTE-IDENTICAL input -- same answer, same
+        # catalog, same claim list. Judging freshly generated answers
+        # instead would make a disagreement inseparable from the two runs
+        # having answered differently.
+        second_verdicts: dict[int, str] = {}
+        if second_judge is not None:
+            other = await second_judge.judge_claims(
                 question=case.question,
                 claims=[(c.index, c.text) for c in claims],
                 excerpts=[(c.n, c.title, c.text) for c in generated.chunks],
             )
-            stance = await judge.judge_stance(question=case.question, answer=generated.answer)
-            # The candidate judge sees BYTE-IDENTICAL input -- same answer, same
-            # catalog, same claim list. Judging freshly generated answers
-            # instead would make a disagreement inseparable from the two runs
-            # having answered differently.
-            second_verdicts: dict[int, str] = {}
-            if second_judge is not None:
-                other = await second_judge.judge_claims(
-                    question=case.question,
-                    claims=[(c.index, c.text) for c in claims],
-                    excerpts=[(c.n, c.title, c.text) for c in generated.chunks],
-                )
-                second_verdicts = {index: v.verdict for index, v in other.items()}
-            relevance, relevance_error = await _judge_relevance(
-                case=case, generated=generated, judge=judge, metrics=metrics
-            )
-        except QuotaExhausted:
+            second_verdicts = {index: v.verdict for index, v in other.items()}
+        relevance, relevance_error = await _judge_relevance(
+            case=case, generated=generated, judge=judge, metrics=metrics
+        )
+    except QuotaExhausted:
+        abort.set()
+        return CaseError(case.id, "judge", "aborted: the account ran out of credits")
+    except Exception as exc:  # noqa: BLE001
+        if _is_out_of_credits(exc):
             abort.set()
             return CaseError(case.id, "judge", "aborted: the account ran out of credits")
-        except Exception as exc:  # noqa: BLE001
-            if _is_out_of_credits(exc):
-                abort.set()
-                return CaseError(case.id, "judge", "aborted: the account ran out of credits")
-            return CaseError(case.id, "judge", f"{type(exc).__name__}: {exc}")
+        return CaseError(case.id, "judge", f"{type(exc).__name__}: {exc}")
 
-        scored = tuple(
-            ScoredClaim(
-                index=claim.index,
-                verdict=verdicts[claim.index].verdict,
-                markers=claim.markers,
-                supporting_excerpts=tuple(verdicts[claim.index].supporting_excerpts),
-                supporting_papers=frozenset(
-                    paper_of[n] for n in verdicts[claim.index].supporting_excerpts if n in paper_of
-                ),
-                marker_papers=frozenset(paper_of[n] for n in claim.markers if n in paper_of),
-                disclosed=claim.disclosed,
+    scored = tuple(
+        ScoredClaim(
+            index=claim.index,
+            verdict=verdicts[claim.index].verdict,
+            markers=claim.markers,
+            supporting_excerpts=tuple(verdicts[claim.index].supporting_excerpts),
+            supporting_papers=frozenset(
+                paper_of[n] for n in verdicts[claim.index].supporting_excerpts if n in paper_of
+            ),
+            marker_papers=frozenset(paper_of[n] for n in claim.markers if n in paper_of),
+            disclosed=claim.disclosed,
+        )
+        for claim in claims
+    )
+    outcome = CaseOutcome(
+        case_id=case.id,
+        kind=case.kind,
+        claims=scored,
+        stance=stance.stance,
+        evidence_present=_evidence_present(case, generated),
+        marker_total=marker_count(generated.answer),
+    )
+    return outcome, generated, second_verdicts, relevance, relevance_error
+
+
+@dataclass(frozen=True)
+class Experiment:
+    """A run being exported to Langfuse (`--langfuse`)."""
+
+    experiment_id: str
+    run_name: str
+    dataset_id: str
+    metadata: dict[str, str]
+
+
+@dataclass(frozen=True)
+class TraceRef:
+    trace_id: str
+    observation_id: str
+
+
+async def _traced_case(
+    *,
+    case: Case,
+    semaphore: asyncio.Semaphore,
+    run_case,
+    experiment: Experiment | None,
+    refs: dict[str, TraceRef],
+):
+    """Run one case under its own root span, `eval.case`.
+
+    Every call the case makes -- embedding, retrieval, rerank, answer, judge --
+    nests under it, so a case reads in Langfuse the way a `chat.turn` does.
+    The span starts AFTER the semaphore is acquired: all cases are gathered at
+    once, and a root opened before the wait would bill queueing as latency.
+    Nothing here yields, so the root may safely be current for the whole case.
+    """
+    async with semaphore:
+        root = observability.start_span(
+            "eval.case",
+            root=True,
+            attributes={
+                "langfuse.trace.name": TRACE_NAME,
+                "langfuse.trace.tags": ["groundedness", case.kind],
+                "langfuse.trace.metadata.case_id": case.id,
+                "langfuse.trace.metadata.kind": case.kind,
+            },
+        )
+        context = root.get_span_context()
+        ref = TraceRef(format(context.trace_id, "032x"), format(context.span_id, "016x"))
+        refs[case.id] = ref
+        observability.set_content(root, "langfuse.trace.input", {"question": case.question})
+        token = None
+        if experiment is not None:
+            attrs = experiment_attributes(
+                experiment_id=experiment.experiment_id,
+                run_name=experiment.run_name,
+                dataset_id=experiment.dataset_id,
+                case=case,
+                root_observation_id=ref.observation_id,
+                run_metadata=experiment.metadata,
             )
-            for claim in claims
-        )
-        outcome = CaseOutcome(
-            case_id=case.id,
-            kind=case.kind,
-            claims=scored,
-            stance=stance.stance,
-            evidence_present=_evidence_present(case, generated),
-            marker_total=marker_count(generated.answer),
-        )
-        return outcome, generated, second_verdicts, relevance, relevance_error
+            # The root already exists, so the processor never saw it: stamp it
+            # by hand, then let the processor stamp everything opened under it.
+            observability.set_attributes(
+                root, {**attrs, ITEM_EXPECTED_OUTPUT: expected_output_json(case)}
+            )
+            observability.set_attributes(root, {"langfuse.session.id": experiment.run_name})
+            token = enter_case(attrs)
+        try:
+            with observability.under(root):
+                result = await run_case()
+            if isinstance(result, CaseError):
+                observability.set_attributes(
+                    root,
+                    {
+                        "langfuse.observation.level": (
+                            "WARNING" if result.stage == "skipped" else "ERROR"
+                        ),
+                        "langfuse.observation.status_message": f"{result.stage}: {result.error}"[
+                            :300
+                        ],
+                    },
+                )
+            else:
+                outcome, generated = result[0], result[1]
+                observability.set_content(root, "langfuse.trace.output", generated.answer)
+                observability.set_metadata(
+                    root,
+                    stance=outcome.stance,
+                    evidence_present=str(outcome.evidence_present),
+                    scope_source=generated.scope_source,
+                )
+            return result
+        except BaseException as exc:
+            observability.mark_error(root, exc)
+            raise
+        finally:
+            if token is not None:
+                exit_case(token)
+            root.end()
+
+
+async def _export_scores(
+    exporter: LangfuseExporter,
+    *,
+    experiment: Experiment,
+    outcomes: list[CaseOutcome],
+    relevances: dict[str, RelevanceOutcome],
+    refs: dict[str, TraceRef],
+) -> None:
+    await exporter.post_scores(
+        experiment_id=experiment.experiment_id,
+        cases=[
+            CaseScores(
+                case_id=outcome.case_id,
+                trace_id=refs[outcome.case_id].trace_id,
+                observation_id=refs[outcome.case_id].observation_id,
+                scores=case_scores(outcome, relevances.get(outcome.case_id)),
+            )
+            for outcome in outcomes
+            if outcome.case_id in refs
+        ],
+    )
 
 
 def _verdicts_by_claim(path: Path) -> tuple[dict[str, dict[int, str]], str]:
@@ -644,6 +779,21 @@ async def main() -> None:
         action="store_true",
         help="run even when --judge-model IS the answering model; the report says so",
     )
+    parser.add_argument(
+        "--langfuse",
+        action="store_true",
+        help=(
+            f"export the run to Langfuse as an experiment on dataset {DATASET_NAME!r}: "
+            "one trace per case plus per-case scores. Needs LANGFUSE_*_KEY; sends the "
+            "question, excerpts and answer unless LANGFUSE_CAPTURE_CONTENT=false"
+        ),
+    )
+    parser.add_argument(
+        "--langfuse-run",
+        default=None,
+        metavar="NAME",
+        help="experiment run name in Langfuse (default: '<answering> judged by <judge> · <time>')",
+    )
     parser.add_argument("--per-case", action="store_true", help="print the per-case table")
     parser.add_argument(
         "--limit", type=int, default=None, help="first N cases only, for a smoke run"
@@ -663,8 +813,23 @@ async def main() -> None:
     except ValueError as exc:
         raise SystemExit(str(exc)) from None
 
-    # Before any model call, so every paid call of the run is tallied.
-    tally = install_tally()
+    if args.langfuse_run and not args.langfuse:
+        raise SystemExit("--langfuse-run needs --langfuse")
+    from app.core.config import settings
+
+    if args.langfuse and not observability.keys_configured():
+        raise SystemExit("--langfuse needs LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY")
+
+    # Before any model call, so every paid call of the run is tallied -- and,
+    # with --langfuse, shipped.
+    tally = install_tally(
+        processors=(
+            [ExperimentSpanProcessor(), observability.langfuse_span_processor()]
+            if args.langfuse
+            else []
+        ),
+        capture_content=settings.langfuse_capture_content if args.langfuse else False,
+    )
     generator = AnswerGenerator()
     judge = Judge(model=args.judge_model, max_tokens=args.judge_max_tokens)
     second_judge = (
@@ -686,8 +851,6 @@ async def main() -> None:
                 f"{args.replay}: no saved generation for {len(missing)} case(s): "
                 f"{', '.join(missing[:5])}{' ...' if len(missing) > 5 else ''}"
             )
-    from app.core.config import settings
-
     answering = replay_model if args.replay else settings.llm_model
     # BEFORE any model call: a self-judged run discovered in the report header
     # has already been paid for.
@@ -699,6 +862,44 @@ async def main() -> None:
         )
     except SelfJudgeError as exc:
         raise SystemExit(str(exc)) from None
+
+    experiment: Experiment | None = None
+    exporter: LangfuseExporter | None = None
+    if args.langfuse:
+        exporter = LangfuseExporter(
+            host=settings.langfuse_host,
+            public_key=settings.langfuse_public_key,
+            secret_key=settings.langfuse_secret_key,
+        )
+        # Before any model call: an export that cannot happen must not be
+        # discovered after the answers are paid for.
+        try:
+            dataset_id = await exporter.ensure_dataset()
+            await exporter.upsert_items(cases)
+        except (LangfuseExportError, OSError) as exc:
+            await exporter.aclose()
+            raise SystemExit(f"Langfuse export setup failed: {exc}") from None
+        metadata = {
+            "answering_model": answering,
+            "judge_model": args.judge_model,
+            "metrics": ",".join(sorted(metrics)),
+            "set": args.set.name,
+            "cases": str(len(cases)),
+            "project_id": args.project_id,
+        }
+        if args.replay:
+            metadata["replayed_from"] = args.replay.name
+        else:
+            metadata["reasoning_effort"] = settings.llm_reasoning_effort or "-"
+            metadata["max_context_chunks"] = str(settings.max_context_chunks)
+        experiment = Experiment(
+            experiment_id=new_experiment_id(),
+            run_name=args.langfuse_run
+            or default_run_name(answering=answering, judge=args.judge_model, now=datetime.now(UTC)),
+            dataset_id=dataset_id,
+            metadata=metadata,
+        )
+    refs: dict[str, TraceRef] = {}
 
     semaphore = asyncio.Semaphore(args.concurrency)
     # Set by the first case to see a credit-exhaustion error. Every case still
@@ -725,16 +926,21 @@ async def main() -> None:
     results = await asyncio.gather(
         *(
             _tracked(
-                _run_case(
+                _traced_case(
                     case=case,
-                    project_id=args.project_id,
-                    generator=generator,
-                    judge=judge,
                     semaphore=semaphore,
-                    abort=abort,
-                    replayed=replayed.get(case.id),
-                    second_judge=second_judge,
-                    metrics=metrics,
+                    run_case=lambda case=case: _run_case(
+                        case=case,
+                        project_id=args.project_id,
+                        generator=generator,
+                        judge=judge,
+                        abort=abort,
+                        replayed=replayed.get(case.id),
+                        second_judge=second_judge,
+                        metrics=metrics,
+                    ),
+                    experiment=experiment,
+                    refs=refs,
                 ),
                 case.id,
             )
@@ -901,9 +1107,47 @@ async def main() -> None:
                 for o in outcomes
             ],
             "errors": [asdict(e) for e in errors],
+            # Where each case landed in Langfuse, so a failed score export can
+            # be re-sent from this file without re-running anything.
+            **(
+                {
+                    "langfuse": {
+                        "experiment_id": experiment.experiment_id,
+                        "run_name": experiment.run_name,
+                        "traces": {k: asdict(v) for k, v in refs.items()},
+                    }
+                }
+                if experiment is not None
+                else {}
+            ),
         }
         args.json.write_text(json.dumps(payload, indent=2, default=list))
         print(f"\nwrote {args.json}")
+
+    if exporter is not None and experiment is not None:
+        # Flush the spans first, so every score lands on a trace that exists.
+        await observability.shutdown_tracing()
+        await _export_scores(
+            exporter,
+            experiment=experiment,
+            outcomes=outcomes,
+            relevances=relevances,
+            refs=refs,
+        )
+        await exporter.aclose()
+        print()
+        print(
+            f"LANGFUSE — experiment {experiment.run_name!r} on dataset {DATASET_NAME!r}: "
+            f"{len(refs)} traces, {exporter.scores_posted} scores posted"
+        )
+        print(
+            "  Datasets > groundedness-golden-set > Runs compares runs; traces are under "
+            "environment 'sdk-experiment'. Per-case scores, not the pooled rates above."
+        )
+        if exporter.score_failures:
+            print(f"  {len(exporter.score_failures)} score(s) FAILED to post:")
+            for failure in exporter.score_failures[:10]:
+                print(f"    {failure}")
 
 
 if __name__ == "__main__":

@@ -9,10 +9,12 @@ about it that must not be "cleaned up":
   that is two different measurements averaged together, and nothing in the
   output would say so. A comparison across runs would then be meaningless,
   which is the entire purpose of this harness.
-- The default answering model in dev is `gpt-4.1-mini`. Letting it grade its
-  own output is self-preference bias measured in the literature and cheap to
-  avoid here: the judge defaults to `gpt-4.1`, a different (stronger) model on
-  the same key.
+- Letting the answering model grade its own output is self-preference bias
+  measured in the literature, and the runner refuses it (`--allow-self-judge`
+  overrides). The judge defaults to `gpt-4.1-mini`, which matched `gpt-4.1` on
+  every aggregate over byte-identical answers (README, 2026-08-22d) at a fifth
+  of the price; a decision that hinges on hallucination COUNTS is re-confirmed
+  with `--judge-model gpt-4.1`.
 
 So the judge owns a plain `AsyncOpenAI` client, pinned to one model named in
 the report header. It reads `settings.llm_base_url`/`llm_api_key` because the
@@ -42,7 +44,7 @@ from app.core.config import settings
 from app.llm.params import adapt_request
 from app.llm.structured import extract_json
 
-DEFAULT_JUDGE_MODEL = "gpt-4.1"
+DEFAULT_JUDGE_MODEL = "gpt-4.1-mini"
 
 # Characters of EXCERPT text per judge request. The catalog is up to
 # `max_context_chunks` (60) chunks -- about 26k tokens -- and gpt-4.1's

@@ -8,7 +8,10 @@ rerank, and the judge -- each carrying `langfuse.observation.model.name` and
 bill in tokens, with no second accounting path to drift from production's.
 
 Content capture is switched off for the tally: the spans live in memory for
-the whole run, and a captured catalog is ~100KB a call.
+the whole run, and a captured catalog is ~100KB a call. A run exported to
+Langfuse (`--langfuse`) keeps the configured capture setting instead, because
+inspecting what the model and the judge were shown is the point of the export;
+about 20MB for a full run.
 
 Tokens only, never dollars: prices change and live outside the code. The
 report prints the counts; whoever reads it prices them.
@@ -18,7 +21,7 @@ from __future__ import annotations
 
 import json
 from collections import defaultdict
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 
 from app.core import observability
 from app.core.config import settings
@@ -28,15 +31,21 @@ USAGE = "langfuse.observation.usage_details"
 REASONING = "langfuse.observation.metadata.reasoning_tokens"
 
 
-def install_tally():
-    """In-memory span exporter as the tracer; returns it for `summarize`."""
+def install_tally(*, processors: Sequence = (), capture_content: bool = False):
+    """In-memory span exporter as the tracer; returns it for `summarize`.
+
+    `processors` are added ahead of the tally -- the Langfuse export passes its
+    attribute stamper and its OTLP exporter here, so one provider serves both.
+    """
     from opentelemetry.sdk.trace import TracerProvider
     from opentelemetry.sdk.trace.export import SimpleSpanProcessor
     from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
-    settings.langfuse_capture_content = False
+    settings.langfuse_capture_content = capture_content
     exporter = InMemorySpanExporter()
     provider = TracerProvider()
+    for processor in processors:
+        provider.add_span_processor(processor)
     provider.add_span_processor(SimpleSpanProcessor(exporter))
     observability.install_provider(provider)
     return exporter
