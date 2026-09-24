@@ -11,7 +11,8 @@ The `-m` form is required for the same reason every other harness documents:
 `pyproject.toml` packages only `app*`, so `evals` is not installed and
 file-path invocation fails with `ModuleNotFoundError: No module named 'app'`.
 
-Flags: `--judge-model` (default `gpt-4.1`), `--concurrency` (default 1 — the
+Flags: `--judge-model` (default `gpt-4.1-mini` since 2026-09-24; `gpt-4.1` before —
+see *Measured — 2026-08-22d*), `--concurrency` (default 1 — the
 judge's TPM cap, not this, is the throughput bound; raising it mostly buys
 429s the judge then sleeps off), `--set` (default: the retrieval harness's own
 `golden_set.json`), `--limit N` for a smoke run, `--per-case`, `--json`,
@@ -82,9 +83,12 @@ Deliberately **not** on `app.llm.client.create_chat_completion`:
   that is two measurements averaged together, with nothing in the output
   saying so — which destroys the only thing this harness is for, comparing
   runs.
-- The dev answering model is `gpt-4.1-mini`. Letting it grade its own output
-  is self-preference bias, and avoiding it costs nothing: the judge defaults
-  to `gpt-4.1` on the same key.
+- Letting the answering model grade its own output is self-preference bias;
+  the runner refuses it unless `--allow-self-judge`. The judge defaults to
+  `gpt-4.1-mini` (it was `gpt-4.1` until 2026-09-24): mini matched gpt-4.1 on
+  every aggregate over identical answers (2026-08-22d below) at a fifth of the
+  price. Re-confirm a decision that hinges on hallucination counts with
+  `--judge-model gpt-4.1`.
 
 ### Rate limits — why the catalog is sliced
 
@@ -489,6 +493,49 @@ paid for — stays in every groundedness denominator.
 list, and every score. An unmeasured score is an **empty cell, never 0** — a
 zero is a measurement.
 
+### Measured — 2026-09-24 (first full relevance run)
+
+51 cases (39 positives, 12 `off_topic`), answering `gpt-5-mini` at
+`LLM_REASONING_EFFORT=low` with `CHAT_ANSWER_MAX_TOKENS=6000`, judge
+`gpt-4.1-mini` (the new default), 60-chunk budget, hybrid retrieval + Cohere
+rerank, `--metrics support,answer_relevance,context_relevance`, exported with
+`--langfuse` (experiment `758c82ffee74076a`).
+
+| group | cases | claims | support | halluc | clean | cite-P | cite-cov | answer-rel | ctx-P | ctx-P@10 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| positives (pooled) | 39 | 111 | 0.98 | 0.02 | 0.95 | 0.96 | 0.94 | 0.97 | 0.14 | 0.35 |
+| evidence reached | 35 | 98 | 0.99 | 0.01 | 0.97 | 0.97 | 0.93 | 0.96 | 0.15 | 0.38 |
+| evidence did NOT reach | 4 | 13 | 0.92 | 0.08 | 0.75 | 0.92 | 1.00 | 1.00 | 0.07 | 0.10 |
+| `off_topic` | 12 | 0 | — | — | 1.00 | — | — | — | 0.01 | 0.01 |
+
+By kind (positives): `content` (25) ctx-P 0.17 / @10 0.38, `figure` (13) 0.09 /
+0.32, `metadata` (1) 0.08 / 0.20. Abstention 0.03 on positives, 1.00 on
+negatives; contradicted claims 0.00. Two cases (`ground-control-station`,
+`fig-arc-distance-steering`) lost their context-relevance columns to a judge
+response missing excerpt verdicts; their support outcomes are counted.
+
+Tokens: `gpt-4.1-mini` 299 calls, 2.11M in / 67k out; `gpt-5-mini` 54 calls,
+1.31M in / 16k out (8.8k reasoning); Cohere 94 search units. About **$1.50**
+at list prices: judge ~$0.95, answers ~$0.36, rerank ~$0.19. Context relevance
+re-reads every catalog, so it roughly doubles the judge's input against a
+support-only run.
+
+**Reading.** The answers hold up; the context does not. Support and answer
+relevance are both near ceiling, but only **14%** of the excerpts the model is
+shown are ones a person answering would use — **35%** of the first ten. The
+2026-09-20 smoke reading's shape (below) holds at full size: the rerank puts
+the useful excerpts first, and most of the 60-chunk budget is read past.
+`off_topic` questions still carry ~45 excerpts each through the distance gate
+(542 shown, ctx-P 0.01); the prompt's refusal rule, not retrieval, is what
+keeps them clean. That makes a smaller budget, or a relevance cutoff after the
+rerank, the next thing worth measuring — this run does not measure it, and a
+cut that trims noise also risks the 4 positives where evidence already failed
+to arrive.
+
+Caveats: one judge, from the answering model's family (the runner prints a
+same-family NOTE); not confirmed against `gpt-4.1`. Relevance verdicts are
+`gpt-4.1-mini`'s, and the 2026-08-22d judge comparison covered support only.
+
 ### Judging with the Claude Code CLI
 
 `tools/claude-proxy` already turns `claude -p` into an OpenAI-compatible
@@ -577,6 +624,56 @@ answer, so claim flags re-derive exactly; judge verdicts are read back as
 recorded. Re-judging instead would have re-bought the same answers with fresh
 sampling noise on top, and any change in the numbers would have been
 inseparable from the policy change being measured.
+
+## Exporting a run to Langfuse (`--langfuse`)
+
+    ... run_eval --project-id <uuid> --judge-model gpt-4.1-mini \
+        --langfuse --langfuse-run "gpt-5-mini low, judged by gpt-4.1-mini"
+
+Opt-in, and it needs `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY`. A run then
+shows up in Langfuse as an **experiment** on the dataset
+`groundedness-golden-set`, so two runs can be compared side by side (Datasets
+→ groundedness-golden-set):
+
+- **the dataset** is the golden set, one item per case (`groundedness-<case
+  id>`), upserted at the start of every exporting run. `--limit N` uploads only
+  those N.
+- **one trace per case**, `eval.case`, with the case's embedding, retrieval,
+  rerank, answer and judge calls nested under it -- the same spans a chat turn
+  produces, so latency and cost read the way they do for `chat.turn`. Traces
+  land in the environment `sdk-experiment`, which keeps them out of the dev
+  chat numbers.
+- **per-case scores** on each trace: `support`, `hallucination`,
+  `citation_precision`, `citation_coverage`, `claims`, `clean`, `refused`,
+  `evidence_present`, plus `answer_relevance` / `context_precision` /
+  `context_precision_at_10` when `--metrics` asked for them. A rate a case has
+  no denominator for (a refusal has no checkable claim) is not posted.
+
+**The report stays the source of truth for headline numbers.** It pools
+support over claims and splits it by evidence; Langfuse averages per-case
+values, which weights a two-claim answer like a fifteen-claim one. Use Langfuse
+for drill-down and run-to-run comparison, and record measurements from the
+report.
+
+The experiment is recorded through `langfuse.experiment.*` span attributes over
+OTLP, not `POST /api/public/dataset-run-items`, which Langfuse Cloud removes on
+2026-11-16. Dataset setup runs BEFORE any model call and aborts the run if it
+fails; a score that fails to post is counted in the output, never raised.
+Scores go through the batched `/api/public/ingestion` endpoint as
+`score-create` events, not one `POST /api/public/scores` each: that endpoint
+is in Langfuse's general bucket, 30 requests a minute on Hobby, and the first
+full export (2026-09-24) lost 449 of 478 scores to 429s. Every REST call also
+retries a 429 after the `retryAfterSeconds` the server names. Score ids are
+`<experiment id>-<case id>-<name>`, so re-sending a run's scores overwrites
+rather than duplicates, and `--json` records the experiment id and each case's
+trace so a failed export can be re-sent from the dump.
+With `LANGFUSE_CAPTURE_CONTENT` on (the default) each trace carries the
+question, the excerpt catalog and the answer. A `--replay` run has no
+answering calls, so it shows judge cost and latency only.
+
+Units: a 2-case smoke run on 2026-09-24 sent 19 observations, 2 traces and 16
+scores; the full 51-case run with relevance sent 51 traces and 478 scores,
+comfortably inside the Hobby plan's 50k a month.
 
 ## Reading the output
 

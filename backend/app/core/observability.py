@@ -84,19 +84,37 @@ def langfuse_headers(public_key: str, secret_key: str) -> dict[str, str]:
     }
 
 
+def keys_configured() -> bool:
+    return bool(settings.langfuse_public_key and settings.langfuse_secret_key)
+
+
+def langfuse_span_processor() -> Any:
+    """The batching OTLP exporter to Langfuse. Shared by the app and the eval
+    harness, which installs its own provider but must ship spans the same way."""
+    from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+    from opentelemetry.sdk.trace.export import BatchSpanProcessor
+
+    exporter = OTLPSpanExporter(
+        endpoint=langfuse_otlp_endpoint(settings.langfuse_host),
+        headers=langfuse_headers(settings.langfuse_public_key, settings.langfuse_secret_key),
+        timeout=10,
+    )
+    # Small batches: a chat answer's span can carry a ~100KB prompt, and the
+    # default 512-span batch could make one request too large to ingest.
+    return BatchSpanProcessor(exporter, max_export_batch_size=64)
+
+
 def init_tracing() -> bool:
     """Build the exporter when both Langfuse keys are set. Idempotent."""
     global _provider
     if _provider is not None:
         return True
-    if not (settings.langfuse_public_key and settings.langfuse_secret_key):
+    if not keys_configured():
         log.info("tracing_disabled", reason="LANGFUSE_PUBLIC_KEY/LANGFUSE_SECRET_KEY unset")
         return False
 
-    from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
     from opentelemetry.sdk.resources import Resource
     from opentelemetry.sdk.trace import TracerProvider
-    from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
     provider = TracerProvider(
         resource=Resource.create(
@@ -106,14 +124,7 @@ def init_tracing() -> bool:
             }
         )
     )
-    exporter = OTLPSpanExporter(
-        endpoint=langfuse_otlp_endpoint(settings.langfuse_host),
-        headers=langfuse_headers(settings.langfuse_public_key, settings.langfuse_secret_key),
-        timeout=10,
-    )
-    # Small batches: a chat answer's span can carry a ~100KB prompt, and the
-    # default 512-span batch could make one request too large to ingest.
-    provider.add_span_processor(BatchSpanProcessor(exporter, max_export_batch_size=64))
+    provider.add_span_processor(langfuse_span_processor())
     _provider = provider
     log.info("tracing_enabled", host=settings.langfuse_host)
     return True
