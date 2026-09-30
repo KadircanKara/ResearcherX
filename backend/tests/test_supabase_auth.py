@@ -131,3 +131,73 @@ async def test_jwks_unreachable_with_nothing_cached_is_unavailable_not_invalid()
     priv, jwk = _keypair()
     with pytest.raises(AuthUnavailable):
         await verify_token(_token(priv), _cache(jwk, fail=True))
+
+
+async def test_header_alg_must_match_the_key_type():
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
+    priv, jwk = _keypair()
+    rsa_priv = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    claims = {
+        "sub": "u",
+        "email": "a@b.c",
+        "aud": "authenticated",
+        "iss": ISS,
+        "exp": int(time.time()) + 3600,
+    }
+    forged = jwt.encode(claims, rsa_priv, algorithm="RS256", headers={"kid": "k1"})
+    with pytest.raises(AuthError):
+        await verify_token(forged, _cache(jwk))
+
+
+async def test_alg_none_is_rejected():
+    priv, jwk = _keypair()
+    tok = jwt.encode({"sub": "u", "email": "a@b.c"}, None, algorithm="none", headers={"kid": "k1"})
+    with pytest.raises(AuthError):
+        await verify_token(tok, _cache(jwk))
+
+
+async def test_expired_ttl_refetches_a_known_kid():
+    priv, jwk = _keypair()
+    now = [1000.0]
+    calls: list[str] = []
+    cache = _cache(jwk, calls=calls, clock=lambda: now[0])
+    await verify_token(_token(priv), cache)
+    now[0] += 3601
+    await verify_token(_token(priv), cache)
+    assert len(calls) == 2
+
+
+async def test_outage_after_ttl_serves_stale_key_with_one_fetch_per_window():
+    priv, jwk = _keypair()
+    now = [1000.0]
+    calls: list[str] = []
+    state = {"fail": False}
+
+    async def fetch(url):
+        calls.append(url)
+        if state["fail"]:
+            raise RuntimeError("down")
+        return {"keys": [jwk]}
+
+    cache = JwksCache("u", fetch=fetch, clock=lambda: now[0])
+    await verify_token(_token(priv), cache)
+    state["fail"] = True
+    now[0] += 3601
+    for _ in range(3):
+        claims = await verify_token(_token(priv), cache)
+        assert claims.sub == "user-1"
+    assert len(calls) == 2  # initial + one failed attempt
+    now[0] += 61
+    await verify_token(_token(priv), cache)
+    assert len(calls) == 3
+
+
+async def test_outage_with_nothing_cached_fetches_once_per_window():
+    priv, jwk = _keypair()
+    calls: list[str] = []
+    cache = _cache(jwk, calls=calls, fail=True)
+    for _ in range(3):
+        with pytest.raises(AuthUnavailable):
+            await verify_token(_token(priv), cache)
+    assert len(calls) == 1

@@ -2,12 +2,14 @@
 
 No per-request call to Supabase: the public keys are fetched once and cached,
 refetched after an hour or when a token names a key we have not seen (key
-rotation), but at most once a minute so a stream of forged `kid`s cannot turn
-us into a proxy that hammers Supabase.
+rotation), but at most once a minute, counting failed attempts too, so neither
+a stream of forged `kid`s nor a Supabase outage turns us into a proxy that
+hammers it. Inside that window a cached (even expired) key is still served.
 
 Only asymmetric algorithms are accepted. Accepting the header's `alg` blindly
 is the classic JWT confusion bug (HS256 signed with the public key); the
-allow-list closes it.
+allow-list closes it, and the header `alg` must also be the one the token's own
+key uses.
 
 Two failure types, because the caller answers them differently: `AuthError`
 means THIS token is no good (401, the browser signs out), `AuthUnavailable`
@@ -63,20 +65,32 @@ class JwksCache:
         self._fetch = fetch
         self._clock = clock
         self._keys: dict[str, jwt.PyJWK] = {}
-        self._fetched_at: float | None = None
+        self._fetched_at: float | None = None  # last SUCCESSFUL fetch
+        self._attempted_at: float | None = None  # last fetch attempt, ok or not
+        self._last_failed = False
 
     async def key(self, kid: str) -> jwt.PyJWK:
-        age = None if self._fetched_at is None else self._clock() - self._fetched_at
-        if kid in self._keys and age is not None and age < _JWKS_TTL_S:
+        now = self._clock()
+        fresh = self._fetched_at is not None and now - self._fetched_at < _JWKS_TTL_S
+        if kid in self._keys and fresh:
             return self._keys[kid]
-        if age is not None and age < _MIN_REFRESH_S:
+        if self._attempted_at is not None and now - self._attempted_at < _MIN_REFRESH_S:
+            # Refetch window closed: never hit Supabase again this soon, whether
+            # the last attempt failed (outage) or succeeded (forged kid).
+            if kid in self._keys:
+                return self._keys[kid]  # a stale key beats refusing everyone
+            if self._last_failed:
+                raise AuthUnavailable("could not fetch signing keys")
             raise AuthError("unknown signing key")
+        self._attempted_at = now
         try:
             await self._refresh()
         except Exception as exc:
+            self._last_failed = True
             if kid in self._keys:
-                return self._keys[kid]  # a stale key beats refusing everyone
+                return self._keys[kid]
             raise AuthUnavailable("could not fetch signing keys") from exc
+        self._last_failed = False
         if kid not in self._keys:
             raise AuthError("unknown signing key")
         return self._keys[kid]
@@ -96,6 +110,8 @@ async def verify_token(token: str, cache: JwksCache) -> Claims:
     if not kid or alg not in ALGORITHMS:
         raise AuthError("unsupported token")
     key = await cache.key(kid)
+    if alg != key.algorithm_name:
+        raise AuthError("token algorithm does not match its key")
     try:
         payload = jwt.decode(
             token,
@@ -105,7 +121,7 @@ async def verify_token(token: str, cache: JwksCache) -> Claims:
             issuer=settings.supabase_issuer,
             options={"require": ["exp", "sub", "aud", "iss"]},
         )
-    except jwt.PyJWTError as exc:
+    except (jwt.PyJWTError, TypeError, ValueError) as exc:
         raise AuthError(type(exc).__name__) from exc
     email = payload.get("email")
     if not isinstance(email, str) or not email:
