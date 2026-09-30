@@ -201,3 +201,24 @@ async def test_outage_with_nothing_cached_fetches_once_per_window():
         with pytest.raises(AuthUnavailable):
             await verify_token(_token(priv), cache)
     assert len(calls) == 1
+
+
+async def test_concurrent_cold_start_callers_share_one_fetch():
+    import asyncio
+
+    priv, jwk = _keypair()
+    calls: list[str] = []
+    gate = asyncio.Event()
+
+    async def fetch(url):
+        calls.append(url)
+        await gate.wait()
+        return {"keys": [jwk]}
+
+    cache = JwksCache("u", fetch=fetch)
+    tasks = [asyncio.create_task(verify_token(_token(priv), cache)) for _ in range(2)]
+    await asyncio.sleep(0.05)  # both are inside key(); one is fetching
+    gate.set()
+    results = await asyncio.gather(*tasks)
+    assert [r.sub for r in results] == ["user-1", "user-1"]
+    assert len(calls) == 1

@@ -18,6 +18,7 @@ means we could not check any token (503, the browser must NOT sign out).
 
 from __future__ import annotations
 
+import asyncio
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -68,8 +69,18 @@ class JwksCache:
         self._fetched_at: float | None = None  # last SUCCESSFUL fetch
         self._attempted_at: float | None = None  # last fetch attempt, ok or not
         self._last_failed = False
+        self._lock: asyncio.Lock | None = None
 
     async def key(self, kid: str) -> jwt.PyJWK:
+        # Lock created lazily: asyncio primitives bind to the loop that first
+        # contends them, so not at import time. Concurrent callers queue behind
+        # the in-flight fetch and then read ITS result via the checks below.
+        if self._lock is None:
+            self._lock = asyncio.Lock()
+        async with self._lock:
+            return await self._key_locked(kid)
+
+    async def _key_locked(self, kid: str) -> jwt.PyJWK:
         now = self._clock()
         fresh = self._fetched_at is not None and now - self._fetched_at < _JWKS_TTL_S
         if kid in self._keys and fresh:
