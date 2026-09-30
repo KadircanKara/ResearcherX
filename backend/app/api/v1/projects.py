@@ -43,7 +43,7 @@ from app.schemas.project import (
 )
 from app.schemas.research import RunOut
 from app.schemas.user import UserOut
-from app.services import project_service
+from app.services import project_service, usage_service
 
 router = APIRouter(tags=["projects"])
 
@@ -206,6 +206,7 @@ async def create_paper(
         raise HTTPException(status_code=422, detail="Manual papers are not available.")
     if data.source == PaperSource.LINK and not feature_enabled("paper_url"):
         raise HTTPException(status_code=422, detail="Link papers are not available.")
+    await usage_service.enforce_paper_slot(db, user)
     paper = Paper(
         project_id=project_id,
         title=data.title,
@@ -353,6 +354,25 @@ async def get_paper_chunk(
     )
 
 
+async def _read_capped_body(request: Request) -> bytes:
+    """The request body, refused with 413 past `paper_pdf_max_bytes`.
+
+    Streamed against a running counter rather than `await request.body()`:
+    a client can lie in Content-Length, or send chunked with none at all.
+    """
+    cap = settings.paper_pdf_max_bytes
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in request.stream():
+        total += len(chunk)
+        if total > cap:
+            raise HTTPException(
+                status_code=413, detail=f"{total} bytes exceeds the {cap} byte limit"
+            )
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 @router.post(
     "/projects/{project_id}/papers/suggest-title",
     response_model=SuggestMetaResponse,
@@ -365,7 +385,8 @@ async def suggest_paper_title(
 ) -> SuggestMetaResponse:
     """Extract title, abstract, and body from PDF bytes via LLM. Fails open."""
     await project_service.require_member(db, project_id, user.id, "member")
-    pdf_bytes = await request.body()
+    await usage_service.enforce_title_assist(db, user)
+    pdf_bytes = await _read_capped_body(request)
     if not pdf_bytes:
         return SuggestMetaResponse(title=None, abstract=None, body=None)
     from app.services.title_extraction_service import extract_meta_from_pdf
@@ -419,20 +440,7 @@ async def ingest_paper(
     paper = await db.get(Paper, paper_id)
     if paper is None or paper.project_id != project_id:
         raise HTTPException(status_code=404, detail="Paper not found")
-    # Streamed against a running counter rather than `await request.body()`:
-    # a client can lie in Content-Length, or send chunked with none at all,
-    # and this is now a STORAGE commitment rather than a transient buffer.
-    cap = settings.paper_pdf_max_bytes
-    chunks: list[bytes] = []
-    total = 0
-    async for chunk in request.stream():
-        total += len(chunk)
-        if total > cap:
-            raise HTTPException(
-                status_code=413, detail=f"{total} bytes exceeds the {cap} byte limit"
-            )
-        chunks.append(chunk)
-    pdf_bytes = b"".join(chunks)
+    pdf_bytes = await _read_capped_body(request)
 
     from app.services.paper_ingest_service import ingest
 

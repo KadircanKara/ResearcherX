@@ -364,6 +364,20 @@ class ChatMessage(Base):
     )
 
 
+class UsageEvent(Base):
+    """One metered action that leaves no other row behind (a title
+    suggestion). Papers and chat turns are counted from their own tables."""
+
+    __tablename__ = "usage_events"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE", name="fk_usage_events_user_id"), index=True
+    )
+    kind: Mapped[str] = mapped_column(String(32))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, index=True)
+
+
 class PaperFile(Base):
     """The uploaded PDF itself, kept so a user can get their own file back.
 
