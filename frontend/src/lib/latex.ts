@@ -1,4 +1,5 @@
-import { API_BASE, getDevUserId } from "./api";
+import { API_BASE, authHeaders, getDevUserId, onAuthFailure } from "./api";
+import { authEnabled } from "./supabase";
 import { saveBlob } from "./download";
 
 export type LatexEngine = "pdflatex" | "xelatex";
@@ -161,13 +162,11 @@ export async function fetchPdfBytes(
   documentId: string,
   hash: string
 ): Promise<Uint8Array> {
-  const headers: Record<string, string> = {};
-  const devUserId = getDevUserId();
-  if (devUserId) headers["X-Dev-User-Id"] = devUserId;
   const r = await fetch(
     `${API_BASE}/v1/projects/${projectId}/latex/${documentId}/pdf?hash=${encodeURIComponent(hash)}`,
-    { headers, cache: "no-store" }
+    { headers: await authHeaders(), cache: "no-store" }
   );
+  await onAuthFailure(r.status);
   if (r.status === 404) throw new PdfNotFoundError();
   if (!r.ok) throw new Error(`GET pdf -> ${r.status}`);
   return new Uint8Array(await r.arrayBuffer());
@@ -334,11 +333,20 @@ export class NameCollisionError extends Error {
   }
 }
 
+/**
+ * Per-request headers (content type). Identity is NOT added here: it is async
+ * (the bearer token comes from the Supabase session), so every fetch below adds
+ * `authHeaders()` itself -- `send`/`sendVoid` for JSON routes, inline for blobs.
+ */
 function headers(extra: Record<string, string> = {}): Record<string, string> {
-  const h = { ...extra };
-  const devUserId = getDevUserId();
-  if (devUserId) h["X-Dev-User-Id"] = devUserId;
-  return h;
+  return { ...extra };
+}
+
+async function withIdentity(init: RequestInit): Promise<RequestInit> {
+  return {
+    ...init,
+    headers: { ...(init.headers as Record<string, string> | undefined), ...(await authHeaders()) },
+  };
 }
 
 /** Tree-relative, always escaped. Never interpolated into the route. */
@@ -347,6 +355,7 @@ function fileUrl(projectId: string, documentId: string, path: string): string {
 }
 
 async function raise(r: Response): Promise<never> {
+  await onAuthFailure(r.status);
   let detail: string | null = null;
   try {
     const body = await r.json();
@@ -375,14 +384,14 @@ async function raise(r: Response): Promise<never> {
 }
 
 async function send<T>(url: string, init: RequestInit): Promise<T> {
-  const r = await fetch(url, { ...init, cache: "no-store" });
+  const r = await fetch(url, { ...(await withIdentity(init)), cache: "no-store" });
   if (!r.ok) await raise(r);
   return (await r.json()) as T;
 }
 
 /** For the one route that answers 204: no body to parse, same error rule. */
 async function sendVoid(url: string, init: RequestInit): Promise<void> {
-  const r = await fetch(url, { ...init, cache: "no-store" });
+  const r = await fetch(url, { ...(await withIdentity(init)), cache: "no-store" });
   if (!r.ok) await raise(r);
 }
 
@@ -416,7 +425,7 @@ export async function readBinaryFile(
   path: string
 ): Promise<Blob> {
   const r = await fetch(fileUrl(projectId, documentId, path), {
-    headers: headers(),
+    headers: { ...headers(), ...(await authHeaders()) },
     cache: "no-store",
   });
   if (!r.ok) await raise(r);
@@ -558,8 +567,8 @@ export async function commitImport(
  *
  * Caveat recorded for whoever wires it: in dev the identity travels in an
  * `X-Dev-User-Id` HEADER, which a plain link cannot send. Task 8 therefore
- * fetches the blob when `getDevUserId()` is set and links directly
- * otherwise.
+ * fetches the blob when `getDevUserId()` is set or Supabase auth is on, and
+ * links directly otherwise.
  */
 export function exportUrl(projectId: string, documentId: string): string {
   return `${API_BASE}/v1/projects/${projectId}/latex/${documentId}/export`;
@@ -567,7 +576,7 @@ export function exportUrl(projectId: string, documentId: string): string {
 
 export async function fetchExport(projectId: string, documentId: string): Promise<Blob> {
   const r = await fetch(exportUrl(projectId, documentId), {
-    headers: headers(),
+    headers: { ...headers(), ...(await authHeaders()) },
     cache: "no-store",
   });
   if (!r.ok) await raise(r);
@@ -592,7 +601,7 @@ export async function downloadExport(
   documentId: string,
   name: string
 ): Promise<void> {
-  if (!getDevUserId()) {
+  if (!getDevUserId() && !authEnabled) {
     window.location.href = exportUrl(projectId, documentId);
     return;
   }

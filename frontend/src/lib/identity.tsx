@@ -1,6 +1,7 @@
 "use client";
 import { createContext, useContext, useEffect, useState } from "react";
 import { apiGet, setDevUserId } from "./api";
+import { authEnabled } from "./supabase";
 import type { User } from "./types";
 
 type Ctx = { me: User | null; users: User[]; actAs: (id: string) => void };
@@ -13,6 +14,11 @@ export function IdentityProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => { setActingId(localStorage.getItem("devUserId")); }, []);
   useEffect(() => {
+    if (authEnabled) {
+      // Real accounts: no teammate switcher, and /users is only the caller.
+      apiGet<User>("/me").then((u) => { setMe(u); setUsers([u]); }).catch(() => {});
+      return;
+    }
     setDevUserId(actingId);
     apiGet<User[]>("/users").then(setUsers).catch(() => {});
     apiGet<User>("/me").then(setMe).catch(() => {});
@@ -22,6 +28,7 @@ export function IdentityProvider({ children }: { children: React.ReactNode }) {
   // is explicitly selected. Persists to localStorage so subsequent page loads
   // start with a valid identity and don't hit 401 on project-scoped requests.
   useEffect(() => {
+    if (authEnabled) return;
     if (actingId === null && users.length > 0) {
       const defaultId = users[0].id;
       localStorage.setItem("devUserId", defaultId);

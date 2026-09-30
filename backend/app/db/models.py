@@ -88,6 +88,11 @@ class User(Base):
     name: Mapped[str] = mapped_column(String(120))
     # Auth deferred: nullable now so the auth phase is purely additive.
     password_hash: Mapped[str | None] = mapped_column(String(255), default=None)
+    # Supabase Auth subject (`sub` claim) when AUTH_MODE=supabase. Unique: one
+    # Supabase user is one of ours. NULL for seeded dev users.
+    auth_subject: Mapped[str | None] = mapped_column(
+        String(64), unique=True, index=True, default=None
+    )
     avatar_color: Mapped[str] = mapped_column(String(9), default="#2D3FE0")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 

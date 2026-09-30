@@ -168,3 +168,34 @@ def test_an_explicit_judge_key_is_used_as_given():
         judge_api_key="sk-or",
     )
     assert s.resolved_judge_api_key == "sk-or"
+
+
+def test_supabase_mode_requires_url():
+    with pytest.raises(ValidationError, match="SUPABASE_URL"):
+        Settings(auth_mode="supabase", supabase_url="")
+
+
+def test_supabase_urls_are_derived_from_the_project_url():
+    s = Settings(auth_mode="supabase", supabase_url="https://abc.supabase.co/")
+    assert s.supabase_issuer == "https://abc.supabase.co/auth/v1"
+    assert s.supabase_jwks_url == "https://abc.supabase.co/auth/v1/.well-known/jwks.json"
+
+
+def test_prod_with_require_auth_refuses_dev_auth(monkeypatch):
+    _set_valid_prod(monkeypatch)
+    monkeypatch.setattr(settings, "require_auth", True)
+    monkeypatch.setattr(settings, "auth_mode", "dev")
+    with pytest.raises(RuntimeError, match="AUTH_MODE"):
+        settings.validate_for_environment()
+
+
+def test_prod_without_require_auth_still_boots_in_dev_auth(monkeypatch):
+    _set_valid_prod(monkeypatch)
+    monkeypatch.setattr(settings, "require_auth", False)
+    monkeypatch.setattr(settings, "auth_mode", "dev")
+    settings.validate_for_environment()  # the local prod smoke test keeps working
+
+
+def test_a_negative_demo_max_users_is_refused():
+    with pytest.raises(ValidationError):
+        Settings(demo_max_users=-1)

@@ -36,6 +36,9 @@ dependencies = [
   # to Langfuse, which ingests OTLP natively, so no Langfuse SDK.
   "opentelemetry-sdk~=1.44",
   "opentelemetry-exporter-otlp-proto-http~=1.44",
+  # Supabase Auth access tokens are verified locally against the project's
+  # JWKS (app/core/supabase_auth.py); [crypto] brings the ES256/RS256 support.
+  "PyJWT[crypto]>=2.9",
 ]
 
 [project.optional-dependencies]

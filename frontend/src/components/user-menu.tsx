@@ -1,7 +1,8 @@
 "use client";
 import { useEffect, useState } from "react";
-import { Check } from "lucide-react";
+import { Check, LogOut } from "lucide-react";
 import { useIdentity } from "@/lib/identity";
+import { authEnabled, supabase } from "@/lib/supabase";
 import { cn } from "@/lib/utils";
 import {
   DropdownMenu,
@@ -55,7 +56,7 @@ export function UserMenu({
   return (
     <DropdownMenu>
       <DropdownMenuTrigger
-        aria-label="Switch user"
+        aria-label={authEnabled ? "Account" : "Switch user"}
         className={cn(
           "text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring",
           className
@@ -68,18 +69,25 @@ export function UserMenu({
         <div className="px-2 pt-1.5 text-sm font-semibold">{me.name}</div>
         <div className="px-2 pb-1.5 text-xs text-muted-foreground">{me.email}</div>
         <DropdownMenuSeparator />
-        <DropdownMenuGroup>
-          <DropdownMenuLabel className="text-xs font-medium text-muted-foreground">
-            Acting as
-          </DropdownMenuLabel>
-          {users.map((u, i) => (
-            <DropdownMenuItem key={u.id} onClick={() => handleActAs(u.id)}>
-              <InitialsAvatar person={u} size={20} />
-              <span className="flex-1">{i === 0 ? `You (${u.name})` : u.name}</span>
-              {u.id === currentActingId && <Check className="text-primary" />}
-            </DropdownMenuItem>
-          ))}
-        </DropdownMenuGroup>
+        {authEnabled ? (
+          <DropdownMenuItem onClick={() => void supabase().auth.signOut()}>
+            <LogOut />
+            <span>Sign out</span>
+          </DropdownMenuItem>
+        ) : (
+          <DropdownMenuGroup>
+            <DropdownMenuLabel className="text-xs font-medium text-muted-foreground">
+              Acting as
+            </DropdownMenuLabel>
+            {users.map((u, i) => (
+              <DropdownMenuItem key={u.id} onClick={() => handleActAs(u.id)}>
+                <InitialsAvatar person={u} size={20} />
+                <span className="flex-1">{i === 0 ? `You (${u.name})` : u.name}</span>
+                {u.id === currentActingId && <Check className="text-primary" />}
+              </DropdownMenuItem>
+            ))}
+          </DropdownMenuGroup>
+        )}
       </DropdownMenuContent>
     </DropdownMenu>
   );
