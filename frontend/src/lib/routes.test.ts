@@ -38,14 +38,10 @@ describe("projectTab", () => {
 
   it("falls back to chat for the bare project path", () => {
     expect(projectTab(routes.project("p1"), "p1")).toBe("chat");
+    expect(projectTab("/admin/research/p1/graph", "p1")).toBe("chat"); // no such tab
   });
 
   it("matches whole segments, not prefixes", () => {
     expect(projectTab(`${routes.papers("p1")}-archive`, "p1")).toBe("chat");
   });
-});
-
-it("only chat and papers are project tabs", () => {
-  expect(projectTab("/admin/research/p1/papers", "p1")).toBe("papers");
-  expect(projectTab("/admin/research/p1/graph", "p1")).toBe("chat"); // no such tab: fallback
 });

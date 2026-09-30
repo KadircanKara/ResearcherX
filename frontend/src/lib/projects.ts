@@ -1,6 +1,6 @@
 import { apiGet, apiSend, authHeaders, onAuthFailure, API_BASE } from "./api";
 import { ApiError, detailOf } from "./api-error";
-import type { Project, ProjectDetail, Run, Paper, PaperSource } from "./types";
+import type { Project, ProjectDetail, Paper, PaperSource } from "./types";
 
 export async function listProjects(): Promise<Project[]> {
   return apiGet<Project[]>("/projects");
@@ -35,14 +35,6 @@ export async function updateProject(
 
 export async function deleteProject(id: string): Promise<void> {
   await apiSend<void>("DELETE", `/projects/${id}`);
-}
-
-export async function listProjectRuns(
-  projectId: string,
-  limit = 20,
-  offset = 0,
-): Promise<Run[]> {
-  return apiGet<Run[]>(`/projects/${projectId}/runs?limit=${limit}&offset=${offset}`);
 }
 
 export async function listPapers(projectId: string): Promise<Paper[]> {
