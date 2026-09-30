@@ -126,7 +126,7 @@ export function Hero() {
               // eslint-disable-next-line @next/next/no-img-element
               <img
                 src={heroPoster(theme, tier)}
-                alt="ResearcherX showing a project's paper library"
+                alt="ResearcherX answering a question about drone-swarm papers with numbered citations, one citation opened to its source passage"
                 className="absolute inset-0 h-full w-full object-cover"
               />
             )}

@@ -15,6 +15,13 @@
  * write a clip whose refusal is not the app's refusal or whose scoped answer
  * cites a paper outside its two mentions.
  *
+ * The default PROJECT_ID is "UAV Swarm Search", a project in the dev database
+ * kept for recording: 13 papers, every one added the way the demo adds papers
+ * (`source: "upload"`, then the PDF posted to `.../ingest`), so no "Linked"
+ * source label appears in frame. Re-records reuse it; if the database is ever
+ * rebuilt, recreate it the same way and point PROJECT_ID at it. The desktop
+ * sidebar is recorded collapsed to its icon rail.
+ *
  * Requirements: the dev stack up (`make up`) with a working LLM behind it,
  * Google Chrome installed, ffmpeg on PATH.
  *
@@ -43,11 +50,13 @@ import { fileURLToPath } from "node:url";
 
 const APP = process.env.APP_URL ?? "http://localhost:3000";
 const API = process.env.API_URL ?? "http://localhost:8000";
-const PROJECT = process.env.PROJECT_ID ?? "fa2ab869-6b13-4b31-be5e-ff0c22652922";
+// "UAV Swarm Search": a project kept for recording (see the header comment).
+const PROJECT = process.env.PROJECT_ID ?? "e3decc1e-5af1-4afa-be61-d0da49a71c30";
 const QUESTION =
   process.env.QUESTION ?? "What reward function do the multi-UAV search agents learn from?";
-// Unmistakably outside a multi-UAV library: the answer must be the refusal.
-const OFF_TOPIC = process.env.OFF_TOPIC ?? "Who won the 2018 FIFA World Cup?";
+// In the library's own domain, but a detail none of its papers reports: the
+// answer must be the refusal (5 of 5 probes, 2026-09-30).
+const OFF_TOPIC = process.env.OFF_TOPIC ?? "What battery chemistry do the UAVs in these papers use?";
 const REFUSAL = "The ingested documents do not cover this.";
 // Typed after `@` to filter the mention list; each must match one title first.
 const MENTION_A = process.env.MENTION_A ?? "Evolutionary";
@@ -69,7 +78,7 @@ const FORMATS = {
     viewport: { width: 1280, height: 800 },
     dpr: 2,
     outputs: [
-      { tier: "xl", width: 1920, crf: 24 },
+      { tier: "xl", width: 1920, crf: 26 },
       { tier: "md", width: 1280, crf: 26 },
     ],
     poster: (theme) => `hero-${theme}-poster.jpg`,
@@ -93,10 +102,14 @@ const FRAME_DIR = path.resolve(here, "../.hero-frames");
 // researcher's projects; hidden so the clip shows a believable library.
 const HIDDEN_PROJECTS = String.raw`Task\d|curl export|PerfProbe|Browser Verify`;
 
-/** Runs in the page before any app script: the theme, a fake cursor, no dev chrome. */
+/**
+ * Runs in the page before any app script: the theme, the sidebar collapsed to
+ * its icon rail, a fake cursor, no dev chrome.
+ */
 function pageSetup({ hiddenProjects, theme }) {
   try {
     localStorage.setItem("theme", theme);
+    localStorage.setItem("rx.sidebar.collapsed", "1");
   } catch {}
   // Passed as a string: a RegExp does not survive serialisation into the page.
   const hide = new RegExp(hiddenProjects, "i");
