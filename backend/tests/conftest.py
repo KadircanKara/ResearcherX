@@ -34,6 +34,12 @@ os.environ["JUDGE_API_KEY"] = ""
 # Tests that assert on spans install an in-memory provider themselves.
 os.environ["LANGFUSE_PUBLIC_KEY"] = ""
 os.environ["LANGFUSE_SECRET_KEY"] = ""
+# Auth stays on the dev seam under test; a dev .env pointing at Supabase must
+# not route identity through the network.
+os.environ["AUTH_MODE"] = "dev"
+os.environ["SUPABASE_URL"] = ""
+os.environ["REQUIRE_AUTH"] = "false"
+os.environ["DEMO_MAX_USERS"] = "0"
 
 import asyncio  # noqa: E402
 

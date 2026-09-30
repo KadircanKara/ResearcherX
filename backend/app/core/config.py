@@ -1,4 +1,4 @@
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
@@ -347,6 +347,19 @@ class Settings(BaseSettings):
     # cap; the owner API key (X-API-Key header) bypasses both. The cap is
     # the real DoS backstop for the Groq quota.
     owner_api_key: str | None = None
+    # Authentication. "dev" is the seeded-user seam (X-Dev-User-Id in
+    # ENVIRONMENT=dev); "supabase" verifies Supabase Auth access tokens against
+    # the project's JWKS (app/core/supabase_auth.py). The public demo runs
+    # "supabase"; everything else keeps "dev".
+    auth_mode: Literal["dev", "supabase"] = "dev"
+    supabase_url: str = ""
+    # Opt-in prod guard: when true, ENVIRONMENT=prod refuses AUTH_MODE=dev.
+    # Opt-in so the local prod smoke test (no Supabase) still boots.
+    require_auth: bool = False
+    # Backstop on account creation in supabase mode; 0 = no cap. Signups are
+    # off in the demo's Supabase project, so this only fires if they are
+    # switched on by mistake.
+    demo_max_users: int = 0
     rate_limit_runs: str = "3/hour;10/day"  # per-IP, POST /v1/research
     rate_limit_reads: str = "120/minute"  # per-IP, GETs + SSE connects
     # Groq free tier allows 100k tokens/day and a measured full run costs
@@ -486,6 +499,12 @@ class Settings(BaseSettings):
         return v
 
     @model_validator(mode="after")
+    def _check_auth_mode(self) -> "Settings":
+        if self.auth_mode == "supabase" and not self.supabase_url:
+            raise ValueError("AUTH_MODE=supabase requires SUPABASE_URL")
+        return self
+
+    @model_validator(mode="after")
     def _check_intra_paper_relationship(self) -> "Settings":
         """Guards for the single-paper scope constants (see the "single-paper
         scope" block above), and now also for the hybrid retrieval constants
@@ -577,6 +596,8 @@ class Settings(BaseSettings):
                 "EMBEDDING_BASE_URL points at a dev host "
                 "(set EMBEDDING_BASE_URL to a hosted embedding endpoint)"
             )
+        if self.require_auth and self.auth_mode != "supabase":
+            problems.append("REQUIRE_AUTH is set but AUTH_MODE is not 'supabase'")
         if problems:
             raise RuntimeError(f"refusing to start with ENVIRONMENT=prod: {'; '.join(problems)}")
 
@@ -584,6 +605,14 @@ class Settings(BaseSettings):
     def resolved_embedding_api_key(self) -> str:
         """Use dedicated embedding key or fall back to the LLM key."""
         return self.embedding_api_key or self.llm_api_key
+
+    @property
+    def supabase_issuer(self) -> str:
+        return self.supabase_url.rstrip("/") + "/auth/v1"
+
+    @property
+    def supabase_jwks_url(self) -> str:
+        return self.supabase_issuer + "/.well-known/jwks.json"
 
     @property
     def resolved_judge_base_url(self) -> str:
