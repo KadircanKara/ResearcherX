@@ -2,8 +2,10 @@
 
 Every `enforce_*` runs BEFORE the paid action and raises `LimitExceeded`,
 which `main.py` turns into a 429 carrying the fixed message. Chat turns are
-counted in projects the user OWNS; papers likewise, across all of them, so a
-fresh project never resets the paper cap.
+metered as usage_events rows (charged to the acting user); papers are counted
+in projects the user OWNS, across all of them, so a fresh project never resets
+the paper cap. Papers are therefore charged to the project owner, which equals
+the actor only while FEATURE_SHARING is off (the demo setting).
 """
 
 from datetime import datetime, timezone
@@ -12,10 +14,11 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
-from app.db.models import ChatConversation, ChatMessage, Paper, Project, UsageEvent, User
+from app.db.models import Paper, Project, UsageEvent, User
 from app.services.usage_limits import day_start, is_over
 
 TITLE_ASSIST = "title_assist"
+CHAT_TURN = "chat_turn"
 
 
 class LimitExceeded(Exception):
@@ -38,15 +41,13 @@ async def papers_owned(db: AsyncSession, user_id: str) -> int:
 
 
 async def chat_turns_since(db: AsyncSession, since: datetime, user_id: str | None = None) -> int:
-    q = select(func.count(ChatMessage.id)).where(
-        ChatMessage.role == "user", ChatMessage.created_at >= since
+    # Counted from usage_events, not chat_messages: deleting a conversation
+    # cascades its messages away and would otherwise refund the turns.
+    q = select(func.count(UsageEvent.id)).where(
+        UsageEvent.kind == CHAT_TURN, UsageEvent.created_at >= since
     )
     if user_id is not None:
-        q = (
-            q.join(ChatConversation, ChatConversation.id == ChatMessage.conversation_id)
-            .join(Project, Project.id == ChatConversation.project_id)
-            .where(Project.owner_id == user_id)
-        )
+        q = q.where(UsageEvent.user_id == user_id)
     return int(await db.scalar(q) or 0)
 
 
@@ -79,6 +80,9 @@ async def enforce_chat_turn(db: AsyncSession, user: User, now: datetime | None =
     limit = settings.user_chat_turns_per_day
     if limit and is_over(await chat_turns_since(db, since, user.id), limit):
         raise LimitExceeded(f"Daily chat limit reached ({limit}). Resets at 00:00 UTC.")
+    # Only after both checks pass, so a refused turn leaves no row of any kind.
+    db.add(UsageEvent(user_id=user.id, kind=CHAT_TURN, created_at=_now(now)))
+    await db.commit()
 
 
 async def enforce_title_assist(db: AsyncSession, user: User, now: datetime | None = None) -> None:

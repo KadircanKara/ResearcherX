@@ -5,9 +5,18 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import select
+from sqlalchemy import func, select
 
-from app.db.models import ChatConversation, ChatMessage, Paper, Project, ProjectMember, User
+from app.db.models import (
+    ChatConversation,
+    ChatMessage,
+    Paper,
+    Project,
+    ProjectMember,
+    UsageEvent,
+    User,
+)
+from app.services.usage_service import CHAT_TURN
 from app.db.seed import seed_users
 
 
@@ -115,35 +124,78 @@ async def test_suggest_title_refuses_oversize_body(client, project, limits):
     assert r.status_code == 413
 
 
-async def _conversation_with_turns(db, project, n, when):
+async def _conversation(db, project):
     conv = ChatConversation(project_id=project.id, title="c", created_by=project.owner_id)
     db.add(conv)
-    await db.flush()
-    for _ in range(n):
-        db.add(ChatMessage(conversation_id=conv.id, role="user", content="q", created_at=when))
     await db.commit()
     return conv
 
 
+async def _seed_turns(db, user, n, when):
+    for _ in range(n):
+        db.add(UsageEvent(user_id=user.id, kind=CHAT_TURN, created_at=when))
+    await db.commit()
+
+
+async def _count(db, model):
+    return int(await db.scalar(select(func.count()).select_from(model)) or 0)
+
+
 async def test_the_101st_turn_today_is_refused_and_yesterday_does_not_count(
-    client, db_session, project, limits
+    client, db_session, you, project, limits
 ):
     limits(user_chat_turns_per_day=100)
     now = datetime.now(timezone.utc)
-    conv = await _conversation_with_turns(db_session, project, 100, now)
-    await _conversation_with_turns(db_session, project, 500, now - timedelta(days=1, hours=1))
+    conv = await _conversation(db_session, project)
+    await _seed_turns(db_session, you, 100, now)
+    await _seed_turns(db_session, you, 500, now - timedelta(days=1, hours=1))
+    msgs, events = await _count(db_session, ChatMessage), await _count(db_session, UsageEvent)
     r = await client.post(
         f"/v1/projects/{project.id}/conversations/{conv.id}/messages", json={"content": "hi"}
     )
     assert r.status_code == 429
     assert r.json() == {"detail": "Daily chat limit reached (100). Resets at 00:00 UTC."}
+    # A refused turn leaves no message and no metering event behind.
+    assert await _count(db_session, ChatMessage) == msgs
+    assert await _count(db_session, UsageEvent) == events
 
 
-async def test_the_global_backstop_refuses_everyone(client, db_session, project, limits):
-    limits(global_chat_turns_per_day=3)
-    conv = await _conversation_with_turns(db_session, project, 3, datetime.now(timezone.utc))
+async def test_deleting_the_conversation_does_not_refund_turns(
+    client, db_session, you, project, limits
+):
+    limits(user_chat_turns_per_day=2)
+    conv = await _conversation(db_session, project)
+    await _seed_turns(db_session, you, 2, datetime.now(timezone.utc))
+    d = await client.delete(f"/v1/projects/{project.id}/conversations/{conv.id}")
+    assert d.status_code in (200, 204)
+    fresh = await _conversation(db_session, project)
     r = await client.post(
-        f"/v1/projects/{project.id}/conversations/{conv.id}/messages", json={"content": "hi"}
+        f"/v1/projects/{project.id}/conversations/{fresh.id}/messages", json={"content": "hi"}
+    )
+    assert r.status_code == 429
+
+
+async def test_the_global_backstop_refuses_everyone_and_survives_deletes(
+    client, db_session, you, project, limits
+):
+    limits(global_chat_turns_per_day=3)
+    conv = await _conversation(db_session, project)
+    await _seed_turns(db_session, you, 3, datetime.now(timezone.utc))
+    await client.delete(f"/v1/projects/{project.id}/conversations/{conv.id}")
+    fresh = await _conversation(db_session, project)
+    r = await client.post(
+        f"/v1/projects/{project.id}/conversations/{fresh.id}/messages", json={"content": "hi"}
     )
     assert r.status_code == 429
     assert r.json() == {"detail": "The demo is at capacity for today. Try again after 00:00 UTC."}
+
+
+async def test_suggest_title_refuses_chunked_body_without_content_length(client, project, limits):
+    limits(paper_pdf_max_bytes=10)
+
+    async def body():
+        for _ in range(3):
+            yield b"xxxx"
+
+    r = await client.post(f"/v1/projects/{project.id}/papers/suggest-title", content=body())
+    assert r.status_code == 413
