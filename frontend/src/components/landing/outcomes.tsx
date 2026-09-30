@@ -1,6 +1,6 @@
 /**
  * The trust promise in the reader's terms, and the machinery behind a
- * disclosure for whoever wants it. The four steps above already demonstrate
+ * disclosure for whoever wants it. The three steps above already demonstrate
  * each promise, so this section states them once rather than as a grid.
  */
 export function Outcomes() {

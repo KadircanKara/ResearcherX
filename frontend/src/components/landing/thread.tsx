@@ -14,7 +14,7 @@ import {
 } from "@/lib/landing-demo";
 
 /**
- * One question followed from the library to the manuscript, in four steps.
+ * One question followed from the library to a cited answer, in three steps.
  * The same paper is tinted in every step (`.trace`), and each step pulses it
  * once as it scrolls in -- the page's single authored motion.
  */

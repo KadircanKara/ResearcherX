@@ -1,10 +1,9 @@
 /**
- * The example the landing page follows from library to manuscript.
+ * The example the landing page follows from library to cited answer.
  *
  * Every paper here is FICTIONAL, and the page labels it so: nothing is
  * attributed to a real publication. One paper -- FOLLOWED_PAPER -- appears in
- * all four steps (library row, answer citation, opened passage, \cite in the
- * LaTeX source), which is the thread the page is built on.
+ * all three steps (library row, answer citation, opened passage), which is the thread the page is built on.
  *
  * Locators go through the app's own formatter, and the refusal is the chat's
  * fixed sentence, so the demo reads exactly the way the product does.

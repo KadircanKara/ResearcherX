@@ -63,8 +63,7 @@ export function Hero() {
         </h1>
         <p className="text-site-muted mx-auto mt-6 max-w-2xl text-[1.0625rem] leading-relaxed sm:text-xl">
           Upload the papers you are reading and ask across them. Every sentence of the
-          answer cites the passage it came from, and your paper gets written in the same
-          project.
+          answer cites the passage it came from.
         </p>
         <div className="mt-9 flex flex-col items-stretch justify-center gap-3 sm:flex-row sm:items-center">
           <a

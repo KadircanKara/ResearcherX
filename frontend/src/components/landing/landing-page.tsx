@@ -11,7 +11,7 @@ import { LandingThemeRoot } from "./landing-theme";
  * The marketing page at "/". Its world is the research-assistant category
  * standard (benchmarks: Elicit, Perplexity), in the app's own blue and Inter,
  * following the visitor's system theme unless they pick one with the nav toggle. The story is one question followed
- * from library to manuscript.
+ * from library to cited answer.
  */
 export function LandingPage() {
   return (
