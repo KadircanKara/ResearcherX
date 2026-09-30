@@ -2,30 +2,38 @@
 /**
  * Records the landing page's hero video from the REAL app.
  *
- * The clip shows the product loop the landing page sells: a paper library,
- * a question answered with sentence-level citations, a citation opened to
- * its source passage, and the manuscript compiled in the LaTeX editor. Every
+ * The clip is one conversation with three answers, after a glimpse of the
+ * paper library: a question answered with sentence-level citations and one
+ * citation opened to its source passage; a question the library cannot
+ * answer, refused rather than answered from general knowledge; and a
+ * comparison scoped to two papers picked with the composer's real `@`
+ * mention list, its scope line on screen while the answer is written. Every
  * frame is the running app on real data, never a mock -- so when the UI
  * changes, re-run this and the hero stays true.
  *
- * Requirements: the dev stack up (`make up`), the Claude CLI proxy up
- * (`make claude-proxy`), Google Chrome installed, ffmpeg on PATH.
+ * Before encoding, the script reads the conversation back and refuses to
+ * write a clip whose refusal is not the app's refusal or whose scoped answer
+ * cites a paper outside its two mentions.
+ *
+ * Requirements: the dev stack up (`make up`) with a working LLM behind it,
+ * Google Chrome installed, ffmpeg on PATH.
  *
  *   node scripts/record-hero.mjs
  *
- * Env overrides: APP_URL, API_URL, PROJECT_ID, LATEX_DOC_ID, QUESTION,
- * FORMATS (default "desktop,phone"), and
+ * Env overrides: APP_URL, API_URL, PROJECT_ID, QUESTION, OFF_TOPIC,
+ * MENTION_A / MENTION_B (the text typed after `@` to find each paper),
+ * SCOPED_QUESTION, FORMATS (default "desktop,phone"), and
  * THEMES (default "dark,light"): one full recording per theme, so the
  * landing page can play the clip that matches the visitor's theme.
  *
  * How it works: Chrome's DevTools screencast delivers a frame on every
  * repaint with its timestamp. Each frame is stamped with the playback SPEED
- * in force when it arrived, so slow waits (page loads, a streaming answer,
- * a compile) play back fast while the moments that matter play in real
+ * in force when it arrived, so slow waits (page loads, streaming answers)
+ * play back fast while the moments that matter play in real
  * time. Frames closer than 1/30 s of playback time are dropped, then ffmpeg
  * lays the kept frames out on that remapped timeline and encodes three
- * sizes. The chat turn it asks is deleted again afterwards, so recording
- * leaves no conversation behind.
+ * sizes. Every conversation the recording creates is deleted again
+ * afterwards, so recording leaves no conversation behind.
  */
 import { chromium } from "playwright-core";
 import { execFileSync } from "node:child_process";
@@ -36,9 +44,16 @@ import { fileURLToPath } from "node:url";
 const APP = process.env.APP_URL ?? "http://localhost:3000";
 const API = process.env.API_URL ?? "http://localhost:8000";
 const PROJECT = process.env.PROJECT_ID ?? "fa2ab869-6b13-4b31-be5e-ff0c22652922";
-const LATEX_DOC = process.env.LATEX_DOC_ID ?? "8940cadd-73d4-47f6-8f80-b666857737a1";
 const QUESTION =
   process.env.QUESTION ?? "What reward function do the multi-UAV search agents learn from?";
+// Unmistakably outside a multi-UAV library: the answer must be the refusal.
+const OFF_TOPIC = process.env.OFF_TOPIC ?? "Who won the 2018 FIFA World Cup?";
+const REFUSAL = "The ingested documents do not cover this.";
+// Typed after `@` to filter the mention list; each must match one title first.
+const MENTION_A = process.env.MENTION_A ?? "Evolutionary";
+const MENTION_B = process.env.MENTION_B ?? "Pursuit";
+const SCOPED_QUESTION =
+  process.env.SCOPED_QUESTION ?? "How do these two approaches coordinate the UAVs?";
 
 const FPS = 30;
 const THEMES = (process.env.THEMES ?? "dark,light").split(",").map((t) => t.trim());
@@ -54,8 +69,8 @@ const FORMATS = {
     viewport: { width: 1280, height: 800 },
     dpr: 2,
     outputs: [
-      { tier: "xl", width: 1920, crf: 21 },
-      { tier: "md", width: 1280, crf: 23 },
+      { tier: "xl", width: 1920, crf: 24 },
+      { tier: "md", width: 1280, crf: 26 },
     ],
     poster: (theme) => `hero-${theme}-poster.jpg`,
     posterWidth: 1280,
@@ -63,7 +78,7 @@ const FORMATS = {
   phone: {
     viewport: { width: 400, height: 700 },
     dpr: 3,
-    outputs: [{ tier: "sm", width: 600, crf: 24 }],
+    outputs: [{ tier: "sm", width: 600, crf: 27 }],
     poster: (theme) => `hero-${theme}-sm-poster.jpg`,
     posterWidth: 600,
   },
@@ -96,6 +111,9 @@ function pageSetup({ hiddenProjects, theme }) {
         height: 18px; border-radius: 9999px; border: 2px solid rgba(96,165,250,.9);
         opacity: 0; transform: scale(.4); }
       #rx-cursor.down .ring { animation: rx-click .45s ease-out; }
+      #rx-tick { position: fixed; right: 0; bottom: 0; width: 1px; height: 1px;
+        z-index: 2147483647; pointer-events: none; opacity: .02; background: #000; }
+      #rx-tick.on { background: #fff; }
       @keyframes rx-click { 0% { opacity: 1; transform: scale(.4); }
         100% { opacity: 0; transform: scale(1.8); } }`;
     document.head.appendChild(style);
@@ -105,6 +123,9 @@ function pageSetup({ hiddenProjects, theme }) {
       <path d="M4 2.5 L4 19 L8.6 14.8 L11.6 21.5 L14.3 20.3 L11.4 13.8 L17.6 13.8 Z"
         fill="white" stroke="black" stroke-width="1.4" stroke-linejoin="round"/></svg>`;
     document.body.appendChild(cursor);
+    const tick = document.createElement("div");
+    tick.id = "rx-tick";
+    document.body.appendChild(tick);
     const saved = sessionStorage.getItem("rx-cursor");
     if (saved) cursor.style.transform = saved;
     document.addEventListener(
@@ -148,6 +169,12 @@ async function record(theme, formatName) {
   await mkdir(FRAME_DIR, { recursive: true });
   await mkdir(OUT_DIR, { recursive: true });
 
+  const conversationsUrl = `${API}/v1/projects/${PROJECT}/conversations`;
+  // Every conversation that exists before recording; anything else in the
+  // project afterwards was created by this run and is deleted in `finally`,
+  // even when the run dies before its URL was read.
+  const before = new Set((await (await fetch(conversationsUrl)).json()).map((c) => c.id));
+
   const browser = await chromium.launch({ channel: "chrome", headless: true });
   const context = await browser.newContext({
     viewport: VIEWPORT,
@@ -185,6 +212,19 @@ async function record(theme, formatName) {
     });
 
   const hold = (ms) => page.waitForTimeout(ms);
+  /**
+   * Change the playback speed. A frame only arrives on a repaint, and the gap
+   * before it is charged at the speed in force when it ARRIVES -- so a still
+   * wait at 7x followed by a switch to 1x would play the whole wait in real
+   * time. Forcing one repaint first closes the gap at the old speed.
+   */
+  async function setSpeed(next) {
+    await page
+      .evaluate(() => document.getElementById("rx-tick")?.classList.toggle("on"))
+      .catch(() => {});
+    await hold(120);
+    speed = next;
+  }
   /** Glide the fake cursor to the centre of an element. */
   async function glideTo(locator, { steps = 28, dx = 0, dy = 0 } = {}) {
     await locator.scrollIntoViewIfNeeded();
@@ -192,18 +232,36 @@ async function record(theme, formatName) {
     if (!box) throw new Error(`no box for ${locator}`);
     await page.mouse.move(box.x + box.width / 2 + dx, box.y + box.height / 2 + dy, { steps });
   }
-  async function fastNavigate(url, ready) {
-    speed = 25;
-    await page.goto(url);
-    await ready();
-    await hold(400);
-    speed = 1;
-  }
 
   let conversationId = null;
+  const problems = [];
+
+  /** Wait for the turn just sent to finish: the composer locks, then unlocks. */
+  async function turnDone() {
+    const composer = page.locator("textarea");
+    await page
+      .waitForFunction(() => document.querySelector("textarea")?.disabled, null, { timeout: 3000 })
+      .catch(() => {});
+    await page.waitForFunction(() => !document.querySelector("textarea")?.disabled, null, {
+      timeout: 240000,
+    });
+    return composer;
+  }
+  /** Type `@query` into the composer and pick the first paper the list offers. */
+  async function mention(query) {
+    await page.keyboard.type(`@${query}`, { delay: 60 });
+    const option = page.getByRole("listbox", { name: "Mention a paper" }).getByRole("option").first();
+    await option.waitFor();
+    await hold(500);
+    await glideTo(option, { steps: 18 });
+    await hold(250);
+    await option.click();
+    await hold(500);
+  }
+
   try {
     // Warm every route once, uncaptured, so dev-mode compiles never show.
-    for (const p of ["papers", "chat", `latex/${LATEX_DOC}`]) {
+    for (const p of ["papers", "chat"]) {
       await page.goto(`${APP}/admin/research/${PROJECT}/${p}`);
       await page.waitForLoadState("networkidle").catch(() => {});
     }
@@ -214,7 +272,7 @@ async function record(theme, formatName) {
     await page.mouse.move(VIEWPORT.width * 0.62, VIEWPORT.height * 0.78);
     await hold(600);
     await startCapture();
-    await hold(1400);
+    await hold(1200);
     const row = page.locator("main").getByText("Cooperative Multi-Target Search", { exact: false }).first();
     await row.scrollIntoViewIfNeeded().catch(() => {});
     const target = (await row.count()) ? row : page.locator("main table tbody tr, main [role=row]").nth(2);
@@ -222,18 +280,18 @@ async function record(theme, formatName) {
     await hold(250);
     await target.click();
     await page.getByText("searchable").first().waitFor({ timeout: 15000 }).catch(() => {});
-    await hold(1800);
+    await hold(1500);
 
     // ── scene 2: ask, and watch the cited answer arrive ─────────────────────
     const chatTab = page.getByRole("link", { name: "Chat" }).first();
     await glideTo(chatTab);
     await hold(200);
-    speed = 25;
+    await setSpeed(25);
     await chatTab.click();
     const box = page.getByPlaceholder(/Ask a question about this project/);
     await box.waitFor();
     await hold(300);
-    speed = 1;
+    await setSpeed(1);
     await glideTo(box);
     await box.click();
     await hold(300);
@@ -246,10 +304,14 @@ async function record(theme, formatName) {
     await page.waitForURL(/\/chat\/[0-9a-f-]{36}/, { timeout: 30000 });
     conversationId = page.url().split("/chat/")[1].split(/[?#]/)[0];
     await hold(1500); // the "thinking / searching" status, in real time
-    speed = 7; // the answer streams at seven times speed
-    await page.getByText("Sources", { exact: true }).last().waitFor({ timeout: 240000 });
+    await setSpeed(7); // the answer streams at seven times speed
+    await turnDone();
+    if (!(await page.locator('button[aria-label^="Citation 1,"]').count())) {
+      const answer = await page.locator("main").innerText().catch(() => "");
+      throw new Error(`the first answer carries no citations:\n${answer.slice(-800)}`);
+    }
     await hold(1500);
-    speed = 1;
+    await setSpeed(1);
     await hold(600);
 
     // ── scene 3: open a citation to its source passage ──────────────────────
@@ -270,58 +332,95 @@ async function record(theme, formatName) {
       const c = document.getElementById("rx-cursor");
       if (c) c.style.visibility = "";
     });
-    await hold(1400);
-    await page.mouse.move(VIEWPORT.width * 0.83, VIEWPORT.height * 0.91, { steps: 20 });
-    await hold(400);
+    await hold(1600);
 
-    // ── scene 4: write it up -- compile the manuscript, jump PDF to source ──
-    await fastNavigate(`${APP}/admin/research/${PROJECT}/latex/${LATEX_DOC}`, () =>
-      page.getByRole("button", { name: /^Compile/ }).waitFor(),
-    );
-    await hold(700);
-    const compile = page.getByRole("button", { name: /^Compile/ });
-    await glideTo(compile);
+    // ── scene 4: a question the library cannot answer is refused ────────────
+    const composer = page.locator("textarea");
+    await glideTo(composer, { steps: 24 });
+    await composer.click();
+    await hold(300);
+    await page.keyboard.type(OFF_TOPIC, { delay: 45 });
+    await hold(500);
+    const ask = page.getByRole("button", { name: "Ask", exact: true });
+    await glideTo(ask);
     await hold(200);
-    await compile.click();
-    speed = 4;
-    await page.waitForFunction(
-      () => [...document.querySelectorAll("canvas")].some((c) => c.width > 300),
-      null,
-      { timeout: 90000 },
-    );
-    await hold(1200);
-    speed = 1;
-    if (formatName === "phone") {
-      // A phone stacks source over PDF, so the PDF would compile off screen:
-      // switch the editor to its PDF-only view instead of jumping to source.
-      const pdfView = page.getByRole("tab", { name: "PDF", exact: true });
-      await glideTo(pdfView);
-      await hold(200);
-      await pdfView.click();
-    }
+    await ask.click();
     await hold(900);
-    const firstPage = page.locator("canvas").first();
-    const pbox = formatName === "phone" ? null : await firstPage.boundingBox();
-    if (pbox) {
-      const x = pbox.x + pbox.width * 0.5;
-      const y = pbox.y + pbox.height * 0.1;
-      await page.mouse.move(x, y, { steps: 30 });
-      await hold(300);
-      await page.mouse.dblclick(x, y);
-    }
+    await setSpeed(7);
+    await turnDone();
+    await hold(400);
+    await setSpeed(1);
+    const refusal = page.locator("main").getByText(REFUSAL, { exact: false }).last();
+    await refusal.evaluate((el) => el.scrollIntoView({ block: "center", behavior: "smooth" }));
     await hold(2600);
+
+    // ── scene 5: a comparison scoped to two papers named with `@` ───────────
+    await glideTo(composer, { steps: 24 });
+    await composer.click();
+    await hold(300);
+    await mention(MENTION_A);
+    await mention(MENTION_B);
+    await page.keyboard.type(SCOPED_QUESTION, { delay: 40 });
+    await hold(600);
+    await glideTo(ask);
+    await hold(200);
+    await ask.click();
+    await hold(700);
+    // The scope line shows while the turn is retrieving and writing; hold it
+    // in real time, because on a mention turn it does not outlive the answer.
+    await setSpeed(7);
+    const scopeLine = page.getByText(/You named 2 papers/).last();
+    await scopeLine.waitFor({ timeout: 120000 });
+    await setSpeed(1);
+    await scopeLine.evaluate((el) => el.scrollIntoView({ block: "center", behavior: "instant" }));
+    await hold(2400);
+    await setSpeed(7);
+    await turnDone();
+    await hold(400);
+    await setSpeed(1);
+    // The answer from its top, then the two papers it cites.
+    const lastQuestion = page.locator("main").getByText(SCOPED_QUESTION, { exact: false }).last();
+    await lastQuestion.evaluate((el) => el.scrollIntoView({ block: "start", behavior: "smooth" }));
+    await hold(2600);
+    const sources = page.getByText("Sources", { exact: true }).last();
+    await sources.evaluate((el) => el.scrollIntoView({ block: "center", behavior: "smooth" }));
+    await hold(2800);
 
     await cdp.send("Page.stopScreencast");
     await hold(300);
+
+    // ── read the conversation back: the clip must show what it claims ───────
+    const conv = await (await fetch(`${conversationsUrl}/${conversationId}`)).json();
+    const msgs = conv.messages ?? [];
+    const answers = msgs.filter((m) => m.role === "assistant");
+    const scopedAsk = msgs.filter((m) => m.role === "user").at(-1);
+    if (answers.length !== 3) problems.push(`expected 3 answers, got ${answers.length}`);
+    const [cited, refused, scoped] = answers;
+    if (!cited?.citations?.length) problems.push("the first answer carries no citations");
+    console.log(`refusal answer: ${JSON.stringify(refused?.content)}`);
+    if (refused?.content.trim() !== REFUSAL) problems.push("the off-topic answer is not the refusal");
+    const named = new Set(scopedAsk?.mentions ?? []);
+    const citedPapers = new Set((scoped?.citations ?? []).map((c) => c.paper_id));
+    console.log(`scoped turn: mentions ${[...named].join(", ")}; cited ${[...citedPapers].join(", ")}`);
+    if (named.size !== 2) problems.push(`the scoped question names ${named.size} papers`);
+    if (!citedPapers.size) problems.push("the scoped answer carries no citations");
+    for (const id of citedPapers) {
+      if (!named.has(id)) problems.push(`the scoped answer cites ${id}, outside its mentions`);
+    }
   } finally {
-    if (conversationId) {
-      const res = await fetch(`${API}/v1/projects/${PROJECT}/conversations/${conversationId}`, {
-        method: "DELETE",
-      }).catch((e) => e);
-      console.log(`deleted recording conversation ${conversationId}:`, res.status ?? res);
+    const after = await fetch(conversationsUrl)
+      .then((r) => r.json())
+      .catch(() => []);
+    const created = new Set(after.map((c) => c.id).filter((id) => !before.has(id)));
+    if (conversationId) created.add(conversationId);
+    for (const id of created) {
+      const res = await fetch(`${conversationsUrl}/${id}`, { method: "DELETE" }).catch((e) => e);
+      console.log(`deleted recording conversation ${id}:`, res.status ?? res);
     }
     await browser.close();
   }
+
+  if (problems.length) throw new Error(`not encoding this take:\n  ${problems.join("\n  ")}`);
 
   if (kept.length < 10) throw new Error(`only ${kept.length} frames captured`);
 

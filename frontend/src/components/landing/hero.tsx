@@ -117,7 +117,7 @@ export function Hero() {
                 loop
                 playsInline
                 preload="metadata"
-                aria-label="ResearcherX answering a question about a drone-fleet paper library with citations"
+                aria-label="ResearcherX answering questions about a drone-fleet paper library: an answer with citations, a refusal when the papers do not cover the question, and a comparison scoped to two papers"
                 onError={() => setVideoOk(false)}
                 className="absolute inset-0 h-full w-full object-cover"
               />
@@ -133,7 +133,8 @@ export function Hero() {
           </div>
         </div>
         <figcaption className="text-site-muted mt-4 text-center text-[13px]">
-          Recorded in the real app: a question answered with citations, and one citation opened.
+          Recorded in the real app: a cited answer with one citation opened, a question the
+          papers do not cover refused, and a comparison scoped to two papers.
         </figcaption>
       </figure>
     </section>
