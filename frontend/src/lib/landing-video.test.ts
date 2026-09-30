@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { heroPoster, heroVideoSrc, heroVideoTier } from "./landing-video";
+import { heroPoster, heroVideoAspect, heroVideoSrc, heroVideoTier } from "./landing-video";
 
 describe("heroVideoTier", () => {
   it("serves phones the smallest file", () => {
@@ -26,5 +26,13 @@ describe("heroVideoTier", () => {
     expect(heroVideoSrc("light", "xl")).toBe("/landing/hero-light-xl.mp4");
     expect(heroPoster("dark", "md")).toBe("/landing/hero-dark-poster.jpg");
     expect(heroPoster("light", "sm")).toBe("/landing/hero-light-sm-poster.jpg");
+  });
+});
+
+describe("heroVideoAspect", () => {
+  it("matches the viewport each tier was recorded at", () => {
+    expect(heroVideoAspect("md")).toBe(1.6);
+    expect(heroVideoAspect("xl")).toBe(1.6);
+    expect(heroVideoAspect("sm")).toBeCloseTo(4 / 7);
   });
 });

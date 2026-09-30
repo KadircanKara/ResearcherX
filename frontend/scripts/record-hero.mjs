@@ -188,7 +188,15 @@ async function record(theme, formatName) {
   // even when the run dies before its URL was read.
   const before = new Set((await (await fetch(conversationsUrl)).json()).map((c) => c.id));
 
-  const browser = await chromium.launch({ channel: "chrome", headless: true });
+  // The window must BE the viewport. Headless Chrome's default window is
+  // 1280x713, and the screencast captures the window, not the emulated
+  // viewport: without these flags every desktop frame lost its bottom 87px
+  // and ffmpeg stretched the rest back to 16:10.
+  const browser = await chromium.launch({
+    channel: "chrome",
+    headless: true,
+    args: [`--window-size=${VIEWPORT.width},${VIEWPORT.height}`, `--force-device-scale-factor=${DPR}`],
+  });
   const context = await browser.newContext({
     viewport: VIEWPORT,
     deviceScaleFactor: DPR,
@@ -197,6 +205,8 @@ async function record(theme, formatName) {
   });
   await context.addInitScript(pageSetup, { hiddenProjects: HIDDEN_PROJECTS, theme });
   const page = await context.newPage();
+
+  const problems = [];
 
   // ── frame capture on a speed-remapped timeline ─────────────────────────────
   let speed = 1;
@@ -207,6 +217,12 @@ async function record(theme, formatName) {
   const cdp = await context.newCDPSession(page);
   cdp.on("Page.screencastFrame", async ({ data, metadata, sessionId }) => {
     cdp.send("Page.screencastFrameAck", { sessionId }).catch(() => {});
+    if (metadata.deviceWidth !== VIEWPORT.width || metadata.deviceHeight !== VIEWPORT.height) {
+      const got = `${metadata.deviceWidth}x${metadata.deviceHeight}`;
+      if (!problems.some((p) => p.startsWith("frame size"))) {
+        problems.push(`frame size ${got}, expected ${VIEWPORT.width}x${VIEWPORT.height}`);
+      }
+    }
     const ts = metadata.timestamp;
     if (lastTs !== null) virtual += (ts - lastTs) / speed;
     lastTs = ts;
@@ -247,7 +263,6 @@ async function record(theme, formatName) {
   }
 
   let conversationId = null;
-  const problems = [];
 
   /** Wait for the turn just sent to finish: the composer locks, then unlocks. */
   async function turnDone() {
@@ -282,6 +297,31 @@ async function record(theme, formatName) {
     // ── scene 1: the library ─────────────────────────────────────────────────
     await page.goto(`${APP}/admin/research/${PROJECT}/papers`);
     await page.getByText("papers in this library").waitFor();
+    // A paper is checked when its row is opened, and the check lives in page
+    // state, so open and close every row once, uncaptured: the library then
+    // reads "Searchable 13" instead of "Not checked yet 13".
+    const rows = page.locator("main button[aria-expanded][aria-controls]");
+    const rowCount = await rows.count();
+    for (let i = 0; i < rowCount; i++) {
+      await rows.nth(i).click();
+      await rows.nth(i).click();
+    }
+    const railCount = (label) =>
+      page.evaluate((l) => {
+        const dt = [...document.querySelectorAll("dt")].find((d) => d.textContent.trim() === l);
+        return Number(dt?.nextElementSibling?.textContent ?? NaN);
+      }, label);
+    await page
+      .waitForFunction(() => {
+        const dt = [...document.querySelectorAll("dt")].find((d) => d.textContent.trim() === "Not checked yet");
+        return dt?.nextElementSibling?.textContent === "0";
+      }, null, { timeout: 30000 })
+      .catch(() => {});
+    const searchableCount = await railCount("Searchable");
+    if (searchableCount !== rowCount) {
+      problems.push(`library shows Searchable ${searchableCount} of ${rowCount} papers`);
+    }
+    await page.evaluate(() => window.scrollTo(0, 0));
     await page.mouse.move(VIEWPORT.width * 0.62, VIEWPORT.height * 0.78);
     await hold(600);
     await startCapture();
@@ -456,6 +496,7 @@ async function record(theme, formatName) {
     const vf = [
       `fps=${FPS}`,
       `scale=${width}:${height}:flags=lanczos`,
+      "setsar=1",
       `fade=t=in:st=0:d=0.4:color=${fade}`,
       `fade=t=out:st=${(total - 0.5).toFixed(2)}:d=0.5:color=${fade}`,
       "format=yuv420p",

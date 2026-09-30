@@ -2,8 +2,9 @@
  * Which encoding of the hero clip a viewport gets.
  *
  * The clip is a recording of the real app (scripts/record-hero.mjs): the
- * library, a cited answer, a citation opened to its passage, the manuscript
- * compiled. Chosen by width alone: 1920 wide for large displays, 1280 by
+ * library, a cited answer with a citation opened to its passage, a question
+ * the papers do not cover refused, and a comparison scoped to two papers.
+ * Chosen by width alone: 1920 wide for large displays, 1280 by
  * default, and below 768 a SEPARATE portrait recording made at a phone
  * viewport, because a downscaled desktop frame is unreadable on a phone. Self-hosted under
  * public/landing, so re-running the script replaces them in place. Pure so
@@ -36,4 +37,16 @@ export function heroVideoTier(viewportWidth: number): HeroVideoTier {
   if (viewportWidth < 768) return "sm";
   if (viewportWidth >= 1600) return "xl";
   return "md";
+}
+
+/**
+ * The shape of each recording, width over height, from the viewports in
+ * scripts/record-hero.mjs (desktop 1280x800, phone 400x700). The hero frame
+ * takes its shape from the clip it plays, never the other way round: a frame
+ * of a different shape would crop the recording or stretch it. The Hero
+ * component replaces this with the file's own dimensions once they load, so
+ * a re-recording at another viewport still fits; this is the first paint.
+ */
+export function heroVideoAspect(tier: HeroVideoTier): number {
+  return tier === "sm" ? 400 / 700 : 1280 / 800;
 }
