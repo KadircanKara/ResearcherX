@@ -13,7 +13,6 @@
 export const ADMIN_BASE = "/admin";
 
 const research = `${ADMIN_BASE}/research`;
-const explorer = `${ADMIN_BASE}/explorer`;
 
 export const routes = {
   /** Sign-in lives outside the app prefix: it is the one page a signed-out visitor may see. */
@@ -25,22 +24,17 @@ export const routes = {
   chat: (id: string) => `${research}/${id}/chat`,
   conversation: (id: string, cid: string) => `${research}/${id}/chat/${cid}`,
   papers: (id: string) => `${research}/${id}/papers`,
-  graph: (id: string) => `${research}/${id}/graph`,
-  latex: (id: string) => `${research}/${id}/latex`,
-  latexDoc: (id: string, docId: string) => `${research}/${id}/latex/${docId}`,
-  explorer: () => explorer,
-  exploration: (eid: string) => `${explorer}/${eid}`,
 } as const;
 
-/** The four sections of a project, in tab order. */
-export type ProjectTab = "chat" | "papers" | "graph" | "latex";
+/** The two sections of a project, in tab order. */
+export type ProjectTab = "chat" | "papers";
 
 /**
  * Which project tab `pathname` is on. Chat is the fallback: the project's own
  * URL redirects there, so a bare project path is the chat tab.
  */
 export function projectTab(pathname: string, projectId: string): ProjectTab {
-  const tabs: ProjectTab[] = ["papers", "graph", "latex"];
+  const tabs: ProjectTab[] = ["papers"];
   for (const tab of tabs) {
     const href = routes[tab](projectId);
     if (pathname === href || pathname.startsWith(`${href}/`)) return tab;

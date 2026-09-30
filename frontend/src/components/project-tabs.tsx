@@ -2,15 +2,13 @@
 
 import Link from "next/link"
 import { usePathname } from "next/navigation"
-import { FileCode2, Library, MessageSquare, Share2 } from "lucide-react"
+import { Library, MessageSquare } from "lucide-react"
 import { projectTab, routes, type ProjectTab } from "@/lib/routes"
 import { cn } from "@/lib/utils"
 
 const TABS: { key: ProjectTab; label: string; icon: typeof MessageSquare }[] = [
   { key: "chat", label: "Chat", icon: MessageSquare },
   { key: "papers", label: "Papers", icon: Library },
-  { key: "graph", label: "Graph", icon: Share2 },
-  { key: "latex", label: "LaTeX", icon: FileCode2 },
 ]
 
 /**
