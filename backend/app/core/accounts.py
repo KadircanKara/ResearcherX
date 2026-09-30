@@ -49,6 +49,7 @@ async def resolve_account(db: AsyncSession, claims: Claims) -> User:
         await db.commit()
         return user
 
+    # Count-then-insert can overshoot under concurrency; a backstop by design.
     if settings.demo_max_users:
         total = await db.scalar(select(func.count()).select_from(User))
         if total >= settings.demo_max_users:
@@ -66,8 +67,14 @@ async def resolve_account(db: AsyncSession, claims: Claims) -> User:
     except IntegrityError:
         await db.rollback()
         winner = await _by_subject(db, claims.sub)
+        if winner is not None:
+            return winner
+        # Lost on the email constraint: a same-email row with another subject won.
+        winner = await _by_email(db, claims.email)
         if winner is None:
             raise
+        winner.auth_subject = claims.sub
+        await db.commit()
         return winner
     log.info("account_created", user_id=user.id)
     return user

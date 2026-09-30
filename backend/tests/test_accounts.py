@@ -31,10 +31,13 @@ async def test_second_login_returns_the_same_user_and_creates_nothing(db_session
 
 
 async def test_email_match_is_case_insensitive(db_session):
-    db_session.add(User(email="client@acme.com", name="Client"))
+    seeded = User(email="Client@Acme.com", name="Client")
+    db_session.add(seeded)
     await db_session.commit()
+    seeded_id = seeded.id
     user = await resolve_account(db_session, Claims(sub="s9", email="client@acme.com"))
-    assert user.email == "client@acme.com" and user.auth_subject == "s9"
+    assert user.id == seeded_id
+    assert user.email == "Client@Acme.com" and user.auth_subject == "s9"
     assert await _count(db_session, User) == 1
 
 
@@ -54,3 +57,50 @@ async def test_creation_is_refused_at_the_user_cap(db_session, monkeypatch):
         await resolve_account(db_session, Claims(sub="s2", email="b@x.com"))
     # an existing account still resolves at the cap
     assert (await resolve_account(db_session, Claims(sub="s1", email="a@x.com"))).email == "a@x.com"
+
+
+async def test_a_lost_race_on_the_subject_returns_the_winner(db_session, monkeypatch):
+    from app.core import accounts
+
+    winner = User(email="a@x.com", name="a", auth_subject="s1")
+    db_session.add(winner)
+    await db_session.commit()
+    winner_id = winner.id
+
+    real = accounts._by_subject
+    calls = {"n": 0}
+
+    async def stale_first(db, sub):
+        calls["n"] += 1
+        return None if calls["n"] == 1 else await real(db, sub)
+
+    async def no_email(db, email):
+        return None
+
+    monkeypatch.setattr(accounts, "_by_subject", stale_first)
+    monkeypatch.setattr(accounts, "_by_email", no_email)
+    user = await resolve_account(db_session, Claims(sub="s1", email="a@x.com"))
+    assert user.id == winner_id
+    assert await _count(db_session, User) == 1
+    assert await _count(db_session, Project) == 0
+
+
+async def test_a_lost_race_on_the_email_relinks_to_the_winner(db_session, monkeypatch):
+    from app.core import accounts
+
+    winner = User(email="a@x.com", name="a", auth_subject="other")
+    db_session.add(winner)
+    await db_session.commit()
+    winner_id = winner.id
+
+    real = accounts._by_email
+    calls = {"n": 0}
+
+    async def stale_first(db, email):
+        calls["n"] += 1
+        return None if calls["n"] == 1 else await real(db, email)
+
+    monkeypatch.setattr(accounts, "_by_email", stale_first)
+    user = await resolve_account(db_session, Claims(sub="mine", email="a@x.com"))
+    assert user.id == winner_id and user.auth_subject == "mine"
+    assert await _count(db_session, User) == 1
