@@ -16,6 +16,8 @@ const research = `${ADMIN_BASE}/research`;
 const explorer = `${ADMIN_BASE}/explorer`;
 
 export const routes = {
+  /** Sign-in lives outside the app prefix: it is the one page a signed-out visitor may see. */
+  login: () => "/login",
   /** The app's own front door; the landing page sends "Open the app" here. */
   home: () => ADMIN_BASE,
   research: () => research,

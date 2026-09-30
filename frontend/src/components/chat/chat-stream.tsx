@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { ChatCitation, ChatEvent, ChatMessage, Paper } from "@/lib/types";
 import { chatMessagesUrl, getConversation } from "@/lib/chat";
-import { getDevUserId } from "@/lib/api";
+import { authHeaders, onAuthFailure } from "@/lib/api";
 import { AssistantAnswer } from "@/components/chat/assistant-answer";
 import { resetChunkCache } from "@/components/chat/citation-chip";
 import { StreamingTurn } from "@/components/chat/streaming-turn";
@@ -151,17 +151,17 @@ export function ChatStream({
 
     const controller = new AbortController();
     const url = chatMessagesUrl(projectId, conversationId);
-    const uid = getDevUserId();
     // POST via fetch (EventSource doesn't support POST), then read as SSE
-    fetch(url, {
+    authHeaders().then((identity) => fetch(url, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        ...(uid ? { "X-Dev-User-Id": uid } : {}),
+        ...identity,
       },
       body: JSON.stringify({ content: pendingContent, mentioned_paper_ids: pendingMentions ?? [] }),
       signal: controller.signal,
-    }).then(async (res) => {
+    })).then(async (res) => {
+      await onAuthFailure(res.status);
       if (!res.ok || !res.body) {
         const msg = sendFailureMessage(res.status, pendingMentions?.length ?? 0);
         setError(msg);

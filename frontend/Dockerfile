@@ -28,6 +28,11 @@ COPY . .
 # image works for any domain — no rebuild per environment.
 ARG NEXT_PUBLIC_API_BASE=""
 ENV NEXT_PUBLIC_API_BASE=$NEXT_PUBLIC_API_BASE
+# Supabase Auth (public demo). Public by design; empty keeps the dev seam.
+ARG NEXT_PUBLIC_SUPABASE_URL=""
+ENV NEXT_PUBLIC_SUPABASE_URL=$NEXT_PUBLIC_SUPABASE_URL
+ARG NEXT_PUBLIC_SUPABASE_ANON_KEY=""
+ENV NEXT_PUBLIC_SUPABASE_ANON_KEY=$NEXT_PUBLIC_SUPABASE_ANON_KEY
 RUN npm run build
 
 

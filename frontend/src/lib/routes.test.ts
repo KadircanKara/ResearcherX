@@ -27,6 +27,10 @@ describe("routes", () => {
     expect(routes.exploration("e1")).toBe(`${routes.explorer()}/e1`);
   });
 
+  it("login lives outside the app prefix", () => {
+    expect(routes.login()).toBe("/login");
+  });
+
   it("leaves the root for the landing page", () => {
     expect(ADMIN_BASE).not.toBe("/");
     expect(routes.home()).toBe("/admin");

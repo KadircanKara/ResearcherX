@@ -1,4 +1,4 @@
-import { apiGet, apiSend, getDevUserId, API_BASE } from "./api";
+import { apiGet, apiSend, authHeaders, onAuthFailure, API_BASE } from "./api";
 import type { Project, ProjectDetail, Member, Role, Run, Paper, PaperSource } from "./types";
 
 export async function listProjects(): Promise<Project[]> {
@@ -66,19 +66,19 @@ export async function listPapers(projectId: string): Promise<Paper[]> {
 /**
  * The stored PDF for an uploaded paper. Throws when there is none (404).
  *
- * Fetched rather than exposed as a plain link: in dev the identity travels
- * in an `X-Dev-User-Id` HEADER, which an `<a href>` cannot send -- the same
+ * Fetched rather than exposed as a plain link: the identity travels in a
+ * HEADER (bearer token, or `X-Dev-User-Id` in dev), which an `<a href>` cannot send -- the same
  * caveat `downloadExport` carries in the LaTeX client. Keeping the header
  * handling here means the page never assembles a URL of its own.
  */
 export async function fetchPaperPdf(projectId: string, paperId: string): Promise<Blob> {
   const headers: Record<string, string> = {};
-  const uid = getDevUserId();
-  if (uid) headers["X-Dev-User-Id"] = uid;
+  Object.assign(headers, await authHeaders());
   const r = await fetch(`${API_BASE}/v1/projects/${projectId}/papers/${paperId}/pdf`, {
     headers,
     cache: "no-store",
   });
+  await onAuthFailure(r.status);
   if (!r.ok) throw new Error(`paper pdf -> ${r.status}`);
   return r.blob();
 }
@@ -120,12 +120,12 @@ export async function ingestPaper(
   const headers: Record<string, string> = {
     "Content-Type": "application/octet-stream",
   };
-  const uid = getDevUserId();
-  if (uid) headers["X-Dev-User-Id"] = uid;
+  Object.assign(headers, await authHeaders());
   const r = await fetch(
     `${API_BASE}/v1/projects/${projectId}/papers/${paperId}/ingest`,
     { method: "POST", headers, body: pdfBytes, cache: "no-store" }
   );
+  await onAuthFailure(r.status);
   if (!r.ok) throw new Error(`ingest -> ${r.status}`);
   return r.json();
 }
@@ -137,12 +137,12 @@ export async function suggestTitle(
   const headers: Record<string, string> = {
     "Content-Type": "application/octet-stream",
   };
-  const uid = getDevUserId();
-  if (uid) headers["X-Dev-User-Id"] = uid;
+  Object.assign(headers, await authHeaders());
   const r = await fetch(
     `${API_BASE}/v1/projects/${projectId}/papers/suggest-title`,
     { method: "POST", headers, body: pdfBytes, cache: "no-store" }
   );
+  await onAuthFailure(r.status);
   if (!r.ok) return { title: null, abstract: null, body: null };
   return r.json();
 }
@@ -152,12 +152,12 @@ export async function suggestTitleFromUrl(
   url: string
 ): Promise<{ title: string | null; abstract: string | null; requires_manual: boolean }> {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
-  const uid = getDevUserId();
-  if (uid) headers["X-Dev-User-Id"] = uid;
+  Object.assign(headers, await authHeaders());
   const r = await fetch(
     `${API_BASE}/v1/projects/${projectId}/papers/suggest-title-from-url`,
     { method: "POST", headers, body: JSON.stringify({ url }), cache: "no-store" }
   );
+  await onAuthFailure(r.status);
   if (!r.ok) return { title: null, abstract: null, requires_manual: true };
   return r.json();
 }
@@ -168,8 +168,7 @@ export async function ingestPaperFromUrl(
   url: string
 ): Promise<{ chunks_stored: number }> {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
-  const uid = getDevUserId();
-  if (uid) headers["X-Dev-User-Id"] = uid;
+  Object.assign(headers, await authHeaders());
   const r = await fetch(
     `${API_BASE}/v1/projects/${projectId}/papers/${paperId}/ingest-from-url`,
     {
@@ -179,6 +178,7 @@ export async function ingestPaperFromUrl(
       cache: "no-store",
     }
   );
+  await onAuthFailure(r.status);
   if (r.status === 422) {
     const body = await r.json().catch(() => ({}));
     const err = new Error("ingest-from-url -> 422") as Error & { paywalled?: boolean };
