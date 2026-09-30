@@ -16,6 +16,7 @@ from app.db.models import ResearchRun, RunStatus
 from app.db.seed import seed_dev_data
 from app.db.session import SessionLocal, engine
 from app.services.task_registry import registry
+from app.services.usage_service import LimitExceeded
 
 
 async def _fail_orphaned_runs() -> None:
@@ -90,6 +91,11 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="ResearcherX", version="0.1.0", lifespan=lifespan)
+
+
+@app.exception_handler(LimitExceeded)
+async def _limit_exceeded(_request: Request, exc: LimitExceeded) -> JSONResponse:
+    return JSONResponse(status_code=429, content={"detail": exc.message})
 
 
 # Registered BEFORE CORSMiddleware on purpose. `add_middleware` prepends, so

@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import type { ChatCitation, ChatEvent, ChatMessage, Paper } from "@/lib/types";
 import { chatMessagesUrl, getConversation } from "@/lib/chat";
 import { authHeaders, onAuthFailure } from "@/lib/api";
+import { detailOf } from "@/lib/api-error";
 import { AssistantAnswer } from "@/components/chat/assistant-answer";
 import { resetChunkCache } from "@/components/chat/citation-chip";
 import { StreamingTurn } from "@/components/chat/streaming-turn";
@@ -51,7 +52,12 @@ interface Props {
  * else stays deliberately generic — this says what the USER did, never what
  * the server did internally.
  */
-export function sendFailureMessage(status: number, mentionCount: number): string {
+export function sendFailureMessage(
+  status: number,
+  mentionCount: number,
+  detail: string | null = null
+): string {
+  if (status === 429) return detail ?? "Daily chat limit reached.";
   if (mentionCount === 0) return "Request failed.";
   if (status === 400) {
     return "A mentioned paper is no longer in this project. Remove the mention and send again.";
@@ -163,7 +169,8 @@ export function ChatStream({
     })).then(async (res) => {
       await onAuthFailure(res.status);
       if (!res.ok || !res.body) {
-        const msg = sendFailureMessage(res.status, pendingMentions?.length ?? 0);
+        const detail = res.ok ? null : await detailOf(res);
+        const msg = sendFailureMessage(res.status, pendingMentions?.length ?? 0, detail);
         setError(msg);
         setStatus("idle");
         onError?.(msg);

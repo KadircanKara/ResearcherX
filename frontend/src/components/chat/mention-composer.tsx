@@ -39,6 +39,7 @@ export function MentionComposer({
   submitLabel = "Ask",
   placeholder = "Ask a question… use @ to mention a paper",
   helperText,
+  notice,
   popupPlacement = "below",
 }: {
   papers: Paper[];
@@ -51,6 +52,8 @@ export function MentionComposer({
   submitLabel?: string;
   placeholder?: string;
   helperText?: string;
+  /** A usage note, e.g. turns left today; shown under the input. */
+  notice?: string | null;
   /**
    * "above" for a composer pinned to the bottom of the viewport, where a
    * list opening downward would open off-screen.
@@ -220,6 +223,8 @@ export function MentionComposer({
           You can mention up to {MAX_MENTIONS} papers.
         </p>
       )}
+
+      {notice && <p className="text-xs text-muted-foreground">{notice}</p>}
 
       <div className="flex flex-wrap items-center justify-between gap-2">
         {helperText ? (

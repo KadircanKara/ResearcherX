@@ -40,6 +40,16 @@ os.environ["AUTH_MODE"] = "dev"
 os.environ["SUPABASE_URL"] = ""
 os.environ["REQUIRE_AUTH"] = "false"
 os.environ["DEMO_MAX_USERS"] = "0"
+for _feature in ("LATEX", "RESEARCH", "PAPER_URL", "SHARING", "MANUAL_PAPERS"):
+    os.environ[f"FEATURE_{_feature}"] = "true"
+for _limit in (
+    "USER_MAX_PAPERS",
+    "USER_CHAT_TURNS_PER_DAY",
+    "USER_LLM_ASSISTS_PER_DAY",
+    "USER_INGESTS_PER_DAY",
+    "GLOBAL_CHAT_TURNS_PER_DAY",
+):
+    os.environ[_limit] = "0"
 
 import asyncio  # noqa: E402
 

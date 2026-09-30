@@ -1,5 +1,6 @@
 "use client";
 
+import { limitMessage } from "@/lib/usage";
 import { useEffect, useRef, useState } from "react";
 import { Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -144,7 +145,7 @@ export function AddPaperUploadTab({
         const bytes = await item.file.arrayBuffer();
         await withTimeout(ingestPaper(projectId, paper.id, bytes), ITEM_TIMEOUT_MS, "ingestPaper");
         update(item.id, { status: "done" });
-      } catch {
+      } catch (err) {
         // Never leave a paper row without its PDF.
         let cleanedUp = true;
         if (paperId) {
@@ -155,7 +156,7 @@ export function AddPaperUploadTab({
             console.error("paper cleanup failed after ingest error", { paperId, cleanupErr });
           }
         }
-        update(item.id, { status: "failed", error: uploadFailure(cleanedUp) });
+        update(item.id, { status: "failed", error: limitMessage(err) ?? uploadFailure(cleanedUp) });
       }
     });
 

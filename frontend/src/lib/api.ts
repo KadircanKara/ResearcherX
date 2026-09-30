@@ -1,7 +1,9 @@
 import { buildAuthHeaders, isSessionEnded } from "./auth-headers";
 import { routes } from "./routes";
 import { accessToken, authEnabled, supabase } from "./supabase";
+import { ApiError, detailOf } from "./api-error";
 import type { Run } from "./types";
+import type { Usage } from "./usage";
 
 export const API_BASE =
   process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8000";
@@ -53,7 +55,7 @@ export async function apiGet<T>(path: string): Promise<T> {
     cache: "no-store",
   });
   await onAuthFailure(r.status);
-  if (!r.ok) throw new Error(`GET ${path} -> ${r.status}`);
+  if (!r.ok) throw new ApiError(r.status, await detailOf(r), `GET ${path}`);
   return (await r.json()) as T;
 }
 
@@ -69,7 +71,9 @@ export async function apiSend<T>(
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
   await onAuthFailure(r.status);
-  if (!r.ok) throw new Error(`${method} ${path} -> ${r.status}`);
+  if (!r.ok) throw new ApiError(r.status, await detailOf(r), `${method} ${path}`);
   if (r.status === 204) return undefined;
   return (await r.json()) as T;
 }
+
+export const fetchUsage = () => apiGet<Usage>("/me/usage");

@@ -13,12 +13,14 @@ import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { EmptyState, NoMatchState } from "@/components/ui/empty-state";
 import { Input } from "@/components/ui/input";
 import { RenameDialog } from "@/components/ui/rename-dialog";
+import { fetchUsage } from "@/lib/api";
 import { saveBlob } from "@/lib/download";
 import { deletePaper, fetchPaperPdf, listPapers, patchPaper, probePaperIndexed } from "@/lib/projects";
 import { lastAddedLabel, libraryHeadline, summarize, type ProbeMap } from "@/lib/papers";
 import { matchesQuery } from "@/lib/search";
 import { clear, retainVisible, selectAll, toggle } from "@/lib/selection";
 import type { Paper } from "@/lib/types";
+import { papersLine, type Usage } from "@/lib/usage";
 
 /** Title and abstract -- the two things a row shows once opened, so every
  * match is visible and nothing reads as a false positive. */
@@ -28,6 +30,7 @@ export default function PapersPage() {
   const { id: projectId } = useParams<{ id: string }>();
   const [papers, setPapers] = useState<Paper[]>([]);
   const [loading, setLoading] = useState(true);
+  const [usage, setUsage] = useState<Usage | null>(null);
   const [query, setQuery] = useState("");
   const [editing, setEditing] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
@@ -72,6 +75,7 @@ export default function PapersPage() {
     (opts: { silent?: boolean } = {}) => {
       const seq = ++loadSeq.current;
       if (!opts.silent) setLoading(true);
+      fetchUsage().then(setUsage).catch(() => {});
       listPapers(projectId)
         .then((ps) => {
           if (seq !== loadSeq.current) return; // a newer load already won
@@ -233,10 +237,15 @@ export default function PapersPage() {
         title={loading ? "Reading the library" : libraryHeadline(summary)}
         meta={loading ? undefined : lastAddedLabel(papers)}
         actions={
-          <Button size="sm" onClick={() => openAdd([])}>
-            <Plus className="size-4" aria-hidden />
-            Add papers
-          </Button>
+          <div className="flex items-center gap-3">
+            {usage && papersLine(usage) && (
+              <span className="text-xs text-muted-foreground">{papersLine(usage)}</span>
+            )}
+            <Button size="sm" onClick={() => openAdd([])}>
+              <Plus className="size-4" aria-hidden />
+              Add papers
+            </Button>
+          </div>
         }
       />
 

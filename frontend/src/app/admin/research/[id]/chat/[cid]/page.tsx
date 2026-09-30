@@ -9,8 +9,10 @@ import { MentionComposer } from "@/components/chat/mention-composer";
 import { getConversation } from "@/lib/chat";
 import { questionCount, startedAt } from "@/lib/conversations";
 import type { Mention } from "@/lib/mentions";
+import { fetchUsage } from "@/lib/api";
 import { listPapers } from "@/lib/projects";
 import { routes } from "@/lib/routes";
+import { turnsLeftLine, type Usage } from "@/lib/usage";
 import type { ChatConversationDetail, Paper } from "@/lib/types";
 
 export default function ConversationPage() {
@@ -43,6 +45,12 @@ export default function ConversationPage() {
       .catch(() => {})
       .finally(() => setLoading(false));
   }, [projectId, cid]);
+
+  const [usage, setUsage] = useState<Usage | null>(null);
+  const refreshUsage = () => {
+    fetchUsage().then(setUsage).catch(() => {});
+  };
+  useEffect(refreshUsage, []);
 
   useEffect(() => {
     listPapers(projectId).then(setPapers).catch(() => {});
@@ -121,7 +129,10 @@ export default function ConversationPage() {
             pendingContent={pendingContent}
             pendingMentions={pendingMentions}
             papers={papers}
-            onDone={() => setPendingContent(undefined)}
+            onDone={() => {
+              setPendingContent(undefined);
+              refreshUsage();
+            }}
             onError={handleSendFailed}
           />
 
@@ -142,6 +153,7 @@ export default function ConversationPage() {
               submitLabel="Ask"
               helperText="Type @ to name a paper and search only inside it"
               popupPlacement="above"
+              notice={usage ? turnsLeftLine(usage) : null}
             />
           </div>
         </>

@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import palette
 from app.core.config import settings
+from app.core.features import feature_enabled, require_feature
 from app.core.identity import get_current_user
 from app.core.logging import log
 from app.db.models import (
@@ -42,7 +43,7 @@ from app.schemas.project import (
 )
 from app.schemas.research import RunOut
 from app.schemas.user import UserOut
-from app.services import project_service
+from app.services import project_service, usage_service
 
 router = APIRouter(tags=["projects"])
 
@@ -133,7 +134,11 @@ async def delete_project(
     return Response(status_code=204)
 
 
-@router.get("/projects/{project_id}/runs", response_model=list[RunOut])
+@router.get(
+    "/projects/{project_id}/runs",
+    response_model=list[RunOut],
+    dependencies=[Depends(require_feature("research"))],
+)
 async def list_project_runs(
     project_id: str,
     limit: int = Query(default=20, ge=1, le=100),
@@ -197,6 +202,11 @@ async def create_paper(
     db: AsyncSession = Depends(get_session),
 ) -> PaperOut:
     await project_service.require_member(db, project_id, user.id, "member")
+    if data.source == PaperSource.MANUAL and not feature_enabled("manual_papers"):
+        raise HTTPException(status_code=422, detail="Manual papers are not available.")
+    if data.source == PaperSource.LINK and not feature_enabled("paper_url"):
+        raise HTTPException(status_code=422, detail="Link papers are not available.")
+    await usage_service.enforce_paper_slot(db, user)
     paper = Paper(
         project_id=project_id,
         title=data.title,
@@ -344,6 +354,25 @@ async def get_paper_chunk(
     )
 
 
+async def _read_capped_body(request: Request) -> bytes:
+    """The request body, refused with 413 past `paper_pdf_max_bytes`.
+
+    Streamed against a running counter rather than `await request.body()`:
+    a client can lie in Content-Length, or send chunked with none at all.
+    """
+    cap = settings.paper_pdf_max_bytes
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in request.stream():
+        total += len(chunk)
+        if total > cap:
+            raise HTTPException(
+                status_code=413, detail=f"{total} bytes exceeds the {cap} byte limit"
+            )
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 @router.post(
     "/projects/{project_id}/papers/suggest-title",
     response_model=SuggestMetaResponse,
@@ -356,7 +385,8 @@ async def suggest_paper_title(
 ) -> SuggestMetaResponse:
     """Extract title, abstract, and body from PDF bytes via LLM. Fails open."""
     await project_service.require_member(db, project_id, user.id, "member")
-    pdf_bytes = await request.body()
+    await usage_service.enforce_title_assist(db, user)
+    pdf_bytes = await _read_capped_body(request)
     if not pdf_bytes:
         return SuggestMetaResponse(title=None, abstract=None, body=None)
     from app.services.title_extraction_service import extract_meta_from_pdf
@@ -368,6 +398,7 @@ async def suggest_paper_title(
 @router.post(
     "/projects/{project_id}/papers/suggest-title-from-url",
     response_model=SuggestTitleFromUrlResponse,
+    dependencies=[Depends(require_feature("paper_url"))],
 )
 async def suggest_paper_title_from_url(
     project_id: str,
@@ -406,23 +437,11 @@ async def ingest_paper(
     db: AsyncSession = Depends(get_session),
 ) -> dict:
     await project_service.require_member(db, project_id, user.id, "member")
+    await usage_service.enforce_ingest(db, user)
     paper = await db.get(Paper, paper_id)
     if paper is None or paper.project_id != project_id:
         raise HTTPException(status_code=404, detail="Paper not found")
-    # Streamed against a running counter rather than `await request.body()`:
-    # a client can lie in Content-Length, or send chunked with none at all,
-    # and this is now a STORAGE commitment rather than a transient buffer.
-    cap = settings.paper_pdf_max_bytes
-    chunks: list[bytes] = []
-    total = 0
-    async for chunk in request.stream():
-        total += len(chunk)
-        if total > cap:
-            raise HTTPException(
-                status_code=413, detail=f"{total} bytes exceeds the {cap} byte limit"
-            )
-        chunks.append(chunk)
-    pdf_bytes = b"".join(chunks)
+    pdf_bytes = await _read_capped_body(request)
 
     from app.services.paper_ingest_service import ingest
 
@@ -478,7 +497,10 @@ async def download_paper_pdf(
     )
 
 
-@router.post("/projects/{project_id}/papers/{paper_id}/ingest-from-url")
+@router.post(
+    "/projects/{project_id}/papers/{paper_id}/ingest-from-url",
+    dependencies=[Depends(require_feature("paper_url"))],
+)
 async def ingest_paper_from_url(
     project_id: str,
     paper_id: str,
@@ -537,7 +559,11 @@ async def ingest_paper_from_url(
 # ── members ──────────────────────────────────────────────────────────────────
 
 
-@router.get("/projects/{project_id}/members", response_model=list[MemberOut])
+@router.get(
+    "/projects/{project_id}/members",
+    response_model=list[MemberOut],
+    dependencies=[Depends(require_feature("sharing"))],
+)
 async def list_members(
     project_id: str,
     user: User = Depends(get_current_user),
@@ -547,7 +573,12 @@ async def list_members(
     return [await _member_out(m, db) for m in members]
 
 
-@router.post("/projects/{project_id}/members", response_model=MemberOut, status_code=201)
+@router.post(
+    "/projects/{project_id}/members",
+    response_model=MemberOut,
+    status_code=201,
+    dependencies=[Depends(require_feature("sharing"))],
+)
 async def add_member(
     project_id: str,
     data: MemberCreate,
@@ -558,7 +589,11 @@ async def add_member(
     return await _member_out(membership, db)
 
 
-@router.patch("/projects/{project_id}/members/{target_user_id}", response_model=MemberOut)
+@router.patch(
+    "/projects/{project_id}/members/{target_user_id}",
+    response_model=MemberOut,
+    dependencies=[Depends(require_feature("sharing"))],
+)
 async def update_member_role(
     project_id: str,
     target_user_id: str,
@@ -572,7 +607,11 @@ async def update_member_role(
     return await _member_out(membership, db)
 
 
-@router.delete("/projects/{project_id}/members/{target_user_id}", status_code=204)
+@router.delete(
+    "/projects/{project_id}/members/{target_user_id}",
+    status_code=204,
+    dependencies=[Depends(require_feature("sharing"))],
+)
 async def remove_member(
     project_id: str,
     target_user_id: str,

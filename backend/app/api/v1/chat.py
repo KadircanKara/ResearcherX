@@ -17,7 +17,7 @@ from app.schemas.chat import (
     ConversationOut,
     ConversationUpdate,
 )
-from app.services import project_service
+from app.services import project_service, usage_service
 from app.services.chat_service import ChatService
 from app.services.conversation_service import ConversationService, retitle_citations
 
@@ -143,6 +143,9 @@ async def send_message(
         mentions = await _conv_svc.validate_mentions(db, project_id, payload.mentioned_paper_ids)
     except ValueError:
         raise HTTPException(status_code=400, detail="Unknown paper in mentions") from None
+
+    # Before the save: a refused turn must leave no row behind to count.
+    await usage_service.enforce_chat_turn(db, user)
 
     # Persist the user message BEFORE starting the SSE stream.
     # ChatService.respond expects the message already in the conversation.

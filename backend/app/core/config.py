@@ -360,6 +360,23 @@ class Settings(BaseSettings):
     # off in the demo's Supabase project, so this only fires if they are
     # switched on by mistake.
     demo_max_users: int = Field(default=0, ge=0)
+    # Feature switches. All on by default; the public demo turns them off and
+    # a switched-off route answers 404 exactly as an unmounted one would
+    # (app/core/features.py). Keeping the routes mounted is what keeps the
+    # demo branch free of backend diffs.
+    feature_latex: bool = True
+    feature_research: bool = True
+    feature_paper_url: bool = True
+    feature_sharing: bool = True
+    feature_manual_papers: bool = True
+    # Per-user limits, counted from the DB (app/services/usage_service.py).
+    # 0 = off, and a negative value fails validation rather than acting as on.
+    # The day window starts at 00:00 UTC.
+    user_max_papers: int = Field(default=0, ge=0)
+    user_chat_turns_per_day: int = Field(default=0, ge=0)
+    user_llm_assists_per_day: int = Field(default=0, ge=0)
+    user_ingests_per_day: int = Field(default=0, ge=0)
+    global_chat_turns_per_day: int = Field(default=0, ge=0)
     rate_limit_runs: str = "3/hour;10/day"  # per-IP, POST /v1/research
     rate_limit_reads: str = "120/minute"  # per-IP, GETs + SSE connects
     # Groq free tier allows 100k tokens/day and a measured full run costs
