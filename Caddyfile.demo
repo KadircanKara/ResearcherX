@@ -1,0 +1,24 @@
+# Public demo. The site address is the domain, so Caddy issues and renews
+# Let's Encrypt certificates on its own (ports 80 + 443 open on the VM).
+#
+# Only /v1/* reaches the backend. FastAPI's /docs, /redoc and /openapi.json
+# live outside /v1, so they fall through to the frontend (a 404) and never
+# list the switched-off routes.
+{$DEMO_DOMAIN} {
+	encode zstd gzip
+
+	handle /v1/* {
+		# DoS floor; the per-route PDF cap (25MB) lives in the backend.
+		request_body {
+			max_size 64MB
+		}
+		reverse_proxy backend:8000 {
+			# SSE must stream token by token.
+			flush_interval -1
+		}
+	}
+
+	handle {
+		reverse_proxy frontend:3000
+	}
+}

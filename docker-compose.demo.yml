@@ -1,0 +1,41 @@
+# Public demo: layered on docker-compose.prod.yml.
+#   docker compose -p researcherx-demo -f docker-compose.prod.yml -f docker-compose.demo.yml up -d --build
+# Secrets come from the shell environment (a root-only env file on the VM,
+# see deploy/RUNBOOK.md). Nothing secret lives in this file.
+services:
+  backend:
+    environment:
+      AUTH_MODE: supabase
+      REQUIRE_AUTH: "true"
+      SUPABASE_URL: ${SUPABASE_URL:?SUPABASE_URL is required}
+      DEMO_MAX_USERS: "20"
+      FEATURE_LATEX: "false"
+      FEATURE_RESEARCH: "false"
+      FEATURE_PAPER_URL: "false"
+      FEATURE_SHARING: "false"
+      FEATURE_MANUAL_PAPERS: "false"
+      USER_MAX_PAPERS: "20"
+      PAPER_PDF_MAX_BYTES: "26214400"
+      USER_CHAT_TURNS_PER_DAY: "100"
+      USER_LLM_ASSISTS_PER_DAY: "40"
+      USER_INGESTS_PER_DAY: "40"
+      GLOBAL_CHAT_TURNS_PER_DAY: "1000"
+      LLM_BASE_URL: https://api.openai.com/v1
+      LLM_MODEL: gpt-5-mini
+      LLM_REASONING_EFFORT: low
+      CHAT_ANSWER_MAX_TOKENS: "6000"
+      # The prod file does not pass this through; without it reranking is
+      # silently off.
+      COHERE_API_KEY: ${COHERE_API_KEY:?COHERE_API_KEY is required}
+      CORS_ORIGINS: https://${DEMO_DOMAIN:?DEMO_DOMAIN is required}
+  frontend:
+    build:
+      args:
+        NEXT_PUBLIC_SUPABASE_URL: ${SUPABASE_URL:?SUPABASE_URL is required}
+        NEXT_PUBLIC_SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY:?SUPABASE_ANON_KEY is required}
+    image: researcherx-frontend:demo
+  caddy:
+    environment:
+      DEMO_DOMAIN: ${DEMO_DOMAIN:?DEMO_DOMAIN is required}
+    volumes:
+      - ./Caddyfile.demo:/etc/caddy/Caddyfile:ro

@@ -35,3 +35,6 @@ docs/session.txt
 # MCP server config (contains API keys — keep local)
 .mcp.json
 backend/stub-papers/
+
+# Nightly demo DB dumps (make demo-backup)
+backups/
