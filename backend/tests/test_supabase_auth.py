@@ -73,7 +73,7 @@ async def test_a_valid_token_yields_sub_and_lowercased_email():
 @pytest.mark.parametrize(
     "overrides",
     [
-        {"exp": int(time.time()) - 10},
+        {"exp": int(time.time()) - 60},
         {"aud": "anon"},
         {"iss": "https://evil.example/auth/v1"},
         {"sub": None},
@@ -84,6 +84,19 @@ async def test_bad_claims_are_rejected(overrides):
     priv, jwk = _keypair()
     with pytest.raises(AuthError):
         await verify_token(_token(priv, **overrides), _cache(jwk))
+
+
+async def test_a_token_issued_slightly_in_the_future_verifies():
+    priv, jwk = _keypair()
+    token = _token(priv, iat=int(time.time()) + 5)
+    claims = await verify_token(token, _cache(jwk))
+    assert claims.sub == "user-1"
+
+
+async def test_a_token_expired_beyond_the_leeway_is_still_refused():
+    priv, jwk = _keypair()
+    with pytest.raises(AuthError):
+        await verify_token(_token(priv, exp=int(time.time()) - 60), _cache(jwk))
 
 
 async def test_a_token_signed_by_another_key_is_rejected():

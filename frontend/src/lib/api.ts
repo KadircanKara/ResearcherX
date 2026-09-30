@@ -41,7 +41,9 @@ export async function authHeaders(): Promise<Record<string, string>> {
 /** A 401 under real auth ends the session: sign out and go to /login. */
 export async function onAuthFailure(status: number): Promise<void> {
   if (!isSessionEnded(status, authEnabled)) return;
-  await supabase().auth.signOut();
+  // Local scope only: a backend 401 (e.g. misconfig) must not revoke the
+  // user's sessions on other devices, and needs no network call to succeed.
+  await supabase().auth.signOut({ scope: "local" });
   window.location.assign(routes.login());
 }
 

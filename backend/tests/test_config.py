@@ -194,3 +194,8 @@ def test_prod_without_require_auth_still_boots_in_dev_auth(monkeypatch):
     monkeypatch.setattr(settings, "require_auth", False)
     monkeypatch.setattr(settings, "auth_mode", "dev")
     settings.validate_for_environment()  # the local prod smoke test keeps working
+
+
+def test_a_negative_demo_max_users_is_refused():
+    with pytest.raises(ValidationError):
+        Settings(demo_max_users=-1)

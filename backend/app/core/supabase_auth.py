@@ -112,6 +112,11 @@ class JwksCache:
         self._fetched_at = self._clock()
 
 
+# PyJWT rejects an `iat` ahead of our clock; a slightly slow host clock must
+# not 401 a freshly signed-in user.
+_CLOCK_LEEWAY_S = 30
+
+
 async def verify_token(token: str, cache: JwksCache) -> Claims:
     try:
         header = jwt.get_unverified_header(token)
@@ -130,6 +135,7 @@ async def verify_token(token: str, cache: JwksCache) -> Claims:
             algorithms=[alg],
             audience="authenticated",
             issuer=settings.supabase_issuer,
+            leeway=_CLOCK_LEEWAY_S,
             options={"require": ["exp", "sub", "aud", "iss"]},
         )
     except (jwt.PyJWTError, TypeError, ValueError) as exc:

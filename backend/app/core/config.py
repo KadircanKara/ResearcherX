@@ -359,7 +359,7 @@ class Settings(BaseSettings):
     # Backstop on account creation in supabase mode; 0 = no cap. Signups are
     # off in the demo's Supabase project, so this only fires if they are
     # switched on by mistake.
-    demo_max_users: int = 0
+    demo_max_users: int = Field(default=0, ge=0)
     rate_limit_runs: str = "3/hour;10/day"  # per-IP, POST /v1/research
     rate_limit_reads: str = "120/minute"  # per-IP, GETs + SSE connects
     # Groq free tier allows 100k tokens/day and a measured full run costs
