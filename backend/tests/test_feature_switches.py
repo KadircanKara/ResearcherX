@@ -34,22 +34,6 @@ def off(monkeypatch):
     return _off
 
 
-async def test_latex_off_is_404(client, project, off):
-    off("latex")
-    assert (await client.get(f"/v1/projects/{project.id}/latex")).status_code == 404
-
-
-async def test_research_off_is_404(client, project, off):
-    off("research")
-    assert (await client.get("/v1/research/some-id")).status_code == 404
-    assert (await client.get(f"/v1/projects/{project.id}/runs")).status_code == 404
-
-
-async def test_sharing_off_is_404(client, project, off):
-    off("sharing")
-    assert (await client.get(f"/v1/projects/{project.id}/members")).status_code == 404
-
-
 async def test_paper_url_off_is_404_and_refuses_link_papers(client, project, off):
     off("paper_url")
     r = await client.post(
@@ -75,6 +59,73 @@ async def test_manual_off_refuses_manual_but_allows_upload(client, project, off)
 async def test_everything_on_by_default(client, project):
     assert (await client.get(f"/v1/projects/{project.id}/members")).status_code == 200
     assert (await client.get(f"/v1/projects/{project.id}/latex")).status_code == 200
+
+
+NOT_FOUND = {"detail": "Not Found"}
+
+# (feature, method, path template, JSON body). {p} project, {d} latex document,
+# {u} another user, {paper} a real paper. Bodies are valid so that a missing
+# gate reaches the handler and answers something other than 404 / this body.
+_GATED = [
+    ("sharing", "GET", "/v1/projects/{p}/members", None),
+    ("sharing", "POST", "/v1/projects/{p}/members", {"user_id": "{u}", "role": "member"}),
+    ("sharing", "PATCH", "/v1/projects/{p}/members/{u}", {"role": "member"}),
+    ("sharing", "DELETE", "/v1/projects/{p}/members/{u}", None),
+    ("research", "GET", "/v1/projects/{p}/runs", None),
+    ("research", "POST", "/v1/research", {"question": "What is RAG?", "project_id": "{p}"}),
+    ("research", "GET", "/v1/research/{r}", None),
+    ("research", "GET", "/v1/research/{r}/events", None),
+    (
+        "paper_url",
+        "POST",
+        "/v1/projects/{p}/papers/suggest-title-from-url",
+        {"url": "https://x.org"},
+    ),
+    (
+        "paper_url",
+        "POST",
+        "/v1/projects/{p}/papers/{paper}/ingest-from-url",
+        {"url": "https://x.org"},
+    ),
+    ("latex", "GET", "/v1/projects/{p}/latex", None),
+    ("latex", "GET", "/v1/projects/{p}/latex/{d}", None),
+    ("latex", "GET", "/v1/projects/{p}/latex/{d}/files", None),
+    ("latex", "GET", "/v1/projects/{p}/latex/{d}/members", None),
+]
+
+
+@pytest_asyncio.fixture
+async def resources(client, project, db_session):
+    """A real paper, latex document and second user, created while all is on."""
+    other = (
+        (await db_session.execute(select(User).where(User.email != "you@researcherx.dev")))
+        .scalars()
+        .first()
+    )
+    paper = await client.post(
+        f"/v1/projects/{project.id}/papers", json={"title": "T", "source": "upload"}
+    )
+    doc = await client.post(f"/v1/projects/{project.id}/latex", json={"name": "d"})
+    assert paper.status_code == 201 and doc.status_code == 201
+    return {
+        "p": project.id,
+        "u": other.id,
+        "paper": paper.json()["id"],
+        "d": doc.json()["id"],
+        "r": "00000000-0000-0000-0000-000000000000",
+    }
+
+
+@pytest.mark.parametrize("feature,method,path,body", _GATED)
+async def test_every_gated_route_is_a_plain_404_when_its_feature_is_off(
+    client, resources, off, feature, method, path, body
+):
+    off(feature)
+    ids = resources
+    json = None if body is None else {k: v.format(**ids) for k, v in body.items()}
+    r = await client.request(method, path.format(**ids), json=json)
+    assert r.status_code == 404
+    assert r.json() == NOT_FOUND
 
 
 async def test_anonymous_request_in_supabase_mode_resolves_to_none(db_session, monkeypatch):
