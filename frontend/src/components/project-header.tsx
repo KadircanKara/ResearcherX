@@ -1,38 +1,26 @@
 "use client"
 
 import { useEffect, useState } from "react"
-import { Users } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
-import { Button } from "@/components/ui/button"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
-import { ShareProjectDialog } from "@/components/share-dialog"
 import { colorFor, PROJECT_PALETTE, type ProjectColor } from "@/lib/project-colors"
 import { updateProject } from "@/lib/projects"
 import { publishProjectColor } from "@/lib/project-store"
 import { cn } from "@/lib/utils"
-import type { Member, ProjectDetail } from "@/lib/types"
+import type { ProjectDetail } from "@/lib/types"
 
 /**
  * The project's own header above the tab strip, ported from the prototype's
- * `project-header.tsx`: eyebrow badge, colour dot + title, description, and
- * the member count with Share.
+ * `project-header.tsx`: eyebrow badge, colour dot + title and description.
  *
  * The colour is applied the moment it is picked -- here and, through
  * `publishProjectColor`, on the sidebar dot -- and reverted if the PATCH
  * fails: keeping a colour the server rejected would be a lie the next reload
  * undoes. Only an owner may change it; anyone else sees a plain dot.
  */
-export function ProjectHeader({
-  detail,
-  onMembersChange,
-}: {
-  detail: ProjectDetail
-  /** The share dialog's fresh member list, so the count here can follow it. */
-  onMembersChange?: (members: Member[]) => void
-}) {
-  const { project, members } = detail
+export function ProjectHeader({ detail }: { detail: ProjectDetail }) {
+  const { project } = detail
   const canEdit = detail.my_role === "owner"
-  const [shareOpen, setShareOpen] = useState(false)
   const [color, setColor] = useState<ProjectColor>(() => colorFor(project))
 
   useEffect(() => {
@@ -48,8 +36,6 @@ export function ProjectHeader({
       publishProjectColor({ id: project.id, color: previous })
     })
   }
-
-  const memberCount = members.length
 
   return (
     <div className="flex flex-wrap items-start justify-between gap-4">
@@ -92,24 +78,6 @@ export function ProjectHeader({
           </p>
         )}
       </div>
-
-      <div className="flex shrink-0 items-center gap-2">
-        <span className="flex items-center gap-1.5 text-[13px] text-muted-foreground">
-          <Users className="size-3.5" aria-hidden />
-          {memberCount} {memberCount === 1 ? "member" : "members"}
-        </span>
-        <Button variant="outline" size="sm" onClick={() => setShareOpen(true)}>
-          Share
-        </Button>
-      </div>
-
-      <ShareProjectDialog
-        open={shareOpen}
-        onOpenChange={setShareOpen}
-        project={project}
-        members={members}
-        onMembersChange={onMembersChange}
-      />
     </div>
   )
 }

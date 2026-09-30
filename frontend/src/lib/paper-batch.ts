@@ -95,21 +95,3 @@ export function uploadFailure(cleanedUp: boolean): string {
     ? "Couldn't read or index this PDF."
     : "Couldn't index this PDF, and cleanup failed — check the paper list for a leftover entry.";
 }
-
-/**
- * Why a linked paper was not added. Paywalled is a normal outcome for a URL,
- * not a crash, and indexing being down is not the link's fault — saying
- * "couldn't fetch" there sends the reader to re-check a URL that was fine.
- */
-export function linkFailure(opts: {
-  cleanedUp: boolean;
-  paywalled: boolean;
-  unavailable: boolean;
-}): string {
-  if (!opts.cleanedUp) {
-    return "Couldn't fetch this paper, and cleanup failed — check the paper list for a leftover entry.";
-  }
-  if (opts.paywalled) return "Paywalled — upload the PDF instead.";
-  if (opts.unavailable) return "Indexing is temporarily unavailable. Try again later.";
-  return "Couldn't fetch this paper.";
-}

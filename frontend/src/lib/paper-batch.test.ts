@@ -4,7 +4,6 @@ import {
   TITLE_MAX,
   addButtonLabel,
   addableCount,
-  linkFailure,
   nonPdfNotice,
   overCapNotice,
   splitPdfs,
@@ -72,24 +71,9 @@ describe("addableCount and its label", () => {
 });
 
 describe("failure messages", () => {
-  it("says a failed cleanup distinctly, for both sources", () => {
+  it("says a failed cleanup distinctly", () => {
     expect(uploadFailure(true)).toBe("Couldn't read or index this PDF.");
     expect(uploadFailure(false)).toContain("cleanup failed");
-    expect(linkFailure({ cleanedUp: false, paywalled: true, unavailable: false })).toContain(
-      "cleanup failed"
-    );
-  });
-
-  it("names a paywall and an indexing outage rather than blaming the link", () => {
-    expect(linkFailure({ cleanedUp: true, paywalled: true, unavailable: false })).toBe(
-      "Paywalled — upload the PDF instead."
-    );
-    expect(linkFailure({ cleanedUp: true, paywalled: false, unavailable: true })).toBe(
-      "Indexing is temporarily unavailable. Try again later."
-    );
-    expect(linkFailure({ cleanedUp: true, paywalled: false, unavailable: false })).toBe(
-      "Couldn't fetch this paper."
-    );
   });
 });
 

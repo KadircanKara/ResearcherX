@@ -1,6 +1,6 @@
 import { apiGet, apiSend, authHeaders, onAuthFailure, API_BASE } from "./api";
 import { ApiError, detailOf } from "./api-error";
-import type { Project, ProjectDetail, Member, Role, Run, Paper, PaperSource } from "./types";
+import type { Project, ProjectDetail, Member, Run, Paper, PaperSource } from "./types";
 
 export async function listProjects(): Promise<Project[]> {
   return apiGet<Project[]>("/projects");
@@ -39,17 +39,6 @@ export async function deleteProject(id: string): Promise<void> {
 
 export async function listMembers(id: string): Promise<Member[]> {
   return apiGet<Member[]>(`/projects/${id}/members`);
-}
-
-export async function addMember(
-  id: string,
-  body: { user_id: string; role: Role }
-): Promise<Member> {
-  return (await apiSend<Member>("POST", `/projects/${id}/members`, body)) as Member;
-}
-
-export async function removeMember(id: string, userId: string): Promise<void> {
-  await apiSend<void>("DELETE", `/projects/${id}/members/${userId}`);
 }
 
 export async function listProjectRuns(
@@ -145,55 +134,6 @@ export async function suggestTitle(
   );
   await onAuthFailure(r.status);
   if (!r.ok) return { title: null, abstract: null, body: null };
-  return r.json();
-}
-
-export async function suggestTitleFromUrl(
-  projectId: string,
-  url: string
-): Promise<{ title: string | null; abstract: string | null; requires_manual: boolean }> {
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  Object.assign(headers, await authHeaders());
-  const r = await fetch(
-    `${API_BASE}/v1/projects/${projectId}/papers/suggest-title-from-url`,
-    { method: "POST", headers, body: JSON.stringify({ url }), cache: "no-store" }
-  );
-  await onAuthFailure(r.status);
-  if (!r.ok) return { title: null, abstract: null, requires_manual: true };
-  return r.json();
-}
-
-export async function ingestPaperFromUrl(
-  projectId: string,
-  paperId: string,
-  url: string
-): Promise<{ chunks_stored: number }> {
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  Object.assign(headers, await authHeaders());
-  const r = await fetch(
-    `${API_BASE}/v1/projects/${projectId}/papers/${paperId}/ingest-from-url`,
-    {
-      method: "POST",
-      headers,
-      body: JSON.stringify({ url }),
-      cache: "no-store",
-    }
-  );
-  await onAuthFailure(r.status);
-  if (r.status === 422) {
-    const body = await r.json().catch(() => ({}));
-    const err = new Error("ingest-from-url -> 422") as Error & { paywalled?: boolean };
-    err.paywalled = body?.detail?.error === "paywalled";
-    throw err;
-  }
-  if (r.status === 503) {
-    // The PDF was fetched and parsed — only indexing is down. Distinct from a
-    // fetch failure so the UI doesn't tell the user their link is bad.
-    const err = new Error("ingest-from-url -> 503") as Error & { unavailable?: boolean };
-    err.unavailable = true;
-    throw err;
-  }
-  if (!r.ok) throw new Error(`ingest-from-url -> ${r.status}`);
   return r.json();
 }
 
