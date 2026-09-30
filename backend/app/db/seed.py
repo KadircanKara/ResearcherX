@@ -108,3 +108,18 @@ async def seed_projects(db: AsyncSession) -> None:
             )
             existing_members.add(uid)
         await db.flush()
+
+
+async def seed_dev_data(db: AsyncSession) -> None:
+    """Seed the dev users + projects, only on the dev identity seam.
+
+    Under AUTH_MODE=supabase the seeded identities would be unreachable
+    accounts, and `you@researcherx.dev` would own three demo projects nobody
+    can open.
+    """
+    from app.core.config import settings
+
+    if settings.auth_mode != "dev":
+        return
+    await seed_users(db)
+    await seed_projects(db)
