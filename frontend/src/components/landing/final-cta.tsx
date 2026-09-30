@@ -11,10 +11,10 @@ export function FinalCta() {
         </p>
         <div className="mt-9 flex flex-col items-stretch justify-center gap-3 sm:flex-row sm:items-center">
           <a
-            href={routes.home()}
+            href={routes.login()}
             className="bg-site-accent text-site-accent-fg inline-flex h-12 items-center justify-center gap-2 rounded-lg px-6 text-[15px] font-medium transition-[filter] hover:brightness-110"
           >
-            Open the app
+            Login
             <ArrowRight className="size-4" aria-hidden />
           </a>
           <a

@@ -68,10 +68,10 @@ export function Hero() {
         </p>
         <div className="mt-9 flex flex-col items-stretch justify-center gap-3 sm:flex-row sm:items-center">
           <a
-            href={routes.home()}
+            href={routes.login()}
             className="bg-site-accent text-site-accent-fg inline-flex h-12 items-center justify-center gap-2 rounded-lg px-6 text-[15px] font-medium transition-[filter] hover:brightness-110"
           >
-            Open the app
+            Login
             <ArrowRight className="size-4" aria-hidden />
           </a>
           <a
@@ -85,7 +85,7 @@ export function Hero() {
           </a>
         </div>
         <p className="text-site-muted mt-5 text-[13px]">
-          Open source · PDFs, arXiv links and Overleaf projects
+          Open source · Upload PDFs, ask across them, cite every sentence
         </p>
       </div>
 
@@ -118,7 +118,7 @@ export function Hero() {
                 loop
                 playsInline
                 preload="metadata"
-                aria-label="ResearcherX answering a question about a drone-fleet paper library with citations, then compiling the paper in its LaTeX editor"
+                aria-label="ResearcherX answering a question about a drone-fleet paper library with citations"
                 onError={() => setVideoOk(false)}
                 className="absolute inset-0 h-full w-full object-cover"
               />
@@ -134,8 +134,7 @@ export function Hero() {
           </div>
         </div>
         <figcaption className="text-site-muted mt-4 text-center text-[13px]">
-          Recorded in the real app: a question answered with citations, one citation opened,
-          then the paper compiled.
+          Recorded in the real app: a question answered with citations, and one citation opened.
         </figcaption>
       </figure>
     </section>

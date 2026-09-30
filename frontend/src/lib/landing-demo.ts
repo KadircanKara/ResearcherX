@@ -14,7 +14,7 @@ import { formatChunkLocator } from "./citation-locator";
 export type DemoPaper = {
   id: number;
   title: string;
-  source: "PDF" | "arXiv" | "Manual";
+  source: "PDF";
   bibkey: string;
 };
 
@@ -28,7 +28,7 @@ export const DEMO_PAPERS: DemoPaper[] = [
   {
     id: 2,
     title: "Collision-Aware Coordination Under Intermittent Links",
-    source: "arXiv",
+    source: "PDF",
     bibkey: "nowak2023",
   },
   {
@@ -40,7 +40,7 @@ export const DEMO_PAPERS: DemoPaper[] = [
   {
     id: 4,
     title: "Energy-Aware Relay Placement for Drone Swarms",
-    source: "arXiv",
+    source: "PDF",
     bibkey: "okafor2024",
   },
 ];

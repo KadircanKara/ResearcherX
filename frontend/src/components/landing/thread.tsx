@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { FileText, Link2, CornerDownRight } from "lucide-react";
+import { FileText, CornerDownRight } from "lucide-react";
 import {
   DEMO_ANSWER,
   DEMO_CITATIONS,
@@ -24,7 +24,7 @@ export function Thread() {
       <div className="mx-auto max-w-[1180px] px-5 sm:px-8">
         <div className="max-w-2xl">
           <h2 className="text-site-fg text-3xl font-semibold sm:text-[2.75rem] sm:leading-[1.1]">
-            Follow one question from library to manuscript.
+            Follow one question from library to cited answer.
           </h2>
           <p className="text-site-muted mt-5 text-[17px] leading-relaxed">
             The papers in this example are illustrative. Watch the highlighted one: it is the
@@ -36,7 +36,7 @@ export function Thread() {
           <Step
             n={1}
             title="Build the library"
-            body="Drop in PDFs, paste an arXiv link, or type a reference by hand. Each paper is split along its own sections and indexed, so you can ask about it as soon as it lands."
+            body="Drop in PDFs. Each paper is split along its own sections and indexed, so you can ask about it as soon as it lands."
           >
             <LibraryVisual />
           </Step>
@@ -53,14 +53,6 @@ export function Thread() {
             body="Open any marker to read the exact passage, with its section and page, before you rely on it. Nothing is paraphrased from memory."
           >
             <PassageVisual />
-          </Step>
-          <Step
-            n={4}
-            title="Write it up in the same project"
-            body="Keep your manuscript next to its sources: a multi-file LaTeX editor, Overleaf zip import, and a compiler with click-through between source and PDF."
-            id="writing"
-          >
-            <LatexVisual />
           </Step>
         </ol>
       </div>
@@ -146,11 +138,7 @@ function LibraryVisual() {
                 followed ? "trace bg-site-accent-soft" : ""
               }`}
             >
-              {p.source === "arXiv" ? (
-                <Link2 className="text-site-muted size-4 shrink-0" aria-hidden />
-              ) : (
-                <FileText className="text-site-muted size-4 shrink-0" aria-hidden />
-              )}
+              <FileText className="text-site-muted size-4 shrink-0" aria-hidden />
               <span className="text-site-fg min-w-0 flex-1 leading-snug font-medium">{p.title}</span>
               <span className="text-site-muted hidden shrink-0 sm:inline">{p.source}</span>
               <span className="text-site-muted inline-flex shrink-0 items-center gap-1.5">
@@ -315,100 +303,6 @@ function PassageVisual() {
       <blockquote className="border-site-line text-site-fg mt-5 border-l pl-4 text-[15px] leading-[1.8]">
         {c.passage}
       </blockquote>
-    </div>
-  );
-}
-
-/* ── step 4 ─────────────────────────────────────────────────────────────── */
-
-type Line = { n: number; code: ReactNode; block?: string };
-
-const LINES: Line[] = [
-  { n: 1, code: "\\subsection{Reward design}", block: "heading" },
-  { n: 2, code: "" },
-  { n: 3, code: "The planner trades coverage", block: "para" },
-  { n: 4, code: "against energy, penalizing", block: "para" },
-  {
-    n: 5,
-    code: (
-      <>
-        close pairs{" "}
-        <span className="trace bg-site-accent-soft text-site-fg rounded px-0.5">
-          \cite{"{"}
-          {FOLLOWED_PAPER.bibkey}
-          {"}"}
-        </span>
-        .
-      </>
-    ),
-    block: "para",
-  },
-  { n: 6, code: "" },
-  { n: 7, code: "\\begin{equation}", block: "equation" },
-  { n: 8, code: "  R = \\alpha C - \\beta E", block: "equation" },
-  { n: 9, code: "      - \\gamma P", block: "equation" },
-  { n: 10, code: "\\end{equation}", block: "equation" },
-];
-
-function LatexVisual() {
-  const [active, setActive] = useState<string | null>(null);
-  const tint = (name: string) => (active === name ? "bg-site-accent-soft" : "");
-
-  return (
-    <div className="grid md:grid-cols-2">
-      <div className="border-site-line border-b md:border-r md:border-b-0">
-        <div className="border-site-line text-site-muted border-b px-4 py-2.5 text-[12px]">
-          sections/method.tex
-        </div>
-        <ul className="py-2 font-mono text-[12px] leading-[1.9]">
-          {LINES.map((l) => (
-            <li key={l.n}>
-              <button
-                type="button"
-                onPointerEnter={(e) => e.pointerType === "mouse" && setActive(l.block ?? null)}
-                onPointerLeave={(e) => e.pointerType === "mouse" && setActive(null)}
-                onFocus={() => setActive(l.block ?? null)}
-                onBlur={() => setActive(null)}
-                onClick={() => setActive(l.block ?? null)}
-                className={`flex w-full gap-3 px-4 text-left transition-colors ${
-                  l.block ? tint(l.block) : ""
-                }`}
-              >
-                <span className="text-site-muted/60 w-4 shrink-0 text-right tabular-nums">
-                  {l.n}
-                </span>
-                <span className="text-site-fg break-words whitespace-pre-wrap">
-                  {l.code || " "}
-                </span>
-              </button>
-            </li>
-          ))}
-        </ul>
-      </div>
-
-      <div className="bg-white p-5 text-neutral-900">
-        <p className="text-[11px] text-neutral-500">main.pdf · page 5</p>
-        <div className={`mt-4 rounded px-2 py-1 transition-colors ${tint("heading")}`}>
-          <p className="font-serif text-[15px] font-semibold">3.2 Reward design</p>
-        </div>
-        <div className={`mt-1 rounded px-2 py-1 transition-colors ${tint("para")}`}>
-          <p className="font-serif text-[13.5px] leading-relaxed">
-            The planner trades coverage against energy, penalizing close pairs [1].
-          </p>
-        </div>
-        <div className={`mt-2 rounded px-2 py-2 text-center transition-colors ${tint("equation")}`}>
-          <span className="font-serif text-[14px] italic">R = αC − βE − γP</span>
-          <span className="float-right font-serif text-[12px] text-neutral-500">(3)</span>
-        </div>
-        <div className="mt-5 border-t border-neutral-200 pt-3">
-          <p className="font-serif text-[11.5px] leading-relaxed text-neutral-600">
-            [1] {FOLLOWED_PAPER.title}.
-          </p>
-        </div>
-      </div>
-      <p className="text-site-muted border-site-line col-span-full border-t px-4 py-2.5 text-[12px]">
-        Point at a line of source, or tap it, to find it in the PDF.
-      </p>
     </div>
   );
 }

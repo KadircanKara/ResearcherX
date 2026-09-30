@@ -97,7 +97,7 @@ export function NewProjectDialog({
         <DialogHeader>
           <DialogTitle>New project</DialogTitle>
           <DialogDescription>
-            A project keeps its own papers, conversations and LaTeX documents.
+            A project keeps its own papers and conversations.
           </DialogDescription>
         </DialogHeader>
 
