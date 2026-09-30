@@ -47,7 +47,7 @@ demo-logs:
 
 # Nightly from cron (deploy/RUNBOOK.md); keeps 7 days.
 demo-backup:
-	mkdir -p backups && $(DEMO) exec -T db pg_dump -U researcherx researcherx | gzip > backups/researcherx-$$(date -u +%F).sql.gz && find backups -name 'researcherx-*.sql.gz' -mtime +7 -delete
+	umask 077 && mkdir -p backups && set -e && $(DEMO) exec -T db pg_dump -U researcherx researcherx > backups/.tmp.sql && gzip -c backups/.tmp.sql > backups/.tmp.sql.gz && mv backups/.tmp.sql.gz backups/researcherx-$$(date -u +%F).sql.gz && rm -f backups/.tmp.sql && find backups -name 'researcherx-*.sql.gz' -mtime +7 -delete
 
 revision:
 	docker compose exec backend alembic revision --autogenerate -m "$(m)"

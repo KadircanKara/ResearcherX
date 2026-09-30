@@ -31,11 +31,18 @@ One VM, `docker-compose.prod.yml` + `docker-compose.demo.yml`, Caddy with automa
 4. OTP expiry `3600` seconds, email OTP length `6`.
 5. URL Configuration: Site URL `https://<DEMO_DOMAIN>`.
 6. **JWT signing keys.** The backend verifies access tokens against the project's public keys, so the project must sign with an asymmetric key (ES256 or RS256): Settings → JWT Keys / signing keys, and make sure an ES256 or RS256 key is the current signing key. With the legacy HS256 shared secret, every login succeeds and then loops back to `/login` with no message. Check this **before the first login**.
-7. Project Settings → API: copy the Project URL and the anon (publishable) key.
+7. SQL editor: create the keep-alive table (used by the cron in section 8; it holds no data and anon can only read it):
+   ```sql
+   create table public.keepalive (id int primary key);
+   insert into public.keepalive values (1);
+   alter table public.keepalive enable row level security;
+   create policy "anon can read keepalive" on public.keepalive for select to anon using (true);
+   ```
+8. Project Settings → API: copy the Project URL and the anon (publishable) key.
 
 ## 5. Secrets on the VM
 
-1. Create `/etc/researcherx-demo.env` (mode `600`, owner root) with these variables, one `NAME=value` per line, no `export`:
+1. Create `/etc/researcherx-demo.env` (mode `600`, owner root) with these variables, one `NAME='value'` per line, no `export`. **Single-quote every value**: the file is shell-sourced, so an unquoted `$`, space or backtick would be expanded:
    `POSTGRES_PASSWORD`, `LLM_API_KEY` (OpenAI), `EMBEDDING_API_KEY` (OpenAI), `COHERE_API_KEY`, `OWNER_API_KEY` (random: `openssl rand -hex 32`), `SUPABASE_URL`, `SUPABASE_ANON_KEY` and `DEMO_DOMAIN`.
 2. **Start on a fresh database.** The demo must not reuse a dev database or `data/postgres` from a dev machine. `AUTH_MODE=supabase` never seeds users, so a fresh database has no seed users; a database carried over from dev would hold the dev seed accounts and their projects.
 3. Deploy: `cd /srv/researcherx && set -a; . /etc/researcherx-demo.env; set +a; make demo-up`.
@@ -60,10 +67,10 @@ One VM, `docker-compose.prod.yml` + `docker-compose.demo.yml`, Caddy with automa
 
 ```
 0 3 * * * cd /srv/researcherx && set -a && . /etc/researcherx-demo.env && set +a && make demo-backup
-0 12 * * * set -a && . /etc/researcherx-demo.env && set +a && curl -fsS "$SUPABASE_URL/auth/v1/health" -H "apikey: $SUPABASE_ANON_KEY" >/dev/null
+0 12 * * * set -a && . /etc/researcherx-demo.env && set +a && curl -fsS "$SUPABASE_URL/rest/v1/keepalive?select=id&limit=1" -H "apikey: $SUPABASE_ANON_KEY" -H "Authorization: Bearer $SUPABASE_ANON_KEY" >/dev/null
 ```
 
-The first is the nightly DB dump (kept 7 days in `/srv/researcherx/backups`). The second is the keep-alive: Supabase free projects pause after 7 idle days, and this daily request to Supabase auth keeps the project active. Copy backups off the VM occasionally.
+The first is the nightly DB dump (kept 7 days in `/srv/researcherx/backups`, mode 600; a failed dump leaves the previous dumps untouched). The second is a daily read of the keep-alive table through the public anon key, to avoid the free-tier inactivity pause (free projects pause after 7 idle days); if the project pauses anyway, restore it from the dashboard (see section 11, step 1). Never use the service_role key here. Copy backups off the VM occasionally.
 
 ## 9. Updating the demo
 
