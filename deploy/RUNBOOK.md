@@ -37,6 +37,7 @@ One VM, `docker-compose.prod.yml` + `docker-compose.demo.yml`, Caddy with automa
    insert into public.keepalive values (1);
    alter table public.keepalive enable row level security;
    create policy "anon can read keepalive" on public.keepalive for select to anon using (true);
+   grant select on public.keepalive to anon;
    ```
 8. Project Settings → API: copy the Project URL and the anon (publishable) key.
 
