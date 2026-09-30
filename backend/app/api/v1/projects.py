@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import palette
 from app.core.config import settings
+from app.core.features import feature_enabled, require_feature
 from app.core.identity import get_current_user
 from app.core.logging import log
 from app.db.models import (
@@ -133,7 +134,11 @@ async def delete_project(
     return Response(status_code=204)
 
 
-@router.get("/projects/{project_id}/runs", response_model=list[RunOut])
+@router.get(
+    "/projects/{project_id}/runs",
+    response_model=list[RunOut],
+    dependencies=[Depends(require_feature("research"))],
+)
 async def list_project_runs(
     project_id: str,
     limit: int = Query(default=20, ge=1, le=100),
@@ -197,6 +202,10 @@ async def create_paper(
     db: AsyncSession = Depends(get_session),
 ) -> PaperOut:
     await project_service.require_member(db, project_id, user.id, "member")
+    if data.source == PaperSource.MANUAL and not feature_enabled("manual_papers"):
+        raise HTTPException(status_code=422, detail="Manual papers are not available.")
+    if data.source == PaperSource.LINK and not feature_enabled("paper_url"):
+        raise HTTPException(status_code=422, detail="Link papers are not available.")
     paper = Paper(
         project_id=project_id,
         title=data.title,
@@ -368,6 +377,7 @@ async def suggest_paper_title(
 @router.post(
     "/projects/{project_id}/papers/suggest-title-from-url",
     response_model=SuggestTitleFromUrlResponse,
+    dependencies=[Depends(require_feature("paper_url"))],
 )
 async def suggest_paper_title_from_url(
     project_id: str,
@@ -478,7 +488,10 @@ async def download_paper_pdf(
     )
 
 
-@router.post("/projects/{project_id}/papers/{paper_id}/ingest-from-url")
+@router.post(
+    "/projects/{project_id}/papers/{paper_id}/ingest-from-url",
+    dependencies=[Depends(require_feature("paper_url"))],
+)
 async def ingest_paper_from_url(
     project_id: str,
     paper_id: str,
@@ -537,7 +550,11 @@ async def ingest_paper_from_url(
 # ── members ──────────────────────────────────────────────────────────────────
 
 
-@router.get("/projects/{project_id}/members", response_model=list[MemberOut])
+@router.get(
+    "/projects/{project_id}/members",
+    response_model=list[MemberOut],
+    dependencies=[Depends(require_feature("sharing"))],
+)
 async def list_members(
     project_id: str,
     user: User = Depends(get_current_user),
@@ -547,7 +564,12 @@ async def list_members(
     return [await _member_out(m, db) for m in members]
 
 
-@router.post("/projects/{project_id}/members", response_model=MemberOut, status_code=201)
+@router.post(
+    "/projects/{project_id}/members",
+    response_model=MemberOut,
+    status_code=201,
+    dependencies=[Depends(require_feature("sharing"))],
+)
 async def add_member(
     project_id: str,
     data: MemberCreate,
@@ -558,7 +580,11 @@ async def add_member(
     return await _member_out(membership, db)
 
 
-@router.patch("/projects/{project_id}/members/{target_user_id}", response_model=MemberOut)
+@router.patch(
+    "/projects/{project_id}/members/{target_user_id}",
+    response_model=MemberOut,
+    dependencies=[Depends(require_feature("sharing"))],
+)
 async def update_member_role(
     project_id: str,
     target_user_id: str,
@@ -572,7 +598,11 @@ async def update_member_role(
     return await _member_out(membership, db)
 
 
-@router.delete("/projects/{project_id}/members/{target_user_id}", status_code=204)
+@router.delete(
+    "/projects/{project_id}/members/{target_user_id}",
+    status_code=204,
+    dependencies=[Depends(require_feature("sharing"))],
+)
 async def remove_member(
     project_id: str,
     target_user_id: str,
