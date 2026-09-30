@@ -365,8 +365,8 @@ class ChatMessage(Base):
 
 
 class UsageEvent(Base):
-    """One metered action that leaves no other row behind (a title
-    suggestion). Papers and chat turns are counted from their own tables."""
+    """One metered action that leaves no other row behind: chat turns, title
+    assists and ingests. Papers are counted from their own table."""
 
     __tablename__ = "usage_events"
 

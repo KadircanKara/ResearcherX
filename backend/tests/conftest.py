@@ -46,6 +46,7 @@ for _limit in (
     "USER_MAX_PAPERS",
     "USER_CHAT_TURNS_PER_DAY",
     "USER_LLM_ASSISTS_PER_DAY",
+    "USER_INGESTS_PER_DAY",
     "GLOBAL_CHAT_TURNS_PER_DAY",
 ):
     os.environ[_limit] = "0"

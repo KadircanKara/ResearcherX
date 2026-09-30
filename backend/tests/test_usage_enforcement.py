@@ -199,3 +199,103 @@ async def test_suggest_title_refuses_chunked_body_without_content_length(client,
 
     r = await client.post(f"/v1/projects/{project.id}/papers/suggest-title", content=body())
     assert r.status_code == 413
+
+
+async def _paper(db, project):
+    p = Paper(project_id=project.id, title="p", source="upload")
+    db.add(p)
+    await db.commit()
+    return p
+
+
+async def test_the_3rd_ingest_today_is_refused_before_any_paid_call(
+    client, db_session, you, project, limits
+):
+    from app.services.usage_service import INGEST
+
+    limits(user_ingests_per_day=2)
+    paper = await _paper(db_session, project)
+    now = datetime.now(timezone.utc)
+    for _ in range(2):
+        db_session.add(UsageEvent(user_id=you.id, kind=INGEST, created_at=now))
+    # Yesterday's ingests never count against today.
+    for _ in range(50):
+        db_session.add(
+            UsageEvent(user_id=you.id, kind=INGEST, created_at=now - timedelta(days=1, hours=1))
+        )
+    await db_session.commit()
+    events = await _count(db_session, UsageEvent)
+    paid = AsyncMock(return_value=1)
+    with patch("app.services.paper_ingest_service.ingest", new=paid):
+        r = await client.post(
+            f"/v1/projects/{project.id}/papers/{paper.id}/ingest", content=b"%PDF"
+        )
+    assert r.status_code == 429
+    assert r.json() == {"detail": "Daily upload limit reached (2). Resets at 00:00 UTC."}
+    paid.assert_not_called()
+    assert await _count(db_session, UsageEvent) == events
+
+
+async def test_allowed_ingests_are_metered_and_yesterday_frees_the_slot(
+    client, db_session, you, project, limits
+):
+    from app.services.usage_service import INGEST
+
+    limits(user_ingests_per_day=1)
+    paper = await _paper(db_session, project)
+    db_session.add(
+        UsageEvent(
+            user_id=you.id, kind=INGEST, created_at=datetime.now(timezone.utc) - timedelta(days=2)
+        )
+    )
+    await db_session.commit()
+    paid = AsyncMock(return_value=3)
+    with patch("app.services.paper_ingest_service.ingest", new=paid):
+        ok = await client.post(
+            f"/v1/projects/{project.id}/papers/{paper.id}/ingest", content=b"%PDF"
+        )
+        again = await client.post(
+            f"/v1/projects/{project.id}/papers/{paper.id}/ingest", content=b"%PDF"
+        )
+    assert ok.status_code == 200
+    assert again.status_code == 429
+    assert paid.call_count == 1
+
+
+def test_a_negative_ingest_limit_is_refused_by_settings():
+    from pydantic import ValidationError
+
+    from app.core.config import Settings
+
+    with pytest.raises(ValidationError):
+        Settings(user_ingests_per_day=-1)
+
+
+async def test_an_allowed_chat_turn_writes_exactly_one_chat_turn_event(
+    client, db_session, project, limits
+):
+    from app.api.v1 import chat as chat_api
+
+    limits(user_chat_turns_per_day=2)
+    conv = await _conversation(db_session, project)
+
+    async def fake_respond(*_a, **_k):
+        yield {"event": "done", "data": "{}"}
+
+    async def turn_events():
+        return int(
+            await db_session.scalar(
+                select(func.count()).select_from(UsageEvent).where(UsageEvent.kind == CHAT_TURN)
+            )
+            or 0
+        )
+
+    url = f"/v1/projects/{project.id}/conversations/{conv.id}/messages"
+    with patch.object(chat_api.chat_service, "respond", new=fake_respond):
+        for expected in (1, 2):
+            r = await client.post(url, json={"content": "hi"})
+            assert r.status_code == 200
+            assert await turn_events() == expected
+        third = await client.post(url, json={"content": "hi"})
+    assert third.status_code == 429
+    assert await turn_events() == 2

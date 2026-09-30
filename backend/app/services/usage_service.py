@@ -19,6 +19,7 @@ from app.services.usage_limits import day_start, is_over
 
 TITLE_ASSIST = "title_assist"
 CHAT_TURN = "chat_turn"
+INGEST = "ingest"
 
 
 class LimitExceeded(Exception):
@@ -60,6 +61,15 @@ async def assists_since(db: AsyncSession, user_id: str, since: datetime) -> int:
     return int(await db.scalar(q) or 0)
 
 
+async def ingests_since(db: AsyncSession, user_id: str, since: datetime) -> int:
+    q = select(func.count(UsageEvent.id)).where(
+        UsageEvent.user_id == user_id,
+        UsageEvent.kind == INGEST,
+        UsageEvent.created_at >= since,
+    )
+    return int(await db.scalar(q) or 0)
+
+
 async def enforce_paper_slot(db: AsyncSession, user: User) -> None:
     limit = settings.user_max_papers
     if not limit:
@@ -89,9 +99,25 @@ async def enforce_title_assist(db: AsyncSession, user: User, now: datetime | Non
     await enforce_paper_slot(db, user)  # a full library cannot use a suggestion
     limit = settings.user_llm_assists_per_day
     if not limit:
+        # Release the user-row lock enforce_paper_slot may hold: the caller
+        # goes on to stream a body and call the LLM.
+        await db.commit()
         return
     moment = _now(now)
     if is_over(await assists_since(db, user.id, day_start(moment)), limit):
         raise LimitExceeded(f"Daily title-suggestion limit reached ({limit}). Resets at 00:00 UTC.")
     db.add(UsageEvent(user_id=user.id, kind=TITLE_ASSIST, created_at=moment))
+    await db.commit()
+
+
+async def enforce_ingest(db: AsyncSession, user: User, now: datetime | None = None) -> None:
+    # Re-ingest re-extracts, re-embeds and re-runs metadata extraction, all
+    # paid, and needs no free paper slot -- so it is metered on its own.
+    limit = settings.user_ingests_per_day
+    if not limit:
+        return
+    moment = _now(now)
+    if is_over(await ingests_since(db, user.id, day_start(moment)), limit):
+        raise LimitExceeded(f"Daily upload limit reached ({limit}). Resets at 00:00 UTC.")
+    db.add(UsageEvent(user_id=user.id, kind=INGEST, created_at=moment))
     await db.commit()

@@ -375,6 +375,7 @@ class Settings(BaseSettings):
     user_max_papers: int = Field(default=0, ge=0)
     user_chat_turns_per_day: int = Field(default=0, ge=0)
     user_llm_assists_per_day: int = Field(default=0, ge=0)
+    user_ingests_per_day: int = Field(default=0, ge=0)
     global_chat_turns_per_day: int = Field(default=0, ge=0)
     rate_limit_runs: str = "3/hour;10/day"  # per-IP, POST /v1/research
     rate_limit_reads: str = "120/minute"  # per-IP, GETs + SSE connects

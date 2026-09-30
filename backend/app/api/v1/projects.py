@@ -437,6 +437,7 @@ async def ingest_paper(
     db: AsyncSession = Depends(get_session),
 ) -> dict:
     await project_service.require_member(db, project_id, user.id, "member")
+    await usage_service.enforce_ingest(db, user)
     paper = await db.get(Paper, paper_id)
     if paper is None or paper.project_id != project_id:
         raise HTTPException(status_code=404, detail="Paper not found")
