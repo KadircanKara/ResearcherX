@@ -1,4 +1,5 @@
 import { apiGet, apiSend, authHeaders, onAuthFailure, API_BASE } from "./api";
+import { ApiError, detailOf } from "./api-error";
 import type { Project, ProjectDetail, Member, Role, Run, Paper, PaperSource } from "./types";
 
 export async function listProjects(): Promise<Project[]> {
@@ -126,7 +127,7 @@ export async function ingestPaper(
     { method: "POST", headers, body: pdfBytes, cache: "no-store" }
   );
   await onAuthFailure(r.status);
-  if (!r.ok) throw new Error(`ingest -> ${r.status}`);
+  if (!r.ok) throw new ApiError(r.status, await detailOf(r), "ingest");
   return r.json();
 }
 
