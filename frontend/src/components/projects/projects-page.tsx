@@ -11,7 +11,7 @@ import { Button } from "@/components/ui/button";
 import { EmptyState, NoMatchState } from "@/components/ui/empty-state";
 import { Input } from "@/components/ui/input";
 import { useIdentity } from "@/lib/identity";
-import { createProject, listMembers, listProjects } from "@/lib/projects";
+import { createProject, listProjects } from "@/lib/projects";
 import { publishProjectListChanged } from "@/lib/project-store";
 import {
   DEFAULT_PROJECT_VIEW,
@@ -21,7 +21,7 @@ import {
   type ProjectView,
 } from "@/lib/project-view";
 import { routes } from "@/lib/routes";
-import type { Member, Project } from "@/lib/types";
+import type { Project } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 /**
@@ -36,7 +36,6 @@ export function ProjectsPage() {
   /** `null` while the first load (or a reload after an identity switch) runs. */
   const [projects, setProjects] = useState<Project[] | null>(null);
   const [error, setError] = useState(false);
-  const [members, setMembers] = useState<Record<string, Member[]>>({});
   const [query, setQuery] = useState("");
   const [dialogOpen, setDialogOpen] = useState(false);
   // Seeded in an effect rather than from a `useState` initializer: the server
@@ -45,10 +44,8 @@ export function ProjectsPage() {
   // mismatch. Same trade the sidebar's collapsed state makes in `AppShell`.
   const [view, setView] = useState<ProjectView>(DEFAULT_PROJECT_VIEW);
 
-  // A load started for a previous identity must not land over the current
-  // one's, and neither may the member lists it triggered.
+  // A load started for a previous identity must not land over the current one's.
   const loadSeq = useRef(0);
-  const membersRequested = useRef(new Set<string>());
 
   useEffect(() => {
     setView(parseProjectView(window.localStorage.getItem(PROJECT_VIEW_KEY)));
@@ -61,8 +58,6 @@ export function ProjectsPage() {
 
   const load = useCallback(async () => {
     const seq = ++loadSeq.current;
-    membersRequested.current = new Set();
-    setMembers({});
     setProjects(null);
     setError(false);
     try {
@@ -77,24 +72,6 @@ export function ProjectsPage() {
   useEffect(() => {
     void load();
   }, [load, me?.id]);
-
-  // The list endpoint carries a member COUNT only; the list view's avatar
-  // strip needs the people, so each project's members are fetched once, and
-  // only when that view is actually on screen. A failed fetch leaves that
-  // row's strip empty rather than failing the page.
-  useEffect(() => {
-    if (view !== "list" || !projects) return;
-    const seq = loadSeq.current;
-    for (const project of projects) {
-      if (membersRequested.current.has(project.id)) continue;
-      membersRequested.current.add(project.id);
-      listMembers(project.id)
-        .then((rows) => {
-          if (seq === loadSeq.current) setMembers((prev) => ({ ...prev, [project.id]: rows }));
-        })
-        .catch(() => {});
-    }
-  }, [view, projects]);
 
   async function handleCreate(values: NewProjectValues) {
     const project = await createProject({
@@ -183,7 +160,7 @@ export function ProjectsPage() {
         ) : (
           <div className="fade-block divide-y overflow-hidden rounded-lg border bg-card">
             {filtered.map((project) => (
-              <ProjectListRow key={project.id} project={project} members={members[project.id]} />
+              <ProjectListRow key={project.id} project={project} />
             ))}
           </div>
         )}
