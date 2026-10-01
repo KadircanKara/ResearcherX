@@ -4,7 +4,10 @@ import {
   MAX_BATCH,
   TITLE_MAX,
   addButtonLabel,
+  NO_TEXT_WARNING,
   addableCount,
+  closesAfterBatch,
+  ingestWarning,
   linkFailure,
   overCapNotice,
   splitUploads,
@@ -133,5 +136,36 @@ describe("withTimeout", () => {
     const settled = expect(hung).rejects.toThrow("ingestPaper timed out");
     await vi.advanceTimersByTimeAsync(1000);
     await settled;
+  });
+});
+
+describe("ingestWarning", () => {
+  it("warns only when the upload stored no chunks", () => {
+    expect(ingestWarning(0)).toBe(NO_TEXT_WARNING);
+    expect(ingestWarning(1)).toBeNull();
+    expect(ingestWarning(67)).toBeNull();
+  });
+
+  it("names the likely cause and the consequence", () => {
+    expect(NO_TEXT_WARNING).toContain("scan");
+    expect(NO_TEXT_WARNING).toContain("chat can't search it");
+  });
+});
+
+describe("closesAfterBatch", () => {
+  it("closes when every row was added cleanly", () => {
+    expect(closesAfterBatch([{ status: "done" }, { status: "done", warning: undefined }])).toBe(
+      true
+    );
+  });
+
+  it("stays open while a warning would otherwise vanish unread", () => {
+    expect(closesAfterBatch([{ status: "done" }, { status: "done", warning: NO_TEXT_WARNING }])).toBe(
+      false
+    );
+  });
+
+  it("stays open on a failure", () => {
+    expect(closesAfterBatch([{ status: "done" }, { status: "failed" }])).toBe(false);
   });
 });

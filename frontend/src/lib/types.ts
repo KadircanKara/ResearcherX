@@ -196,5 +196,8 @@ export interface Paper {
   /** Whether an uploaded PDF is stored. False for link-sourced papers and
    * for everything ingested before PDFs were kept. */
   has_pdf: boolean;
+  /** Chunks the retriever holds for this paper under the configured
+   * embedding model. 0 means chat cannot search it. */
+  chunk_count: number;
   created_at: string;
 }

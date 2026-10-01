@@ -8,7 +8,7 @@ from urllib.parse import quote
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.concurrency import run_in_threadpool
 from openai import RateLimitError
-from sqlalchemy import desc, select as sa_select
+from sqlalchemy import desc, func, select as sa_select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import palette
@@ -191,9 +191,36 @@ async def _stored_pdf_ids(db: AsyncSession, paper_ids: list[str]) -> set[str]:
     return set(rows.scalars().all())
 
 
+async def _chunk_counts(db: AsyncSession, paper_ids: list[str]) -> dict[str, int]:
+    """How many chunks each paper has under the CONFIGURED embedding model.
+
+    One grouped query for the whole list, never one per paper. The model
+    filter is mandatory: rows from a previous model are invisible to
+    retrieval, so counting them would call an un-searchable paper searchable.
+    A paper with no rows is absent from the result; callers read it as 0.
+    """
+    if not paper_ids:
+        return {}
+    rows = await db.execute(
+        sa_select(PaperChunkEmbedding.paper_id, func.count())
+        .where(
+            PaperChunkEmbedding.paper_id.in_(paper_ids),
+            PaperChunkEmbedding.model == settings.embedding_model,
+        )
+        .group_by(PaperChunkEmbedding.paper_id)
+    )
+    return {paper_id: count for paper_id, count in rows.all()}
+
+
 async def _paper_out(db: AsyncSession, paper: Paper) -> PaperOut:
     out = PaperOut.model_validate(paper)
-    return out.model_copy(update={"has_pdf": bool(await _stored_pdf_ids(db, [paper.id]))})
+    counts = await _chunk_counts(db, [paper.id])
+    return out.model_copy(
+        update={
+            "has_pdf": bool(await _stored_pdf_ids(db, [paper.id])),
+            "chunk_count": counts.get(paper.id, 0),
+        }
+    )
 
 
 @router.post("/projects/{project_id}/papers", response_model=PaperOut, status_code=201)
@@ -304,9 +331,14 @@ async def list_papers(
         sa_select(Paper).where(Paper.project_id == project_id).order_by(Paper.created_at)
     )
     papers = list(result.scalars().all())
-    with_pdf = await _stored_pdf_ids(db, [p.id for p in papers])
+    ids = [p.id for p in papers]
+    with_pdf = await _stored_pdf_ids(db, ids)
+    counts = await _chunk_counts(db, ids)
     return [
-        PaperOut.model_validate(p).model_copy(update={"has_pdf": p.id in with_pdf}) for p in papers
+        PaperOut.model_validate(p).model_copy(
+            update={"has_pdf": p.id in with_pdf, "chunk_count": counts.get(p.id, 0)}
+        )
+        for p in papers
     ]
 
 

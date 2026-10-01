@@ -18,8 +18,7 @@ function RailLine({ label, value }: { label: string; value: number }) {
 /**
  * The right-hand "This library" summary + add-paper drop zone.
  *
- * The three counts come from `summarize`, which counts only states it can
- * stand behind.
+ * The counts come from `summarize`, read off each paper's `chunk_count`.
  */
 export function LibraryRail({
   summary,
@@ -44,7 +43,6 @@ export function LibraryRail({
             </p>
             <dl className="mt-3 space-y-1.5 text-[13px]">
               <RailLine label="Searchable" value={summary.searchable} />
-              <RailLine label="Not checked yet" value={summary.unchecked} />
               <RailLine label="Needs your attention" value={summary.attention} />
             </dl>
           </>
