@@ -1,14 +1,15 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { ApiError } from "./api-error";
 import {
   MAX_BATCH,
   TITLE_MAX,
   addButtonLabel,
   addableCount,
   linkFailure,
-  nonPdfNotice,
   overCapNotice,
-  splitPdfs,
+  splitUploads,
   titleFromFilename,
+  unsupportedNotice,
   uploadFailure,
   withTimeout,
   type BatchStatus,
@@ -16,23 +17,24 @@ import {
 
 const file = (name: string) => ({ name });
 
-describe("splitPdfs", () => {
-  it("keeps PDFs, whatever the extension's case, and counts the rest", () => {
-    const r = splitPdfs([file("a.pdf"), file("b.PDF"), file("notes.txt")], 0);
-    expect(r.accepted.map((f) => f.name)).toEqual(["a.pdf", "b.PDF"]);
-    expect(r.nonPdf).toBe(1);
+describe("splitUploads", () => {
+  it("keeps the five formats, whatever the extension's case, and counts the rest", () => {
+    const names = ["a.pdf", "b.PDF", "c.docx", "d.md", "e.markdown", "f.TXT", "g.rtf"];
+    const r = splitUploads([...names, "h.doc", "i.png", "README"].map(file), 0);
+    expect(r.accepted.map((f) => f.name)).toEqual(names);
+    expect(r.unsupported).toBe(3);
     expect(r.overCap).toBe(0);
   });
 
   it("caps the batch at what is left of it, counting the overflow", () => {
     const files = Array.from({ length: 5 }, (_, i) => file(`${i}.pdf`));
-    const r = splitPdfs(files, MAX_BATCH - 2);
+    const r = splitUploads(files, MAX_BATCH - 2);
     expect(r.accepted.map((f) => f.name)).toEqual(["0.pdf", "1.pdf"]);
     expect(r.overCap).toBe(3);
   });
 
   it("accepts nothing into a full batch, and never a negative room", () => {
-    const r = splitPdfs([file("a.pdf")], MAX_BATCH + 3);
+    const r = splitUploads([file("a.pdf")], MAX_BATCH + 3);
     expect(r.accepted).toEqual([]);
     expect(r.overCap).toBe(1);
   });
@@ -40,8 +42,12 @@ describe("splitPdfs", () => {
 
 describe("notices", () => {
   it("says how many were skipped and why, in both numbers", () => {
-    expect(nonPdfNotice(1)).toBe("1 file was not a PDF and was skipped.");
-    expect(nonPdfNotice(3)).toBe("3 files were not PDFs and were skipped.");
+    expect(unsupportedNotice(1)).toBe(
+      "1 file was not a PDF, DOCX, Markdown, TXT or RTF file and was skipped."
+    );
+    expect(unsupportedNotice(3)).toBe(
+      "3 files were not PDF, DOCX, Markdown, TXT or RTF files and were skipped."
+    );
     expect(overCapNotice(1)).toBe("1 file was over the 20-file cap and was skipped.");
     expect(overCapNotice(2)).toBe("2 files were over the 20-file cap and were skipped.");
   });
@@ -50,6 +56,11 @@ describe("notices", () => {
 describe("titleFromFilename", () => {
   it("drops the extension and bounds the length", () => {
     expect(titleFromFilename("Swarm Search.PDF")).toBe("Swarm Search");
+    expect(titleFromFilename("Draft v2.docx")).toBe("Draft v2");
+    expect(titleFromFilename("notes.Markdown")).toBe("notes");
+    expect(titleFromFilename("plain.txt")).toBe("plain");
+    expect(titleFromFilename("old.rtf")).toBe("old");
+    expect(titleFromFilename("archive.tar.gz")).toBe("archive.tar.gz");
     expect(titleFromFilename(`${"x".repeat(200)}.pdf`)).toHaveLength(TITLE_MAX);
   });
 });
@@ -73,10 +84,24 @@ describe("addableCount and its label", () => {
 
 describe("failure messages", () => {
   it("says a failed cleanup distinctly, for both sources", () => {
-    expect(uploadFailure(true)).toBe("Couldn't read or index this PDF.");
+    expect(uploadFailure(true)).toBe("Couldn't read or index this file.");
     expect(uploadFailure(false)).toContain("cleanup failed");
     expect(linkFailure({ cleanedUp: false, paywalled: true, unavailable: false })).toContain(
       "cleanup failed"
+    );
+  });
+
+  it("shows the backend's reason for a refused file, and only for a 422", () => {
+    const refused = new ApiError(422, "This file's contents don't match its .docx extension.");
+    expect(uploadFailure(true, refused)).toBe(
+      "This file's contents don't match its .docx extension."
+    );
+    expect(uploadFailure(false, refused)).toContain("cleanup failed");
+    expect(uploadFailure(true, new ApiError(500, "boom"))).toBe(
+      "Couldn't read or index this file."
+    );
+    expect(uploadFailure(true, new ApiError(422, null))).toBe(
+      "Couldn't read or index this file."
     );
   });
 
