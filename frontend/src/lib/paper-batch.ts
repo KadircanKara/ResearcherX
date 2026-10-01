@@ -85,6 +85,32 @@ export function addButtonLabel(count: number, submitting: boolean): string {
   return submitting ? "Adding…" : `Add ${plural(count, "paper")}`;
 }
 
+/** What an added row says when its PDF yielded no text at all. */
+export const NO_TEXT_WARNING =
+  "No text could be read from this file (it may be a scan), so chat can't search it.";
+
+/**
+ * The warning for an upload that succeeded but stored no chunks, or null.
+ *
+ * Zero chunks is a 200, not an error: the paper exists and its PDF is kept,
+ * so the batch goes on. But chat can never find it, which the reader must be
+ * told at the moment they added it rather than discover from a silent miss.
+ */
+export function ingestWarning(chunksStored: number): string | null {
+  return chunksStored > 0 ? null : NO_TEXT_WARNING;
+}
+
+/**
+ * Whether the dialog may close itself once a batch finishes: only when every
+ * row was added AND none carries a warning -- closing would take the warning
+ * off screen before anyone read it.
+ */
+export function closesAfterBatch(
+  items: readonly { status: BatchStatus; warning?: string | null }[]
+): boolean {
+  return items.every((it) => it.status === "done" && !it.warning);
+}
+
 /**
  * Why an uploaded PDF was not added. A failed compensating delete is said
  * distinctly: a generic "failed" there would let a retry create the paper

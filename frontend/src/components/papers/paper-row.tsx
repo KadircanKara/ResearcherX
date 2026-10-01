@@ -23,7 +23,6 @@ export function PaperRow({
   onToggleOpen,
   downloading,
   deleting,
-  onCheckAgain,
   onRename,
   onRemove,
   onDownload,
@@ -37,7 +36,6 @@ export function PaperRow({
   onToggleOpen: () => void;
   downloading: boolean;
   deleting: boolean;
-  onCheckAgain: () => void;
   onRename: () => void;
   onRemove: () => void;
   onDownload: () => void;
@@ -95,7 +93,6 @@ export function PaperRow({
               state={state}
               downloading={downloading}
               deleting={deleting}
-              onCheckAgain={onCheckAgain}
               onRename={onRename}
               onRemove={onRemove}
               onDownload={onDownload}

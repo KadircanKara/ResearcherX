@@ -210,7 +210,7 @@ async function record(theme, formatName) {
 
     // ── scene 1: the library ─────────────────────────────────────────────────
     await page.goto(`${APP}/admin/research/${PROJECT}/papers`);
-    await page.getByText("papers in this library").waitFor();
+    await page.getByText(/\d+ papers?, (all|none|\d+ of them) searchable/).waitFor();
     await page.mouse.move(VIEWPORT.width * 0.62, VIEWPORT.height * 0.78);
     await hold(600);
     await startCapture();
