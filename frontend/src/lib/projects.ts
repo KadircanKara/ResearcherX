@@ -90,18 +90,24 @@ export async function deletePaper(projectId: string, paperId: string): Promise<v
   await apiSend("DELETE", `/projects/${projectId}/papers/${paperId}`);
 }
 
+/**
+ * Upload a paper's file as the raw body. `ext` ("pdf", "docx", "md", …) is
+ * how the backend knows the format, which it then confirms against the
+ * bytes; only the extension is sent, never the file name.
+ */
 export async function ingestPaper(
   projectId: string,
   paperId: string,
-  pdfBytes: ArrayBuffer
+  fileBytes: ArrayBuffer,
+  ext: string
 ): Promise<{ chunks_stored: number }> {
   const headers: Record<string, string> = {
     "Content-Type": "application/octet-stream",
   };
   Object.assign(headers, await authHeaders());
   const r = await fetch(
-    `${API_BASE}/v1/projects/${projectId}/papers/${paperId}/ingest`,
-    { method: "POST", headers, body: pdfBytes, cache: "no-store" }
+    `${API_BASE}/v1/projects/${projectId}/papers/${paperId}/ingest?ext=${encodeURIComponent(ext)}`,
+    { method: "POST", headers, body: fileBytes, cache: "no-store" }
   );
   await onAuthFailure(r.status);
   if (!r.ok) throw new ApiError(r.status, await detailOf(r), "ingest");
@@ -152,26 +158,4 @@ export async function getPaperChunk(
   return apiGet<PaperChunk>(
     `/projects/${projectId}/papers/${paperId}/chunks/${chunkIndex}`
   );
-}
-
-/**
- * Does the retriever hold anything for this paper?
- *
- * There is no chunk-count or ingest-state field anywhere in the API (see
- * `lib/papers.ts`), so this asks the one question that can be asked: chunk 0
- * either exists under the current embedding model or it does not. A 404 is
- * the ANSWER "none", not a failure; anything else is a failed check and is
- * reported as such rather than read as an empty paper.
- */
-export async function probePaperIndexed(
-  projectId: string,
-  paperId: string
-): Promise<"indexed" | "empty" | "unavailable"> {
-  try {
-    await getPaperChunk(projectId, paperId, 0);
-    return "indexed";
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    return msg.includes("404") ? "empty" : "unavailable";
-  }
 }

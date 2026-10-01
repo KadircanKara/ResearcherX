@@ -6,18 +6,14 @@ import { abstractExcerpt, sourceLine, stateDetail, type PaperState } from "@/lib
 import type { Paper } from "@/lib/types";
 
 /**
- * The body shown under an expanded paper row: the retriever's answer for
+ * The body shown under an expanded paper row: what the retriever holds for
  * this paper, in words, and the handful of things you can do about it.
- *
- * The probe that produced `state` is the page's — one request for chunk 0,
- * issued when the row is opened, never a sweep over the library.
  */
 export function PaperRowBody({
   paper,
   state,
   downloading,
   deleting,
-  onCheckAgain,
   onRename,
   onRemove,
   onDownload,
@@ -26,12 +22,10 @@ export function PaperRowBody({
   state: PaperState;
   downloading: boolean;
   deleting: boolean;
-  onCheckAgain: () => void;
   onRename: () => void;
   onRemove: () => void;
   onDownload: () => void;
 }) {
-  const checking = state.kind === "checking";
   const link = paper.resolved_pdf_url ?? paper.pdf_url;
   const abstract = paper.abstract?.trim();
 
@@ -50,14 +44,6 @@ export function PaperRowBody({
         </blockquote>
       )}
       <div className="flex flex-wrap gap-x-4 gap-y-2 pt-1">
-        <button
-          type="button"
-          className="text-primary underline-offset-2 hover:underline disabled:pointer-events-none disabled:opacity-50"
-          disabled={checking}
-          onClick={onCheckAgain}
-        >
-          {checking ? "Checking…" : "Check the retriever again"}
-        </button>
         {/* A paper we hold the PDF for downloads; a link-sourced one opens
             where it lives; a paper with neither was added before PDFs were
             kept, and gets no control at all rather than a dead one. */}
@@ -68,7 +54,7 @@ export function PaperRowBody({
             disabled={downloading}
             onClick={onDownload}
           >
-            {downloading ? "Downloading…" : "Download PDF"}
+            {downloading ? "Downloading…" : "Download file"}
           </button>
         ) : link ? (
           <a

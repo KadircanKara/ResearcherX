@@ -12,14 +12,22 @@ import {
   TITLE_MAX,
   addButtonLabel,
   addableCount,
-  nonPdfNotice,
+  closesAfterBatch,
+  ingestWarning,
   overCapNotice,
-  splitPdfs,
+  splitUploads,
   titleFromFilename,
+  unsupportedNotice,
   uploadFailure,
   withTimeout,
   type BatchStatus,
 } from "@/lib/paper-batch";
+import {
+  SUPPORTED_LABEL,
+  UPLOAD_ACCEPT,
+  isPdfName,
+  uploadExtension,
+} from "@/lib/paper-file-types";
 import { createPaper, deletePaper, ingestPaper, suggestTitle } from "@/lib/projects";
 
 type BatchItem = {
@@ -31,11 +39,15 @@ type BatchItem = {
   body: string | null;
   status: BatchStatus;
   error?: string;
+  /** Added, but chat cannot search it. Not a failure: the batch goes on. */
+  warning?: string;
 };
 
 /**
- * Upload: a batch of PDFs, each read for a suggested title on arrival, then
- * created and ingested on Add.
+ * Upload: a batch of paper files (PDF, DOCX, Markdown, TXT, RTF), each PDF
+ * read for a suggested title on arrival, then created and ingested on Add.
+ * Other formats are titled from their file name: the suggestion endpoint
+ * reads PDF bytes only.
  *
  * The prototype's per-file progress bar is shown while a file saves, but in
  * an INDETERMINATE (pulsing) state: the upload is a single `fetch`, which
@@ -60,7 +72,7 @@ export function AddPaperUploadTab({
   onBusyChange: (busy: boolean) => void;
 }) {
   const [items, setItemsState] = useState<BatchItem[]>([]);
-  const [nonPdf, setNonPdf] = useState(0);
+  const [unsupported, setUnsupported] = useState(0);
   const [overCap, setOverCap] = useState(0);
   const [submitting, setSubmitting] = useState(false);
 
@@ -85,8 +97,8 @@ export function AddPaperUploadTab({
   }, [initialFiles]);
 
   async function addFiles(files: File[]) {
-    const split = splitPdfs(files, itemsRef.current.length);
-    if (split.nonPdf > 0) setNonPdf((n) => n + split.nonPdf);
+    const split = splitUploads(files, itemsRef.current.length);
+    if (split.unsupported > 0) setUnsupported((n) => n + split.unsupported);
     if (split.overCap > 0) setOverCap((n) => n + split.overCap);
     if (split.accepted.length === 0) return;
 
@@ -102,6 +114,10 @@ export function AddPaperUploadTab({
     setItems((prev) => [...prev, ...fresh]);
 
     await runBatch(fresh, async (item) => {
+      if (!isPdfName(item.name)) {
+        update(item.id, { status: "ready", title: titleFromFilename(item.name) });
+        return;
+      }
       update(item.id, { status: "extracting" });
       try {
         const bytes = await item.file.arrayBuffer();
@@ -127,7 +143,7 @@ export function AddPaperUploadTab({
     setSubmitting(true);
 
     await runBatch(queue, async (item) => {
-      update(item.id, { status: "saving", error: undefined });
+      update(item.id, { status: "saving", error: undefined, warning: undefined });
       let paperId: string | null = null;
       try {
         const live = itemsRef.current.find((c) => c.id === item.id) ?? item;
@@ -143,10 +159,16 @@ export function AddPaperUploadTab({
         );
         paperId = paper.id;
         const bytes = await item.file.arrayBuffer();
-        await withTimeout(ingestPaper(projectId, paper.id, bytes), ITEM_TIMEOUT_MS, "ingestPaper");
-        update(item.id, { status: "done" });
+        // splitUploads admitted only names with a supported extension.
+        const ext = uploadExtension(item.name) ?? "pdf";
+        const { chunks_stored } = await withTimeout(
+          ingestPaper(projectId, paper.id, bytes, ext),
+          ITEM_TIMEOUT_MS,
+          "ingestPaper"
+        );
+        update(item.id, { status: "done", warning: ingestWarning(chunks_stored) ?? undefined });
       } catch (err) {
-        // Never leave a paper row without its PDF.
+        // Never leave a paper row without its file.
         let cleanedUp = true;
         if (paperId) {
           try {
@@ -156,13 +178,13 @@ export function AddPaperUploadTab({
             console.error("paper cleanup failed after ingest error", { paperId, cleanupErr });
           }
         }
-        update(item.id, { status: "failed", error: limitMessage(err) ?? uploadFailure(cleanedUp) });
+        update(item.id, { status: "failed", error: limitMessage(err) ?? uploadFailure(cleanedUp, err) });
       }
     });
 
     setSubmitting(false);
     onSaved();
-    if (itemsRef.current.every((it) => it.status === "done")) onDone();
+    if (closesAfterBatch(itemsRef.current)) onDone();
   }
 
   const extracting = items.some((it) => it.status === "pending" || it.status === "extracting");
@@ -182,12 +204,14 @@ export function AddPaperUploadTab({
           void addFiles(Array.from(e.dataTransfer.files));
         }}
       >
-        <span className="text-[13px] font-medium">Drop PDFs here or click to choose files</span>
-        <span className="text-[12px] text-muted-foreground">A batch is capped at 20 files.</span>
+        <span className="text-[13px] font-medium">Drop papers here or click to choose files</span>
+        <span className="text-[12px] text-muted-foreground">
+          {SUPPORTED_LABEL}. A batch is capped at 20 files.
+        </span>
         <input
           type="file"
           multiple
-          accept=".pdf"
+          accept={UPLOAD_ACCEPT}
           className="sr-only"
           onChange={(e) => {
             if (e.target.files) void addFiles(Array.from(e.target.files));
@@ -196,7 +220,9 @@ export function AddPaperUploadTab({
         />
       </label>
 
-      {nonPdf > 0 && <p className="text-[12px] text-muted-foreground">{nonPdfNotice(nonPdf)}</p>}
+      {unsupported > 0 && (
+        <p className="text-[12px] text-muted-foreground">{unsupportedNotice(unsupported)}</p>
+      )}
       {overCap > 0 && <p className="text-[12px] text-muted-foreground">{overCapNotice(overCap)}</p>}
 
       {items.length > 0 && (
@@ -227,6 +253,11 @@ export function AddPaperUploadTab({
               {/* Indeterminate while saving — see the component note. */}
               {it.status === "saving" && <Progress className="mt-2 animate-pulse" value={null} />}
               {it.status === "done" && <Progress className="mt-2" value={100} />}
+              {it.status === "done" && it.warning && (
+                <p role="status" className="mt-1.5 text-[12px] text-warning">
+                  {it.warning}
+                </p>
+              )}
               {it.status === "failed" && (
                 <div className="mt-1.5 space-y-1.5">
                   <p className="text-[12px] text-destructive">{it.error}</p>

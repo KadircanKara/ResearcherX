@@ -119,6 +119,11 @@ class PaperOut(BaseModel):
     # ingested before `paper_files` existed -- those bytes are gone and
     # nothing can recover them.
     has_pdf: bool = False
+    # Chunks stored for this paper under the configured embedding model --
+    # what retrieval can actually search. 0 means chat cannot find it: an
+    # image-only PDF, a manual paper with no text, or one never re-indexed
+    # after a model change.
+    chunk_count: int = 0
     created_at: datetime
     model_config = {"from_attributes": True}
 

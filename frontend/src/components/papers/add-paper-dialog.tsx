@@ -52,7 +52,8 @@ export function AddPaperDialog({
         <DialogHeader>
           <DialogTitle>Add papers</DialogTitle>
           <DialogDescription>
-            Upload PDFs. Each one is read, indexed and ready to chat about.
+            Upload papers as PDF, DOCX, Markdown, TXT or RTF. Each one is read,
+            indexed and ready to chat about.
           </DialogDescription>
         </DialogHeader>
         <AddPaperUploadTab

@@ -1,7 +1,7 @@
 "use client";
 
 import { PaperRow } from "@/components/papers/paper-row";
-import { paperState, type ProbeMap } from "@/lib/papers";
+import { paperState } from "@/lib/papers";
 import type { Paper } from "@/lib/types";
 
 /**
@@ -12,7 +12,6 @@ import type { Paper } from "@/lib/types";
  */
 export function PaperTable({
   papers,
-  probes,
   editing,
   selectedIds,
   onToggleSelect,
@@ -20,13 +19,11 @@ export function PaperTable({
   onToggleOpen,
   downloadingId,
   deletingId,
-  onCheckAgain,
   onRename,
   onRemove,
   onDownload,
 }: {
   papers: Paper[];
-  probes: ProbeMap;
   editing: boolean;
   selectedIds: ReadonlySet<string>;
   onToggleSelect: (paper: Paper) => void;
@@ -34,7 +31,6 @@ export function PaperTable({
   onToggleOpen: (paper: Paper) => void;
   downloadingId: string | null;
   deletingId: string | null;
-  onCheckAgain: (paper: Paper) => void;
   onRename: (paper: Paper) => void;
   onRemove: (paper: Paper) => void;
   onDownload: (paper: Paper) => void;
@@ -52,7 +48,7 @@ export function PaperTable({
           <PaperRow
             key={paper.id}
             paper={paper}
-            state={paperState(paper, probes[paper.id])}
+            state={paperState(paper)}
             editing={editing}
             selected={selectedIds.has(paper.id)}
             onToggleSelect={() => onToggleSelect(paper)}
@@ -60,7 +56,6 @@ export function PaperTable({
             onToggleOpen={() => onToggleOpen(paper)}
             downloading={downloadingId === paper.id}
             deleting={deletingId === paper.id}
-            onCheckAgain={() => onCheckAgain(paper)}
             onRename={() => onRename(paper)}
             onRemove={() => onRemove(paper)}
             onDownload={() => onDownload(paper)}

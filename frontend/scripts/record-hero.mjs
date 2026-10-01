@@ -296,32 +296,17 @@ async function record(theme, formatName) {
 
     // ── scene 1: the library ─────────────────────────────────────────────────
     await page.goto(`${APP}/admin/research/${PROJECT}/papers`);
-    await page.getByText("papers in this library").waitFor();
-    // A paper is checked when its row is opened, and the check lives in page
-    // state, so open and close every row once, uncaptured: the library then
-    // reads "Searchable 13" instead of "Not checked yet 13".
-    const rows = page.locator("main button[aria-expanded][aria-controls]");
-    const rowCount = await rows.count();
-    for (let i = 0; i < rowCount; i++) {
-      await rows.nth(i).click();
-      await rows.nth(i).click();
-    }
-    const railCount = (label) =>
-      page.evaluate((l) => {
-        const dt = [...document.querySelectorAll("dt")].find((d) => d.textContent.trim() === l);
-        return Number(dt?.nextElementSibling?.textContent ?? NaN);
-      }, label);
-    await page
-      .waitForFunction(() => {
-        const dt = [...document.querySelectorAll("dt")].find((d) => d.textContent.trim() === "Not checked yet");
-        return dt?.nextElementSibling?.textContent === "0";
-      }, null, { timeout: 30000 })
-      .catch(() => {});
-    const searchableCount = await railCount("Searchable");
+    // The list reports every paper's state on load, so the library must read
+    // "N papers, all searchable" with no row opened.
+    await page.getByText(/\d+ papers?, (all|none|\d+ of them) searchable/).waitFor();
+    const rowCount = await page.locator("main button[aria-expanded][aria-controls]").count();
+    const searchableCount = await page.evaluate(() => {
+      const dt = [...document.querySelectorAll("dt")].find((d) => d.textContent.trim() === "Searchable");
+      return Number(dt?.nextElementSibling?.textContent ?? NaN);
+    });
     if (searchableCount !== rowCount) {
       problems.push(`library shows Searchable ${searchableCount} of ${rowCount} papers`);
     }
-    await page.evaluate(() => window.scrollTo(0, 0));
     await page.mouse.move(VIEWPORT.width * 0.62, VIEWPORT.height * 0.78);
     await hold(600);
     await startCapture();
