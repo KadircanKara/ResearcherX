@@ -15,8 +15,8 @@ import { Input } from "@/components/ui/input";
 import { RenameDialog } from "@/components/ui/rename-dialog";
 import { fetchUsage } from "@/lib/api";
 import { saveBlob } from "@/lib/download";
-import { deletePaper, fetchPaperPdf, listPapers, patchPaper, probePaperIndexed } from "@/lib/projects";
-import { lastAddedLabel, libraryHeadline, summarize, type ProbeMap } from "@/lib/papers";
+import { deletePaper, fetchPaperPdf, listPapers, patchPaper } from "@/lib/projects";
+import { lastAddedLabel, libraryHeadline, summarize } from "@/lib/papers";
 import { matchesQuery } from "@/lib/search";
 import { clear, retainVisible, selectAll, toggle } from "@/lib/selection";
 import type { Paper } from "@/lib/types";
@@ -39,9 +39,6 @@ export default function PapersPage() {
   // One row open at a time: the opened body is wide and two of them stacked
   // push the rest of the table off screen.
   const [openId, setOpenId] = useState<string | null>(null);
-  // What the retriever answered about each paper, keyed by id. Never fetched
-  // in a sweep -- one request, when a row is opened. See `lib/papers.ts`.
-  const [probes, setProbes] = useState<ProbeMap>({});
 
   const [addOpen, setAddOpen] = useState(false);
   // A fresh array per open, deliberately: the upload tab consumes it on
@@ -80,13 +77,6 @@ export default function PapersPage() {
         .then((ps) => {
           if (seq !== loadSeq.current) return; // a newer load already won
           setPapers(ps);
-          // A probe is a claim about a paper that still exists. Dropping the
-          // rest keeps a deleted paper's answer from lingering in the map.
-          setProbes((prev) => {
-            const live: ProbeMap = {};
-            for (const p of ps) if (prev[p.id]) live[p.id] = prev[p.id];
-            return live;
-          });
         })
         .catch(() => {})
         .finally(() => {
@@ -100,23 +90,8 @@ export default function PapersPage() {
     load();
   }, [load]);
 
-  const probe = useCallback(
-    (paperId: string) => {
-      setProbes((prev) => ({ ...prev, [paperId]: "checking" }));
-      void probePaperIndexed(projectId, paperId).then((result) => {
-        setProbes((prev) =>
-          // Only write back if this paper is still being tracked: a delete
-          // between the request and its answer already pruned the map, and
-          // re-adding the key would resurrect a row's state in `summarize`.
-          prev[paperId] === undefined ? prev : { ...prev, [paperId]: result }
-        );
-      });
-    },
-    [projectId]
-  );
-
   const visible = papers.filter((p) => matchesQuery(query, searchable(p)));
-  const summary = summarize(papers, probes);
+  const summary = summarize(papers);
 
   function changeQuery(next: string) {
     setQuery(next);
@@ -129,11 +104,7 @@ export default function PapersPage() {
   }
 
   function toggleOpen(paper: Paper) {
-    const next = openId === paper.id ? null : paper.id;
-    setOpenId(next);
-    // Asked on open, and again only if the previous attempt failed outright.
-    const seen = probes[paper.id];
-    if (next && (seen === undefined || seen === "unavailable")) probe(paper.id);
+    setOpenId(openId === paper.id ? null : paper.id);
   }
 
   function openAdd(files: File[]) {
@@ -146,7 +117,8 @@ export default function PapersPage() {
     setRenameBusy(true);
     setRenameError(null);
     try {
-      // A title-only PATCH re-embeds nothing, so the row's probe still holds.
+      // A title-only PATCH re-embeds nothing; the returned row carries
+      // the same chunk_count.
       const updated = await patchPaper(projectId, renamePaper.id, { title: value });
       setPapers((prev) => prev.map((p) => (p.id === updated.id ? updated : p)));
       setRenamePaper(null);
@@ -169,11 +141,6 @@ export default function PapersPage() {
       setSelectedIds((prev) => {
         const next = new Set(prev);
         next.delete(paperId);
-        return next;
-      });
-      setProbes((prev) => {
-        const next = { ...prev };
-        delete next[paperId];
         return next;
       });
       if (openId === paperId) setOpenId(null);
@@ -317,7 +284,6 @@ export default function PapersPage() {
           ) : (
             <PaperTable
               papers={visible}
-              probes={probes}
               editing={editing}
               selectedIds={selectedIds}
               onToggleSelect={(paper) => setSelectedIds(toggle(selectedIds, paper.id))}
@@ -325,7 +291,6 @@ export default function PapersPage() {
               onToggleOpen={toggleOpen}
               downloadingId={downloadingId}
               deletingId={deletingId}
-              onCheckAgain={(paper) => probe(paper.id)}
               onRename={(paper) => {
                 setRenameError(null);
                 setRenamePaper(paper);

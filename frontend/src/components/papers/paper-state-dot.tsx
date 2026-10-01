@@ -6,8 +6,7 @@ import { cn } from "@/lib/utils";
  *
  * Both words come from `lib/papers.ts` — this component picks no vocabulary
  * and makes no claim of its own, it only decides which colour a tone is
- * drawn in. The pulse is on `checking` alone, because that is the only state
- * that is going to change on its own.
+ * drawn in.
  */
 export function PaperStateDot({ state }: { state: PaperState }) {
   const dotClass =
@@ -19,11 +18,7 @@ export function PaperStateDot({ state }: { state: PaperState }) {
   return (
     <span className="inline-flex items-center gap-1.5 text-[13px]">
       <span
-        className={cn(
-          "size-1.5 shrink-0 rounded-full",
-          dotClass,
-          state.kind === "checking" && "animate-pulse"
-        )}
+        className={cn("size-1.5 shrink-0 rounded-full", dotClass)}
         aria-hidden
       />
       <span className={state.tone === "bad" ? "text-destructive" : "text-foreground"}>

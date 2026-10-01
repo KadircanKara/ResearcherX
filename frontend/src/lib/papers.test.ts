@@ -10,7 +10,6 @@ import {
   sourceLine,
   stateDetail,
   summarize,
-  type ProbeMap,
 } from "./papers";
 import type { Paper, PaperSource } from "./types";
 
@@ -24,6 +23,7 @@ function paper(over: Partial<Paper> = {}): Paper {
     pdf_url: null,
     resolved_pdf_url: null,
     has_pdf: false,
+    chunk_count: 0,
     source: "upload" as PaperSource,
     created_at: "2026-08-14T09:30:00Z",
     ...over,
@@ -31,11 +31,14 @@ function paper(over: Partial<Paper> = {}): Paper {
 }
 
 describe("paperState", () => {
-  it("calls a manual paper carrying text indexed, because create_paper wrote its chunks", () => {
-    const s = paperState(paper({ source: "manual", abstract: "An abstract." }), undefined);
-    expect(s.kind).toBe("expected");
-    expect(s.certain).toBe(true);
-    expect(s.tone).toBe("on");
+  it("calls any paper with chunks searchable", () => {
+    for (const source of ["upload", "link", "manual"] as const) {
+      const s = paperState(paper({ source, abstract: "a", chunk_count: 3 }));
+      expect(s.kind).toBe("indexed");
+      expect(s.label).toBe("searchable");
+      expect(s.tone).toBe("on");
+      expect(s.chunks).toBe(3);
+    }
   });
 
   it("counts a body as text too", () => {
@@ -43,95 +46,68 @@ describe("paperState", () => {
     expect(hasText(paper({ abstract: "   " }))).toBe(false);
   });
 
+  it("flags an upload or link with no chunks: chat cannot search it", () => {
+    for (const source of ["upload", "link"] as const) {
+      const s = paperState(paper({ source }));
+      expect(s.kind).toBe("empty");
+      expect(s.label).toBe("no indexed text");
+      expect(s.tone).toBe("bad");
+    }
+  });
+
   it("calls a manual paper with no text nothing-to-index, not a failure", () => {
-    const s = paperState(paper({ source: "manual" }), undefined);
+    const s = paperState(paper({ source: "manual" }));
     expect(s.kind).toBe("no-text");
     expect(s.tone).toBe("idle");
   });
 
-  it("says nothing about an unprobed upload — the list response does not carry it", () => {
-    const s = paperState(paper({ source: "upload" }), undefined);
-    expect(s.kind).toBe("unchecked");
-    expect(s.certain).toBe(false);
-  });
-
-  it("lets a probe overturn the manual-paper inference, since the model may have changed", () => {
-    const s = paperState(paper({ source: "manual", abstract: "a" }), "empty");
+  it("flags a manual paper whose text has no chunks under the current model", () => {
+    const s = paperState(paper({ source: "manual", abstract: "a" }));
     expect(s.kind).toBe("empty");
     expect(s.tone).toBe("bad");
   });
 
-  it("reports a failed probe as a failed check, not as a paper with no text", () => {
-    const s = paperState(paper({ source: "link" }), "unavailable");
-    expect(s.kind).toBe("unavailable");
-    expect(s.certain).toBe(false);
-    expect(stateDetail(s)).toContain("says nothing about the paper");
-  });
-
-  it("shows the probe in flight", () => {
-    expect(paperState(paper(), "checking").kind).toBe("checking");
+  it("explains a scan in the opened row", () => {
+    expect(stateDetail(paperState(paper()))).toContain("scanned PDF");
   });
 });
 
 describe("summarize", () => {
   const papers = [
-    paper({ id: "a", source: "manual", abstract: "x" }), // expected
-    paper({ id: "b", source: "upload" }), // unchecked
-    paper({ id: "c", source: "upload" }), // probed indexed
-    paper({ id: "d", source: "upload" }), // probed empty
-    paper({ id: "e", source: "manual" }), // no-text
+    paper({ id: "a", source: "manual", abstract: "x", chunk_count: 1 }),
+    paper({ id: "b", source: "upload", chunk_count: 12 }),
+    paper({ id: "c", source: "upload" }), // empty
+    paper({ id: "d", source: "manual" }), // no-text
   ];
-  const probes: ProbeMap = { c: "indexed", d: "empty" };
 
-  it("counts only states it can stand behind as searchable", () => {
-    expect(summarize(papers, probes)).toEqual({
-      total: 5,
-      searchable: 2,
-      unchecked: 1,
-      attention: 1,
-    });
-  });
-
-  it("counts a probe in flight as not checked yet", () => {
-    expect(summarize([paper()], { p1: "checking" }).unchecked).toBe(1);
-  });
-
-  it("puts a no-text manual paper in no bucket: nothing to check, nothing wrong", () => {
-    const s = summarize([paper({ source: "manual" })], {});
-    expect(s).toEqual({ total: 1, searchable: 0, unchecked: 0, attention: 0 });
-  });
-
-  it("puts a failed probe in no bucket: it says nothing about the paper", () => {
-    const s = summarize([paper()], { p1: "unavailable" });
-    expect(s).toEqual({ total: 1, searchable: 0, unchecked: 0, attention: 0 });
+  it("counts searchable and attention, and puts no-text in neither", () => {
+    expect(summarize(papers)).toEqual({ total: 4, searchable: 2, attention: 1 });
   });
 });
 
 describe("libraryHeadline", () => {
   it("is empty-handed when the library is", () => {
-    expect(libraryHeadline(summarize([], {}))).toBe("No papers yet");
+    expect(libraryHeadline(summarize([]))).toBe("No papers yet");
   });
 
-  it("claims no searchable count when nothing has established one", () => {
-    const s = summarize([paper({ id: "a" }), paper({ id: "b" })], {});
-    expect(libraryHeadline(s)).toBe("2 papers in this library");
+  it("says so when nothing is searchable", () => {
+    const s = summarize([paper({ id: "a" }), paper({ id: "b" })]);
+    expect(libraryHeadline(s)).toBe("2 papers, none searchable");
   });
 
-  it("states the fact that matters once part of the library is known searchable", () => {
-    const s = summarize(
-      [paper({ id: "a" }), paper({ id: "b" }), paper({ id: "c" })],
-      { a: "indexed", b: "indexed" }
-    );
+  it("states how much of the library is searchable", () => {
+    const s = summarize([
+      paper({ id: "a", chunk_count: 2 }),
+      paper({ id: "b", chunk_count: 5 }),
+      paper({ id: "c" }),
+    ]);
     expect(libraryHeadline(s)).toBe("3 papers, 2 of them searchable");
   });
 
   it("says so when every paper is searchable", () => {
-    const s = summarize([paper({ id: "a" }), paper({ id: "b" })], {
-      a: "indexed",
-      b: "indexed",
-    });
+    const s = summarize([paper({ id: "a", chunk_count: 1 }), paper({ id: "b", chunk_count: 1 })]);
     expect(libraryHeadline(s)).toBe("2 papers, all searchable");
-    expect(libraryHeadline(summarize([paper({ id: "a" })], { a: "indexed" }))).toBe(
+    expect(libraryHeadline(summarize([paper({ id: "a", chunk_count: 4 })]))).toBe(
       "1 paper, all searchable"
     );
   });
@@ -170,27 +146,14 @@ describe("abstractExcerpt", () => {
 });
 
 describe("retrieverLabel", () => {
-  it("says the retriever holds text only once a probe has said so", () => {
-    expect(retrieverLabel(paperState(paper(), "indexed"))).toBe("holds text");
-  });
-
-  it("stays silent about a paper nobody has asked the retriever about", () => {
-    expect(retrieverLabel(paperState(paper(), undefined))).toBe("—");
-    expect(retrieverLabel(paperState(paper(), "checking"))).toBe("—");
-    expect(retrieverLabel(paperState(paper(), "unavailable"))).toBe("—");
-  });
-
-  it("does NOT promote an indexed-on-save paper, which no probe has confirmed", () => {
-    const expected = paperState(paper({ source: "manual", abstract: "a" }), undefined);
-    expect(expected.kind).toBe("expected");
-    expect(retrieverLabel(expected)).toBe("—");
+  it("states the chunk count for a searchable paper", () => {
+    expect(retrieverLabel(paperState(paper({ chunk_count: 1 })))).toBe("1 chunk");
+    expect(retrieverLabel(paperState(paper({ chunk_count: 42 })))).toBe("42 chunks");
   });
 
   it("says holds nothing for both ways of holding nothing", () => {
-    expect(retrieverLabel(paperState(paper(), "empty"))).toBe("holds nothing");
-    expect(retrieverLabel(paperState(paper({ source: "manual" }), undefined))).toBe(
-      "holds nothing"
-    );
+    expect(retrieverLabel(paperState(paper()))).toBe("holds nothing");
+    expect(retrieverLabel(paperState(paper({ source: "manual" })))).toBe("holds nothing");
   });
 });
 
