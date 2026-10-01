@@ -12,6 +12,8 @@ import {
   TITLE_MAX,
   addButtonLabel,
   addableCount,
+  closesAfterBatch,
+  ingestWarning,
   nonPdfNotice,
   overCapNotice,
   splitPdfs,
@@ -31,6 +33,8 @@ type BatchItem = {
   body: string | null;
   status: BatchStatus;
   error?: string;
+  /** Added, but chat cannot search it. Not a failure: the batch goes on. */
+  warning?: string;
 };
 
 /**
@@ -127,7 +131,7 @@ export function AddPaperUploadTab({
     setSubmitting(true);
 
     await runBatch(queue, async (item) => {
-      update(item.id, { status: "saving", error: undefined });
+      update(item.id, { status: "saving", error: undefined, warning: undefined });
       let paperId: string | null = null;
       try {
         const live = itemsRef.current.find((c) => c.id === item.id) ?? item;
@@ -143,8 +147,12 @@ export function AddPaperUploadTab({
         );
         paperId = paper.id;
         const bytes = await item.file.arrayBuffer();
-        await withTimeout(ingestPaper(projectId, paper.id, bytes), ITEM_TIMEOUT_MS, "ingestPaper");
-        update(item.id, { status: "done" });
+        const { chunks_stored } = await withTimeout(
+          ingestPaper(projectId, paper.id, bytes),
+          ITEM_TIMEOUT_MS,
+          "ingestPaper"
+        );
+        update(item.id, { status: "done", warning: ingestWarning(chunks_stored) ?? undefined });
       } catch (err) {
         // Never leave a paper row without its PDF.
         let cleanedUp = true;
@@ -162,7 +170,7 @@ export function AddPaperUploadTab({
 
     setSubmitting(false);
     onSaved();
-    if (itemsRef.current.every((it) => it.status === "done")) onDone();
+    if (closesAfterBatch(itemsRef.current)) onDone();
   }
 
   const extracting = items.some((it) => it.status === "pending" || it.status === "extracting");
@@ -227,6 +235,11 @@ export function AddPaperUploadTab({
               {/* Indeterminate while saving — see the component note. */}
               {it.status === "saving" && <Progress className="mt-2 animate-pulse" value={null} />}
               {it.status === "done" && <Progress className="mt-2" value={100} />}
+              {it.status === "done" && it.warning && (
+                <p role="status" className="mt-1.5 text-[12px] text-warning">
+                  {it.warning}
+                </p>
+              )}
               {it.status === "failed" && (
                 <div className="mt-1.5 space-y-1.5">
                   <p className="text-[12px] text-destructive">{it.error}</p>
