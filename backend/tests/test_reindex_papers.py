@@ -17,7 +17,7 @@ def _row(**kw):
         pdf_url=None,
         abstract=None,
         body=None,
-        has_file=False,
+        has_pdf_file=False,
     )
     base.update(kw)
     return SimpleNamespace(**base)
@@ -26,7 +26,7 @@ def _row(**kw):
 def test_tier_prefers_stored_pages_then_pdf_then_markdown_then_manual():
     assert rp.tier_for(_row(extracted_pages=[{"page": 1, "text": "x"}])) == "pages"
     assert rp.tier_for(_row(pdf_url="https://arxiv.org/abs/1")) == "pdf"
-    assert rp.tier_for(_row(has_file=True)) == "pdf"
+    assert rp.tier_for(_row(has_pdf_file=True)) == "pdf"
     assert rp.tier_for(_row(extracted_text="## A\n\nx")) == "markdown"
     assert rp.tier_for(_row(body="hand-entered")) == "manual"
 
@@ -85,9 +85,9 @@ async def test_a_successful_fetch_reports_it_was_attempted():
 
 
 async def test_a_retained_blob_never_counts_as_a_network_fetch():
-    """`has_file` papers read the blob from the database — no network at
+    """`has_pdf_file` papers read the blob from the database — no network at
     all — so pacing must not fire for them even under `--fetch`."""
-    row = _row(has_file=True)
+    row = _row(has_pdf_file=True)
     with patch.object(rp, "_blob_bytes", new=AsyncMock(return_value=b"%PDF-1.4 fake")):
         with patch.object(rp, "fetch_pdf", new=AsyncMock(side_effect=AssertionError("network"))):
             with patch.object(rp, "extract_document") as mock_extract:

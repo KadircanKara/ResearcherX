@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import re
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from fastapi.concurrency import run_in_threadpool
 from openai import RateLimitError
 from sqlalchemy import desc, select as sa_select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -433,15 +435,38 @@ async def ingest_paper(
     project_id: str,
     paper_id: str,
     request: Request,
+    ext: str | None = Query(
+        None,
+        max_length=255,
+        description="The uploaded file's extension (pdf, docx, md, markdown, txt, rtf). "
+        "Absent means pdf, for clients that predate the other formats.",
+    ),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_session),
 ) -> dict:
+    from app.services import text_extraction
+
     await project_service.require_member(db, project_id, user.id, "member")
+    # The extension alone is checked before the quota is charged: a file we
+    # would never take must not cost the user an upload.
+    try:
+        text_extraction.format_for_extension(ext)
+    except text_extraction.UnsupportedFileType as exc:
+        raise HTTPException(status_code=422, detail=exc.message) from None
     await usage_service.enforce_ingest(db, user)
     paper = await db.get(Paper, paper_id)
     if paper is None or paper.project_id != project_id:
         raise HTTPException(status_code=404, detail="Paper not found")
-    pdf_bytes = await _read_capped_body(request)
+    file_bytes = await _read_capped_body(request)
+
+    # Content is confirmed against the extension BEFORE anything is stored:
+    # a refused file is not the user's paper, and a .docx's decompression
+    # bound has to hold before any parser opens it. Off the event loop, since
+    # that bound means really decompressing the archive.
+    try:
+        file_format = await run_in_threadpool(text_extraction.detect_format, ext, file_bytes)
+    except (text_extraction.UnsupportedFileType, text_extraction.UnreadableFile) as exc:
+        raise HTTPException(status_code=422, detail=exc.message) from None
 
     from app.services.paper_ingest_service import ingest
 
@@ -451,15 +476,34 @@ async def ingest_paper(
     await db.merge(
         PaperFile(
             paper_id=paper_id,
-            blob=pdf_bytes,
-            size_bytes=len(pdf_bytes),
-            content_type="application/pdf",
+            blob=file_bytes,
+            size_bytes=len(file_bytes),
+            content_type=text_extraction.content_type_for(file_format),
         )
     )
     await db.commit()
 
-    n = await ingest(db, paper_id, pdf_bytes)
+    try:
+        n = await ingest(db, paper_id, file_bytes, file_format=file_format)
+    except text_extraction.UnreadableFile as exc:
+        raise HTTPException(status_code=422, detail=exc.message) from None
     return {"chunks_stored": n}
+
+
+def _content_disposition(title: str, extension: str) -> str:
+    """`attachment` named for the paper. The title, not the id: the file
+    lands in a downloads folder where an id names nothing. Stripped of the
+    characters a filesystem refuses, for the same reason
+    `conversationFilename` does it. A header is latin-1 on the wire, so the
+    plain `filename` is an ASCII fallback and `filename*` (RFC 6266/5987)
+    carries the real UTF-8 title -- an em dash in a title must not 500 the
+    download."""
+    safe = re.sub(r'[\\/:*?"<>|]', "-", title).strip()[:80] or "paper"
+    ascii_name = safe.encode("ascii", "replace").decode("ascii").replace("?", "_")
+    return (
+        f'attachment; filename="{ascii_name}{extension}"; '
+        f"filename*=UTF-8''{quote(safe + extension, safe='')}"
+    )
 
 
 @router.get("/projects/{project_id}/papers/{paper_id}/pdf")
@@ -469,12 +513,15 @@ async def download_paper_pdf(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_session),
 ) -> Response:
-    """The uploaded PDF, back verbatim.
+    """The uploaded file, back verbatim, whatever its format. The path still
+    says `/pdf` because it predates the other formats and clients use it.
 
     Only an UPLOADED paper has one. A link-sourced paper is served by its
     own `pdf_url`, which the client opens directly -- re-hosting someone
     else's copy would buy nothing the link does not already give.
     """
+    from app.services.text_extraction import extension_for_content_type
+
     await project_service.require_member(db, project_id, user.id, "member")
     paper = await db.get(Paper, paper_id)
     if paper is None or paper.project_id != project_id:
@@ -484,16 +531,19 @@ async def download_paper_pdf(
     if stored is None:
         # A paper ingested before this table existed, or one added by link.
         # 404 rather than 204: there is no document at this address.
-        raise HTTPException(status_code=404, detail="No PDF stored for this paper")
+        raise HTTPException(status_code=404, detail="No file stored for this paper")
 
-    # The title, not the id: the file lands in a downloads folder where an
-    # id names nothing. Quoted and stripped of the characters a filesystem
-    # refuses, for the same reason `conversationFilename` does it.
-    safe = re.sub(r'[\\/:*?"<>|]', "-", paper.title).strip()[:80] or "paper"
+    # The stored type verbatim, set as a header rather than `media_type`:
+    # Starlette appends `charset=utf-8` to any text/* media type, which
+    # would mislabel a cp1252 .txt that is served byte for byte.
     return Response(
         content=stored.blob,
-        media_type=stored.content_type,
-        headers={"Content-Disposition": f'attachment; filename="{safe}.pdf"'},
+        headers={
+            "Content-Type": stored.content_type,
+            "Content-Disposition": _content_disposition(
+                paper.title, extension_for_content_type(stored.content_type)
+            ),
+        },
     )
 
 

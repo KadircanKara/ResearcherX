@@ -1,9 +1,11 @@
-"""Paper ingest: PDF -> pages + outline -> section-aware chunks -> embeddings.
+"""Paper ingest: file -> text -> section-aware chunks -> embeddings.
 
 Chunking is `structured_chunker.py` (pure) fed by `pdf_extraction.py`
-(PyMuPDF). This module owns persistence and the tier decision:
+(PyMuPDF) for PDFs and `text_extraction.py` (pure) for every other upload
+format. This module owns persistence and the tier decision:
 
     PDF bytes            -> extract_document -> tier 1 (outline) or tier 2
+    DOCX/MD/TXT/RTF bytes-> extract_markdown -> tier 3 (no pages)
     stored extracted_text-> chunk_markdown   -> tier 3 (no pages)
 
 Every row stores the author's text; the string that is EMBEDDED is
@@ -11,6 +13,7 @@ Every row stores the author's text; the string that is EMBEDDED is
 else at index time.
 """
 
+import asyncio
 import json
 import re
 import uuid
@@ -27,6 +30,7 @@ from app.services.embedding_service import EmbeddingService
 from app.services.paper_metadata_service import apply_metadata
 from app.services.pdf_extraction import extract_document, outline_to_json, pages_to_json
 from app.services.structured_chunker import ChunkRecord, chunk_markdown, chunk_pages
+from app.services.text_extraction import PDF, extract_markdown
 
 # Matches figure captions: "Figure 3." / "Fig. 3:" / "FIGURE 3 —" etc.
 _FIGURE_CAPTION_RE = re.compile(
@@ -108,13 +112,25 @@ async def index_chunks(
 
 
 async def ingest(
-    db: AsyncSession, paper_id: str, pdf_bytes: bytes, source_url: str | None = None
+    db: AsyncSession,
+    paper_id: str,
+    file_bytes: bytes,
+    source_url: str | None = None,
+    *,
+    file_format: str = PDF,
 ) -> int:
-    """Extract, chunk, embed, and persist a PDF. Returns number of chunks stored.
+    """Extract, chunk, embed, and persist one paper file. Returns the number
+    of chunks stored.
 
-    Stores `extracted_text` (plain markdown), `extracted_pages` and `outline`
-    BEFORE index_chunks so text and chunks land in one transaction; a later
-    re-chunk replays from the stored pages and never needs the PDF again.
+    `file_format` is a `text_extraction` format, already confirmed against
+    the bytes by `detect_format` (the upload route does that before storing
+    the file). PDFs store `extracted_text` (plain markdown),
+    `extracted_pages` and `outline`, so a re-chunk replays from the stored
+    pages and never needs the PDF again; every other format stores
+    `extracted_text` only, because it has no pages, and that stored markdown
+    is all a later re-chunk needs (`reindex_papers`, markdown tier). Either
+    way the text lands BEFORE index_chunks, in one transaction with the
+    chunks.
 
     One trace per ingest: extraction, every embedding batch and the metadata
     call nest under it.
@@ -124,10 +140,14 @@ async def ingest(
         attributes={
             "langfuse.trace.name": "paper.ingest",
             "langfuse.trace.metadata.paper_id": paper_id,
-            "langfuse.trace.metadata.pdf_bytes": len(pdf_bytes),
+            "langfuse.trace.metadata.file_format": file_format,
+            "langfuse.trace.metadata.file_bytes": len(file_bytes),
         },
     ) as span:
-        n = await _ingest(db, paper_id, pdf_bytes, source_url)
+        if file_format == PDF:
+            n = await _ingest(db, paper_id, file_bytes, source_url)
+        else:
+            n = await _ingest_text(db, paper_id, file_bytes, file_format, source_url)
         observability.set_attributes(span, {"langfuse.trace.metadata.chunks": n})
         return n
 
@@ -158,6 +178,43 @@ async def _ingest(db: AsyncSession, paper_id: str, pdf_bytes: bytes, source_url:
     # After indexing, in its own transaction: indexing is load-bearing and
     # must not be delayed or endangered by an LLM call.
     await apply_metadata(db, paper_id, ex.markdown, source_url)
+    return n
+
+
+async def _ingest_text(
+    db: AsyncSession, paper_id: str, data: bytes, file_format: str, source_url: str | None
+) -> int:
+    """The non-PDF twin of `_ingest`: markdown -> the tier-3 chunker, the
+    same one `index_manual` and a re-chunk from stored text use.
+
+    Extraction runs in a worker thread: mammoth and striprtf are CPU-bound
+    and the app has one event loop in one worker. An empty document stores
+    "" and indexes zero chunks; it is not an error.
+    """
+    with observability.span("paper.extract"):
+        md = await asyncio.to_thread(extract_markdown, file_format, data)
+    paper = await db.get(Paper, paper_id)
+    title = paper.title if paper is not None else ""
+    if paper is not None:
+        paper.extracted_text = md
+        # Pages left by an earlier PDF ingest of this paper would make
+        # `reindex_papers` replay the OLD document: its pages tier wins.
+        paper.extracted_pages = None
+        paper.outline = None
+
+    records = chunk_records_for_markdown(md)
+    log.info(
+        "paper_ingest_chunks",
+        paper_id=paper_id,
+        tier=3,
+        file_format=file_format,
+        body_chunks=sum(1 for r in records if r.kind == "body"),
+        figure_chunks=sum(1 for r in records if r.kind == "caption"),
+    )
+    n = await index_chunks(db, paper_id, records, title=title)
+
+    # Same rule as `_ingest`: after indexing, in its own transaction.
+    await apply_metadata(db, paper_id, md, source_url)
     return n
 
 
