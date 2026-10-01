@@ -15,6 +15,7 @@ import { Input } from "@/components/ui/input";
 import { RenameDialog } from "@/components/ui/rename-dialog";
 import { fetchUsage } from "@/lib/api";
 import { saveBlob } from "@/lib/download";
+import { extensionForType } from "@/lib/paper-file-types";
 import { deletePaper, fetchPaperPdf, listPapers, patchPaper } from "@/lib/projects";
 import { lastAddedLabel, libraryHeadline, summarize } from "@/lib/papers";
 import { matchesQuery } from "@/lib/search";
@@ -189,9 +190,11 @@ export default function PapersPage() {
           .replace(/[\\/:*?"<>|]/g, "-")
           .trim()
           .slice(0, 80) || "paper";
-      saveBlob(blob, `${safe}.pdf`);
+      // The served type names the extension: an upload may be any of the
+      // supported formats, not only a PDF.
+      saveBlob(blob, `${safe}${extensionForType(blob.type)}`);
     } catch {
-      setError("Could not download that PDF. Please try again.");
+      setError("Could not download that file. Please try again.");
     } finally {
       setDownloadingId(null);
     }

@@ -19,9 +19,15 @@ should be backing off.
 
 Tiers, best available per paper (spec §1):
     pages     stored extracted_pages/outline -> no PDF, no network
-    pdf       paper_files blob or pdf_url     -> extract, STORE pages/outline
+    pdf       stored PDF blob or pdf_url      -> extract, STORE pages/outline
     markdown  extracted_text                  -> sections, no pages
     manual    abstract + body                 -> index_manual
+
+Only a stored file whose `content_type` is `application/pdf` counts toward
+the pdf tier. An uploaded .docx/.md/.txt/.rtf is in `paper_files` too, and
+handing its bytes to PyMuPDF would at best fail and at worst index garbage;
+those papers re-chunk from their stored `extracted_text` (markdown tier),
+which is exactly what their ingest produced from the file.
 
 A paper that resolves to no chunks AND has no manual content either (no
 pages, no fetchable/fetched PDF, no stored markdown, no abstract, no body)
@@ -62,7 +68,10 @@ _FETCH_DELAY_S = 3.0
 _SELECT = """
     SELECT p.id, p.title, p.extracted_text, p.extracted_pages, p.outline, p.pdf_url,
            p.abstract, p.body,
-           EXISTS (SELECT 1 FROM paper_files f WHERE f.paper_id = p.id) AS has_file
+           EXISTS (
+               SELECT 1 FROM paper_files f
+               WHERE f.paper_id = p.id AND f.content_type = 'application/pdf'
+           ) AS has_pdf_file
     FROM papers p
 """
 _STALE_SQL = text(
@@ -76,7 +85,11 @@ _STALE_SQL = text(
 """
 )
 _ALL_SQL = text(_SELECT + " ORDER BY p.created_at")
-_BLOB_SQL = text("SELECT blob FROM paper_files WHERE paper_id = :id")
+# The content-type filter repeats `has_pdf_file`'s on purpose: this is the
+# query whose bytes reach `extract_document`.
+_BLOB_SQL = text(
+    "SELECT blob FROM paper_files WHERE paper_id = :id AND content_type = 'application/pdf'"
+)
 
 
 def _pdf_url(url: str) -> str:
@@ -87,7 +100,7 @@ def _pdf_url(url: str) -> str:
 def tier_for(row) -> str:
     if row.extracted_pages:
         return "pages"
-    if row.pdf_url or getattr(row, "has_file", False):
+    if row.pdf_url or getattr(row, "has_pdf_file", False):
         return "pdf"
     if row.extracted_text:
         return "markdown"
@@ -97,10 +110,10 @@ def tier_for(row) -> str:
 async def _blob_bytes(row) -> bytes | None:
     """The retained PDF, read from the DB — never the network.
 
-    `None` covers both "not `has_file`" and "`has_file` but the blob row is
+    `None` covers both "not `has_pdf_file`" and "`has_pdf_file` but the blob row is
     missing" (shouldn't happen, but that inconsistency must not masquerade
     as a network fetch when it falls through to `pdf_url` below)."""
-    if not getattr(row, "has_file", False):
+    if not getattr(row, "has_pdf_file", False):
         return None
     async with SessionLocal() as db:
         blob = (await db.execute(_BLOB_SQL, {"id": row.id})).scalar_one_or_none()
@@ -176,7 +189,7 @@ async def _reindex_one(row, *, allow_fetch: bool) -> tuple[int | None, str | Non
     """`n is None` means SKIPPED — no chunks were written and nothing
     existing was touched; every other `n` commits a write. `fetch_attempted`
     is returned on BOTH paths — a skip can still follow a fetch that hit the
-    network and failed (no `pdf_url`/`has_file` fallback content either), and
+    network and failed (no `pdf_url`/`has_pdf_file` fallback content either), and
     the caller's rate-limit pacing has to fire then too. A first cut of this
     guard collapsed the skip to a bare `None`, which discarded the flag and
     silently reintroduced the zero-delay-on-failure bug for that one subset

@@ -1,4 +1,6 @@
+import { ApiError } from "./api-error";
 import { plural } from "./format";
+import { uploadExtension } from "./paper-file-types";
 
 /**
  * The rules behind the Add papers dialog's three tabs.
@@ -34,33 +36,34 @@ export function withTimeout<T>(promise: Promise<T>, ms: number, label: string): 
 export type BatchStatus = "pending" | "extracting" | "ready" | "saving" | "done" | "failed";
 
 /**
- * Which of `files` join a batch already holding `queued` rows: the PDFs, up
- * to the cap. Both kinds of refusal are COUNTED, never dropped silently —
- * the tab says how many files it skipped and why.
+ * Which of `files` join a batch already holding `queued` rows: the supported
+ * formats (`paper-file-types.ts`), up to the cap. Both kinds of refusal are
+ * COUNTED, never dropped silently — the tab says how many files it skipped
+ * and why.
  */
-export function splitPdfs<T extends { name: string }>(
+export function splitUploads<T extends { name: string }>(
   files: readonly T[],
   queued: number,
   max: number = MAX_BATCH
-): { accepted: T[]; nonPdf: number; overCap: number } {
-  const pdfs = files.filter((f) => f.name.toLowerCase().endsWith(".pdf"));
+): { accepted: T[]; unsupported: number; overCap: number } {
+  const supported = files.filter((f) => uploadExtension(f.name) !== null);
   const room = Math.max(0, max - queued);
-  const accepted = pdfs.slice(0, room);
+  const accepted = supported.slice(0, room);
   return {
     accepted,
-    nonPdf: files.length - pdfs.length,
-    overCap: pdfs.length - accepted.length,
+    unsupported: files.length - supported.length,
+    overCap: supported.length - accepted.length,
   };
 }
 
-/** The line under the drop zone for files that were not PDFs. */
-export function nonPdfNotice(n: number): string {
+/** The line under the drop zone for files in a format we do not take. */
+export function unsupportedNotice(n: number): string {
   return n === 1
-    ? "1 file was not a PDF and was skipped."
-    : `${n} files were not PDFs and were skipped.`;
+    ? "1 file was not a PDF, DOCX, Markdown, TXT or RTF file and was skipped."
+    : `${n} files were not PDF, DOCX, Markdown, TXT or RTF files and were skipped.`;
 }
 
-/** The line under the drop zone for PDFs past the cap. */
+/** The line under the drop zone for files past the cap. */
 export function overCapNotice(n: number, max: number = MAX_BATCH): string {
   return n === 1
     ? `1 file was over the ${max}-file cap and was skipped.`
@@ -69,7 +72,9 @@ export function overCapNotice(n: number, max: number = MAX_BATCH): string {
 
 /** The title a row falls back to when extraction suggests none. */
 export function titleFromFilename(name: string): string {
-  return name.replace(/\.pdf$/i, "").slice(0, TITLE_MAX);
+  const ext = uploadExtension(name);
+  const stem = ext ? name.slice(0, name.length - ext.length - 1) : name;
+  return stem.slice(0, TITLE_MAX);
 }
 
 /**
@@ -112,14 +117,19 @@ export function closesAfterBatch(
 }
 
 /**
- * Why an uploaded PDF was not added. A failed compensating delete is said
+ * Why an uploaded file was not added. A failed compensating delete is said
  * distinctly: a generic "failed" there would let a retry create the paper
- * again and leave the first one orphaned.
+ * again and leave the first one orphaned. Otherwise a 422 carries the
+ * backend's own reason (contents that contradict the extension, an
+ * unreadable document), written for the reader and saying what to do;
+ * anything else stays generic.
  */
-export function uploadFailure(cleanedUp: boolean): string {
-  return cleanedUp
-    ? "Couldn't read or index this PDF."
-    : "Couldn't index this PDF, and cleanup failed — check the paper list for a leftover entry.";
+export function uploadFailure(cleanedUp: boolean, err?: unknown): string {
+  if (!cleanedUp) {
+    return "Couldn't index this file, and cleanup failed — check the paper list for a leftover entry.";
+  }
+  if (err instanceof ApiError && err.status === 422 && err.detail) return err.detail;
+  return "Couldn't read or index this file.";
 }
 
 /**

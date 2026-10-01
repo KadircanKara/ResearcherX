@@ -54,7 +54,7 @@ export function PaperRowBody({
             disabled={downloading}
             onClick={onDownload}
           >
-            {downloading ? "Downloading…" : "Download PDF"}
+            {downloading ? "Downloading…" : "Download file"}
           </button>
         ) : link ? (
           <a

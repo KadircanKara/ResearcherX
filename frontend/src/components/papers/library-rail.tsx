@@ -60,7 +60,7 @@ export function LibraryRail({
           e.preventDefault();
           setDragOver(false);
           // Handed STRAIGHT to the add dialog rather than filtered here: the
-          // upload tab already drops non-PDFs and caps the batch, and says
+          // upload tab already drops unsupported files and caps the batch, and says
           // so — a second copy of that rule here would drop files silently.
           onOpenAdd(Array.from(e.dataTransfer.files));
         }}
@@ -70,7 +70,7 @@ export function LibraryRail({
         )}
       >
         <Upload className="size-5 text-muted-foreground" aria-hidden />
-        <span className="text-[13px] font-medium">Drop a PDF here to add it to the library</span>
+        <span className="text-[13px] font-medium">Drop a paper file here to add it to the library</span>
         <span className="text-[12px] text-muted-foreground">
           Papers are read, split and embedded on arrival — usually under a minute for 20 pages.
         </span>

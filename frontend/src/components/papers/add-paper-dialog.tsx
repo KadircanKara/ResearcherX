@@ -75,7 +75,7 @@ export function AddPaperDialog({
         <DialogHeader>
           <DialogTitle>Add papers</DialogTitle>
           <DialogDescription>
-            Upload PDFs, link to a paper elsewhere, or enter one by hand.
+            Upload files, link to a paper elsewhere, or enter one by hand.
           </DialogDescription>
         </DialogHeader>
         <Tabs value={tab} onValueChange={(next) => setTab(next as AddTab)}>
