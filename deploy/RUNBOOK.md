@@ -6,7 +6,7 @@ One VM, `docker-compose.prod.yml` + `docker-compose.demo.yml`, Caddy with automa
 
 ## 1. VM
 
-1. Create an Ubuntu LTS VM with 2 vCPU / 4GB.
+1. Create an Ubuntu LTS VM with at least 4 vCPU / 8GB and 40GB of disk. The LaTeX compiler image is TeX Live scheme-full (about 6GB on disk, built once, which takes a while on the first deploy), and each compile may use up to 2 CPUs and 2GB of memory.
 2. Install Docker Engine and the compose plugin (https://docs.docker.com/engine/install/ubuntu/), and `make` and `git`: `apt install -y make git` (Ubuntu cloud images lack `make`; `make demo-up` and the backup cron need it).
 3. Firewall: `ufw allow 22 && ufw allow 80 && ufw allow 443 && ufw enable`. Nothing else is open (the database and backend publish no ports).
 4. Nothing else may hold ports 80/443: `docker ps --format '{{.Names}} {{.Ports}}' | grep -E ':(80|443)->'` must print nothing. Another stack's proxy there makes `make demo-up` fail with `port is already allocated`; stop that stack first (`docker compose -p <project> down` works without its compose file).
@@ -108,7 +108,8 @@ A Cohere trial key is rate-capped and not licensed for production. When it runs 
 1. Invite yourself and sign in with the emailed 6-digit code.
 2. Create a project, upload 2-3 PDFs; they appear in Papers as searchable.
 3. Ask a question: the answer streams with citation chips that open the passage.
-4. `/admin/research/<id>/latex` and `/graph` show not-found, and the add-paper dialog has only PDF upload.
-5. Paper cap race: with 19/20 papers, upload a batch of 3. Exactly one succeeds and the others show "Paper limit reached (20). Delete a paper to add another."
-6. Sign out: back to `/login`. Sign in again with a new code: same projects.
-7. In a second browser or incognito window that is not signed in, `/admin` redirects to `/login`.
+4. `/admin/research/<id>/graph` shows not-found, and the add-paper dialog has only file upload (PDF, DOCX, Markdown, TXT, RTF).
+5. LaTeX: create a blank project, compile it, and see the PDF. The editor has no Share button. `docker inspect researcherx-demo-latex-compiler-1 --format '{{.Config.Env}}'` lists no secrets, and the compiler publishes no ports.
+6. Paper cap race: with 19/20 papers, upload a batch of 3. Exactly one succeeds and the others show "Paper limit reached (20). Delete a paper to add another."
+7. Sign out: back to `/login`. Sign in again with a new code: same projects.
+8. In a second browser or incognito window that is not signed in, `/admin` redirects to `/login`.
