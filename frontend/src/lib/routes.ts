@@ -24,17 +24,19 @@ export const routes = {
   chat: (id: string) => `${research}/${id}/chat`,
   conversation: (id: string, cid: string) => `${research}/${id}/chat/${cid}`,
   papers: (id: string) => `${research}/${id}/papers`,
+  latex: (id: string) => `${research}/${id}/latex`,
+  latexDoc: (id: string, docId: string) => `${research}/${id}/latex/${docId}`,
 } as const;
 
-/** The two sections of a project, in tab order. */
-export type ProjectTab = "chat" | "papers";
+/** The three sections of a project, in tab order. */
+export type ProjectTab = "chat" | "papers" | "latex";
 
 /**
  * Which project tab `pathname` is on. Chat is the fallback: the project's own
  * URL redirects there, so a bare project path is the chat tab.
  */
 export function projectTab(pathname: string, projectId: string): ProjectTab {
-  const tabs: ProjectTab[] = ["papers"];
+  const tabs: ProjectTab[] = ["papers", "latex"];
   for (const tab of tabs) {
     const href = routes[tab](projectId);
     if (pathname === href || pathname.startsWith(`${href}/`)) return tab;
