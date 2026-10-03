@@ -28,20 +28,31 @@ services:
       COHERE_API_KEY: ${COHERE_API_KEY:?COHERE_API_KEY is required}
       CORS_ORIGINS: https://${DEMO_DOMAIN:?DEMO_DOMAIN is required}
     # The compiler is reachable ONLY over the internal `latex` network.
+    # rx-backend is the name Caddy uses (see Caddyfile.demo).
     networks:
-      - default
-      - latex
+      default:
+        aliases: [rx-backend]
+      latex:
   frontend:
+    networks:
+      default:
+        aliases: [rx-frontend]
     build:
       args:
         NEXT_PUBLIC_SUPABASE_URL: ${SUPABASE_URL:?SUPABASE_URL is required}
         NEXT_PUBLIC_SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY:?SUPABASE_ANON_KEY is required}
     image: researcherx-frontend:demo
+  # Also the VM's shared edge proxy: other apps join the external `proxy`
+  # network and drop a site file into /srv/edge/sites (deploy/RUNBOOK.md, 12).
   caddy:
     environment:
       DEMO_DOMAIN: ${DEMO_DOMAIN:?DEMO_DOMAIN is required}
     volumes:
       - ./Caddyfile.demo:/etc/caddy/Caddyfile:ro
+      - /srv/edge/sites:/etc/caddy/sites:ro
+    networks:
+      - default
+      - proxy
   # Copied whole from docker-compose.yml: every key below is part of the
   # sandbox (see CLAUDE.md, "LaTeX is compiled in a separate container"). A
   # partial copy is a sandbox with a hole in it.
@@ -92,3 +103,6 @@ services:
 networks:
   latex:
     internal: true    # no egress: a compile cannot phone home with what it read
+  # Shared with other apps on the VM; created once with `docker network create proxy`.
+  proxy:
+    external: true

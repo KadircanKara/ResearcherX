@@ -4,6 +4,17 @@
 # Only /v1/* reaches the backend. FastAPI's /docs, /redoc and /openapi.json
 # live outside /v1, so they fall through to the frontend (a 404) and never
 # list the switched-off routes.
+#
+# This Caddy is also the shared edge for other apps on the VM: it joins the
+# external `proxy` network, and every *.caddy file in /srv/edge/sites (mounted
+# at /etc/caddy/sites) is a site block for one of those apps. Upstreams here use
+# the rx-* aliases, never the bare service names: another app on `proxy` can
+# carry the alias `backend` or `frontend` too, and the bare name would become
+# ambiguous.
+
+# No match is a warning, not an error, so an empty sites dir is fine.
+import /etc/caddy/sites/*.caddy
+
 {$DEMO_DOMAIN} {
 	encode zstd gzip
 
@@ -12,13 +23,13 @@
 		request_body {
 			max_size 64MB
 		}
-		reverse_proxy backend:8000 {
+		reverse_proxy rx-backend:8000 {
 			# SSE must stream token by token.
 			flush_interval -1
 		}
 	}
 
 	handle {
-		reverse_proxy frontend:3000
+		reverse_proxy rx-frontend:3000
 	}
 }
