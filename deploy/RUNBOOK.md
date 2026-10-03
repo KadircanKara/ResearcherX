@@ -9,9 +9,10 @@ One VM, `docker-compose.prod.yml` + `docker-compose.demo.yml`, Caddy with automa
 1. Create an Ubuntu LTS VM with at least 4 vCPU / 8GB and 40GB of disk. The LaTeX compiler image is TeX Live scheme-full (about 6GB on disk, built once, which takes a while on the first deploy), and each compile may use up to 2 CPUs and 2GB of memory.
 2. Install Docker Engine and the compose plugin (https://docs.docker.com/engine/install/ubuntu/), and `make` and `git`: `apt install -y make git` (Ubuntu cloud images lack `make`; `make demo-up` and the backup cron need it).
 3. Firewall: `ufw allow 22 && ufw allow 80 && ufw allow 443 && ufw enable`. Nothing else is open (the database and backend publish no ports).
-4. Nothing else may hold ports 80/443: `docker ps --format '{{.Names}} {{.Ports}}' | grep -E ':(80|443)->'` must print nothing. Another stack's proxy there makes `make demo-up` fail with `port is already allocated`; stop that stack first (`docker compose -p <project> down` works without its compose file).
-5. As root (`sudo -i`; `/srv` is root-owned, so a plain `git clone` there is refused): `git clone https://github.com/KadircanKara/ResearcherX.git /srv/researcherx && cd /srv/researcherx && git checkout demo`.
-6. Give Docker real DNS servers. On OVH (and other images whose `/etc/resolv.conf` points at systemd-resolved's `127.0.0.53`), containers inherit that address, cannot reach it, and Caddy can never get a certificate (`lookup acme-v02.api.letsencrypt.org on 127.0.0.53:53: ... connection refused`). If `/etc/docker/daemon.json` does not exist: `echo '{"dns": ["1.1.1.1", "8.8.8.8"]}' > /etc/docker/daemon.json && systemctl restart docker` (merge the `dns` key in instead if the file exists).
+4. Nothing else may hold ports 80/443: `docker ps --format '{{.Names}} {{.Ports}}' | grep -E ':(80|443)->'` must print nothing. Another stack's proxy there makes `make demo-up` fail with `port is already allocated`; stop that stack first (`docker compose -p <project> down` works without its compose file). To serve other apps on the same VM, route them through this demo's Caddy instead (section 12).
+5. Create the shared proxy network and sites directory, once: `docker network create proxy && mkdir -p /srv/edge/sites`. `make demo-up` fails with `network proxy declared as external, but could not be found` until the network exists.
+6. As root (`sudo -i`; `/srv` is root-owned, so a plain `git clone` there is refused): `git clone https://github.com/KadircanKara/ResearcherX.git /srv/researcherx && cd /srv/researcherx && git checkout demo`.
+7. Give Docker real DNS servers. On OVH (and other images whose `/etc/resolv.conf` points at systemd-resolved's `127.0.0.53`), containers inherit that address, cannot reach it, and Caddy can never get a certificate (`lookup acme-v02.api.letsencrypt.org on 127.0.0.53:53: ... connection refused`). If `/etc/docker/daemon.json` does not exist: `echo '{"dns": ["1.1.1.1", "8.8.8.8"]}' > /etc/docker/daemon.json && systemctl restart docker` (merge the `dns` key in instead if the file exists).
 
 ## 2. DNS
 
@@ -102,6 +103,17 @@ A Cohere trial key is rate-capped and not licensed for production. When it runs 
 3. Resend domain not verified.
 4. A code that never arrives: check Supabase → Logs → Auth, then the Resend dashboard.
 5. "Sign-in is temporarily unavailable." from the API: the backend cannot reach Supabase's keys; check `SUPABASE_URL` and `make demo-logs`.
+
+## 12. Other apps on the same VM
+
+This demo's Caddy is the VM's only proxy on 80/443. Another app is served through it without touching this repo:
+
+1. The app's compose publishes no ports. Its entry containers join the external `proxy` network under aliases unique on the VM (e.g. `myapp-web`), never bare names like `backend` or `frontend`.
+2. Its site block goes in `/srv/edge/sites/<app>.caddy`, as root, proxying to those aliases. Caddy reads every `*.caddy` file there through the `import` line in `Caddyfile.demo`.
+3. Point the app's DNS `A` record at the VM, then validate and reload, as root:
+   `docker exec researcherx-demo-caddy-1 caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile && docker exec researcherx-demo-caddy-1 caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile`
+
+A bad site file fails validation and the reload is skipped, so the demo keeps serving. A `make demo-down` takes every app's HTTPS down with it.
 
 ## Acceptance
 
