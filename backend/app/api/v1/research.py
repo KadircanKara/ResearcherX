@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sse_starlette.sse import EventSourceResponse
 
-from app.core.identity import get_current_user_optional
+from app.core.identity import get_current_user, get_current_user_optional
 from app.core.logging import log
 from app.core.security import enforce_read_limits, enforce_run_quotas
 from app.db.models import User
@@ -25,6 +25,11 @@ service = ResearchService()
 # the old EventSource before the new one connects, so cancelling the moment
 # subscriber_count hits zero would kill runs on every reload.
 UNWATCHED_CANCEL_GRACE_S = 10.0
+
+# How often a quiet SSE stream wakes to check whether its client is still
+# there. Without it a subscriber to a run that never publishes again would
+# sit in `queue.get()` forever, holding its queue and connection.
+SSE_IDLE_CHECK_S = 15.0
 
 # Strong refs to the grace-window watchers (bare create_task results are
 # GC-able); each removes itself when done.
@@ -95,16 +100,33 @@ async def create_run(
     )
 
 
-@router.get("/{run_id}", response_model=RunOut, dependencies=[Depends(enforce_read_limits)])
-async def get_run(run_id: str, db: AsyncSession = Depends(get_session)) -> RunOut:
+async def _authorize_run_read(request: Request, db: AsyncSession, run_id: str):
+    """Load a run and enforce the same membership `create_run` and
+    `GET /projects/{id}/runs` enforce. A run bound to a project is readable
+    only by that project's members; a project-less run has no owner to check.
+    404 for a missing run, before anything subscribes to it."""
     run = await service.get(db, run_id)
     if run is None:
         raise HTTPException(status_code=404, detail="run not found")
+    if run.project_id is not None:
+        user = await get_current_user(request, db)
+        await project_service.require_member(db, run.project_id, user.id, "member")
+    return run
+
+
+@router.get("/{run_id}", response_model=RunOut, dependencies=[Depends(enforce_read_limits)])
+async def get_run(run_id: str, request: Request, db: AsyncSession = Depends(get_session)) -> RunOut:
+    run = await _authorize_run_read(request, db, run_id)
     return RunOut.model_validate(run)
 
 
 @router.get("/{run_id}/events", dependencies=[Depends(enforce_read_limits)])
-async def stream_events(run_id: str, request: Request) -> EventSourceResponse:
+async def stream_events(
+    run_id: str, request: Request, db: AsyncSession = Depends(get_session)
+) -> EventSourceResponse:
+    await _authorize_run_read(request, db, run_id)
+    # The check is done; do not hold a pooled connection for the stream.
+    await db.close()
     queue = bus.subscribe(run_id)
 
     async def event_gen() -> AsyncIterator[dict]:
@@ -112,7 +134,10 @@ async def stream_events(run_id: str, request: Request) -> EventSourceResponse:
             while True:
                 if await request.is_disconnected():
                     break
-                event = await queue.get()
+                try:
+                    event = await asyncio.wait_for(queue.get(), SSE_IDLE_CHECK_S)
+                except TimeoutError:
+                    continue
                 if event is None:
                     yield {"event": "end", "data": "{}"}
                     break

@@ -6,6 +6,11 @@ on:
     branches: [main]
   pull_request:
 
+# Read-only token for every job: a pull_request run executes the PR's own
+# code, and nothing here needs to write to the repository.
+permissions:
+  contents: read
+
 jobs:
   backend:
     runs-on: ubuntu-latest

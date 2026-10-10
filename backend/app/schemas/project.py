@@ -87,18 +87,25 @@ class ProjectDetailOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+# Manual text is chunked and embedded (paid) on every create and edit, so it
+# carries a ceiling. Generous: a body pasted from `suggest-title` is a whole
+# paper's extracted markdown.
+_ABSTRACT_MAX_CHARS = 100_000
+_BODY_MAX_CHARS = 5_000_000
+
+
 class PaperCreate(BaseModel):
     title: str = Field(min_length=1, max_length=512)
-    abstract: str | None = None
-    body: str | None = None
+    abstract: str | None = Field(default=None, max_length=_ABSTRACT_MAX_CHARS)
+    body: str | None = Field(default=None, max_length=_BODY_MAX_CHARS)
     pdf_url: str | None = None
     source: PaperSource = PaperSource.MANUAL
 
 
 class PaperUpdate(BaseModel):
     title: str | None = Field(default=None, min_length=1, max_length=512)
-    abstract: str | None = None
-    body: str | None = None
+    abstract: str | None = Field(default=None, max_length=_ABSTRACT_MAX_CHARS)
+    body: str | None = Field(default=None, max_length=_BODY_MAX_CHARS)
 
 
 class PaperOut(BaseModel):

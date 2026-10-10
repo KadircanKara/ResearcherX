@@ -299,3 +299,48 @@ async def test_an_allowed_chat_turn_writes_exactly_one_chat_turn_event(
         third = await client.post(url, json={"content": "hi"})
     assert third.status_code == 429
     assert await turn_events() == 2
+
+
+async def test_editing_a_manual_papers_text_draws_on_the_ingest_meter(
+    client, db_session, project, limits
+):
+    limits(user_ingests_per_day=1)
+    paper = Paper(project_id=project.id, title="m", source="manual", body="v0")
+    db_session.add(paper)
+    await db_session.commit()
+    paid = AsyncMock(return_value=1)
+    with patch("app.services.paper_ingest_service.index_manual", new=paid):
+        ok = await client.patch(f"/v1/projects/{project.id}/papers/{paper.id}", json={"body": "v1"})
+        refused = await client.patch(
+            f"/v1/projects/{project.id}/papers/{paper.id}", json={"body": "v2"}
+        )
+        # A title-only edit re-embeds nothing and is never metered.
+        title_only = await client.patch(
+            f"/v1/projects/{project.id}/papers/{paper.id}", json={"title": "renamed"}
+        )
+    assert ok.status_code == 200
+    assert refused.status_code == 429
+    assert title_only.status_code == 200
+    assert paid.call_count == 1
+
+
+async def test_ingest_from_url_draws_on_the_ingest_meter(client, db_session, project, limits):
+    limits(user_ingests_per_day=1)
+    paper = await _paper(db_session, project)
+    fetch = AsyncMock(return_value=(b"%PDF", "https://example.org/p.pdf"))
+    paid = AsyncMock(return_value=1)
+    with (
+        patch("app.services.paper_fetch_service.fetch_pdf", new=fetch),
+        patch("app.services.paper_ingest_service.ingest", new=paid),
+    ):
+        ok = await client.post(
+            f"/v1/projects/{project.id}/papers/{paper.id}/ingest-from-url",
+            json={"url": "https://example.org/p.pdf"},
+        )
+        refused = await client.post(
+            f"/v1/projects/{project.id}/papers/{paper.id}/ingest-from-url",
+            json={"url": "https://example.org/p.pdf"},
+        )
+    assert ok.status_code == 200
+    assert refused.status_code == 429
+    assert fetch.call_count == 1

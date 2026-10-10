@@ -28,6 +28,12 @@ class UnsafeUrl(Exception):
     """The URL names something inside our own network, or is not http(s)."""
 
 
+# RFC 6598 shared address space (carrier-grade NAT). Not `is_private` in
+# Python's table, yet routable only inside a provider's network -- some cloud
+# and VPN internals live here.
+_CGNAT = ipaddress.ip_network("100.64.0.0/10")
+
+
 def _is_blocked(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     """Everything that is not a public internet address.
 
@@ -36,6 +42,10 @@ def _is_blocked(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     169.254.169.254 -- is infrastructure, and fetching it on behalf of a user
     is SSRF whatever the response is then used for.
     """
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
+    if isinstance(ip, ipaddress.IPv4Address) and ip in _CGNAT:
+        return True
     return (
         ip.is_private
         or ip.is_loopback

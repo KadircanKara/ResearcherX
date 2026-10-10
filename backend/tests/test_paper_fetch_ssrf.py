@@ -25,6 +25,9 @@ from app.services import paper_fetch_service as svc
         "224.0.0.1",  # multicast
         "::1",  # loopback, v6
         "fc00::1",  # unique-local, v6
+        "100.64.0.1",  # shared address space (CGNAT), not is_private
+        "::ffff:127.0.0.1",  # v4-mapped loopback
+        "::ffff:169.254.169.254",  # v4-mapped metadata endpoint
     ],
 )
 def test_non_public_addresses_are_blocked(address: str):

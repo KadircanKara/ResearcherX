@@ -250,3 +250,39 @@ async def test_member_can_list_runs(
     )
     assert r.status_code == 200
     assert len(r.json()) == 1
+
+
+# ── Reading a run is gated like creating one ─────────────────────────────────
+
+
+async def test_a_non_member_cannot_read_a_project_run(
+    client, amelia: User, project: Project, db_session: AsyncSession
+):
+    run = ResearchRun(question="private question here", project_id=project.id, report="secret")
+    db_session.add(run)
+    await db_session.commit()
+    r = await client.get(f"/v1/research/{run.id}", headers={"X-Dev-User-Id": amelia.id})
+    assert r.status_code == 404
+    assert "secret" not in r.text
+    events = await client.get(f"/v1/research/{run.id}/events", headers={"X-Dev-User-Id": amelia.id})
+    assert events.status_code == 404
+
+
+async def test_a_member_reads_their_project_run(
+    client, you: User, project: Project, db_session: AsyncSession
+):
+    run = ResearchRun(question="member question here", project_id=project.id, report="ok")
+    db_session.add(run)
+    await db_session.commit()
+    r = await client.get(f"/v1/research/{run.id}", headers={"X-Dev-User-Id": you.id})
+    assert r.status_code == 200
+    assert r.json()["report"] == "ok"
+
+
+async def test_events_for_an_unknown_run_are_refused_before_subscribing(client):
+    from app.services.event_bus import bus
+
+    run_id = "00000000-0000-0000-0000-000000000000"
+    r = await client.get(f"/v1/research/{run_id}/events")
+    assert r.status_code == 404
+    assert bus.subscriber_count(run_id) == 0

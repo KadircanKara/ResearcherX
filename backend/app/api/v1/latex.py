@@ -372,8 +372,10 @@ async def get_document_pdf(
     db: AsyncSession = Depends(get_session),
 ) -> Response:
     await latex_access.require(db, project_id, document_id, user.id)
-    await _get_document_or_404(db, project_id, document_id)
-    build = cache.get(hash)
+    document = await _get_document_or_404(db, project_id, document_id)
+    # Bound to THIS document: a hash another document compiled to is a 404
+    # here, not that document's PDF.
+    build = cache.get_for(document.id, hash)
     if build is None:
         # The cache is in-process and bounded, so a hash can age out. A 404
         # tells the client to recompile rather than pretending the PDF is gone
