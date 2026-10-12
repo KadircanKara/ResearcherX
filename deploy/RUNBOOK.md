@@ -1,6 +1,6 @@
 # Public demo runbook
 
-One VM, `docker-compose.prod.yml` + `docker-compose.demo.yml`, Caddy with automatic HTTPS, Supabase email-OTP sign-in (invite-only), Resend for the email. You create every account and enter every secret.
+One VM, `docker-compose.prod.yml` + `docker-compose.demo.yml`, Caddy with automatic HTTPS, Supabase email + password sign-up with an emailed activation link (email-code sign-in kept as a second way in), Resend for the email. You create every account and enter every secret.
 
 `<DEMO_DOMAIN>` below is the hostname the demo is served on (e.g. `demo.example.com`).
 
@@ -28,11 +28,19 @@ One VM, `docker-compose.prod.yml` + `docker-compose.demo.yml`, Caddy with automa
 
 ## 4. Supabase (new free project)
 
-1. Authentication → Sign In / Providers → Email: enabled; "Allow new users to sign up" **off**; "Confirm email" on.
+1. Authentication → Sign In / Providers → Email: enabled; "Allow new users to sign up" **on**; "Confirm email" **on** (this is what makes an account inactive until its activation link is opened -- never turn it off: an unconfirmed address would then sign straight in); "Secure email change" **on**; "Secure password change" on. Password requirements: minimum length **10** (the sign-up page says 10; `PASSWORD_MIN` in `frontend/src/lib/auth-flow.ts`).
 2. Authentication → Emails → SMTP: custom SMTP pointed at Resend, sender `no-reply@<DEMO_DOMAIN>`, name "ResearcherX".
-3. Authentication → Emails → "Magic link or OTP" template: paste `deploy/supabase/otp-email.html`, subject "Your ResearcherX sign-in code".
+3. Authentication → Emails → templates. The two link templates point at the app's OWN pages (`/auth/confirm`, `/auth/reset`), which verify the token by script: the link then works in any browser, and a mail scanner that pre-opens it cannot spend it. Do not put `{{ .ConfirmationURL }}` back.
+   - "Confirm signup": paste `deploy/supabase/confirm-email.html`, subject "Activate your ResearcherX account".
+   - "Reset password": paste `deploy/supabase/reset-email.html`, subject "Reset your ResearcherX password".
+   - "Magic link or OTP": paste `deploy/supabase/otp-email.html`, subject "Your ResearcherX sign-in code".
 4. Authentication → Sign In / Providers → Email: Email OTP Expiration `3600` seconds, **Email OTP Length `6`**. New projects default to 8, and the sign-in page accepts only 6 digits.
-5. URL Configuration: Site URL `https://<DEMO_DOMAIN>`.
+5. URL Configuration: Site URL `https://<DEMO_DOMAIN>` (the email templates build their links from it); Redirect URLs: `https://<DEMO_DOMAIN>/auth/confirm` and `https://<DEMO_DOMAIN>/auth/reset`.
+   Because the templates use the Site URL, testing sign-up locally needs a separate Supabase project whose Site URL is `http://localhost:3000`.
+5a. **Attack Protection.** Sign-ups are public, and every account spends paid LLM, embedding and rerank calls.
+   - CAPTCHA: create a Cloudflare Turnstile widget for `<DEMO_DOMAIN>` (Cloudflare dashboard → Turnstile), then Authentication → Attack Protection → enable CAPTCHA, provider Turnstile, paste the **secret** key. The **site** key goes in `TURNSTILE_SITE_KEY` (section 5). Enable both together: with the dashboard on and no site key in the build, every sign-up and sign-in fails with "The verification check failed".
+   - Rate Limits: "emails sent per hour" at or below what Resend allows (free tier: 100/day); keep the token-verification and sign-up limits at their defaults.
+   - The per-user daily limits in `docker-compose.demo.yml` and `DEMO_MAX_USERS` are the spending ceiling: total daily spend is roughly users × per-user limits. Raise `DEMO_MAX_USERS` deliberately.
 6. **JWT signing keys.** The backend verifies access tokens against the project's public keys, so the project must sign with an asymmetric key (ES256 or RS256): Settings → JWT Keys / signing keys, and make sure an ES256 or RS256 key is the current signing key. With the legacy HS256 shared secret, every login succeeds and then loops back to `/login` with no message. Check this **before the first login**.
 7. SQL editor: create the keep-alive table (used by the cron in section 8; it holds no data and anon can only read it):
    ```sql
@@ -47,7 +55,7 @@ One VM, `docker-compose.prod.yml` + `docker-compose.demo.yml`, Caddy with automa
 ## 5. Secrets on the VM
 
 1. Create `/etc/researcherx-demo.env` (mode `600`, owner root) with these variables, one `NAME='value'` per line, no `export`. **Single-quote every value**: the file is shell-sourced, so an unquoted `$`, space or backtick would be expanded:
-   `POSTGRES_PASSWORD` (random: `openssl rand -hex 32`; it is the password of the demo's own Postgres container, set on first start and never read from anywhere else), `LLM_API_KEY` (OpenAI), `EMBEDDING_API_KEY` (OpenAI), `COHERE_API_KEY`, `OWNER_API_KEY` (random: `openssl rand -hex 32`), `SUPABASE_URL` (`https://<project-ref>.supabase.co`), `SUPABASE_ANON_KEY` (the publishable or anon key, never the secret/service_role key) and `DEMO_DOMAIN` (hostname only, no `https://`).
+   `POSTGRES_PASSWORD` (random: `openssl rand -hex 32`; it is the password of the demo's own Postgres container, set on first start and never read from anywhere else), `LLM_API_KEY` (OpenAI), `EMBEDDING_API_KEY` (OpenAI), `COHERE_API_KEY`, `OWNER_API_KEY` (random: `openssl rand -hex 32`), `SUPABASE_URL` (`https://<project-ref>.supabase.co`), `SUPABASE_ANON_KEY` (the publishable or anon key, never the secret/service_role key) `DEMO_DOMAIN` (hostname only, no `https://`), and optionally `TURNSTILE_SITE_KEY` (the Turnstile **site** key from 5a; public, baked into the frontend).
 
    Create the file already locked down, as root: `install -m 600 -o root -g root /dev/null /etc/researcherx-demo.env`, then edit it with `nano` as root. Long keys pasted through an editor get truncated easily; write them without one instead, so they are never echoed:
    ```bash
@@ -58,17 +66,18 @@ One VM, `docker-compose.prod.yml` + `docker-compose.demo.yml`, Caddy with automa
 2. **Start on a fresh database.** The demo must not reuse a dev database or `data/postgres` from a dev machine. `AUTH_MODE=supabase` never seeds users, so a fresh database has no seed users; a database carried over from dev would hold the dev seed accounts and their projects.
 3. Deploy as root (`sudo -i` first; the env file is mode 600, root only): `cd /srv/researcherx && set -a; . /etc/researcherx-demo.env; set +a; make demo-up`.
 4. Health check: `curl -fsS https://<DEMO_DOMAIN>/v1/health`.
-5. `SUPABASE_ANON_KEY` and `SUPABASE_URL` are baked into the frontend image at build time; if you change either, redeploy (step 3 rebuilds).
+5. `SUPABASE_ANON_KEY`, `SUPABASE_URL` and `TURNSTILE_SITE_KEY` are baked into the frontend image at build time; if you change any, redeploy (step 3 rebuilds).
 6. FastAPI's `/docs`, `/redoc` and `/openapi.json` are not exposed: Caddy proxies only `/v1/*` to the backend, and everything else goes to the frontend.
 
-## 6. Add a client
+## 6. Accounts
 
-1. Supabase → Authentication → Users → Add user → Create new user, with their email and **Auto Confirm User** ticked. If the dialog asks for a password, paste a long random one (`openssl rand -base64 32`) and keep no copy: login is by email code only, and Supabase's own password endpoint is reachable with the public key, so the password must be unguessable.
-2. Send them the URL and ask them to sign in with that email.
-3. **Never re-invite an email address that previously belonged to a different client.** Accounts relink by email, so the new person would get the old client's papers and chats. Use a different address, or wipe that user's data first.
-4. The demo admits at most `DEMO_MAX_USERS` (20) accounts; the 21st gets "The demo is full."
+1. People sign up themselves at `https://<DEMO_DOMAIN>/signup`: email + password, then the activation link. Until it is opened the account cannot sign in ("Activate your account first"), and the login page offers to resend it.
+2. Forgotten password: `/forgot-password` emails a reset link to `/auth/reset`.
+3. Accounts created by hand before sign-up opened have an unknown random password: those users use "Forgot password?" once, or "Email me a sign-in code instead".
+4. **A deleted account's email must not reach its old data.** Re-registering the address gives a new Supabase `sub`. Before the security-audit fixes (PR #38) are deployed, the backend relinks by email and the new owner of the address would get the old papers and chats; after them, it refuses unless `AUTH_RELINK_BY_EMAIL=true`. Either way, delete a removed user's data (section 7) before the address can come back.
+5. The demo admits at most `DEMO_MAX_USERS` accounts; the next sign-up gets "The demo is full." on its first request after activation.
 
-## 7. Remove a client
+## 7. Remove an account
 
 1. Supabase → Users → the user → Delete (or Ban).
 2. Their existing sessions end when the access token expires, within about an hour.
@@ -117,7 +126,7 @@ A bad site file fails validation and the reload is skipped, so the demo keeps se
 
 ## Acceptance
 
-1. Invite yourself and sign in with the emailed 6-digit code.
+1. Sign up at `/signup`; the activation email arrives (check Resend's log if not), its link lands on `/auth/confirm` and opens the app. Sign out, sign back in with the password; "Forgot password?" sends a reset link that lands on `/auth/reset`; "Email me a sign-in code instead" still works. Signing in before activating shows "Activate your account first".
 2. Create a project, upload 2-3 PDFs; they appear in Papers as searchable.
 3. Ask a question: the answer streams with citation chips that open the passage.
 4. `/admin/research/<id>/graph` shows not-found, and the add-paper dialog has only file upload (PDF, DOCX, Markdown, TXT, RTF).

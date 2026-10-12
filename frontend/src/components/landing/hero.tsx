@@ -75,10 +75,10 @@ export function Hero() {
         </p>
         <div className="mt-9 flex flex-col items-stretch justify-center gap-3 sm:flex-row sm:items-center">
           <a
-            href={routes.login()}
+            href={routes.signup()}
             className="bg-site-accent text-site-accent-fg inline-flex h-12 items-center justify-center gap-2 rounded-lg px-6 text-[15px] font-medium transition-[filter] hover:brightness-110"
           >
-            Login
+            Get started
             <ArrowRight className="size-4" aria-hidden />
           </a>
           <a
