@@ -1,9 +1,11 @@
 """Map a verified Supabase identity to our User, creating it on first login.
 
-Lookup order: the `sub` we stored, then the verified email (case-insensitive).
-`users.email` is unique and only the operator can create Supabase users, so an
-email match is the same person — including a client deleted and re-invited
-in Supabase, who arrives with a NEW `sub` and is relinked to their data.
+Lookup order: the `sub` we stored, then the email (case-insensitive). An email
+match binds a row that has NO subject yet (a seeded or pre-provisioned user).
+A row already bound to a DIFFERENT subject is moved only when
+`settings.auth_relink_by_email` is on -- the re-invited-client case, where the
+operator alone creates Supabase users. Otherwise it is refused: an email in a
+token is not proof of owning the account it names.
 
 A new user gets exactly one project, owned by them. Two first requests
 racing each other are settled by the unique constraints: the loser rolls back
@@ -26,6 +28,21 @@ class DemoFull(Exception):
     """Account creation refused: DEMO_MAX_USERS reached."""
 
 
+class SubjectConflict(Exception):
+    """The email belongs to an account bound to another Supabase subject."""
+
+
+def _bind(user: User, sub: str) -> None:
+    """Bind `user` to `sub`, refusing to move an existing different binding
+    unless relinking is enabled."""
+    if user.auth_subject is not None and user.auth_subject != sub:
+        if not settings.auth_relink_by_email:
+            log.warning("account_relink_refused", user_id=user.id)
+            raise SubjectConflict
+        log.info("account_relinked", user_id=user.id)
+    user.auth_subject = sub
+
+
 async def _by_subject(db: AsyncSession, sub: str) -> User | None:
     return (await db.execute(select(User).where(User.auth_subject == sub))).scalar_one_or_none()
 
@@ -43,9 +60,7 @@ async def resolve_account(db: AsyncSession, claims: Claims) -> User:
 
     user = await _by_email(db, claims.email)
     if user is not None:
-        if user.auth_subject is not None:
-            log.info("account_relinked", user_id=user.id)
-        user.auth_subject = claims.sub
+        _bind(user, claims.sub)
         await db.commit()
         return user
 
@@ -73,7 +88,7 @@ async def resolve_account(db: AsyncSession, claims: Claims) -> User:
         winner = await _by_email(db, claims.email)
         if winner is None:
             raise
-        winner.auth_subject = claims.sub
+        _bind(winner, claims.sub)
         await db.commit()
         return winner
     log.info("account_created", user_id=user.id)

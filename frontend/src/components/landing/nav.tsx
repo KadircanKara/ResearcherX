@@ -93,10 +93,10 @@ export function Nav() {
           <div className="flex items-center gap-2">
             <ThemeButton />
             <a
-              href={routes.home()}
+              href={routes.login()}
               className="bg-site-accent text-site-accent-fg inline-flex h-9 items-center rounded-lg px-4 text-[14px] font-medium transition-[filter] hover:brightness-110"
             >
-              Open the app
+              Login
             </a>
           </div>
         </nav>
@@ -132,10 +132,10 @@ export function Nav() {
             </a>
           ))}
           <a
-            href={routes.home()}
+            href={routes.login()}
             className="bg-site-accent text-site-accent-fg mt-6 inline-flex h-12 items-center justify-center rounded-lg text-[15px] font-medium"
           >
-            Open the app
+            Login
           </a>
         </div>
       )}

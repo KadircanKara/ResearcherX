@@ -34,9 +34,10 @@ def fresh_limiter_state():
 # --- client_ip -------------------------------------------------------------
 
 
-def test_client_ip_prefers_first_forwarded_hop():
+def test_client_ip_takes_the_hop_our_proxy_appended():
+    # The first hop is client-supplied and spoofable; the last is Caddy's.
     req = make_request({"X-Forwarded-For": "9.9.9.9, 10.0.0.1"})
-    assert security.client_ip(req) == "9.9.9.9"
+    assert security.client_ip(req) == "10.0.0.1"
 
 
 def test_client_ip_falls_back_to_socket_peer():

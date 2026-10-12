@@ -2,34 +2,10 @@ import { buildAuthHeaders, isSessionEnded } from "./auth-headers";
 import { routes } from "./routes";
 import { accessToken, authEnabled, supabase } from "./supabase";
 import { ApiError, detailOf } from "./api-error";
-import type { Run } from "./types";
 import type { Usage } from "./usage";
 
 export const API_BASE =
   process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8000";
-
-export async function createRun(question: string, projectId?: string): Promise<Run> {
-  const run = await apiSend<Run>("POST", "/research", {
-    question,
-    project_id: projectId ?? null,
-  });
-  if (!run) throw new Error("create failed: no body");
-  return run;
-}
-
-export async function getRun(id: string): Promise<Run> {
-  const res = await fetch(`${API_BASE}/v1/research/${id}`, {
-    headers: await authHeaders(),
-    cache: "no-store",
-  });
-  await onAuthFailure(res.status);
-  if (!res.ok) throw new Error(`get failed: ${res.status}`);
-  return res.json();
-}
-
-export function eventsUrl(id: string): string {
-  return `${API_BASE}/v1/research/${id}/events`;
-}
 
 let devUserId: string | null = null;
 export const setDevUserId = (id: string | null) => { devUserId = id; };

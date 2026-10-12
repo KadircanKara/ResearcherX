@@ -66,6 +66,9 @@ JSON_INSTRUCTION = "Respond with a single JSON object and nothing else — no pr
 # it to 429 lets the pool's failover treat it like any other provider quota.
 _RATE_LIMIT_MARKERS = ("rate limit", "usage limit", "quota", "too many requests")
 
+# A chat turn at a 100-paper library is ~200KB of JSON; 8 MiB is headroom.
+MAX_BODY_BYTES = 8 * 1024 * 1024
+
 
 class Config:
     def __init__(self, args: argparse.Namespace) -> None:
@@ -276,9 +279,16 @@ class Handler(BaseHTTPRequestHandler):
         self._send_json(status, {"error": {"message": message, "type": "claude_proxy_error"}})
 
     def _read_body(self) -> dict:
-        length = int(self.headers.get("Content-Length") or 0)
-        if not length:
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            raise ProxyError(400, "invalid Content-Length") from None
+        if length <= 0:
             raise ProxyError(400, "empty request body")
+        # Refused before reading: the declared length is the client's word,
+        # and reading it whole would let one request claim gigabytes.
+        if length > MAX_BODY_BYTES:
+            raise ProxyError(413, f"request body exceeds {MAX_BODY_BYTES} bytes")
         try:
             return json.loads(self.rfile.read(length))
         except ValueError as exc:
@@ -408,7 +418,11 @@ class Handler(BaseHTTPRequestHandler):
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--host", default=os.environ.get("CLAUDE_PROXY_HOST", "0.0.0.0"))
+    # Loopback by default: the proxy spends the host's Claude login and has no
+    # auth of its own, so it must not answer the LAN. Docker Desktop reaches
+    # host loopback through host.docker.internal; on Linux, pass the docker
+    # bridge address (e.g. --host 172.17.0.1), never 0.0.0.0 on an open network.
+    parser.add_argument("--host", default=os.environ.get("CLAUDE_PROXY_HOST", "127.0.0.1"))
     parser.add_argument(
         "--port", type=int, default=int(os.environ.get("CLAUDE_PROXY_PORT", "8787"))
     )

@@ -2,7 +2,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Binoculars, BookOpen, ChevronLeft, ChevronRight, Menu } from "lucide-react";
+import { BookOpen, ChevronLeft, ChevronRight, Menu } from "lucide-react";
 import { routes } from "@/lib/routes";
 import { cn } from "@/lib/utils";
 import { listProjects } from "@/lib/projects";
@@ -74,19 +74,6 @@ function SidebarContent({
         >
           <BookOpen />
           {!compact && "Research"}
-        </Button>
-        <Button
-          variant="ghost"
-          render={<Link href={routes.explorer()} onClick={close} />}
-          aria-label={compact ? "Explorer" : undefined}
-          className={cn(
-            "w-full justify-start rounded-md",
-            !onResearch ? "bg-sidebar-accent text-sidebar-accent-foreground" : "text-muted-foreground",
-            compact && "justify-center px-0",
-          )}
-        >
-          <Binoculars />
-          {!compact && "Explorer"}
         </Button>
       </nav>
 

@@ -2,7 +2,7 @@ from fastapi import Depends, HTTPException, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.accounts import DemoFull, resolve_account
+from app.core.accounts import DemoFull, SubjectConflict, resolve_account
 from app.core.config import settings
 from app.core.logging import log
 from app.core.supabase_auth import AuthError, AuthUnavailable, jwks_cache, verify_token
@@ -29,6 +29,10 @@ async def _supabase_user(request: Request, db: AsyncSession) -> User:
         return await resolve_account(db, claims)
     except DemoFull:
         raise HTTPException(status_code=403, detail="The demo is full.") from None
+    except SubjectConflict:
+        raise HTTPException(
+            status_code=403, detail="This email is linked to another sign-in. Contact the operator."
+        ) from None
 
 
 async def get_current_user_optional(

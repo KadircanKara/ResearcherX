@@ -1,6 +1,6 @@
 /**
  * The trust promise in the reader's terms, and the machinery behind a
- * disclosure for whoever wants it. The four steps above already demonstrate
+ * disclosure for whoever wants it. The three steps above already demonstrate
  * each promise, so this section states them once rather than as a grid.
  */
 export function Outcomes() {
@@ -21,11 +21,6 @@ export function Outcomes() {
               <span className="text-site-fg font-medium">The search goes where you send it.</span>{" "}
               Name papers with @, or name one in your question, and the answer tells you when it
               searched only those.
-            </p>
-            <p>
-              <span className="text-site-fg font-medium">Your sources stay beside your draft.</span>{" "}
-              The library and the manuscript live in one project, so a claim you checked is one
-              click from the sentence you cite it in.
             </p>
           </div>
         </div>
@@ -50,8 +45,6 @@ export function Outcomes() {
               removed, and markers are renumbered in reading order.
             </p>
             <p>
-              LaTeX compiles in a separate sandboxed service with no access to secrets or the
-              database, with SyncTeX for source-to-PDF navigation.{" "}
               <a
                 href="https://github.com/KadircanKara/ResearcherX"
                 target="_blank"

@@ -121,3 +121,22 @@ def test_a_build_with_no_extraction_root_still_reports_its_size():
     build = _build(pdf=b"x" * 50, root=None)
 
     assert build.size == 50 + len(b"gz")
+
+
+def test_a_build_is_served_only_to_a_document_that_compiled_it():
+    cache = LatexCache(max_entries=4, max_bytes=10_000)
+    cache.put("k", _build(), document_id="doc-a")
+    assert cache.get_for("doc-a", "k") is not None
+    assert cache.get_for("doc-b", "k") is None
+    # A second document with an identical tree shares the entry once it
+    # compiles to it itself.
+    cache.put("k", _build(), document_id="doc-b")
+    assert cache.get_for("doc-b", "k") is not None
+
+
+def test_ownership_is_dropped_with_the_evicted_entry():
+    cache = LatexCache(max_entries=1, max_bytes=10_000)
+    cache.put("a", _build(), document_id="doc-a")
+    cache.put("b", _build(), document_id="doc-b")
+    assert cache.get_for("doc-a", "a") is None
+    assert "a" not in cache._owners

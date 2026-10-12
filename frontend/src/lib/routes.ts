@@ -13,11 +13,17 @@
 export const ADMIN_BASE = "/admin";
 
 const research = `${ADMIN_BASE}/research`;
-const explorer = `${ADMIN_BASE}/explorer`;
 
 export const routes = {
   /** Sign-in lives outside the app prefix: it is the one page a signed-out visitor may see. */
   login: () => "/login",
+  /** The auth pages share that rule: a signed-out visitor must reach them. */
+  signup: () => "/signup",
+  forgotPassword: () => "/forgot-password",
+  /** Where the activation email's link lands (deploy/supabase/confirm-email.html). */
+  authConfirm: () => "/auth/confirm",
+  /** Where the password-reset email's link lands (deploy/supabase/reset-email.html). */
+  authReset: () => "/auth/reset",
   /** The app's own front door; the landing page sends "Open the app" here. */
   home: () => ADMIN_BASE,
   research: () => research,
@@ -25,22 +31,19 @@ export const routes = {
   chat: (id: string) => `${research}/${id}/chat`,
   conversation: (id: string, cid: string) => `${research}/${id}/chat/${cid}`,
   papers: (id: string) => `${research}/${id}/papers`,
-  graph: (id: string) => `${research}/${id}/graph`,
   latex: (id: string) => `${research}/${id}/latex`,
   latexDoc: (id: string, docId: string) => `${research}/${id}/latex/${docId}`,
-  explorer: () => explorer,
-  exploration: (eid: string) => `${explorer}/${eid}`,
 } as const;
 
-/** The four sections of a project, in tab order. */
-export type ProjectTab = "chat" | "papers" | "graph" | "latex";
+/** The three sections of a project, in tab order. */
+export type ProjectTab = "chat" | "papers" | "latex";
 
 /**
  * Which project tab `pathname` is on. Chat is the fallback: the project's own
  * URL redirects there, so a bare project path is the chat tab.
  */
 export function projectTab(pathname: string, projectId: string): ProjectTab {
-  const tabs: ProjectTab[] = ["papers", "graph", "latex"];
+  const tabs: ProjectTab[] = ["papers", "latex"];
   for (const tab of tabs) {
     const href = routes[tab](projectId);
     if (pathname === href || pathname.startsWith(`${href}/`)) return tab;

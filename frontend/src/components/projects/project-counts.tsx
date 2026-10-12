@@ -1,18 +1,17 @@
-import { FileText, MessageSquare, Users } from "lucide-react";
+import { FileText, MessageSquare } from "lucide-react";
 import type { Project } from "@/lib/types";
 
 /**
- * The three small counts shown on a project card and list row.
+ * The small counts shown on a project card and list row.
  *
  * Rendered exactly as the list endpoint reports them. Note that the server
  * currently sends `papers` and `chats` as 0 for every project
- * (`project_service.list_projects`); only `members` is counted.
+ * (`project_service.list_projects`).
  */
 export function ProjectCounts({ project }: { project: Project }) {
   const items = [
     { icon: FileText, value: project.counts.papers, label: "papers" },
     { icon: MessageSquare, value: project.counts.chats, label: "chats" },
-    { icon: Users, value: project.counts.members, label: "members" },
   ];
   return (
     <ul className="flex items-center gap-3 text-[12px] text-muted-foreground">

@@ -155,6 +155,11 @@ export function MarkdownRenderer({
     <div className="space-y-3 text-sm text-foreground">
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
+        // No images: this text is model- or paper-derived, and an image is a
+        // request to any URL it names the moment it renders -- a tracking
+        // beacon, or an exfiltration channel under prompt injection.
+        disallowedElements={["img"]}
+        unwrapDisallowed
         // Tuple form, not citationMarks({...}): unified treats a bare
         // function as an ATTACHER and calls it with the options, using its
         // return value as the transformer. Passing an already-invoked

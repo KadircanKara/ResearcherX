@@ -36,6 +36,9 @@ docs/session.txt
 .mcp.json
 backend/stub-papers/
 
+# Nightly demo DB dumps (make demo-backup)
+backups/
+
 # Copied out of node_modules by frontend/scripts/copy-pdf-worker.mjs at
 # dev/build time, so it always matches the installed pdfjs-dist.
 frontend/public/pdf.worker.min.mjs

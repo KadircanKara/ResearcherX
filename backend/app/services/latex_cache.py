@@ -52,6 +52,11 @@ class LatexCache:
     def __init__(self, max_entries: int | None = None, max_bytes: int | None = None) -> None:
         self._entries: OrderedDict[str, CachedBuild] = OrderedDict()
         self._latest: dict[str, str] = {}
+        # Which documents compiled to each key. The key is a content hash and
+        # two documents with identical trees share one entry, but a PDF is
+        # served only to a document that produced it: the hash is a cache
+        # key, not a capability, and must not open another document's build.
+        self._owners: dict[str, set[str]] = {}
         self._max_entries = max_entries if max_entries is not None else settings.latex_cache_entries
         self._max_bytes = max_bytes if max_bytes is not None else settings.latex_cache_bytes
 
@@ -60,6 +65,7 @@ class LatexCache:
         self._entries.move_to_end(key)
         if document_id:
             self._latest[document_id] = key
+            self._owners.setdefault(key, set()).add(document_id)
         self._evict()
 
     def get(self, key: str) -> CachedBuild | None:
@@ -70,6 +76,12 @@ class LatexCache:
         # one whose artifacts must survive eviction.
         self._entries.move_to_end(key)
         return build
+
+    def get_for(self, document_id: str, key: str) -> CachedBuild | None:
+        """`get`, but only for a key this document itself compiled to."""
+        if document_id not in self._owners.get(key, ()):
+            return None
+        return self.get(key)
 
     def latest_for(self, document_id: str) -> CachedBuild | None:
         """The last successful build of a document, whatever its source is
@@ -111,6 +123,7 @@ class LatexCache:
         """
         for document_id in [d for d, k in self._latest.items() if k == key]:
             del self._latest[document_id]
+        self._owners.pop(key, None)
 
     def _total_bytes(self) -> int:
         return sum(build.size for build in self._entries.values())

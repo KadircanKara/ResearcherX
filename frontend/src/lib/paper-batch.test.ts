@@ -8,7 +8,6 @@ import {
   addableCount,
   closesAfterBatch,
   ingestWarning,
-  linkFailure,
   overCapNotice,
   splitUploads,
   titleFromFilename,
@@ -22,7 +21,15 @@ const file = (name: string) => ({ name });
 
 describe("splitUploads", () => {
   it("keeps the five formats, whatever the extension's case, and counts the rest", () => {
-    const names = ["a.pdf", "b.PDF", "c.docx", "d.md", "e.markdown", "f.TXT", "g.rtf"];
+    const names = [
+      "a.pdf",
+      "b.PDF",
+      "c.docx",
+      "d.md",
+      "e.markdown",
+      "f.TXT",
+      "g.rtf",
+    ];
     const r = splitUploads([...names, "h.doc", "i.png", "README"].map(file), 0);
     expect(r.accepted.map((f) => f.name)).toEqual(names);
     expect(r.unsupported).toBe(3);
@@ -46,13 +53,17 @@ describe("splitUploads", () => {
 describe("notices", () => {
   it("says how many were skipped and why, in both numbers", () => {
     expect(unsupportedNotice(1)).toBe(
-      "1 file was not a PDF, DOCX, Markdown, TXT or RTF file and was skipped."
+      "1 file was not a PDF, DOCX, Markdown, TXT or RTF file and was skipped.",
     );
     expect(unsupportedNotice(3)).toBe(
-      "3 files were not PDF, DOCX, Markdown, TXT or RTF files and were skipped."
+      "3 files were not PDF, DOCX, Markdown, TXT or RTF files and were skipped.",
     );
-    expect(overCapNotice(1)).toBe("1 file was over the 20-file cap and was skipped.");
-    expect(overCapNotice(2)).toBe("2 files were over the 20-file cap and were skipped.");
+    expect(overCapNotice(1)).toBe(
+      "1 file was over the 20-file cap and was skipped.",
+    );
+    expect(overCapNotice(2)).toBe(
+      "2 files were over the 20-file cap and were skipped.",
+    );
   });
 });
 
@@ -72,9 +83,11 @@ describe("addableCount and its label", () => {
   const rows = (...s: BatchStatus[]) => s.map((status) => ({ status }));
 
   it("counts neither failed nor already-added rows", () => {
-    expect(addableCount(rows("pending", "extracting", "ready", "saving", "done", "failed"))).toBe(
-      4
-    );
+    expect(
+      addableCount(
+        rows("pending", "extracting", "ready", "saving", "done", "failed"),
+      ),
+    ).toBe(4);
   });
 
   it("reads as the prototype's button", () => {
@@ -86,37 +99,25 @@ describe("addableCount and its label", () => {
 });
 
 describe("failure messages", () => {
-  it("says a failed cleanup distinctly, for both sources", () => {
+  it("says a failed cleanup distinctly", () => {
     expect(uploadFailure(true)).toBe("Couldn't read or index this file.");
     expect(uploadFailure(false)).toContain("cleanup failed");
-    expect(linkFailure({ cleanedUp: false, paywalled: true, unavailable: false })).toContain(
-      "cleanup failed"
-    );
   });
 
   it("shows the backend's reason for a refused file, and only for a 422", () => {
-    const refused = new ApiError(422, "This file's contents don't match its .docx extension.");
+    const refused = new ApiError(
+      422,
+      "This file's contents don't match its .docx extension.",
+    );
     expect(uploadFailure(true, refused)).toBe(
-      "This file's contents don't match its .docx extension."
+      "This file's contents don't match its .docx extension.",
     );
     expect(uploadFailure(false, refused)).toContain("cleanup failed");
     expect(uploadFailure(true, new ApiError(500, "boom"))).toBe(
-      "Couldn't read or index this file."
+      "Couldn't read or index this file.",
     );
     expect(uploadFailure(true, new ApiError(422, null))).toBe(
-      "Couldn't read or index this file."
-    );
-  });
-
-  it("names a paywall and an indexing outage rather than blaming the link", () => {
-    expect(linkFailure({ cleanedUp: true, paywalled: true, unavailable: false })).toBe(
-      "Paywalled — upload the PDF instead."
-    );
-    expect(linkFailure({ cleanedUp: true, paywalled: false, unavailable: true })).toBe(
-      "Indexing is temporarily unavailable. Try again later."
-    );
-    expect(linkFailure({ cleanedUp: true, paywalled: false, unavailable: false })).toBe(
-      "Couldn't fetch this paper."
+      "Couldn't read or index this file.",
     );
   });
 });
@@ -154,18 +155,26 @@ describe("ingestWarning", () => {
 
 describe("closesAfterBatch", () => {
   it("closes when every row was added cleanly", () => {
-    expect(closesAfterBatch([{ status: "done" }, { status: "done", warning: undefined }])).toBe(
-      true
-    );
+    expect(
+      closesAfterBatch([
+        { status: "done" },
+        { status: "done", warning: undefined },
+      ]),
+    ).toBe(true);
   });
 
   it("stays open while a warning would otherwise vanish unread", () => {
-    expect(closesAfterBatch([{ status: "done" }, { status: "done", warning: NO_TEXT_WARNING }])).toBe(
-      false
-    );
+    expect(
+      closesAfterBatch([
+        { status: "done" },
+        { status: "done", warning: NO_TEXT_WARNING },
+      ]),
+    ).toBe(false);
   });
 
   it("stays open on a failure", () => {
-    expect(closesAfterBatch([{ status: "done" }, { status: "failed" }])).toBe(false);
+    expect(closesAfterBatch([{ status: "done" }, { status: "failed" }])).toBe(
+      false,
+    );
   });
 });

@@ -10,11 +10,8 @@ describe("routes", () => {
       routes.chat("p"),
       routes.conversation("p", "c"),
       routes.papers("p"),
-      routes.graph("p"),
       routes.latex("p"),
       routes.latexDoc("p", "d"),
-      routes.explorer(),
-      routes.exploration("e"),
     ];
     for (const path of all) expect(path.startsWith(ADMIN_BASE)).toBe(true);
   });
@@ -24,11 +21,18 @@ describe("routes", () => {
     expect(routes.chat("p1").startsWith(project + "/")).toBe(true);
     expect(routes.conversation("p1", "c1")).toBe(`${routes.chat("p1")}/c1`);
     expect(routes.latexDoc("p1", "d1")).toBe(`${routes.latex("p1")}/d1`);
-    expect(routes.exploration("e1")).toBe(`${routes.explorer()}/e1`);
   });
 
   it("login lives outside the app prefix", () => {
     expect(routes.login()).toBe("/login");
+  });
+
+  it("every auth page lives outside the app prefix, so the gate never covers it", () => {
+    const auth = [routes.signup(), routes.forgotPassword(), routes.authConfirm(), routes.authReset()];
+    for (const path of auth) expect(path.startsWith(ADMIN_BASE)).toBe(false);
+    // The email templates hard-code these two paths.
+    expect(routes.authConfirm()).toBe("/auth/confirm");
+    expect(routes.authReset()).toBe("/auth/reset");
   });
 
   it("leaves the root for the landing page", () => {
@@ -40,13 +44,13 @@ describe("routes", () => {
 describe("projectTab", () => {
   it("reads the tab from a project path", () => {
     expect(projectTab(routes.papers("p1"), "p1")).toBe("papers");
-    expect(projectTab(routes.graph("p1"), "p1")).toBe("graph");
-    expect(projectTab(routes.latexDoc("p1", "d1"), "p1")).toBe("latex");
     expect(projectTab(routes.conversation("p1", "c1"), "p1")).toBe("chat");
+    expect(projectTab(routes.latexDoc("p1", "d1"), "p1")).toBe("latex");
   });
 
   it("falls back to chat for the bare project path", () => {
     expect(projectTab(routes.project("p1"), "p1")).toBe("chat");
+    expect(projectTab("/admin/research/p1/graph", "p1")).toBe("chat"); // no such tab
   });
 
   it("matches whole segments, not prefixes", () => {

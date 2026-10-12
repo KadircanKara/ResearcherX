@@ -1,10 +1,9 @@
 /**
- * The example the landing page follows from library to manuscript.
+ * The example the landing page follows from library to cited answer.
  *
  * Every paper here is FICTIONAL, and the page labels it so: nothing is
  * attributed to a real publication. One paper -- FOLLOWED_PAPER -- appears in
- * all four steps (library row, answer citation, opened passage, \cite in the
- * LaTeX source), which is the thread the page is built on.
+ * all three steps (library row, answer citation, opened passage), which is the thread the page is built on.
  *
  * Locators go through the app's own formatter, and the refusal is the chat's
  * fixed sentence, so the demo reads exactly the way the product does.
@@ -14,7 +13,7 @@ import { formatChunkLocator } from "./citation-locator";
 export type DemoPaper = {
   id: number;
   title: string;
-  source: "PDF" | "arXiv" | "Manual";
+  source: "PDF";
   bibkey: string;
 };
 
@@ -28,7 +27,7 @@ export const DEMO_PAPERS: DemoPaper[] = [
   {
     id: 2,
     title: "Collision-Aware Coordination Under Intermittent Links",
-    source: "arXiv",
+    source: "PDF",
     bibkey: "nowak2023",
   },
   {
@@ -40,7 +39,7 @@ export const DEMO_PAPERS: DemoPaper[] = [
   {
     id: 4,
     title: "Energy-Aware Relay Placement for Drone Swarms",
-    source: "arXiv",
+    source: "PDF",
     bibkey: "okafor2024",
   },
 ];

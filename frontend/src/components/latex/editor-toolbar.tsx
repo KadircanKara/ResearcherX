@@ -68,7 +68,7 @@ export function EditorToolbar({
    * action is to bring the preview back in step -- here, by compiling.
    */
   pdfStale: boolean;
-  onShare: () => void;
+  onShare?: () => void;
   onRename: () => void;
   onDelete: () => void;
   onEngineChange: (engine: LatexEngine) => void;
@@ -132,10 +132,14 @@ export function EditorToolbar({
           Compile
         </Button>
 
-        <Button variant="outline" size="sm" onClick={onShare} className="gap-1.5">
-          <Share2 className="size-3.5" aria-hidden />
-          Share
-        </Button>
+        {/* No Share on the demo: sharing is switched off and every project
+            has one member. */}
+        {onShare && (
+          <Button variant="outline" size="sm" onClick={onShare} className="gap-1.5">
+            <Share2 className="size-3.5" aria-hidden />
+            Share
+          </Button>
+        )}
 
         <DropdownMenu>
           <DropdownMenuTrigger render={<Button variant="ghost" size="icon" aria-label="More actions" />}>

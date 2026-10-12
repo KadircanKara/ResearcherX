@@ -13,7 +13,6 @@ import {
 } from "@/components/ui/resizable";
 import { BinaryPreview } from "@/components/latex/binary-preview";
 import { ConflictDialog } from "@/components/latex/conflict-dialog";
-import { DocumentShareDialog } from "@/components/latex/document-share-dialog";
 import {
   EditorDeleteDialog,
   EditorNewFileDialog,
@@ -74,11 +73,6 @@ function useIsDesktop(): boolean {
 interface LatexWorkspaceProps {
   projectId: string;
   documentId: string;
-  /** The project's owner, per its member list -- the server refuses a grant
-   * naming them (they already resolve to editor ahead of the grant table),
-   * so the share dialog renders them with no control. Combined below with
-   * the open document's own `created_by` for the same reason. */
-  ownerId: string | null;
 }
 
 /**
@@ -87,7 +81,7 @@ interface LatexWorkspaceProps {
  * source and PDF side by side, and the compile bar. The prototype's editor
  * is a mock; everything behind this layout is the real engine.
  */
-export function LatexWorkspace({ projectId, documentId, ownerId }: LatexWorkspaceProps) {
+export function LatexWorkspace({ projectId, documentId }: LatexWorkspaceProps) {
   const router = useRouter();
 
   // `useLatexDocument` needs a `canEdit` boolean as an ARGUMENT, before its
@@ -184,7 +178,6 @@ export function LatexWorkspace({ projectId, documentId, ownerId }: LatexWorkspac
   // that answer to this; the file tree has its own panel and width.
   const [viewMode, setViewMode] = useState<ViewMode>("split");
 
-  const [shareOpen, setShareOpen] = useState(false);
 
   // Import dialog: open state only. The two-step plan/commit conversation
   // (and its own busy/error) lives inside `ImportDropzone`, which the
@@ -670,7 +663,6 @@ export function LatexWorkspace({ projectId, documentId, ownerId }: LatexWorkspac
           compiling={compile.compiling}
           onCompile={() => void compile.compile()}
           pdfStale={canEdit && compile.pdfBytes !== null && compile.stale && !compile.compiling}
-          onShare={() => setShareOpen(true)}
           onRename={() => {
             setRenameError(null);
             setRenameOpen(true);
@@ -777,16 +769,6 @@ export function LatexWorkspace({ projectId, documentId, ownerId }: LatexWorkspac
         )}
       </div>
 
-      <DocumentShareDialog
-        open={shareOpen}
-        onOpenChange={setShareOpen}
-        projectId={projectId}
-        documentId={documentId}
-        canEdit={canEdit}
-        fullAccessUserIds={[ownerId, doc.document?.created_by ?? null].filter(
-          (id): id is string => id !== null
-        )}
-      />
 
       <EditorNewFileDialog
         open={newFile.open}

@@ -1,6 +1,6 @@
 "use client"
 
-import { useCallback, useEffect, useState } from "react"
+import { useEffect, useState } from "react"
 import Link from "next/link"
 import { useParams, usePathname } from "next/navigation"
 import { ProjectHeader } from "@/components/project-header"
@@ -10,7 +10,7 @@ import { getProject } from "@/lib/projects"
 import { useIdentity } from "@/lib/identity"
 import { projectTab, routes } from "@/lib/routes"
 import { cn } from "@/lib/utils"
-import type { Member, ProjectDetail } from "@/lib/types"
+import type { ProjectDetail } from "@/lib/types"
 
 /**
  * The project shell, ported from the prototype's `research.$id.tsx`: the top
@@ -42,10 +42,6 @@ export default function ProjectLayout({ children }: { children: React.ReactNode 
       })
       .finally(() => setLoading(false))
   }, [id, me?.id])
-
-  const onMembersChange = useCallback((members: Member[]) => {
-    setDetail((prev) => (prev ? { ...prev, members } : prev))
-  }, [])
 
   const topBar = (
     <div className="hidden h-14 items-center justify-end border-b px-6 lg:flex">
@@ -106,7 +102,7 @@ export default function ProjectLayout({ children }: { children: React.ReactNode 
       {topBar}
       <div className="border-b">
         <div className="mx-auto w-full max-w-[110rem] space-y-4 px-4 py-5 sm:px-8">
-          <ProjectHeader detail={detail} onMembersChange={onMembersChange} />
+          <ProjectHeader detail={detail} />
           <ProjectTabs projectId={id} active={tab} />
         </div>
       </div>

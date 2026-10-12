@@ -11,7 +11,7 @@ const TITLE = "Projects — ResearcherX";
 export const metadata: Metadata = {
   title: TITLE,
   description:
-    "Every research workspace in ResearcherX: papers, conversations and LaTeX documents, grouped by project.",
+    "Every research workspace in ResearcherX: papers and conversations, grouped by project.",
   openGraph: {
     title: TITLE,
     description: "Organise your research into focused workspaces.",
