@@ -920,6 +920,12 @@ def compile_tree(bounded: "_Bounded", engine: str, main_path: str) -> dict:
         proc = subprocess.Popen(
             [
                 "latexmk",
+                # No rc files. A `latexmkrc` is Perl that latexmk executes,
+                # and the project tree is user content: without this flag a
+                # tree-root `latexmkrc` runs arbitrary code in this
+                # container, a capability `-no-shell-escape` otherwise
+                # denies. This container ships no rc file of its own.
+                "-norc",
                 flag,
                 "-cd",
                 "-synctex=1",

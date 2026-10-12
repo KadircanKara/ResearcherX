@@ -135,6 +135,11 @@ export function CitationChip({
           <div className="max-h-60 space-y-1.5 overflow-y-auto text-xs leading-relaxed text-muted-foreground">
             <ReactMarkdown
               remarkPlugins={[remarkGfm]}
+              // No images: this text is model- or paper-derived, and an image is a
+              // request to any URL it names the moment it renders -- a tracking
+              // beacon, or an exfiltration channel under prompt injection.
+              disallowedElements={["img"]}
+              unwrapDisallowed
               rehypePlugins={[[highlightTerms, { terms: queryTerms }]]}
               // remark-gfm autolinks bare URLs in paper text. Without
               // target="_blank" a click navigates the tab away from the

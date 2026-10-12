@@ -166,3 +166,10 @@ Windows). On Linux add to the backend service:
 extra_hosts:
   - "host.docker.internal:host-gateway"
 ```
+
+The proxy binds `127.0.0.1` by default: it has no authentication and spends
+your Claude login, so it must not answer the LAN. Docker Desktop reaches host
+loopback through `host.docker.internal`; on Linux the bridge gateway does
+not, so bind the bridge address instead, e.g.
+`CLAUDE_PROXY_HOST=172.17.0.1 make claude-proxy`. Request bodies over 8 MiB
+are refused with 413 before they are read.

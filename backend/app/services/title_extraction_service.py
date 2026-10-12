@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import html as _html_module
 import re
 
@@ -75,6 +76,8 @@ class PaperMeta(BaseModel):
 _DOI_RE = re.compile(r"10\.\d{4,}/[^\s\"<>]+")
 _ARXIV_PDF_RE = re.compile(r"^(https?://arxiv\.org)/pdf/(.+?)(?:\.pdf)?$", re.IGNORECASE)
 _CROSSREF_TIMEOUT = httpx.Timeout(8.0)
+# Redirects are followed by hand so each hop passes `assert_fetchable`.
+_MAX_REDIRECTS = 5
 
 # Sent to academic APIs (Crossref, Semantic Scholar, Unpaywall)
 _API_HEADERS = {"User-Agent": "ResearcherX/1.0 (mailto:researcherx@example.com)"}
@@ -324,35 +327,65 @@ async def extract_meta_from_page(url: str) -> tuple[str | None, str | None]:
         url = normalized
 
     debug_log.step("extract_meta_from_page", url=url)
+    # The URL is the member's, so this fetch gets the same SSRF guard as
+    # `paper_fetch_service._get_pdf_bytes`: every hop is checked, redirects
+    # are followed by hand, and both branches read against a byte cap. What
+    # comes back (title, abstract) is returned to the caller, so an internal
+    # address must never be fetched at all.
+    from app.core.config import settings
+    from app.services.paper_fetch_service import UnsafeUrl, assert_fetchable
+
+    cap = settings.paper_pdf_max_bytes
+    chunks: list[str] = []
+    total = 0
     try:
         async with httpx.AsyncClient(
-            timeout=_CROSSREF_TIMEOUT, headers=_BROWSER_HEADERS, follow_redirects=True
+            timeout=_CROSSREF_TIMEOUT, headers=_BROWSER_HEADERS, follow_redirects=False
         ) as client:
-            async with client.stream("GET", url) as r:
-                debug_log.step("page_http_response", url=url, status=r.status_code)
-                if r.status_code != 200:
-                    log.debug("page_meta_fetch_failed", url=url, status=r.status_code)
-                    return None, None
+            current = url
+            for _ in range(_MAX_REDIRECTS + 1):
+                await assert_fetchable(current)
+                async with client.stream("GET", current) as r:
+                    if r.is_redirect:
+                        location = r.headers.get("location")
+                        if not location:
+                            return None, None
+                        current = str(httpx.URL(current).join(location))
+                        continue
+                    debug_log.step("page_http_response", url=current, status=r.status_code)
+                    if r.status_code != 200:
+                        log.debug("page_meta_fetch_failed", url=current, status=r.status_code)
+                        return None, None
 
-                ct = r.headers.get("content-type", "")
-                if "pdf" in ct.lower():
-                    debug_log.step("pdf_content_detected", content_type=ct)
-                    pdf_bytes = await r.aread()
-                    meta = await extract_meta_from_pdf(pdf_bytes)
-                    return meta[0], meta[1]
+                    ct = r.headers.get("content-type", "")
+                    if "pdf" in ct.lower():
+                        debug_log.step("pdf_content_detected", content_type=ct)
+                        parts: list[bytes] = []
+                        size = 0
+                        async for part in r.aiter_bytes():
+                            size += len(part)
+                            if size > cap:
+                                return None, None
+                            parts.append(part)
+                        meta = await extract_meta_from_pdf(b"".join(parts))
+                        return meta[0], meta[1]
 
-                chunks: list[str] = []
-                total = 0
-                async for chunk in r.aiter_text():
-                    chunks.append(chunk)
-                    total += len(chunk)
-                    if "</head>" in chunk.lower() or total >= 200_000:
-                        break
+                    async for chunk in r.aiter_text():
+                        chunks.append(chunk)
+                        total += len(chunk)
+                        if "</head>" in chunk.lower() or total >= 200_000:
+                            break
+                    break
+            else:
+                return None, None
         snippet = "".join(chunks)
         debug_log.step(
             "page_bytes_read", bytes=total, found_head_close="</head>" in snippet.lower()
         )
         return _extract_title_from_html(snippet), _extract_abstract_from_html(snippet)
+    except UnsafeUrl as exc:
+        log.info("page_meta_unsafe_url", url=url, error=str(exc))
+        debug_log.step("page_meta_unsafe_url", error=str(exc))
     except Exception as exc:
         log.debug("page_meta_extraction_failed", url=url, error=str(exc))
         debug_log.step("page_meta_error", error=str(exc))
@@ -377,9 +410,15 @@ async def extract_meta_from_pdf(
         import fitz
         import pymupdf4llm
 
-        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-        body_md = pymupdf4llm.to_markdown(doc)
-        doc.close()
+        def _to_markdown() -> str:
+            doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+            try:
+                return pymupdf4llm.to_markdown(doc)
+            finally:
+                doc.close()
+
+        # Off the event loop: PyMuPDF is CPU-bound and the app has one loop.
+        body_md = await asyncio.to_thread(_to_markdown)
         body = body_md.strip() or None
         meta = await extract_metadata_from_text(body_md)
         return meta.title, meta.abstract, body

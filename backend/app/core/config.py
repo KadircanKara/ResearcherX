@@ -360,6 +360,14 @@ class Settings(BaseSettings):
     # off in the demo's Supabase project, so this only fires if they are
     # switched on by mistake.
     demo_max_users: int = Field(default=0, ge=0)
+    # Whether a verified email may MOVE an account that is already bound to a
+    # different Supabase subject onto the new one. Off by default: an email
+    # match alone proves only that some token carries that address, and if
+    # the Supabase project ever lets a user hold an address it has not
+    # verified, moving the binding hands them the victim's data. Turn it on
+    # only for a project where the operator alone creates users, to relink a
+    # client deleted and re-invited (who arrives with a new `sub`).
+    auth_relink_by_email: bool = False
     # Feature switches. All on by default; the public demo turns them off and
     # a switched-off route answers 404 exactly as an unmounted one would
     # (app/core/features.py). Keeping the routes mounted is what keeps the

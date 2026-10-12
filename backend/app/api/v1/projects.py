@@ -289,6 +289,11 @@ async def update_paper(
     text_changed = any(
         key in fields and fields[key] != getattr(paper, key) for key in ("abstract", "body")
     )
+    if paper.source == PaperSource.MANUAL and text_changed:
+        # A text edit re-chunks and re-embeds the paper -- paid work, metered
+        # like a re-ingest. Charged before any field is applied, so a refused
+        # edit changes nothing.
+        await usage_service.enforce_ingest(db, user)
     for key, value in fields.items():
         setattr(paper, key, value)
 
@@ -442,6 +447,9 @@ async def suggest_paper_title_from_url(
 ) -> SuggestTitleFromUrlResponse:
     """Extract title + abstract via DOI→Crossref → HTML meta tags."""
     await project_service.require_member(db, project_id, user.id, "member")
+    # Same meter as the PDF suggestion: an outbound fetch, a possible PDF
+    # parse and an LLM call, all paid by the operator.
+    await usage_service.enforce_title_assist(db, user)
     from app.services.title_extraction_service import (
         extract_doi,
         extract_meta_from_page,
@@ -591,6 +599,9 @@ async def ingest_paper_from_url(
     db: AsyncSession = Depends(get_session),
 ) -> dict:
     await project_service.require_member(db, project_id, user.id, "member")
+    # Fetch, extraction, embedding and metadata are the same paid work as an
+    # upload, so this route draws on the same daily meter as `ingest_paper`.
+    await usage_service.enforce_ingest(db, user)
     paper = await db.get(Paper, paper_id)
     if paper is None or paper.project_id != project_id:
         raise HTTPException(status_code=404, detail="Paper not found")

@@ -2,8 +2,8 @@
 
 Three layers, all enforced as FastAPI dependencies:
 
-- per-IP moving-window limits (keyed on the first ``X-Forwarded-For`` hop —
-  Caddy sets it; direct connections fall back to the socket peer)
+- per-IP moving-window limits (keyed on the LAST ``X-Forwarded-For`` hop —
+  the one Caddy appends; direct connections fall back to the socket peer)
 - a global daily run cap counted from ``research_runs`` rows — the DB is
   the counter, so it survives restarts for free
 - ``X-API-Key`` owner bypass (constant-time compare)
@@ -33,10 +33,18 @@ _limiter = MovingWindowRateLimiter(_storage)
 
 
 def client_ip(request: Request) -> str:
-    """First X-Forwarded-For hop, or the socket peer when not proxied."""
+    """Last X-Forwarded-For hop, or the socket peer when not proxied.
+
+    The LAST hop is the one our own proxy appended from the socket it
+    accepted. Every earlier hop is whatever the client sent, so keying on the
+    first lets a caller pick a fresh rate-limit bucket per request. This
+    assumes exactly one proxy (Caddy) in front of the backend.
+    """
     fwd = request.headers.get("x-forwarded-for")
     if fwd:
-        return fwd.split(",")[0].strip()
+        hops = [h.strip() for h in fwd.split(",") if h.strip()]
+        if hops:
+            return hops[-1]
     return request.client.host if request.client else "unknown"
 
 

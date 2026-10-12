@@ -153,8 +153,10 @@ async def ingest(
 
 
 async def _ingest(db: AsyncSession, paper_id: str, pdf_bytes: bytes, source_url: str | None) -> int:
+    # PyMuPDF is CPU-bound and its cost grows with page count, not bytes; on
+    # the app's single event loop a long PDF would stall every other request.
     with observability.span("paper.extract"):
-        ex = extract_document(pdf_bytes)
+        ex = await asyncio.to_thread(extract_document, pdf_bytes)
     paper = await db.get(Paper, paper_id)
     title = paper.title if paper is not None else ""
     if paper is not None:
@@ -233,5 +235,5 @@ async def index_manual(
     records: list[ChunkRecord] = []
     if abstract and abstract.strip() and _norm(abstract) not in _norm(body):
         records.append(ChunkRecord(text=abstract.strip(), section=(), page=None, kind="abstract"))
-    records += chunk_records_for_markdown(body)
+    records += await asyncio.to_thread(chunk_records_for_markdown, body)
     return await index_chunks(db, paper_id, records, title=title)

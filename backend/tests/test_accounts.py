@@ -3,7 +3,7 @@
 import pytest
 from sqlalchemy import func, select
 
-from app.core.accounts import DEFAULT_PROJECT_TITLE, DemoFull, resolve_account
+from app.core.accounts import DEFAULT_PROJECT_TITLE, DemoFull, SubjectConflict, resolve_account
 from app.core.supabase_auth import Claims
 from app.db.models import Project, ProjectMember, User
 
@@ -41,7 +41,18 @@ async def test_email_match_is_case_insensitive(db_session):
     assert await _count(db_session, User) == 1
 
 
-async def test_a_reinvited_client_is_relinked_and_keeps_their_data(db_session):
+async def test_a_bound_account_is_not_moved_to_another_subject_by_default(db_session):
+    old = await resolve_account(db_session, Claims(sub="owner-sub", email="a@x.com"))
+    with pytest.raises(SubjectConflict):
+        await resolve_account(db_session, Claims(sub="attacker-sub", email="a@x.com"))
+    await db_session.refresh(old)
+    assert old.auth_subject == "owner-sub"
+
+
+async def test_a_reinvited_client_is_relinked_and_keeps_their_data(db_session, monkeypatch):
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "auth_relink_by_email", True)
     old = await resolve_account(db_session, Claims(sub="old-sub", email="a@x.com"))
     again = await resolve_account(db_session, Claims(sub="new-sub", email="a@x.com"))
     assert again.id == old.id and again.auth_subject == "new-sub"
@@ -87,6 +98,9 @@ async def test_a_lost_race_on_the_subject_returns_the_winner(db_session, monkeyp
 
 async def test_a_lost_race_on_the_email_relinks_to_the_winner(db_session, monkeypatch):
     from app.core import accounts
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "auth_relink_by_email", True)
 
     winner = User(email="a@x.com", name="a", auth_subject="other")
     db_session.add(winner)
