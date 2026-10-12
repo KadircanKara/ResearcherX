@@ -41,6 +41,8 @@ services:
       args:
         NEXT_PUBLIC_SUPABASE_URL: ${SUPABASE_URL:?SUPABASE_URL is required}
         NEXT_PUBLIC_SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY:?SUPABASE_ANON_KEY is required}
+        # Public site key; the secret half lives only in the Supabase dashboard.
+        NEXT_PUBLIC_TURNSTILE_SITE_KEY: ${TURNSTILE_SITE_KEY:-}
     image: researcherx-frontend:demo
   # Also the VM's shared edge proxy: other apps join the external `proxy`
   # network and drop a site file into /srv/edge/sites (deploy/RUNBOOK.md, 12).

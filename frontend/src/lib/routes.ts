@@ -17,6 +17,13 @@ const research = `${ADMIN_BASE}/research`;
 export const routes = {
   /** Sign-in lives outside the app prefix: it is the one page a signed-out visitor may see. */
   login: () => "/login",
+  /** The auth pages share that rule: a signed-out visitor must reach them. */
+  signup: () => "/signup",
+  forgotPassword: () => "/forgot-password",
+  /** Where the activation email's link lands (deploy/supabase/confirm-email.html). */
+  authConfirm: () => "/auth/confirm",
+  /** Where the password-reset email's link lands (deploy/supabase/reset-email.html). */
+  authReset: () => "/auth/reset",
   /** The app's own front door; the landing page sends "Open the app" here. */
   home: () => ADMIN_BASE,
   research: () => research,

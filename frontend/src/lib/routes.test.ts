@@ -27,6 +27,14 @@ describe("routes", () => {
     expect(routes.login()).toBe("/login");
   });
 
+  it("every auth page lives outside the app prefix, so the gate never covers it", () => {
+    const auth = [routes.signup(), routes.forgotPassword(), routes.authConfirm(), routes.authReset()];
+    for (const path of auth) expect(path.startsWith(ADMIN_BASE)).toBe(false);
+    // The email templates hard-code these two paths.
+    expect(routes.authConfirm()).toBe("/auth/confirm");
+    expect(routes.authReset()).toBe("/auth/reset");
+  });
+
   it("leaves the root for the landing page", () => {
     expect(ADMIN_BASE).not.toBe("/");
     expect(routes.home()).toBe("/admin");
