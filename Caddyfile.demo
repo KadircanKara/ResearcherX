@@ -1,3 +1,8 @@
+# DEPRECATED: the edge Caddy is its own stack now (deploy/edge, RUNBOOK
+# section 12). Kept only so `deploy/edge/edge-cutover.sh rollback` can restart
+# the old researcherx-demo-caddy-1, which bind-mounts this file. Delete it once
+# every VM has run `edge-cutover.sh cleanup`.
+#
 # Public demo. The site address is the domain, so Caddy issues and renews
 # Let's Encrypt certificates on its own (ports 80 + 443 open on the VM).
 #

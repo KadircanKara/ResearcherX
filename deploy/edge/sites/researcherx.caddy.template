@@ -1,0 +1,29 @@
+# ResearcherX. Rendered to /srv/edge/sites/researcherx.caddy by
+# deploy/edge/edge-cutover.sh, with __DOMAIN__ replaced by the app's domain.
+#
+# Only /v1/* reaches the backend. FastAPI's /docs, /redoc and /openapi.json
+# live outside /v1, so they fall through to the frontend (a 404) and never
+# list the switched-off routes. Upstreams are the rx-* aliases on `proxy`.
+
+__DOMAIN__ {
+	encode zstd gzip
+
+	# One year, this host only. No includeSubDomains and no preload: both are
+	# hard to take back and would bind hosts this app does not own.
+	header Strict-Transport-Security "max-age=31536000"
+
+	handle /v1/* {
+		# DoS floor; the per-route PDF cap (25MB) lives in the backend.
+		request_body {
+			max_size 64MB
+		}
+		reverse_proxy rx-backend:8000 {
+			# SSE must stream token by token.
+			flush_interval -1
+		}
+	}
+
+	handle {
+		reverse_proxy rx-frontend:3000
+	}
+}

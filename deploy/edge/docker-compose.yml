@@ -1,0 +1,42 @@
+# The VM's edge proxy: the ONLY container that publishes 80/443.
+#
+# Its own stack, owned by no app, so deploying or taking down any app (including
+# ResearcherX) never takes the other apps' HTTPS with it. Installed at
+# /srv/edge by deploy/edge/edge-cutover.sh; run there as root:
+#   docker compose -p edge -f /srv/edge/docker-compose.yml up -d
+#
+# Apps join the external `proxy` network under aliases unique on the VM and
+# drop one site file each into /srv/edge/sites (see Caddyfile).
+services:
+  caddy:
+    image: caddy:2-alpine
+    container_name: edge-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./sites:/etc/caddy/sites:ro
+      # Certificates must persist, or every restart re-issues against Let's
+      # Encrypt's rate limits. Seeded from the old demo Caddy's /data at cutover.
+      - edge_caddy_data:/data
+      - edge_caddy_config:/config
+    networks:
+      - proxy
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+volumes:
+  edge_caddy_data:
+    name: edge_caddy_data
+  edge_caddy_config:
+    name: edge_caddy_config
+
+networks:
+  # Created once with `docker network create proxy`.
+  proxy:
+    external: true

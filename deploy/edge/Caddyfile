@@ -1,0 +1,12 @@
+# Edge Caddy for every app on the VM. Each app owns one site file in
+# /srv/edge/sites (mounted at /etc/caddy/sites), proxying to its own aliases on
+# the `proxy` network -- never bare service names like `backend`, which every
+# app's compose gives out and which would become ambiguous here.
+#
+# After adding or editing a site file, validate then reload, as root:
+#   docker exec edge-caddy caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+#   docker exec edge-caddy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile
+# A file that fails validation is never loaded, so every site keeps serving.
+
+# No match is a warning, not an error, so an empty sites dir is fine.
+import /etc/caddy/sites/*.caddy

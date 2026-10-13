@@ -28,14 +28,19 @@ services:
       COHERE_API_KEY: ${COHERE_API_KEY:?COHERE_API_KEY is required}
       CORS_ORIGINS: https://${DEMO_DOMAIN:?DEMO_DOMAIN is required}
     # The compiler is reachable ONLY over the internal `latex` network.
-    # rx-backend is the name Caddy uses (see Caddyfile.demo).
+    # rx-backend is the name the edge Caddy uses on `proxy`
+    # (deploy/edge/sites/researcherx.caddy.template).
     networks:
       default:
+        aliases: [rx-backend]
+      proxy:
         aliases: [rx-backend]
       latex:
   frontend:
     networks:
       default:
+        aliases: [rx-frontend]
+      proxy:
         aliases: [rx-frontend]
     build:
       args:
@@ -44,17 +49,12 @@ services:
         # Public site key; the secret half lives only in the Supabase dashboard.
         NEXT_PUBLIC_TURNSTILE_SITE_KEY: ${TURNSTILE_SITE_KEY:-}
     image: researcherx-frontend:demo
-  # Also the VM's shared edge proxy: other apps join the external `proxy`
-  # network and drop a site file into /srv/edge/sites (deploy/RUNBOOK.md, 12).
+  # The VM's edge proxy is its own stack now (deploy/edge, container
+  # edge-caddy), so this stack never publishes 80/443 and taking it down never
+  # takes other apps' HTTPS with it. The prod file's caddy service stays for the
+  # local prod smoke test; this profile keeps it from starting here.
   caddy:
-    environment:
-      DEMO_DOMAIN: ${DEMO_DOMAIN:?DEMO_DOMAIN is required}
-    volumes:
-      - ./Caddyfile.demo:/etc/caddy/Caddyfile:ro
-      - /srv/edge/sites:/etc/caddy/sites:ro
-    networks:
-      - default
-      - proxy
+    profiles: ["bundled-edge"]
   # Copied whole from docker-compose.yml: every key below is part of the
   # sandbox (see CLAUDE.md, "LaTeX is compiled in a separate container"). A
   # partial copy is a sandbox with a hole in it.
