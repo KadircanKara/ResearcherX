@@ -9,9 +9,9 @@ One VM, `docker-compose.prod.yml` + `docker-compose.demo.yml`, Caddy with automa
 1. Create an Ubuntu LTS VM with at least 4 vCPU / 8GB and 40GB of disk. The LaTeX compiler image is TeX Live scheme-full (about 6GB on disk, built once, which takes a while on the first deploy), and each compile may use up to 2 CPUs and 2GB of memory.
 2. Install Docker Engine and the compose plugin (https://docs.docker.com/engine/install/ubuntu/), and `make` and `git`: `apt install -y make git` (Ubuntu cloud images lack `make`; `make demo-up` and the backup cron need it).
 3. Firewall: `ufw allow 22 && ufw allow 80 && ufw allow 443 && ufw enable`. Nothing else is open (the database and backend publish no ports).
-4. Nothing else may hold ports 80/443: `docker ps --format '{{.Names}} {{.Ports}}' | grep -E ':(80|443)->'` must print nothing. Another stack's proxy there makes `make demo-up` fail with `port is already allocated`; stop that stack first (`docker compose -p <project> down` works without its compose file). To serve other apps on the same VM, route them through this demo's Caddy instead (section 12).
+4. The only container on ports 80/443 is the **edge Caddy** (`edge-caddy`, its own stack at `/srv/edge`; section 12). `docker ps --format '{{.Names}} {{.Ports}}' | grep -E ':(80|443)->'` must show it and nothing else. This stack publishes no ports.
 5. Create the shared proxy network and sites directory, once: `docker network create proxy && mkdir -p /srv/edge/sites`. `make demo-up` fails with `network proxy declared as external, but could not be found` until the network exists.
-6. As root (`sudo -i`; `/srv` is root-owned, so a plain `git clone` there is refused): `git clone https://github.com/KadircanKara/ResearcherX.git /srv/researcherx && cd /srv/researcherx && git checkout demo`.
+6. As root (`sudo -i`; `/srv` is root-owned, so a plain `git clone` there is refused): `git clone https://github.com/KadircanKara/ResearcherX.git /srv/researcherx && cd /srv/researcherx && git checkout main`.
 7. Give Docker real DNS servers. On OVH (and other images whose `/etc/resolv.conf` points at systemd-resolved's `127.0.0.53`), containers inherit that address, cannot reach it, and Caddy can never get a certificate (`lookup acme-v02.api.letsencrypt.org on 127.0.0.53:53: ... connection refused`). If `/etc/docker/daemon.json` does not exist: `echo '{"dns": ["1.1.1.1", "8.8.8.8"]}' > /etc/docker/daemon.json && systemctl restart docker` (merge the `dns` key in instead if the file exists).
 
 ## 2. DNS
@@ -64,7 +64,7 @@ One VM, `docker-compose.prod.yml` + `docker-compose.demo.yml`, Caddy with automa
    ```
    Check it before deploying: `bash -n /etc/researcherx-demo.env` prints nothing when the syntax is valid, and `cut -d= -f1 /etc/researcherx-demo.env` lists the names without the values. Every `docker compose` command for the demo (including `logs` and `ps`) needs this file loaded in the same shell first, or it fails with `required variable ... is missing a value`.
 2. **Start on a fresh database.** The demo must not reuse a dev database or `data/postgres` from a dev machine. `AUTH_MODE=supabase` never seeds users, so a fresh database has no seed users; a database carried over from dev would hold the dev seed accounts and their projects.
-3. Deploy as root (`sudo -i` first; the env file is mode 600, root only): `cd /srv/researcherx && set -a; . /etc/researcherx-demo.env; set +a; make demo-up`.
+3. Deploy as root (`sudo -i` first; the env file is mode 600, root only): `cd /srv/researcherx && set -a; . /etc/researcherx-demo.env; set +a; make demo-up`. This starts ResearcherX only; it publishes no ports, so the site is not reachable yet. On a fresh VM with no edge Caddy running, install it next, still as root from `/srv/researcherx`: `deploy/edge/edge-cutover.sh install` (section 12). On a VM that already runs the edge Caddy, skip this; it picks the app up on its own.
 4. Health check: `curl -fsS https://<DEMO_DOMAIN>/v1/health`.
 5. `SUPABASE_ANON_KEY`, `SUPABASE_URL` and `TURNSTILE_SITE_KEY` are baked into the frontend image at build time; if you change any, redeploy (step 3 rebuilds).
 6. FastAPI's `/docs`, `/redoc` and `/openapi.json` are not exposed: Caddy proxies only `/v1/*` to the backend, and everything else goes to the frontend.
@@ -97,7 +97,7 @@ After deploy, run both cron commands once by hand (as root, without the `>/dev/n
 ## 9. Updating the demo
 
 1. `cd /srv/researcherx && git pull`.
-2. Run the deploy line from section 5, step 3.
+2. Run the deploy line from section 5, step 3. This restarts only ResearcherX; the edge Caddy and every other app keep serving (the site is briefly unavailable while the backend restarts).
 
 ## 10. Watching cost
 
@@ -113,16 +113,27 @@ A Cohere trial key is rate-capped and not licensed for production. When it runs 
 4. A code that never arrives: check Supabase → Logs → Auth, then the Resend dashboard.
 5. "Sign-in is temporarily unavailable." from the API: the backend cannot reach Supabase's keys; check `SUPABASE_URL` and `make demo-logs`.
 
-## 12. Other apps on the same VM
+## 12. The edge proxy and other apps on the VM
 
-This demo's Caddy is the VM's only proxy on 80/443. Another app is served through it without touching this repo:
+The edge Caddy is its own stack, owned by no app: `/srv/edge/docker-compose.yml` (project `edge`, container `edge-caddy`), sources in `deploy/edge/`. It is the only container that publishes 80/443 and holds every certificate (volume `edge_caddy_data`). Taking ResearcherX or any other app down leaves every other site serving.
 
+**Moving off the old demo Caddy** (`researcherx-demo-caddy-1`, which used to be the edge): as root, from an up-to-date checkout of `main`:
+```bash
+cd /srv/researcherx && git fetch && git checkout main && git pull --ff-only
+deploy/edge/edge-cutover.sh plan
+deploy/edge/edge-cutover.sh cutover
+```
+`plan` changes nothing. `cutover` installs `/srv/edge`, copies the certificates, validates, attaches the running ResearcherX containers to `proxy`, then stops the old Caddy and starts the edge one (a few seconds without HTTPS for every site) and health-checks every site; any failure rolls back on its own. Check every site in a browser, then `deploy/edge/edge-cutover.sh cleanup` removes the stopped old Caddy (its volumes are kept until you delete them). `deploy/edge/edge-cutover.sh rollback` restores the old Caddy at any point before `cleanup`. Deploy new ResearcherX code (section 9) only after the cutover, never during it.
+
+**A fresh VM** (no old Caddy): after `make demo-up` (section 5), run `deploy/edge/edge-cutover.sh install`.
+
+**Adding an app:**
 1. The app's compose publishes no ports. Its entry containers join the external `proxy` network under aliases unique on the VM (e.g. `myapp-web`), never bare names like `backend` or `frontend`.
-2. Its site block goes in `/srv/edge/sites/<app>.caddy`, as root, proxying to those aliases. Caddy reads every `*.caddy` file there through the `import` line in `Caddyfile.demo`.
+2. Its site block goes in `/srv/edge/sites/<app>.caddy`, as root, with the hostname written literally: the edge Caddy has no environment, so `{$VAR}` placeholders resolve to nothing. Write into an existing file in place (`cat new > file`), never `mv`.
 3. Point the app's DNS `A` record at the VM, then validate and reload, as root:
-   `docker exec researcherx-demo-caddy-1 caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile && docker exec researcherx-demo-caddy-1 caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile`
+   `docker exec edge-caddy caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile && docker exec edge-caddy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile`
 
-A bad site file fails validation and the reload is skipped, so the demo keeps serving. A `make demo-down` takes every app's HTTPS down with it.
+A bad site file fails validation and the reload is skipped, so every site keeps serving. ResearcherX's own site file is rendered from `deploy/edge/sites/researcherx.caddy.template` by the cutover script; after changing the template, re-run `deploy/edge/edge-cutover.sh plan`, then render and reload by hand the same way.
 
 ## Acceptance
 
