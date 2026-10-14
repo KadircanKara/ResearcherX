@@ -84,7 +84,8 @@ class AnswerGenerator:
         # mirrored the SQL instead of calling it. Its `_reranker` comes along
         # for the same reason -- built by production's own `build_chat_reranker`,
         # so RERANK_ENABLED / COHERE_API_KEY gate the harness exactly as they
-        # gate a real turn.
+        # gate a real turn. `_fusion_scorer` likewise, so FUSION_MODE /
+        # RERANK_PROVIDER pick the arm for the harness exactly as for a real turn.
         self._chat = ChatService()
 
     async def _papers(self, project_id: str) -> list[Paper]:
@@ -139,6 +140,7 @@ class AnswerGenerator:
                 question,
                 widened,
                 reranker=self._chat._reranker,
+                fusion_scorer=self._chat._fusion_scorer,
             )
         else:
             async with SessionLocal() as db:
@@ -148,6 +150,7 @@ class AnswerGenerator:
                     embedding,
                     question,
                     reranker=self._chat._reranker,
+                    fusion_scorer=self._chat._fusion_scorer,
                 )
 
         contributing = {c.paper_id for c in chunks}
