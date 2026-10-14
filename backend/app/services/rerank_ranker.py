@@ -11,6 +11,7 @@ the per-paper guarantee's absence hid from every mirrored arm on
 
 The network call lives in `app/local_rag/rerank.py::CohereReranker`, whose
 contract is that `None` means "no opinion".
+`JevReranker` (`app/services/jev_reranker.py`) honours the same contract.
 """
 
 from collections.abc import Callable, Sequence
@@ -113,3 +114,32 @@ async def rerank_items(
         top_n=len(head),
     )
     return apply_rerank(head, results) + list(items[limit:])
+
+
+async def rank_candidates(
+    items: Sequence[T],
+    *,
+    query: str,
+    text_of: Callable[[T], str],
+    fusion_scorer: Reranker | None,
+    reranker: Reranker | None,
+    limit: int,
+) -> list[T]:
+    """Both ranking stages after RRF: an optional fusion scorer, then the rerank head.
+
+    `fusion_scorer` (FUSION_MODE=jev) scores EVERY candidate -- the whole
+    dense ∪ sparse union, already in RRF order -- and its order replaces
+    RRF's. RRF's order survives only where the scorer has no opinion (it
+    failed open), which is the same degraded path `rerank_items` has.
+    Then `reranker` orders the first `limit` of that, exactly as before.
+
+    Lives here, not at the call sites, for the reason `rerank_items` does:
+    `chat_service` and both eval harnesses call this one function, so the
+    arms the harness measures are the arms production can run.
+    """
+    ordered = list(items)
+    if fusion_scorer is not None:
+        ordered = await rerank_items(
+            ordered, query=query, text_of=text_of, reranker=fusion_scorer, limit=len(ordered)
+        )
+    return await rerank_items(ordered, query=query, text_of=text_of, reranker=reranker, limit=limit)
