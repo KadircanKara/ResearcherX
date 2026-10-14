@@ -695,13 +695,22 @@ exec'd process. Jev arms need `DECISIONS_API_KEY`; see "Jev experiment arms" in
 | E | `FUSION_MODE=jev RERANK_ENABLED=false` |
 | E2 | `FUSION_MODE=jev` |
 
-- `FUSION_MODE=jev` with `RERANK_PROVIDER=jev` is refused at startup (Jev would
-  score the same pairs twice).
+- `FUSION_MODE=jev` with `RERANK_PROVIDER=jev` is refused at startup while
+  `RERANK_ENABLED` is on (Jev would score the same pairs twice; arm E turns it
+  off).
+- The harness refuses to start (`ERROR:` line, exit 1) when a configured stage
+  did not build: `FUSION_MODE=jev` without `DECISIONS_API_KEY`, or
+  `RERANK_ENABLED` with no usable key for the provider (Jev without
+  `DECISIONS_API_KEY`, Cohere without `COHERE_API_KEY`). Otherwise the run
+  would measure plain RRF under an arm's label. Run arm A explicitly with
+  `RERANK_ENABLED=false`. Skipped under `--replay`, which generates nothing.
+  Logic: `evals/groundedness/stages.py`.
 - Keep the answering model and judge identical across arms, and run B twice to
   get the answer-sampling noise floor.
-- Langfuse traces carry `fusion` and `reranker` trace metadata, and a
-  `jev.rerank` generation span with usage and cost, so arms compare on latency
-  and cost per turn as well as on scores.
+- Live `chat.turn` traces carry `fusion` and `reranker` trace metadata (the
+  stages actually built, not the settings), and a `jev.rerank` generation span
+  with usage and cost. Eval traces do not carry that metadata: there the
+  `--langfuse-run` name is the arm label, so name it after the arm.
 
 ## Reading the output
 
