@@ -3,7 +3,7 @@
 import pytest
 
 from app.local_rag.rerank import RerankResult
-from evals.retrieval.arms import ARMS, ArmReranker, needs, parse_arms
+from evals.retrieval.arms import ARMS, ArmReranker, MemoReranker, needs, parse_arms
 
 
 def test_six_arms_match_the_spec():
@@ -42,12 +42,30 @@ class _Inner:
         return self.result
 
 
-async def test_arm_reranker_memoises_identical_requests():
+async def test_memo_reranker_calls_inner_once_for_identical_requests():
+    inner = _Inner([RerankResult(0, 0.5)])
+    m = MemoReranker(inner)
+    await m.rerank("q", ["a"], 1)
+    await m.rerank("q", ["a"], 1)
+    assert inner.calls == 1
+
+
+async def test_arm_reranker_counts_every_call_and_does_not_memoise():
     inner = _Inner([RerankResult(0, 0.5)])
     w = ArmReranker(inner)
     await w.rerank("q", ["a"], 1)
     await w.rerank("q", ["a"], 1)
-    assert inner.calls == 1 and w.calls == 2 and w.no_opinion == 0
+    assert inner.calls == 2 and w.calls == 2
+
+
+async def test_arm_wrappers_over_a_shared_memo_tally_independently():
+    inner = _Inner(None)
+    memo = MemoReranker(inner)
+    w1, w2 = ArmReranker(memo), ArmReranker(memo)
+    await w1.rerank("q", ["a"], 1)
+    await w2.rerank("q", ["a"], 1)
+    assert inner.calls == 1
+    assert (w1.calls, w1.no_opinion, w2.calls, w2.no_opinion) == (1, 1, 1, 1)
 
 
 async def test_arm_reranker_measures_score_resolution():

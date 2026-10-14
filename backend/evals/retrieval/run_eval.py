@@ -45,7 +45,7 @@ from app.services.hybrid_ranker import fuse_rrf, keep_within_rank_window
 from app.services.intra_paper_ranker import keep_within_paper
 from app.services.jev_reranker import JevReranker
 from app.services.rerank_ranker import rank_candidates, rerank_items
-from evals.retrieval.arms import ARMS, ArmReranker, needs, parse_arms
+from evals.retrieval.arms import ARMS, ArmReranker, MemoReranker, needs, parse_arms
 from evals.retrieval.golden_set import Case, load_golden_set
 from evals.retrieval.metrics import (
     rerank_lost_count,
@@ -760,24 +760,27 @@ async def main() -> None:  # noqa: PLR0912, PLR0915 — a report script, not a l
             timeout_s=settings.jev_timeout_s,
         )
 
-    # One backend set per repeat. Cohere is deterministic, so every repeat
-    # shares one memoised Cohere wrapper and only Jev is re-called.
-    cohere_backend = (
-        ArmReranker(
+    # Shared memos: one Cohere (deterministic) for all repeats, one Jev memo
+    # per backend per repeat (repeats get fresh Jev calls). Each (arm, repeat)
+    # then wraps them in its OWN counters, so health is per arm.
+    cohere_memo = (
+        MemoReranker(
             CohereReranker(api_key=settings.cohere_api_key, model=settings.cohere_rerank_model)
         )
         if args.arms and "cohere" in needs(arm_names)
         else None
     )
     repeats = max(1, args.jev_repeats)
-    backends = [
+    memos = [
         {
-            "cohere": cohere_backend,
-            "jev-noul": ArmReranker(_jev("noul")),
-            "jev-score": ArmReranker(_jev("score")),
+            "cohere": cohere_memo,
+            "jev-noul": MemoReranker(_jev("noul")),
+            "jev-score": MemoReranker(_jev("score")),
         }
         for _ in range(repeats)
     ]
+    # arm_stages[(arm, repeat)] = {"fusion": ArmReranker|None, "rerank": ArmReranker|None}
+    arm_stages: dict[tuple[str, int], dict[str, ArmReranker | None]] = {}
     # arm_results[(arm, repeat)] = list[(Case, list[Scored])], case-aligned with hybrid_positives
     arm_results: dict[tuple[str, int], list] = {}
 
@@ -892,13 +895,23 @@ async def main() -> None:  # noqa: PLR0912, PLR0915 — a report script, not a l
                     spec = ARMS[name]
                     jev_backed = spec.fusion == "jev" or spec.rerank.startswith("jev")
                     for r in range(repeats if jev_backed else 1):
-                        b = backends[r]
+                        stages = arm_stages.get((name, r))
+                        if stages is None:
+                            m = memos[r]
+                            stages = arm_stages[(name, r)] = {
+                                "fusion": (
+                                    ArmReranker(m["jev-noul"]) if spec.fusion == "jev" else None
+                                ),
+                                "rerank": (
+                                    None if spec.rerank == "none" else ArmReranker(m[spec.rerank])
+                                ),
+                            }
                         ranked = await rank_candidates(
                             hybrid_chunks,
                             query=case.question,
                             text_of=lambda c: c.chunk_text,
-                            fusion_scorer=b["jev-noul"] if spec.fusion == "jev" else None,
-                            reranker=None if spec.rerank == "none" else b[spec.rerank],
+                            fusion_scorer=stages["fusion"],
+                            reranker=stages["rerank"],
                             limit=settings.rerank_candidates,
                         )
                         arm_results.setdefault((name, r), []).append((case, ranked))
@@ -1103,12 +1116,12 @@ async def main() -> None:  # noqa: PLR0912, PLR0915 — a report script, not a l
         for (name, r), rows in sorted(arm_results.items()):
             spec = ARMS[name]
             health = []
-            for tag, backend in backends[r].items():
-                used = (tag == "jev-noul" and spec.fusion == "jev") or spec.rerank == tag
-                if used and backend is not None:
-                    distinct = backend.distinct_fraction()
+            for stage, wrapper in arm_stages[(name, r)].items():
+                if wrapper is not None:
+                    tag = "jev-noul" if stage == "fusion" else spec.rerank
+                    distinct = wrapper.distinct_fraction()
                     health.append(
-                        f"{tag} no-opinion {backend.no_opinion}/{backend.calls} "
+                        f"{stage} {tag} no-opinion {wrapper.no_opinion}/{wrapper.calls} "
                         f"distinct {'-' if distinct is None else f'{distinct:.2f}'}"
                     )
             print(

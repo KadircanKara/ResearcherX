@@ -50,16 +50,33 @@ def needs(arms: list[str]) -> set[str]:
     return out
 
 
+class MemoReranker:
+    """Memoises identical requests, so arms that ask the same question of the
+    same backend (E and E2 share Jev's fusion scores) cost one real call."""
+
+    def __init__(self, inner: Reranker) -> None:
+        self.inner = inner
+        self._memo: dict = {}
+
+    async def rerank(
+        self, query: str, documents: list[str], top_n: int
+    ) -> list[RerankResult] | None:
+        key = (query, tuple(documents), top_n)
+        if key not in self._memo:
+            self._memo[key] = await self.inner.rerank(query, documents, top_n)
+        return self._memo[key]
+
+
 @dataclass
 class ArmReranker:
-    """Memoises identical requests (E and E2 share Jev's fusion scores) and
-    counts calls that came back with no opinion, so an arm that silently
+    """Counts what ONE arm stage received. No memo: wrap a shared
+    `MemoReranker` to share answers while each arm keeps its own tally.
+    Counts calls that came back with no opinion, so an arm that silently
     failed open is reported as a no-op rather than as a measurement."""
 
     inner: Reranker
     calls: int = 0
     no_opinion: int = 0
-    _memo: dict = field(default_factory=dict)
     _distinct: list[float] = field(default_factory=list)
 
     def distinct_fraction(self) -> float | None:
@@ -70,10 +87,7 @@ class ArmReranker:
         self, query: str, documents: list[str], top_n: int
     ) -> list[RerankResult] | None:
         self.calls += 1
-        key = (query, tuple(documents), top_n)
-        if key not in self._memo:
-            self._memo[key] = await self.inner.rerank(query, documents, top_n)
-        result = self._memo[key]
+        result = await self.inner.rerank(query, documents, top_n)
         if result is None:
             self.no_opinion += 1
         elif result:
