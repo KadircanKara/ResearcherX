@@ -103,7 +103,8 @@ _MODEL_COUNTS_SQL = text("SELECT model, count(*) AS n FROM paper_chunk_embedding
 # reformulates through a QueryReformulatorAgent when the conversation has prior
 # turns. For the single-turn golden set the two paths agree.
 _SQL = text("""
-    SELECT c.paper_id AS paper_id,
+    SELECT c.id AS chunk_id,
+           c.paper_id AS paper_id,
            p.title AS paper_title,
            c.text AS chunk_text,
            (c.embedding <=> CAST(:qvec AS vector)) AS distance
@@ -344,6 +345,13 @@ def _display_point(lo: float, hi: float) -> str:
         return f"no display value fits — raw bounds ({lo:.6f}, {hi:.6f}]"
 
 
+# The dense control ranks EVERY chunk in the project, and each case's full list
+# is kept for the threshold sweep. Fetched per case, the text would be a fresh
+# copy each time: at ~96k chunks that is ~230 MB per case and was OOM-killed
+# at 2,000 papers. One shared string per chunk keeps it at one corpus copy.
+_shared_text: dict = {}
+
+
 async def _chunks_for(db, svc: EmbeddingService, case: Case, project_id: str) -> list[Scored]:
     embedding = await svc.embed(case.question, task_type="RETRIEVAL_QUERY")
     params = {
@@ -355,8 +363,8 @@ async def _chunks_for(db, svc: EmbeddingService, case: Case, project_id: str) ->
     return [
         Scored(
             paper_id=r.paper_id,
-            paper_title=r.paper_title,
-            chunk_text=r.chunk_text,
+            paper_title=_shared_text.setdefault(("title", r.paper_id), r.paper_title),
+            chunk_text=_shared_text.setdefault(r.chunk_id, r.chunk_text),
             distance=float(r.distance),
         )
         for r in rows

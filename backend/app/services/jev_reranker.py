@@ -40,7 +40,10 @@ DEFAULT_MAX_DOC_CHARS = 2000  # the cap Cohere gets: same input, model isolated
 _RETRIES = 2
 _BACKOFF_S = 0.5
 _MAX_RETRY_AFTER_S = 2.0  # a server-chosen wait must not stall a chat turn
-_RETRY_STATUSES = frozenset({429, 529, 500, 502, 503, 504})
+# 499: OpenRouter answers it intermittently under sustained load (5 times in
+# one six-arm eval run, 2026-10-15); a retry is the difference between one question
+# failing open to RRF order and a real measurement.
+_RETRY_STATUSES = frozenset({429, 499, 529, 500, 502, 503, 504})
 
 _NOUL = {
     "type": "noul",

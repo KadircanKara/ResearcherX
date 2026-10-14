@@ -139,6 +139,21 @@ async def test_a_429_is_retried(monkeypatch):
     assert calls["n"] == 3
 
 
+async def test_a_499_is_retried(monkeypatch):
+    monkeypatch.setattr(jr, "_BACKOFF_S", 0.0)
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(499)
+        return httpx.Response(200, json=_noul(0.7))
+
+    out = await _reranker(handler).rerank("q", ["a"], top_n=1)
+    assert out is not None and out[0].relevance_score == 0.7
+    assert calls["n"] == 2
+
+
 async def test_one_exhausted_request_fails_the_whole_call_open(monkeypatch):
     """Partial scores would put the failed chunk at the tail: never used."""
     monkeypatch.setattr(jr, "_BACKOFF_S", 0.0)
