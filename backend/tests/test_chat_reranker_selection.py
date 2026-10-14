@@ -67,3 +67,15 @@ def test_jev_without_a_key_is_off(monkeypatch):
     )
     assert cs.build_chat_reranker() is None
     assert cs.build_fusion_scorer() is None
+
+
+def test_trace_labels_name_the_stages_that_were_built(monkeypatch):
+    _set(monkeypatch, rerank_enabled=True, rerank_provider="jev", fusion_mode="jev")
+    jev = JevReranker(
+        api_key="k", model="m", base_url="u", question="noul", concurrency=1, timeout_s=1.0
+    )
+    cohere = CohereReranker(api_key="c", model="m")
+    assert cs.stage_labels(jev, jev) == ("jev", "jev")
+    assert cs.stage_labels(cohere, None) == ("cohere", "rrf")
+    # Settings say jev, but the key was missing so nothing was built.
+    assert cs.stage_labels(None, None) == ("none", "rrf")

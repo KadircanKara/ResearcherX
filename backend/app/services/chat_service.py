@@ -32,7 +32,7 @@ from app.services.hybrid_ranker import fuse_rrf, keep_within_rank_window
 from app.services.intra_paper_ranker import keep_within_paper
 from app.local_rag.rerank import CohereReranker
 from app.services.mention_ranker import apply_per_paper_floor
-from app.services.jev_reranker import build_jev_reranker
+from app.services.jev_reranker import JevReranker, build_jev_reranker
 from app.services.rerank_ranker import Reranker, rank_candidates
 from app.services.paper_resolver import ResolvablePaper, resolve_papers_with_evidence
 
@@ -296,6 +296,21 @@ async def _fetch_traced(name: str, db: AsyncSession, sql, params: dict) -> list:
     return rows
 
 
+def stage_labels(reranker: Reranker | None, fusion_scorer: Reranker | None) -> tuple[str, str]:
+    """(reranker, fusion) trace labels from what was BUILT, never from settings.
+
+    A configured stage whose key is missing builds to None; labelling from
+    settings would name a stage that never ran.
+    """
+    if isinstance(reranker, JevReranker):
+        rerank_label = "jev"
+    elif isinstance(reranker, CohereReranker):
+        rerank_label = "cohere"
+    else:
+        rerank_label = "none"
+    return rerank_label, "jev" if fusion_scorer is not None else "rrf"
+
+
 class ChatService:
     def __init__(self) -> None:
         self._embedding_svc = EmbeddingService()
@@ -319,6 +334,7 @@ class ChatService:
         await that opens spans of its own runs `under(turn)` or inside a
         stage span parented to it explicitly.
         """
+        rerank_label, fusion_label = stage_labels(self._reranker, self._fusion_scorer)
         turn = observability.start_span(
             "chat.turn",
             root=True,
@@ -326,10 +342,8 @@ class ChatService:
                 "langfuse.trace.name": "chat.turn",
                 "langfuse.session.id": conversation_id,
                 "langfuse.trace.metadata.mentions": len(mentioned_paper_ids or []),
-                "langfuse.trace.metadata.fusion": settings.fusion_mode,
-                "langfuse.trace.metadata.reranker": (
-                    settings.rerank_provider if settings.rerank_enabled else "none"
-                ),
+                "langfuse.trace.metadata.fusion": fusion_label,
+                "langfuse.trace.metadata.reranker": rerank_label,
             },
         )
         observability.set_content(turn, "langfuse.trace.input", user_content)
