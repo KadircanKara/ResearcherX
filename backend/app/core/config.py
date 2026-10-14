@@ -261,6 +261,29 @@ class Settings(BaseSettings):
     # past the budget, so this spends a surplus that already exists rather
     # than widening any pool.
     rerank_candidates: int = 100
+    # Which model the rerank stage calls when `rerank_enabled`. "jev" is
+    # TypeSafe Jev through OpenRouter (`app/services/jev_reranker.py`), one
+    # yes/no relevance question per chunk. Measured against Cohere on
+    # feat/jev-reranking; see the spec docs/superpowers/specs/
+    # 2026-10-14-jev-reranking-design.md (local) for the arms.
+    rerank_provider: Literal["cohere", "jev"] = "cohere"
+    # "jev" scores EVERY fused candidate (the dense ∪ sparse union, ~250–300
+    # chunks) with Jev and orders by that score; RRF's order survives only as
+    # the fail-open fallback. Runs before the rerank stage. ~3x the Jev calls
+    # of the rerank stage, so it is the latency-heavy arm.
+    fusion_mode: Literal["rrf", "jev"] = "rrf"
+    # Jev through OpenRouter's TypeSafe-compatible endpoint. NOT
+    # /chat/completions: OpenRouter rejects a decisions model there with 400.
+    # Empty key = both Jev stages are off (logged once at construction).
+    decisions_api_key: str = ""
+    decisions_base_url: str = "https://openrouter.ai/api/v1/systemone"
+    # An alias that moves when TypeSafe ships a version. Pin a versioned id
+    # (the response's `model` field names it) before trusting absolute scores.
+    jev_model: str = "~typesafe/jev-latest"
+    jev_question: Literal["noul", "score"] = "noul"
+    # Requests in flight per rerank call. OpenRouter lists 80 req/s for Jev.
+    jev_concurrency: int = Field(default=16, ge=1)
+    jev_timeout_s: float = 10.0
 
     # Chunks each MENTIONED paper is guaranteed before the rest of the budget
     # fills by distance.
@@ -527,6 +550,15 @@ class Settings(BaseSettings):
     def _check_auth_mode(self) -> "Settings":
         if self.auth_mode == "supabase" and not self.supabase_url:
             raise ValueError("AUTH_MODE=supabase requires SUPABASE_URL")
+        return self
+
+    @model_validator(mode="after")
+    def _check_jev_stages(self) -> "Settings":
+        if self.fusion_mode == "jev" and self.rerank_enabled and self.rerank_provider == "jev":
+            raise ValueError(
+                "FUSION_MODE=jev with RERANK_PROVIDER=jev scores every pair twice; "
+                "use RERANK_PROVIDER=cohere (arm E2) or RERANK_ENABLED=false (arm E)"
+            )
         return self
 
     @model_validator(mode="after")
