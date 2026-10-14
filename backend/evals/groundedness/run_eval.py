@@ -57,6 +57,7 @@ from evals.groundedness.langfuse_export import (
 )
 from evals.groundedness.claims import extract_claims, marker_count
 from evals.groundedness.generate import AnswerGenerator, Generated
+from evals.groundedness.stages import stage_config_errors
 from evals.groundedness.judge import (
     DEFAULT_JUDGE_MAX_TOKENS,
     DEFAULT_JUDGE_MODEL,
@@ -831,6 +832,14 @@ async def main() -> None:
         capture_content=settings.langfuse_capture_content if args.langfuse else False,
     )
     generator = AnswerGenerator()
+    if not args.replay:
+        stage_errors = stage_config_errors(
+            settings, generator._chat._reranker, generator._chat._fusion_scorer
+        )
+        if stage_errors:
+            for message in stage_errors:
+                print(f"\nERROR: {message}")
+            raise SystemExit(1)
     judge = Judge(model=args.judge_model, max_tokens=args.judge_max_tokens)
     second_judge = (
         Judge(model=args.compare_judge, max_tokens=args.judge_max_tokens)
