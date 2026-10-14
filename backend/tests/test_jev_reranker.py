@@ -195,3 +195,21 @@ def test_build_uses_settings(monkeypatch):
     monkeypatch.setattr(jr.settings, "jev_question", "score")
     r = jr.build_jev_reranker()
     assert isinstance(r, JevReranker) and r.question == "score"
+
+
+@pytest.mark.parametrize(
+    "usage",
+    [{"input_tokens": "lots", "cost": "n/a"}, "not-a-dict", ["x"]],
+)
+async def test_unparseable_usage_never_costs_the_scores(usage):
+    """Telemetry must not be able to fail the call: every answer was valid."""
+    scores = {"a": 0.2, "b": 0.9}
+
+    def handler(request):
+        passage = json.loads(request.content)["state"]["passage"]
+        body = _noul(scores[passage])
+        body["usage"] = usage
+        return httpx.Response(200, json=body)
+
+    out = await _reranker(handler).rerank("q", ["a", "b"], top_n=2)
+    assert [(r.index, r.relevance_score) for r in out] == [(1, 0.9), (0, 0.2)]

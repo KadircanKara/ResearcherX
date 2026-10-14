@@ -192,21 +192,25 @@ class JevReranker:
 
 
 def _record_usage(span, successes: list[tuple[float, dict]]) -> None:
-    tokens_in = tokens_out = 0
-    cost = 0.0
-    resolved = None
-    for _, body in successes:
-        usage = body.get("usage") or {}
-        tokens_in += int(usage.get("input_tokens") or 0)
-        tokens_out += int(usage.get("output_tokens") or 0)
-        cost += float(usage.get("cost") or 0.0)
-        resolved = resolved or body.get("model")
-    observability.set_json(
-        span, "langfuse.observation.usage_details", {"input": tokens_in, "output": tokens_out}
-    )
-    observability.set_json(span, "langfuse.observation.cost_details", {"total": cost})
-    if resolved:
-        observability.set_metadata(span, resolved_model=resolved)
+    """Telemetry only: it must never fail a call whose scores are valid."""
+    try:
+        tokens_in = tokens_out = 0
+        cost = 0.0
+        resolved = None
+        for _, body in successes:
+            usage = body.get("usage") or {}
+            tokens_in += int(usage.get("input_tokens") or 0)
+            tokens_out += int(usage.get("output_tokens") or 0)
+            cost += float(usage.get("cost") or 0.0)
+            resolved = resolved or body.get("model")
+        observability.set_json(
+            span, "langfuse.observation.usage_details", {"input": tokens_in, "output": tokens_out}
+        )
+        observability.set_json(span, "langfuse.observation.cost_details", {"total": cost})
+        if resolved:
+            observability.set_metadata(span, resolved_model=resolved)
+    except Exception as exc:
+        log.debug("jev_usage_unparsed", error=f"{type(exc).__name__}: {str(exc)[:200]}")
 
 
 def build_jev_reranker() -> JevReranker | None:
