@@ -675,6 +675,34 @@ Units: a 2-case smoke run on 2026-09-24 sent 19 observations, 2 traces and 16
 scores; the full 51-case run with relevance sent 51 traces and 478 scores,
 comfortably inside the Hobby plan's 50k a month.
 
+## Running a Jev arm (ranking stage chosen by env)
+
+The ranking stages are settings, so an arm is an env override on the exec.
+`-e` reaches `Settings` because the harness builds `ChatService()` inside the
+exec'd process. Jev arms need `DECISIONS_API_KEY`; see "Jev experiment arms" in
+`evals/retrieval/README.md` for the arm definitions.
+
+    docker compose exec -T -e RERANK_PROVIDER=jev backend \
+      python -m evals.groundedness.run_eval --project-id <id> --langfuse \
+      --langfuse-run "arm-C jev-noul" --metrics support,answer_relevance,context_relevance
+
+| Arm | Env |
+|---|---|
+| A | `RERANK_ENABLED=false` |
+| B | none (production defaults) |
+| C | `RERANK_PROVIDER=jev` |
+| D | `RERANK_PROVIDER=jev JEV_QUESTION=score` |
+| E | `FUSION_MODE=jev RERANK_ENABLED=false` |
+| E2 | `FUSION_MODE=jev` |
+
+- `FUSION_MODE=jev` with `RERANK_PROVIDER=jev` is refused at startup (Jev would
+  score the same pairs twice).
+- Keep the answering model and judge identical across arms, and run B twice to
+  get the answer-sampling noise floor.
+- Langfuse traces carry `fusion` and `reranker` trace metadata, and a
+  `jev.rerank` generation span with usage and cost, so arms compare on latency
+  and cost per turn as well as on scores.
+
 ## Reading the output
 
 - **`ev`** in the per-case table: did the golden set's expected text reach the

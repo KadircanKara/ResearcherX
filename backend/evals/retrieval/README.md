@@ -649,6 +649,45 @@ a promoted chunk from one mentioned paper would crowd out the other paper's
 floor. `repr` and `both` are unchanged across all three pairings, so it does
 not — the floor pins per paper regardless of the order it is handed.
 
+## Jev experiment arms (`--arms`)
+
+Compares TypeSafe Jev, a pointwise "System One" decision model, with the
+current ranking stages. Arms are defined in `arms.py`, and every one runs
+through production's `rank_candidates`, so the harness and `ChatService` share
+one composition.
+
+    docker compose exec -T backend python -m evals.retrieval.run_eval \
+      --project-id <uuid> --hybrid --arms A,B,C,D,E,E2 --jev-repeats 2
+
+| Arm | Fusion | Rerank (top 100) |
+|---|---|---|
+| A | RRF | none |
+| B | RRF | Cohere `rerank-v3.5` (production today) |
+| C | RRF | Jev noul |
+| D | RRF | Jev score (4 ordered levels) |
+| E | Jev noul over every candidate | none |
+| E2 | Jev noul over every candidate | Cohere |
+
+- Jev arms need `DECISIONS_API_KEY` (an OpenRouter key); B and E2 need
+  `COHERE_API_KEY`. The harness refuses to run without the key an arm needs.
+  Jev is called at `https://openrouter.ai/api/v1/systemone` with model
+  `~typesafe/jev-latest`; `/chat/completions` rejects that model.
+- Output starts with an **RRF ceiling recall@100** line: what the fused list
+  holds at all. Fusion arms (E, E2) can only reorder it, so a low ceiling caps
+  them.
+- Then one row per (arm, repeat): recall@10, recall@20, recall@k, MRR, and
+  **rescued/lost at the 60-chunk budget, always against arm A**.
+- `--jev-repeats N` reruns every Jev arm N times with fresh Jev calls, because
+  Jev is not deterministic (about 0.01 run to run). Cohere is memoised across
+  repeats; E and E2 share Jev fusion answers within a repeat.
+- **Health column, per arm and stage**, e.g.
+  `fusion jev-noul no-opinion 0/38 distinct 0.41; rerank cohere no-opinion 0/38 distinct 0.98`.
+  - `no-opinion > 0` means that stage failed open on those calls (the order
+    fell back to the incoming one); read the `jev_rerank_failed_open` logs.
+    An arm with failed-open calls measures a mix, not the scorer.
+  - `distinct < 1.00` means tied scores. Jev answers at 2-decimal resolution
+    and sorting is stable, so ties keep the incoming RRF order.
+
 ## Multi-mention mode
 
     docker compose exec -T backend python -m evals.retrieval.mention_eval \
