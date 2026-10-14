@@ -758,6 +758,7 @@ async def main() -> None:  # noqa: PLR0912, PLR0915 — a report script, not a l
             question=question,
             concurrency=settings.jev_concurrency,
             timeout_s=settings.jev_timeout_s,
+            deadline_s=settings.jev_deadline_s,
         )
 
     # Shared memos: one Cohere (deterministic) for all repeats, one Jev memo

@@ -39,6 +39,7 @@ Question = Literal["noul", "score"]
 DEFAULT_MAX_DOC_CHARS = 2000  # the cap Cohere gets: same input, model isolated
 _RETRIES = 2
 _BACKOFF_S = 0.5
+_MAX_RETRY_AFTER_S = 2.0  # a server-chosen wait must not stall a chat turn
 _RETRY_STATUSES = frozenset({429, 529, 500, 502, 503, 504})
 
 _NOUL = {
@@ -100,6 +101,7 @@ class JevReranker:
         question: Question,
         concurrency: int,
         timeout_s: float,
+        deadline_s: float = 60.0,
         max_doc_chars: int = DEFAULT_MAX_DOC_CHARS,
         client: httpx.AsyncClient | None = None,
     ) -> None:
@@ -109,6 +111,7 @@ class JevReranker:
         self.question: Question = question
         self._concurrency = concurrency
         self._timeout_s = timeout_s
+        self._deadline_s = deadline_s
         self._max_doc_chars = max_doc_chars
         self._client = client
 
@@ -135,7 +138,9 @@ class JevReranker:
                 resp.raise_for_status()
             retry_after = resp.headers.get("retry-after", "") if resp is not None else ""
             await asyncio.sleep(
-                float(retry_after) if retry_after.isdigit() else _BACKOFF_S * (2**attempt)
+                min(float(retry_after), _MAX_RETRY_AFTER_S)
+                if retry_after.isdigit()
+                else _BACKOFF_S * (2**attempt)
             )
         raise RuntimeError("unreachable")
 
@@ -162,11 +167,26 @@ class JevReranker:
         client = self._client or httpx.AsyncClient(timeout=self._timeout_s)
         sem = asyncio.Semaphore(self._concurrency)
         try:
-            outcomes = await asyncio.gather(
-                *(self._one(client, sem, query, d) for d in documents), return_exceptions=True
-            )
-            failures = [o for o in outcomes if isinstance(o, BaseException)]
-            _record_usage(span, [o for o in outcomes if not isinstance(o, BaseException)])
+            scored: list[tuple[float, dict] | None] = [None] * len(documents)
+
+            async def run(i: int, doc: str) -> None:
+                scored[i] = await self._one(client, sem, query, doc)
+
+            failures: list[BaseException] = []
+            deadline = asyncio.timeout(self._deadline_s)
+            try:
+                async with deadline:
+                    # The first terminal failure cancels every sibling: the
+                    # call fails open as a whole, so further paid requests
+                    # could not change the outcome.
+                    async with asyncio.TaskGroup() as tg:
+                        for i, d in enumerate(documents):
+                            tg.create_task(run(i, d))
+            except* Exception as group:
+                failures = list(group.exceptions)
+            if deadline.expired():
+                failures = [TimeoutError("deadline")]
+            _record_usage(span, [o for o in scored if o is not None])
             observability.set_metadata(span, failures=len(failures))
             if failures:
                 first = failures[0]
@@ -174,6 +194,7 @@ class JevReranker:
                     "jev_rerank_failed_open",
                     failures=len(failures),
                     n_documents=len(documents),
+                    reason="deadline" if deadline.expired() else "request_failed",
                     error=f"{type(first).__name__}: {str(first)[:200]}",
                 )
                 observability.mark_error(span, first)
@@ -181,7 +202,7 @@ class JevReranker:
                 return None
             results = [
                 RerankResult(index=i, relevance_score=score)
-                for i, (score, _) in enumerate(outcomes)  # type: ignore[misc]
+                for i, (score, _) in enumerate(scored)  # type: ignore[misc]
             ]
         finally:
             if self._client is None:
@@ -225,4 +246,5 @@ def build_jev_reranker() -> JevReranker | None:
         question=settings.jev_question,
         concurrency=settings.jev_concurrency,
         timeout_s=settings.jev_timeout_s,
+        deadline_s=settings.jev_deadline_s,
     )

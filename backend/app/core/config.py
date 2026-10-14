@@ -283,7 +283,10 @@ class Settings(BaseSettings):
     jev_question: Literal["noul", "score"] = "noul"
     # Requests in flight per rerank call. OpenRouter lists 80 req/s for Jev.
     jev_concurrency: int = Field(default=16, ge=1)
-    jev_timeout_s: float = 10.0
+    jev_timeout_s: float = Field(default=10.0, gt=0)
+    # Wall-clock bound on one whole rerank call (all documents, all retries).
+    # Past it the call fails open to the incoming order.
+    jev_deadline_s: float = Field(default=60.0, gt=0)
 
     # Chunks each MENTIONED paper is guaranteed before the rest of the budget
     # fills by distance.

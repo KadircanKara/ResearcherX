@@ -213,3 +213,50 @@ async def test_unparseable_usage_never_costs_the_scores(usage):
 
     out = await _reranker(handler).rerank("q", ["a", "b"], top_n=2)
     assert [(r.index, r.relevance_score) for r in out] == [(1, 0.9), (0, 0.2)]
+
+
+async def test_a_hanging_request_hits_the_deadline_and_fails_open():
+    import asyncio
+    import time
+
+    async def handler(request):
+        await asyncio.sleep(30)
+        return httpx.Response(200, json=_noul(0.5))
+
+    r = _reranker(handler, deadline_s=0.2, timeout_s=60.0)
+    start = time.monotonic()
+    assert await r.rerank("q", ["a", "b"], top_n=2) is None
+    assert time.monotonic() - start < 2.0
+
+
+async def test_a_terminal_failure_aborts_the_remaining_requests():
+    calls = {"n": 0}
+
+    async def handler(request):
+        import asyncio
+
+        calls["n"] += 1
+        await asyncio.sleep(0.01)  # a real request yields; a sync mock never would
+        return httpx.Response(400, json={"error": "bad"})
+
+    out = await _reranker(handler, concurrency=1).rerank("q", [str(i) for i in range(10)], top_n=10)
+    assert out is None
+    assert calls["n"] < 10
+
+
+async def test_retry_after_is_capped(monkeypatch):
+    import time
+
+    monkeypatch.setattr(jr, "_MAX_RETRY_AFTER_S", 0.05)
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(429, headers={"retry-after": "600"})
+        return httpx.Response(200, json=_noul(0.6))
+
+    start = time.monotonic()
+    out = await _reranker(handler).rerank("q", ["a"], top_n=1)
+    assert time.monotonic() - start < 2.0
+    assert out is not None and out[0].relevance_score == 0.6
