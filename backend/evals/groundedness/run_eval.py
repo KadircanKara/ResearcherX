@@ -37,6 +37,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from app.core import observability
+from app.core.config import settings
 from evals.groundedness.usage import format_usage, install_tally, summarize
 from evals.groundedness.agreement import pair_verdicts, verdict_shift
 from evals.groundedness.langfuse_export import (
@@ -60,7 +61,6 @@ from evals.groundedness.generate import AnswerGenerator, Generated
 from evals.groundedness.stages import stage_config_errors
 from evals.groundedness.judge import (
     DEFAULT_JUDGE_MAX_TOKENS,
-    DEFAULT_JUDGE_MODEL,
     Judge,
     QuotaExhausted,
 )
@@ -692,7 +692,7 @@ async def main() -> None:
     )
     parser.add_argument("--project-id", required=True)
     parser.add_argument("--set", type=Path, default=_DEFAULT_SET)
-    parser.add_argument("--judge-model", default=DEFAULT_JUDGE_MODEL)
+    parser.add_argument("--judge-model", default=settings.judge_model)
     parser.add_argument(
         "--judge-max-tokens",
         type=int,
@@ -816,7 +816,6 @@ async def main() -> None:
 
     if args.langfuse_run and not args.langfuse:
         raise SystemExit("--langfuse-run needs --langfuse")
-    from app.core.config import settings
 
     if args.langfuse and not observability.keys_configured():
         raise SystemExit("--langfuse needs LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY")

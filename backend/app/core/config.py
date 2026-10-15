@@ -44,6 +44,10 @@ class Settings(BaseSettings):
     # Used ONLY by the eval harness. Nothing in `app/` reads these.
     judge_base_url: str = ""
     judge_api_key: str = ""
+    # The judge's model id AT that endpoint, so endpoint and id are set
+    # together (an OpenRouter id like "google/gemini-2.5-flash-lite" means
+    # nothing to api.openai.com). `--judge-model` still overrides per run.
+    judge_model: str = "gpt-4.1-mini"
 
     # Alternate providers for daily-quota failover, as a JSON list:
     # LLM_FALLBACKS='[{"base_url":"...","api_key":"...","model":"..."}]'

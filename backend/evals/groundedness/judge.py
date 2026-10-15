@@ -44,6 +44,7 @@ from app.core.config import settings
 from app.llm.params import adapt_request
 from app.llm.structured import extract_json
 
+# Shipped default; `settings.judge_model` (JUDGE_MODEL) is what a run uses.
 DEFAULT_JUDGE_MODEL = "gpt-4.1-mini"
 
 # Characters of EXCERPT text per judge request. The catalog is up to
