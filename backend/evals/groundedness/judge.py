@@ -525,19 +525,31 @@ class Judge:
             return frozenset()
         shown = {n for n, _, _ in excerpts}
         judged: dict[int, bool] = {}
-        for excerpt_slice in _pack(excerpts, self.excerpt_chars_per_request):
-            excerpt_block = "\n\n".join(
-                f"[{n}] (from: {title})\n{text}" for n, title, text in excerpt_slice
-            )
-            parsed = await self._structured(
-                system=_CONTEXT_RELEVANCE_SYSTEM,
-                user=f"QUESTION\n{question}\n\nEXCERPTS\n{excerpt_block}",
-                model_cls=ContextRelevanceResponse,
-            )
-            # A number the judge invented is dropped rather than raised on: it
-            # names nothing in the catalog, so it cannot move any count.
-            judged.update({v.n: v.relevant for v in parsed.verdicts if v.n in shown})
+
+        async def ask(batch: list[tuple[int, str, str]]) -> None:
+            for excerpt_slice in _pack(batch, self.excerpt_chars_per_request):
+                excerpt_block = "\n\n".join(
+                    f"[{n}] (from: {title})\n{text}" for n, title, text in excerpt_slice
+                )
+                parsed = await self._structured(
+                    system=_CONTEXT_RELEVANCE_SYSTEM,
+                    user=f"QUESTION\n{question}\n\nEXCERPTS\n{excerpt_block}",
+                    model_cls=ContextRelevanceResponse,
+                )
+                # A number the judge invented is dropped rather than raised on:
+                # it names nothing in the catalog, so it cannot move any count.
+                judged.update({v.n: v.relevant for v in parsed.verdicts if v.n in shown})
+
+        await ask(excerpts)
         missing = sorted(shown - judged.keys())
+        if missing:
+            # Re-asked once with ONLY the skipped excerpts, as `judge_claims`
+            # does for skipped claims. Measured 2026-10-15: gemini-2.5-flash-lite
+            # left verdicts out in 4 of 51 cases (up to ~20 excerpts of a
+            # slice); losing those cases' columns differs per arm and blurs the
+            # comparison. A second miss still raises.
+            await ask([e for e in excerpts if e[0] in set(missing)])
+            missing = sorted(shown - judged.keys())
         if missing:
             listed = ", ".join(f"[{n}]" for n in missing)
             raise ValueError(f"judge returned no relevance verdict for excerpt(s) {listed}")

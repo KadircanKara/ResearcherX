@@ -205,3 +205,31 @@ async def test_content_with_no_object_at_all_still_raises():
     judge, _ = _judge_with_content("I cannot grade these excerpts.")
     with pytest.raises(Exception):
         await judge.judge_stance(question="q", answer="a")
+
+
+async def test_skipped_excerpts_are_re_asked_once_and_alone():
+    def reply(user):
+        shown = _numbers_in(user)
+        if shown == [1, 2, 3]:  # first pass: the judge stops after excerpt 1
+            return ContextRelevanceResponse(verdicts=[ExcerptRelevance(n=1, relevant=True)])
+        return ContextRelevanceResponse(
+            verdicts=[ExcerptRelevance(n=n, relevant=n == 3) for n in shown]
+        )
+
+    transport = FakeTransport(reply)
+    relevant = await _judge(transport).judge_context_relevance(
+        question="q", excerpts=[(1, "A", "x"), (2, "A", "y"), (3, "B", "z")]
+    )
+    assert relevant == frozenset({1, 3})
+    assert [_numbers_in(c["user"]) for c in transport.calls] == [[1, 2, 3], [2, 3]]
+
+
+async def test_a_second_miss_still_raises_after_exactly_one_re_ask():
+    transport = FakeTransport(
+        lambda user: ContextRelevanceResponse(verdicts=[ExcerptRelevance(n=1, relevant=True)])
+    )
+    with pytest.raises(ValueError, match=r"\[2\]"):
+        await _judge(transport).judge_context_relevance(
+            question="q", excerpts=[(1, "A", "x"), (2, "A", "y")]
+        )
+    assert len(transport.calls) == 2
