@@ -1131,10 +1131,11 @@ class ChatService:
           "presence, not promotion". Scoring them here would let a row that
           entered on a per-paper guarantee outrank candidates that earned a
           fused rank.
-        - IT NEVER FILTERS. `apply_rerank` keeps every unscored candidate at
-          the tail; shrinking the list here would turn an ordering stage
-          into an admission stage and could return fewer chunks than the
-          budget allows.
+        - IT NEVER FILTERS by default. `apply_rerank` keeps every unscored
+          candidate at the tail; shrinking the list here would turn an
+          ordering stage into an admission stage and could return fewer
+          chunks than the budget allows. The opt-in exception is
+          `rerank_min_score`, which does exactly that on purpose.
 
         The head/tail split, the fail-open and the "score everything sent"
         rule all live in `rank_candidates`, which the eval harnesses call too --
@@ -1152,6 +1153,7 @@ class ChatService:
             fusion_scorer=fusion_scorer,
             reranker=reranker,
             limit=settings.rerank_candidates,
+            min_score=settings.rerank_min_score,
         )
 
     async def _with_guaranteed_rows(

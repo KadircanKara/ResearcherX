@@ -276,6 +276,15 @@ class Settings(BaseSettings):
     # the fail-open fallback. Runs before the rerank stage. ~3x the Jev calls
     # of the rerank stage, so it is the latency-heavy arm.
     fusion_mode: Literal["rrf", "jev"] = "rrf"
+    # Opt-in admission cutoff on the LAST scoring stage (the reranker, else
+    # the Jev fusion scorer): candidates scored below it, and every unscored
+    # one, are dropped before the budget, so an off_topic question can reach
+    # the model with no excerpts and be refused. None = off (order only).
+    # The scale is the provider's own. Measured 2026-10-15 for Jev noul over
+    # every candidate (`evals/retrieval/score_cutoff.py`, 51 cases): 0.3 kept
+    # answer recall at 0.72 and left 58% of off_topic questions with nothing;
+    # 0.5 cost one question for 75%. No Cohere value has been measured.
+    rerank_min_score: float | None = Field(default=None, ge=0.0, le=1.0)
     # Jev through OpenRouter's TypeSafe-compatible endpoint. NOT
     # /chat/completions: OpenRouter rejects a decisions model there with 400.
     # Empty key = both Jev stages are off (logged once at construction).

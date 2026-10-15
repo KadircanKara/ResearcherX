@@ -900,6 +900,10 @@ async def main() -> None:
         else:
             metadata["reasoning_effort"] = settings.llm_reasoning_effort or "-"
             metadata["max_context_chunks"] = str(settings.max_context_chunks)
+            metadata["rerank_candidates"] = str(settings.rerank_candidates)
+            metadata["rerank_min_score"] = (
+                "-" if settings.rerank_min_score is None else str(settings.rerank_min_score)
+            )
         experiment = Experiment(
             experiment_id=new_experiment_id(),
             run_name=args.langfuse_run
