@@ -377,7 +377,9 @@ class Judge:
                     if details:
                         observability.set_json(span, "langfuse.observation.usage_details", details)
                     observability.set_metadata(
-                        span, reasoning_tokens=observability.reasoning_tokens(usage)
+                        span,
+                        reasoning_tokens=observability.reasoning_tokens(usage),
+                        cached_tokens=observability.cached_tokens(usage),
                     )
             except BadRequestError as exc:
                 # Many OpenAI-compatible endpoints reject `response_format`

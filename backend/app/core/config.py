@@ -527,6 +527,14 @@ class Settings(BaseSettings):
     # `rerank_enabled` above); the index location below is local_rag's alone.
     cohere_api_key: str = ""
     cohere_rerank_model: str = "rerank-v3.5"
+    # Retries on 429 / 5xx / transport errors before failing open. The
+    # defaults keep a chat turn's worst case near 2s of waiting. A trial key
+    # is limited per MINUTE, which those waits cannot outlast: the
+    # groundedness runs of 2026-10-15 lost 11 and 15 of ~76 rerank calls per
+    # arm-B run to 429, silently measuring RRF order. Eval runs raise both
+    # (e.g. COHERE_RETRIES=6, COHERE_MAX_RETRY_WAIT_S=30); a chat turn should not.
+    cohere_retries: int = Field(default=2, ge=0)
+    cohere_max_retry_wait_s: float = Field(default=2.0, ge=0)
     local_rag_dir: str = "./data/local_rag"
 
     # ── Tracing (app/core/observability.py) ──────────────────────────────

@@ -8,9 +8,22 @@ every failure path rather than raising, and the caller keeps its own order.
 import httpx
 import pytest
 
+from app.local_rag import rerank as rerank_module
 from app.local_rag.rerank import CohereReranker
 
 _DOCS = ["swarm coverage path planning", "battery chemistry", "revisit time minimisation"]
+
+
+@pytest.fixture(autouse=True)
+def _no_backoff(monkeypatch):
+    """Record retry waits instead of sleeping them."""
+    waits: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        waits.append(seconds)
+
+    monkeypatch.setattr(rerank_module.asyncio, "sleep", fake_sleep)
+    return waits
 
 
 def _client(handler) -> httpx.AsyncClient:
@@ -165,3 +178,66 @@ async def test_a_missing_api_key_fails_open_without_a_request():
     reranker = CohereReranker(api_key="", client=_client(handler))
     assert await reranker.rerank("q", _DOCS, top_n=2) is None
     assert called is False
+
+
+_OK = {"results": [{"index": 1, "relevance_score": 0.8}]}
+
+
+async def test_a_429_is_retried_and_the_retry_result_is_used():
+    calls = []
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        if len(calls) == 1:
+            return httpx.Response(429, json={"message": "trial key rate limit"})
+        return httpx.Response(200, json=_OK)
+
+    reranker = CohereReranker(api_key="k", client=_client(handler))
+    results = await reranker.rerank("q", _DOCS, top_n=2)
+
+    assert len(calls) == 2
+    assert [r.index for r in results] == [1]
+
+
+async def test_retries_are_bounded_then_fail_open(_no_backoff):
+    calls = []
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        return httpx.Response(429)
+
+    reranker = CohereReranker(api_key="k", client=_client(handler), retries=3)
+    assert await reranker.rerank("q", _DOCS, top_n=2) is None
+    assert len(calls) == 4
+    assert len(_no_backoff) == 3
+
+
+async def test_a_client_error_is_not_retried():
+    calls = []
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        return httpx.Response(401, json={"message": "invalid api token"})
+
+    reranker = CohereReranker(api_key="k", client=_client(handler))
+    assert await reranker.rerank("q", _DOCS, top_n=2) is None
+    assert len(calls) == 1
+
+
+async def test_retry_after_is_honoured_but_capped(_no_backoff):
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(429, headers={"retry-after": "45"})
+
+    reranker = CohereReranker(
+        api_key="k", client=_client(handler), retries=2, max_retry_wait_s=10.0
+    )
+    await reranker.rerank("q", _DOCS, top_n=2)
+    assert _no_backoff == [10.0, 10.0]
+
+
+async def test_retry_settings_come_from_config_when_not_passed(monkeypatch):
+    monkeypatch.setattr(rerank_module.settings, "cohere_retries", 5)
+    monkeypatch.setattr(rerank_module.settings, "cohere_max_retry_wait_s", 30.0)
+    reranker = CohereReranker(api_key="k")
+    assert reranker._retries == 5
+    assert reranker._max_retry_wait_s == 30.0

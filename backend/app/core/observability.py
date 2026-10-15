@@ -305,6 +305,17 @@ def reasoning_tokens(usage: Any) -> int | None:
     return value if isinstance(value, int) else None
 
 
+def cached_tokens(usage: Any) -> int | None:
+    """Input tokens the provider served from its prompt cache, when it says.
+    Already inside `prompt_tokens`, so METADATA like `reasoning_tokens`: a
+    usage key would make Langfuse price the cached part twice."""
+    try:
+        value = usage.prompt_tokens_details.cached_tokens
+    except Exception:
+        return None
+    return value if isinstance(value, int) else None
+
+
 def usage_details(usage: Any) -> dict[str, int] | None:
     """OpenAI-shaped usage into Langfuse's keys, or None when absent."""
     if usage is None:
