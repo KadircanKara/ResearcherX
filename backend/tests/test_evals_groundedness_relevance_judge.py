@@ -233,3 +233,60 @@ async def test_a_second_miss_still_raises_after_exactly_one_re_ask():
             question="q", excerpts=[(1, "A", "x"), (2, "A", "y")]
         )
     assert len(transport.calls) == 2
+
+
+class SequencedCompletions(FakeCompletions):
+    """Replies with each content in turn, then repeats the last."""
+
+    def __init__(self, contents):
+        super().__init__(contents[0])
+        self.contents = list(contents)
+
+    async def create(self, **kwargs):
+        self.content = self.contents[min(self.calls, len(self.contents) - 1)]
+        return await super().create(**kwargs)
+
+
+def _judge_with_sequence(*contents) -> tuple[Judge, SequencedCompletions]:
+    judge = Judge(model="sonnet")
+    completions = SequencedCompletions(contents)
+    judge._client.chat.completions = completions
+    return judge, completions
+
+
+async def test_a_lone_claim_verdict_without_its_list_is_wrapped():
+    """Gemini's shape on single-claim answers: the verdict, minus the list."""
+    judge, completions = _judge_with_sequence(
+        '{"index": 0, "verdict": "supported", "supporting_excerpts": [1]}'
+    )
+    verdicts = await judge.judge_claims(
+        question="q", claims=[(0, "a claim")], excerpts=[(1, "A", "x")]
+    )
+    assert verdicts[0].verdict == "supported"
+    assert verdicts[0].supporting_excerpts == [1]
+    assert completions.calls == 1
+
+
+async def test_a_lone_object_that_is_not_a_verdict_is_not_wrapped():
+    """Wrapping only restores a COMPLETE item: an object missing the verdict
+    still fails, after the one re-ask."""
+    judge, completions = _judge_with_sequence('{"index": 0}')
+    with pytest.raises(Exception):
+        await judge.judge_claims(question="q", claims=[(0, "a claim")], excerpts=[(1, "A", "x")])
+    assert completions.calls == 2
+
+
+async def test_an_unparseable_reply_is_asked_again_once():
+    judge, completions = _judge_with_sequence(
+        '{"stance": "refused" "reason": ""}',  # the missing comma seen live
+        '{"stance": "refused", "reason": ""}',
+    )
+    assert (await judge.judge_stance(question="q", answer="a")).stance == "refused"
+    assert completions.calls == 2
+
+
+async def test_two_unparseable_replies_still_raise():
+    judge, completions = _judge_with_sequence('{"stance": "refused" "reason": ""}')
+    with pytest.raises(Exception):
+        await judge.judge_stance(question="q", answer="a")
+    assert completions.calls == 2
