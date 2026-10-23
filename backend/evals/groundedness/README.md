@@ -582,7 +582,11 @@ cases is a wiring check, not a measurement — but the shape is the expected one
 the rerank puts the useful excerpts first, and most of a 60-chunk budget is
 read past.
 
-### Judging with Jev (categorical, the default since 2026-10-23)
+### Judging with Jev (categorical, opt-in)
+
+The dev `.env` judges with `google/gemini-2.5-flash-lite` through OpenRouter.
+Jev was the default for one day (2026-10-23) and was switched back because it
+costs slightly more per run (see the cost note at the end of this section).
 
 `JUDGE_MODEL=~typesafe/jev-latest` (any name containing "jev") swaps the LLM
 judge for `jev_judge.JevJudge`: TypeSafe Jev through OpenRouter's `/systemone`
@@ -611,7 +615,16 @@ reads context precision quite differently: 0.49 on positives and 0.11 on
 off_topic, against 0.22 and 0.22. **Do not compare Jev-judged ctx-P with
 earlier LLM-judged runs.** The grade put `ir2-exploration-maps` as
 contradictory: answers name Indoor/Forest/Campus where the set expects
-Corridor/Hybrid/Complex. A 40-case replay costs ~$0.03 and takes under a minute.
+Corridor/Hybrid/Complex. A 40-case replay takes under a minute.
+
+Cost, from the Langfuse traces of those two judge runs over the same answers:
+Jev $0.0318 (892 API calls, 758k input tokens) against flash-lite $0.0309 (105
+calls, 266k input tokens). OpenRouter bills Jev at about $0.042 per million
+INPUT tokens with output free, so a cheaper token price does not pay for
+reading ~2.85x the tokens: every pairwise and per-excerpt call re-sends its
+excerpt. The `/systemone` body takes a map of questions and the judge sends
+one per call; asking several questions over one shared state is the untested
+lever if Jev comes back.
 
 ## Disclosed general knowledge is not hallucination
 
