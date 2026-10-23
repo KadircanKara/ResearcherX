@@ -1,15 +1,24 @@
 """Bulk-load a pre-downloaded arXiv corpus into a project, for RAG benchmarking.
 
 Run:  docker compose exec -T backend python -m scripts.bulk_ingest_arxiv \
-          --project-id <uuid> [--dir /app/stub-papers/arxiv] [--limit N]
+          --project-id <uuid> [--dir /app/stub-papers/arxiv] [--limit N] \
+          [--present-only] [--delete-after]
 
 The `-m` form is required: pyproject.toml packages only `app*`, so `scripts` is
 not installed and file-path invocation drops cwd from sys.path.
 
 Expects `<dir>/corpus.json` — a list of Semantic Scholar records, each with
 `arxiv_id`, `title`, `abstract`, `authors`, `year`, `venue`, `pdf_path` — plus
-the PDFs themselves. Produced by the fetch/download pair under the session
-scratchpad; regenerate them there, not here.
+the PDFs themselves, plus an optional `metadata_source` ("s2" when absent).
+Produced by `scripts.fetch_arxiv_corpus`.
+
+Batch loop for a corpus too large to keep on disk: `fetch_arxiv_corpus
+download --batch N`, then this script with `--present-only --delete-after`,
+repeated. `--present-only` skips records whose PDF is not downloaded yet
+instead of reporting each as a failure; `--delete-after` removes a PDF once
+its chunks are committed. A failed paper keeps its PDF, and a deleted one is
+never needed again: `extracted_pages` covers a re-chunk, and arXiv serves the
+file again for a re-extraction.
 
 Two deliberate differences from the `/papers/{id}/ingest-from-url` endpoint:
 
@@ -48,6 +57,10 @@ def _abs_url(arxiv_id: str) -> str:
     return f"https://arxiv.org/abs/{arxiv_id}"
 
 
+def _pdf_path(root: pathlib.Path, rec: dict) -> pathlib.Path:
+    return root / f"{rec['arxiv_id'].replace('/', '_')}.pdf"
+
+
 async def _already_loaded(project_id: str) -> set[str]:
     """pdf_urls already in this project — makes the script re-runnable."""
     async with SessionLocal() as db:
@@ -70,7 +83,7 @@ async def _ingest_one(project_id: str, rec: dict, pdf: pathlib.Path) -> int:
             authors=rec.get("authors") or [],
             year=rec.get("year"),
             venue=rec.get("venue") or "arXiv",
-            metadata_source="s2",
+            metadata_source=rec.get("metadata_source") or "s2",
             extracted_text=md,
             extracted_pages=pages_to_json(ex.pages),
             outline=outline_to_json(ex.outline),
@@ -91,6 +104,8 @@ async def main() -> None:
     parser.add_argument("--dir", default="/app/stub-papers/arxiv")
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--present-only", action="store_true")
+    parser.add_argument("--delete-after", action="store_true")
     args = parser.parse_args()
 
     root = pathlib.Path(args.dir)
@@ -100,8 +115,14 @@ async def main() -> None:
 
     seen = await _already_loaded(args.project_id)
     pending = [r for r in records if _abs_url(r["arxiv_id"]) not in seen]
+    loaded = len(records) - len(pending)
+    not_downloaded = 0
+    if args.present_only:
+        present = [r for r in pending if _pdf_path(root, r).exists()]
+        not_downloaded = len(pending) - len(present)
+        pending = present
     print(
-        f"{len(records)} in corpus, {len(records) - len(pending)} already loaded, "
+        f"{len(records)} in corpus, {loaded} already loaded, {not_downloaded} not downloaded, "
         f"{len(pending)} to ingest  (model: {settings.embedding_model})"
     )
     if args.dry_run:
@@ -114,7 +135,7 @@ async def main() -> None:
     total_chunks = 0
     failures: list[tuple[str, str]] = []
     for i, rec in enumerate(pending, 1):
-        pdf = root / f"{rec['arxiv_id'].replace('/', '_')}.pdf"
+        pdf = _pdf_path(root, rec)
         if not pdf.exists():
             failures.append((rec["arxiv_id"], "pdf missing"))
             print(f"[{i}/{len(pending)}] SKIP  {rec['arxiv_id']}  pdf missing", flush=True)
@@ -122,6 +143,9 @@ async def main() -> None:
         try:
             n = await _ingest_one(args.project_id, rec, pdf)
             total_chunks += n
+            if args.delete_after and n > 0:
+                # A zero-chunk paper (image-only PDF) keeps its file for inspection.
+                pdf.unlink()
             print(
                 f"[{i}/{len(pending)}] {n:>4} chunks  {rec['arxiv_id']:<12} {rec['title'][:56]}",
                 flush=True,

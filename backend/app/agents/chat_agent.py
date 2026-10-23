@@ -8,6 +8,12 @@ from app.core.config import settings
 from app.llm.client import create_chat_completion
 from app.services.chunk_header import excerpt_text
 
+# Stop reasons for a provider's safety classifier ending the answer: Claude's
+# `refusal`, OpenAI's `content_filter`.
+REFUSAL_FINISH_REASONS = frozenset({"refusal", "content_filter"})
+REFUSAL_ANSWER = "I can't answer this request."
+REFUSAL_CUT_NOTE = "\n\n(The rest of this answer was withheld by the model provider.)"
+
 SYSTEM = (
     "You are a research assistant with access to excerpts from academic papers. "
     "Answer the user's question using ONLY the provided paper excerpts and prior "
@@ -300,9 +306,19 @@ class ChatAgent:
             stream=True,
             messages=messages,
         )
+        answered = False
+        refused = False
         async for chunk in stream:
             if not chunk.choices:
                 continue
-            delta = chunk.choices[0].delta.content
+            choice = chunk.choices[0]
+            if getattr(choice, "finish_reason", None) in REFUSAL_FINISH_REASONS:
+                refused = True
+            delta = choice.delta.content
             if delta:
+                answered = True
                 yield delta
+        # A provider-side safety stop ends the stream with no error, often
+        # before any text: without this the reader gets an empty answer.
+        if refused:
+            yield REFUSAL_CUT_NOTE if answered else REFUSAL_ANSWER

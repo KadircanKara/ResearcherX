@@ -43,7 +43,9 @@ from app.local_rag.rerank import CohereReranker
 from app.services.embedding_service import EmbeddingService
 from app.services.hybrid_ranker import fuse_rrf, keep_within_rank_window
 from app.services.intra_paper_ranker import keep_within_paper
-from app.services.rerank_ranker import rerank_items
+from app.services.jev_reranker import JevReranker
+from app.services.rerank_ranker import rank_candidates, rerank_items
+from evals.retrieval.arms import ARMS, ArmReranker, MemoReranker, needs, parse_arms
 from evals.retrieval.golden_set import Case, load_golden_set
 from evals.retrieval.metrics import (
     rerank_lost_count,
@@ -101,7 +103,8 @@ _MODEL_COUNTS_SQL = text("SELECT model, count(*) AS n FROM paper_chunk_embedding
 # reformulates through a QueryReformulatorAgent when the conversation has prior
 # turns. For the single-turn golden set the two paths agree.
 _SQL = text("""
-    SELECT c.paper_id AS paper_id,
+    SELECT c.id AS chunk_id,
+           c.paper_id AS paper_id,
            p.title AS paper_title,
            c.text AS chunk_text,
            (c.embedding <=> CAST(:qvec AS vector)) AS distance
@@ -342,6 +345,13 @@ def _display_point(lo: float, hi: float) -> str:
         return f"no display value fits — raw bounds ({lo:.6f}, {hi:.6f}]"
 
 
+# The dense control ranks EVERY chunk in the project, and each case's full list
+# is kept for the threshold sweep. Fetched per case, the text would be a fresh
+# copy each time: at ~96k chunks that is ~230 MB per case and was OOM-killed
+# at 2,000 papers. One shared string per chunk keeps it at one corpus copy.
+_shared_text: dict = {}
+
+
 async def _chunks_for(db, svc: EmbeddingService, case: Case, project_id: str) -> list[Scored]:
     embedding = await svc.embed(case.question, task_type="RETRIEVAL_QUERY")
     params = {
@@ -353,8 +363,8 @@ async def _chunks_for(db, svc: EmbeddingService, case: Case, project_id: str) ->
     return [
         Scored(
             paper_id=r.paper_id,
-            paper_title=r.paper_title,
-            chunk_text=r.chunk_text,
+            paper_title=_shared_text.setdefault(("title", r.paper_id), r.paper_title),
+            chunk_text=_shared_text.setdefault(r.chunk_id, r.chunk_text),
             distance=float(r.distance),
         )
         for r in rows
@@ -698,6 +708,21 @@ async def main() -> None:  # noqa: PLR0912, PLR0915 — a report script, not a l
             "it beside the hybrid arm, plus rescued/lost across the budget edge"
         ),
     )
+    parser.add_argument(
+        "--arms",
+        default=None,
+        metavar="LIST",
+        help=(
+            "comma list of Jev-experiment arms (A,B,C,D,E,E2; see evals/retrieval/arms.py). "
+            "Requires --hybrid. Each arm runs through production's rank_candidates"
+        ),
+    )
+    parser.add_argument(
+        "--jev-repeats",
+        type=int,
+        default=1,
+        help="re-run every Jev-backed arm N times with fresh calls (Jev is not deterministic)",
+    )
     args = parser.parse_args()
 
     # The rerank consumes a fused candidate list, and there is no fused list
@@ -714,6 +739,59 @@ async def main() -> None:  # noqa: PLR0912, PLR0915 — a report script, not a l
         reranker = CohereReranker(
             api_key=settings.cohere_api_key, model=settings.cohere_rerank_model
         )
+
+    arm_names: list[str] = []
+    if args.arms:
+        try:
+            arm_names = parse_arms(args.arms)
+        except ValueError as exc:
+            print(f"\nERROR: {exc}")
+            return
+        if not args.hybrid:
+            print("\nERROR: --arms requires --hybrid (every arm ranks the fused candidates)")
+            return
+        wanted = needs(arm_names)
+        if "cohere" in wanted and not settings.cohere_api_key:
+            print("\nERROR: arms B/E2 need COHERE_API_KEY")
+            return
+        if wanted & {"jev-noul", "jev-score"} and not settings.decisions_api_key:
+            print("\nERROR: Jev arms need DECISIONS_API_KEY")
+            return
+
+    def _jev(question: str) -> JevReranker:
+        return JevReranker(
+            api_key=settings.decisions_api_key,
+            model=settings.jev_model,
+            base_url=settings.decisions_base_url,
+            question=question,
+            concurrency=settings.jev_concurrency,
+            timeout_s=settings.jev_timeout_s,
+            deadline_s=settings.jev_deadline_s,
+        )
+
+    # Shared memos: one Cohere (deterministic) for all repeats, one Jev memo
+    # per backend per repeat (repeats get fresh Jev calls). Each (arm, repeat)
+    # then wraps them in its OWN counters, so health is per arm.
+    cohere_memo = (
+        MemoReranker(
+            CohereReranker(api_key=settings.cohere_api_key, model=settings.cohere_rerank_model)
+        )
+        if args.arms and "cohere" in needs(arm_names)
+        else None
+    )
+    repeats = max(1, args.jev_repeats)
+    memos = [
+        {
+            "cohere": cohere_memo,
+            "jev-noul": MemoReranker(_jev("noul")),
+            "jev-score": MemoReranker(_jev("score")),
+        }
+        for _ in range(repeats)
+    ]
+    # arm_stages[(arm, repeat)] = {"fusion": ArmReranker|None, "rerank": ArmReranker|None}
+    arm_stages: dict[tuple[str, int], dict[str, ArmReranker | None]] = {}
+    # arm_results[(arm, repeat)] = list[(Case, list[Scored])], case-aligned with hybrid_positives
+    arm_results: dict[tuple[str, int], list] = {}
 
     cases = load_golden_set(args.set)
     svc = EmbeddingService()
@@ -821,6 +899,31 @@ async def main() -> None:  # noqa: PLR0912, PLR0915 — a report script, not a l
                     db, svc, case, args.project_id, threshold=settings.similarity_threshold
                 )
                 hybrid_positives.append((case, hybrid_chunks))
+
+                for name in arm_names:
+                    spec = ARMS[name]
+                    jev_backed = spec.fusion == "jev" or spec.rerank.startswith("jev")
+                    for r in range(repeats if jev_backed else 1):
+                        stages = arm_stages.get((name, r))
+                        if stages is None:
+                            m = memos[r]
+                            stages = arm_stages[(name, r)] = {
+                                "fusion": (
+                                    ArmReranker(m["jev-noul"]) if spec.fusion == "jev" else None
+                                ),
+                                "rerank": (
+                                    None if spec.rerank == "none" else ArmReranker(m[spec.rerank])
+                                ),
+                            }
+                        ranked = await rank_candidates(
+                            hybrid_chunks,
+                            query=case.question,
+                            text_of=lambda c: c.chunk_text,
+                            fusion_scorer=stages["fusion"],
+                            reranker=stages["rerank"],
+                            limit=settings.rerank_candidates,
+                        )
+                        arm_results.setdefault((name, r), []).append((case, ranked))
 
                 if args.rerank:
                     # `rerank_items` is IMPORTED from the shipped path, not
@@ -1003,6 +1106,47 @@ async def main() -> None:  # noqa: PLR0912, PLR0915 — a report script, not a l
         else:
             print("rerank arm: skipped — no positive cases scored (see ERRORS above)")
             print()
+
+    if arm_names and hybrid_positives:
+        budget = settings.max_context_chunks
+        print()
+        print(
+            f"Jev experiment arms (candidates={settings.rerank_candidates} budget={budget} "
+            f"jev_model={settings.jev_model} positives={len(hybrid_positives)}):"
+        )
+        print(
+            f"  RRF ceiling  recall@100: {recall_at_k(hybrid_positives, 100, presorted=True):.2f}"
+            "   (E/E2 can only help cases outside this)"
+        )
+        print(
+            f"  {'arm':<4} {'rep':>3} {'r@10':>5} {'r@20':>5} {f'r@{args.k}':>6} {'MRR':>6} "
+            f"{'resc':>5} {'lost':>5}  stage health"
+        )
+        for (name, r), rows in sorted(arm_results.items()):
+            spec = ARMS[name]
+            health = []
+            for stage, wrapper in arm_stages[(name, r)].items():
+                if wrapper is not None:
+                    tag = "jev-noul" if stage == "fusion" else spec.rerank
+                    distinct = wrapper.distinct_fraction()
+                    health.append(
+                        f"{stage} {tag} no-opinion {wrapper.no_opinion}/{wrapper.calls} "
+                        f"distinct {'-' if distinct is None else f'{distinct:.2f}'}"
+                    )
+            print(
+                f"  {name:<4} {r:>3} "
+                f"{recall_at_k(rows, 10, presorted=True):>5.2f} "
+                f"{recall_at_k(rows, 20, presorted=True):>5.2f} "
+                f"{recall_at_k(rows, args.k, presorted=True):>6.2f} "
+                f"{mean_reciprocal_rank(rows, args.k, presorted=True):>6.3f} "
+                f"{rerank_rescued_count(hybrid_positives, rows, budget):>5} "
+                f"{rerank_lost_count(hybrid_positives, rows, budget):>5}  "
+                f"{'; '.join(health) or '-'}"
+            )
+        print("  rescued/lost are budget-edge crossings against arm A (the fused order).")
+        print("  A stage with no-opinion > 0 fell back to its incoming order for those calls.")
+        print("  distinct < 1.00 = tied scores; ties keep the incoming (RRF) order.")
+        print()
 
     # Column width derived from the actual ids so a long case id can never
     # collide with the next column (a fixed 28-char width collided in

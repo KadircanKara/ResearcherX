@@ -113,8 +113,8 @@ def dataset_item(case: Case) -> dict:
 @dataclass(frozen=True)
 class Score:
     name: str
-    value: float
-    data_type: str  # "NUMERIC" | "BOOLEAN"
+    value: float | str
+    data_type: str  # "NUMERIC" | "BOOLEAN" | "CATEGORICAL" (value is the class name)
 
 
 def case_scores(outcome: CaseOutcome, relevance: RelevanceOutcome | None) -> list[Score]:
@@ -144,6 +144,8 @@ def case_scores(outcome: CaseOutcome, relevance: RelevanceOutcome | None) -> lis
         boolean("evidence_present", outcome.evidence_present)
     if relevance is not None:
         numeric("answer_relevance", relevance.answer_relevance)
+        if relevance.answer_grade is not None:
+            scores.append(Score("answer_grade", relevance.answer_grade, "CATEGORICAL"))
         if relevance.relevant is not None:
             numeric("context_precision", context_precision([relevance]))
             numeric("context_precision_at_10", context_precision([relevance], k=10))

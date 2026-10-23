@@ -44,6 +44,10 @@ class Settings(BaseSettings):
     # Used ONLY by the eval harness. Nothing in `app/` reads these.
     judge_base_url: str = ""
     judge_api_key: str = ""
+    # The judge's model id AT that endpoint, so endpoint and id are set
+    # together (an OpenRouter id like "google/gemini-2.5-flash-lite" means
+    # nothing to api.openai.com). `--judge-model` still overrides per run.
+    judge_model: str = "gpt-4.1-mini"
 
     # Alternate providers for daily-quota failover, as a JSON list:
     # LLM_FALLBACKS='[{"base_url":"...","api_key":"...","model":"..."}]'
@@ -261,6 +265,41 @@ class Settings(BaseSettings):
     # past the budget, so this spends a surplus that already exists rather
     # than widening any pool.
     rerank_candidates: int = 100
+    # Which model the rerank stage calls when `rerank_enabled`. "jev" is
+    # TypeSafe Jev through OpenRouter (`app/services/jev_reranker.py`), one
+    # yes/no relevance question per chunk. Measured against Cohere on
+    # feat/jev-reranking; see the spec docs/superpowers/specs/
+    # 2026-10-14-jev-reranking-design.md (local) for the arms.
+    rerank_provider: Literal["cohere", "jev"] = "cohere"
+    # "jev" scores EVERY fused candidate (the dense ∪ sparse union, ~250–300
+    # chunks) with Jev and orders by that score; RRF's order survives only as
+    # the fail-open fallback. Runs before the rerank stage. ~3x the Jev calls
+    # of the rerank stage, so it is the latency-heavy arm.
+    fusion_mode: Literal["rrf", "jev"] = "rrf"
+    # Opt-in admission cutoff on the LAST scoring stage (the reranker, else
+    # the Jev fusion scorer): candidates scored below it, and every unscored
+    # one, are dropped before the budget, so an off_topic question can reach
+    # the model with no excerpts and be refused. None = off (order only).
+    # The scale is the provider's own. Measured 2026-10-15 for Jev noul over
+    # every candidate (`evals/retrieval/score_cutoff.py`, 51 cases): 0.3 kept
+    # answer recall at 0.72 and left 58% of off_topic questions with nothing;
+    # 0.5 cost one question for 75%. No Cohere value has been measured.
+    rerank_min_score: float | None = Field(default=None, ge=0.0, le=1.0)
+    # Jev through OpenRouter's TypeSafe-compatible endpoint. NOT
+    # /chat/completions: OpenRouter rejects a decisions model there with 400.
+    # Empty key = both Jev stages are off (logged once at construction).
+    decisions_api_key: str = ""
+    decisions_base_url: str = "https://openrouter.ai/api/v1/systemone"
+    # An alias that moves when TypeSafe ships a version. Pin a versioned id
+    # (the response's `model` field names it) before trusting absolute scores.
+    jev_model: str = "~typesafe/jev-latest"
+    jev_question: Literal["noul", "score"] = "noul"
+    # Requests in flight per rerank call. OpenRouter lists 80 req/s for Jev.
+    jev_concurrency: int = Field(default=16, ge=1)
+    jev_timeout_s: float = Field(default=10.0, gt=0)
+    # Wall-clock bound on one whole rerank call (all documents, all retries).
+    # Past it the call fails open to the incoming order.
+    jev_deadline_s: float = Field(default=60.0, gt=0)
 
     # Chunks each MENTIONED paper is guaranteed before the rest of the budget
     # fills by distance.
@@ -501,6 +540,14 @@ class Settings(BaseSettings):
     # `rerank_enabled` above); the index location below is local_rag's alone.
     cohere_api_key: str = ""
     cohere_rerank_model: str = "rerank-v3.5"
+    # Retries on 429 / 5xx / transport errors before failing open. The
+    # defaults keep a chat turn's worst case near 2s of waiting. A trial key
+    # is limited per MINUTE, which those waits cannot outlast: the
+    # groundedness runs of 2026-10-15 lost 11 and 15 of ~76 rerank calls per
+    # arm-B run to 429, silently measuring RRF order. Eval runs raise both
+    # (e.g. COHERE_RETRIES=6, COHERE_MAX_RETRY_WAIT_S=30); a chat turn should not.
+    cohere_retries: int = Field(default=2, ge=0)
+    cohere_max_retry_wait_s: float = Field(default=2.0, ge=0)
     local_rag_dir: str = "./data/local_rag"
 
     # ── Tracing (app/core/observability.py) ──────────────────────────────
@@ -527,6 +574,15 @@ class Settings(BaseSettings):
     def _check_auth_mode(self) -> "Settings":
         if self.auth_mode == "supabase" and not self.supabase_url:
             raise ValueError("AUTH_MODE=supabase requires SUPABASE_URL")
+        return self
+
+    @model_validator(mode="after")
+    def _check_jev_stages(self) -> "Settings":
+        if self.fusion_mode == "jev" and self.rerank_enabled and self.rerank_provider == "jev":
+            raise ValueError(
+                "FUSION_MODE=jev with RERANK_PROVIDER=jev scores every pair twice; "
+                "use RERANK_PROVIDER=cohere (arm E2) or RERANK_ENABLED=false (arm E)"
+            )
         return self
 
     @model_validator(mode="after")

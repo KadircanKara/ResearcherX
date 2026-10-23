@@ -11,6 +11,7 @@ the per-paper guarantee's absence hid from every mirrored arm on
 
 The network call lives in `app/local_rag/rerank.py::CohereReranker`, whose
 contract is that `None` means "no opinion".
+`JevReranker` (`app/services/jev_reranker.py`) honours the same contract.
 """
 
 from collections.abc import Callable, Sequence
@@ -27,7 +28,12 @@ class Reranker(Protocol):
     ) -> list[RerankResult] | None: ...
 
 
-def apply_rerank(items: Sequence[T], results: Sequence[RerankResult] | None) -> list[T]:
+def apply_rerank(
+    items: Sequence[T],
+    results: Sequence[RerankResult] | None,
+    *,
+    min_score: float | None = None,
+) -> list[T]:
     """`items` reordered by relevance score, best first.
 
     `results` addresses `items` by index and may cover only a prefix of them
@@ -54,11 +60,21 @@ def apply_rerank(items: Sequence[T], results: Sequence[RerankResult] | None) -> 
     the client already filters out-of-range indices, and this is the second
     guard, because an index that addresses the wrong candidate reads as a
     plausible answer citing the wrong paper.
+
+    `min_score` is the ONE exception to "nothing is dropped", and it is
+    opt-in (`rerank_min_score`, off by default): when set and the scorer
+    answered, items scored below it AND every unscored item are dropped, so
+    the result can be empty. An empty catalog is the point -- an off_topic
+    question then reaches the model with nothing and it refuses. A scorer
+    that failed open (`results` empty or None) still returns everything:
+    an outage must never read as "nothing is relevant".
     """
     if not results:
         return list(items)
 
     ordered = sorted(results, key=lambda r: r.relevance_score, reverse=True)
+    if min_score is not None:
+        ordered = [r for r in ordered if r.relevance_score >= min_score]
 
     scored: list[T] = []
     taken: set[int] = set()
@@ -69,6 +85,8 @@ def apply_rerank(items: Sequence[T], results: Sequence[RerankResult] | None) -> 
         taken.add(index)
         scored.append(items[index])
 
+    if min_score is not None:
+        return scored
     tail = [item for i, item in enumerate(items) if i not in taken]
     return scored + tail
 
@@ -80,6 +98,7 @@ async def rerank_items(
     text_of: Callable[[T], str],
     reranker: Reranker | None,
     limit: int,
+    min_score: float | None = None,
 ) -> list[T]:
     """The whole rerank stage: send a head, reorder it, keep the tail.
 
@@ -101,6 +120,10 @@ async def rerank_items(
     `reranker is None` -- the kill switch off, or no API key -- skips the
     call entirely and returns the incoming order. That is the same outcome
     as a reranker that fails, by design: one degraded path, not two.
+
+    With `min_score` set (see `apply_rerank`) and a scorer that answered,
+    the unscored tail past `limit` is dropped too: it was never judged, so
+    it cannot pass a cutoff.
     """
     if reranker is None or not items:
         return list(items)
@@ -112,4 +135,54 @@ async def rerank_items(
         # does not select from one. The caller's budget cut is what selects.
         top_n=len(head),
     )
+    if min_score is not None and results:
+        return apply_rerank(head, results, min_score=min_score)
     return apply_rerank(head, results) + list(items[limit:])
+
+
+async def rank_candidates(
+    items: Sequence[T],
+    *,
+    query: str,
+    text_of: Callable[[T], str],
+    fusion_scorer: Reranker | None,
+    reranker: Reranker | None,
+    limit: int,
+    min_score: float | None = None,
+) -> list[T]:
+    """Both ranking stages after RRF: an optional fusion scorer, then the rerank head.
+
+    `fusion_scorer` (FUSION_MODE=jev) scores EVERY candidate -- the whole
+    dense ∪ sparse union, already in RRF order -- and its order replaces
+    RRF's. RRF's order survives only where the scorer has no opinion (it
+    failed open), which is the same degraded path `rerank_items` has.
+    Then `reranker` orders the first `limit` of that, exactly as before.
+
+    Lives here, not at the call sites, for the reason `rerank_items` does:
+    `chat_service` and both eval harnesses call this one function, so the
+    arms the harness measures are the arms production can run.
+
+    `min_score` applies to the LAST stage that runs -- the reranker when
+    there is one, else the fusion scorer -- because that stage's scores set
+    the final order. Its scale is that provider's own (Jev noul is a
+    probability; Cohere's relevance is calibrated differently), so a value
+    measured for one stage means nothing for another.
+    """
+    ordered = list(items)
+    if fusion_scorer is not None:
+        ordered = await rerank_items(
+            ordered,
+            query=query,
+            text_of=text_of,
+            reranker=fusion_scorer,
+            limit=len(ordered),
+            min_score=min_score if reranker is None else None,
+        )
+    return await rerank_items(
+        ordered,
+        query=query,
+        text_of=text_of,
+        reranker=reranker,
+        limit=limit,
+        min_score=min_score if reranker is not None else None,
+    )

@@ -44,6 +44,7 @@ from app.core.config import settings
 from app.llm.params import adapt_request
 from app.llm.structured import extract_json
 
+# Shipped default; `settings.judge_model` (JUDGE_MODEL) is what a run uses.
 DEFAULT_JUDGE_MODEL = "gpt-4.1-mini"
 
 # Characters of EXCERPT text per judge request. The catalog is up to
@@ -310,6 +311,64 @@ def _merge(verdicts: list[dict[int, ClaimVerdict]]) -> dict[int, ClaimVerdict]:
 DEFAULT_JUDGE_MAX_TOKENS = 12_000
 
 
+def _parse(content: str, model_cls: type[BaseModel]):
+    """Parse a judge reply against `model_cls`.
+
+    Raw first, extracted second. `response_format` is only a hint and some
+    endpoints do not implement it at all: through `tools/claude-proxy` it is a
+    LINE APPENDED TO THE SYSTEM PROMPT, so the model can answer with the object
+    and then keep talking. Measured on the 51-case run of 2026-09-20 -- two
+    cases died on `Invalid JSON: trailing characters` and lost their
+    context-relevance column to one sentence of prose.
+
+    Preferring the raw string matters: the extractor slices to the first
+    balanced object, and a response that already parses must not be reshaped
+    on its way through. The fallback never invents a verdict -- content
+    carrying no object at all still raises, and the case becomes an error row,
+    because a judge that answered in prose has not judged.
+    """
+    try:
+        return model_cls.model_validate_json(content)
+    except ValidationError:
+        pass
+    extracted = extract_json(content)
+    try:
+        return model_cls.model_validate_json(extracted)
+    except ValidationError:
+        wrapped = _wrap_lone_item(extracted, model_cls)
+        if wrapped is None:
+            raise
+        return wrapped
+
+
+def _wrap_lone_item(text: str, model_cls: type[BaseModel]):
+    """A list-of-verdicts response sent as ONE bare verdict, put back in its list.
+
+    Measured 2026-10-15: gemini-2.5-flash-lite answered single-claim cases with
+    `{"index": 0, "verdict": ...}` instead of `{"verdicts": [{...}]}` in five
+    cases across four arms, each losing the whole case. The verdict itself is
+    complete; only the wrapper is missing. Applies only to a model with exactly
+    one field holding a list of models, and only when the object validates as
+    that item -- anything else returns None and the original error stands.
+    """
+    if len(model_cls.model_fields) != 1:
+        return None
+    ((name, field),) = model_cls.model_fields.items()
+    args = getattr(field.annotation, "__args__", ())
+    if getattr(field.annotation, "__origin__", None) is not list or len(args) != 1:
+        return None
+    item_cls = args[0]
+    if not (isinstance(item_cls, type) and issubclass(item_cls, BaseModel)):
+        return None
+    try:
+        obj = json.loads(text)
+        if not isinstance(obj, dict):
+            return None
+        return model_cls(**{name: [item_cls.model_validate(obj)]})
+    except (ValueError, ValidationError):
+        return None
+
+
 @dataclass
 class Judge:
     model: str = DEFAULT_JUDGE_MODEL
@@ -349,6 +408,22 @@ class Judge:
             {"role": "system", "content": f"{system}\n\n{schema_block}"},
             {"role": "user", "content": user},
         ]
+        # One fresh call when the reply cannot be parsed at all. Measured
+        # 2026-10-15: gemini-2.5-flash-lite once returned an object with a
+        # missing comma, losing a whole case. A second unparseable reply still
+        # raises -- the case becomes an error row, never a guessed verdict.
+        for parse_attempt in range(2):
+            content = await self._complete(messages)
+            try:
+                return _parse(content, model_cls)
+            except (ValidationError, ValueError):
+                if parse_attempt == 1:
+                    raise
+        raise AssertionError("unreachable: the loop either returns or raises")
+
+    async def _complete(self, messages: list[dict]) -> str:
+        """The judge call with its response_format and rate-limit handling;
+        returns the raw reply text."""
         for attempt in range(1, _MAX_RATE_LIMIT_RETRIES + 1):
             extra = (
                 {"response_format": {"type": "json_object"}}
@@ -377,7 +452,9 @@ class Judge:
                     if details:
                         observability.set_json(span, "langfuse.observation.usage_details", details)
                     observability.set_metadata(
-                        span, reasoning_tokens=observability.reasoning_tokens(usage)
+                        span,
+                        reasoning_tokens=observability.reasoning_tokens(usage),
+                        cached_tokens=observability.cached_tokens(usage),
                     )
             except BadRequestError as exc:
                 # Many OpenAI-compatible endpoints reject `response_format`
@@ -403,25 +480,7 @@ class Judge:
                     raise
                 await asyncio.sleep(_retry_after_seconds(exc, attempt))
                 continue
-            content = response.choices[0].message.content or ""
-            # Raw first, extracted second. `response_format` is only a hint
-            # and some endpoints do not implement it at all: through
-            # `tools/claude-proxy` it is a LINE APPENDED TO THE SYSTEM PROMPT,
-            # so the model can answer with the object and then keep talking.
-            # Measured on the 51-case run of 2026-09-20 -- two cases died on
-            # `Invalid JSON: trailing characters` and lost their
-            # context-relevance column to one sentence of prose.
-            #
-            # Preferring the raw string matters: the extractor slices to the
-            # first balanced object, and a response that already parses must
-            # not be reshaped on its way through. The fallback never invents a
-            # verdict -- content carrying no object at all still raises, and
-            # the case becomes an error row, because a judge that answered in
-            # prose has not judged.
-            try:
-                return model_cls.model_validate_json(content)
-            except ValidationError:
-                return model_cls.model_validate_json(extract_json(content))
+            return response.choices[0].message.content or ""
         raise AssertionError("unreachable: the loop either returns or raises")
 
     async def judge_claims(
@@ -522,19 +581,31 @@ class Judge:
             return frozenset()
         shown = {n for n, _, _ in excerpts}
         judged: dict[int, bool] = {}
-        for excerpt_slice in _pack(excerpts, self.excerpt_chars_per_request):
-            excerpt_block = "\n\n".join(
-                f"[{n}] (from: {title})\n{text}" for n, title, text in excerpt_slice
-            )
-            parsed = await self._structured(
-                system=_CONTEXT_RELEVANCE_SYSTEM,
-                user=f"QUESTION\n{question}\n\nEXCERPTS\n{excerpt_block}",
-                model_cls=ContextRelevanceResponse,
-            )
-            # A number the judge invented is dropped rather than raised on: it
-            # names nothing in the catalog, so it cannot move any count.
-            judged.update({v.n: v.relevant for v in parsed.verdicts if v.n in shown})
+
+        async def ask(batch: list[tuple[int, str, str]]) -> None:
+            for excerpt_slice in _pack(batch, self.excerpt_chars_per_request):
+                excerpt_block = "\n\n".join(
+                    f"[{n}] (from: {title})\n{text}" for n, title, text in excerpt_slice
+                )
+                parsed = await self._structured(
+                    system=_CONTEXT_RELEVANCE_SYSTEM,
+                    user=f"QUESTION\n{question}\n\nEXCERPTS\n{excerpt_block}",
+                    model_cls=ContextRelevanceResponse,
+                )
+                # A number the judge invented is dropped rather than raised on:
+                # it names nothing in the catalog, so it cannot move any count.
+                judged.update({v.n: v.relevant for v in parsed.verdicts if v.n in shown})
+
+        await ask(excerpts)
         missing = sorted(shown - judged.keys())
+        if missing:
+            # Re-asked once with ONLY the skipped excerpts, as `judge_claims`
+            # does for skipped claims. Measured 2026-10-15: gemini-2.5-flash-lite
+            # left verdicts out in 4 of 51 cases (up to ~20 excerpts of a
+            # slice); losing those cases' columns differs per arm and blurs the
+            # comparison. A second miss still raises.
+            await ask([e for e in excerpts if e[0] in set(missing)])
+            missing = sorted(shown - judged.keys())
         if missing:
             listed = ", ".join(f"[{n}]" for n in missing)
             raise ValueError(f"judge returned no relevance verdict for excerpt(s) {listed}")

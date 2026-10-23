@@ -1045,7 +1045,14 @@ async def test_widening_pins_the_mentioned_papers_and_fills_globally(
     calls = []
 
     async def fake_retrieve(
-        db, scope, embedding, query_text, pool_limit=None, guarantee_per_paper=0, reranker=None
+        db,
+        scope,
+        embedding,
+        query_text,
+        pool_limit=None,
+        guarantee_per_paper=0,
+        reranker=None,
+        fusion_scorer=None,
     ):
         # `pool_limit` mirrors the real signature: the mention path asks for a
         # bigger CANDIDATE pool than the budget so `apply_per_paper_floor` is
@@ -1108,7 +1115,14 @@ async def test_mentions_with_no_chunks_at_all_fall_back_to_the_library(
     scopes = []
 
     async def fake_retrieve(
-        db, scope, embedding, query_text, pool_limit=None, guarantee_per_paper=0, reranker=None
+        db,
+        scope,
+        embedding,
+        query_text,
+        pool_limit=None,
+        guarantee_per_paper=0,
+        reranker=None,
+        fusion_scorer=None,
     ):
         # `pool_limit` mirrors the real signature: the mention path asks for a
         # bigger CANDIDATE pool than the budget so `apply_per_paper_floor` is
@@ -1220,7 +1234,14 @@ async def test_widened_fill_is_capped_at_the_context_budget(
     calls = []
 
     async def fake_retrieve(
-        db, scope, embedding, query_text, pool_limit=None, guarantee_per_paper=0, reranker=None
+        db,
+        scope,
+        embedding,
+        query_text,
+        pool_limit=None,
+        guarantee_per_paper=0,
+        reranker=None,
+        fusion_scorer=None,
     ):
         # `pool_limit` mirrors the real signature: the mention path asks for a
         # bigger CANDIDATE pool than the budget so `apply_per_paper_floor` is
@@ -1563,7 +1584,14 @@ async def test_the_candidate_pool_never_scales_with_library_size():
     asked: list[tuple[int | None, int]] = []
 
     async def recording_retrieve(
-        db, papers, embedding, query_text, pool_limit=None, guarantee_per_paper=0, reranker=None
+        db,
+        papers,
+        embedding,
+        query_text,
+        pool_limit=None,
+        guarantee_per_paper=0,
+        reranker=None,
+        fusion_scorer=None,
     ):
         asked.append((pool_limit, guarantee_per_paper))
         return [ChunkContext(n=1, paper_id="pA", title="A", chunk_index=0, text="t")]
@@ -1628,7 +1656,14 @@ async def test_a_widened_turn_that_lands_no_library_chunk_is_not_reported_widene
     owned = [chunk(i) for i in range(budget)]
 
     async def fake_retrieve(
-        db, scope, embedding, query_text, pool_limit=None, guarantee_per_paper=0, reranker=None
+        db,
+        scope,
+        embedding,
+        query_text,
+        pool_limit=None,
+        guarantee_per_paper=0,
+        reranker=None,
+        fusion_scorer=None,
     ):
         return list(owned)
 

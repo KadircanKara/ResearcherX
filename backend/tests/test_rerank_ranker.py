@@ -7,7 +7,7 @@ network call lives in app/local_rag/rerank.py and is not exercised here.
 """
 
 from app.local_rag.rerank import RerankResult
-from app.services.rerank_ranker import apply_rerank, rerank_items
+from app.services.rerank_ranker import apply_rerank, rank_candidates, rerank_items
 
 
 def _r(index: int, score: float) -> RerankResult:
@@ -149,3 +149,125 @@ async def test_an_empty_candidate_list_never_calls_the_provider():
     fake = _FakeReranker(results=[])
     assert await rerank_items([], query="q", text_of=str, reranker=fake, limit=10) == []
     assert fake.calls == []
+
+
+class _ByScore:
+    """A fake reranker scoring each document from a table; records calls."""
+
+    def __init__(self, table, *, fail=False):
+        self.table, self.fail, self.calls = table, fail, []
+
+    async def rerank(self, query, documents, top_n):
+        self.calls.append(list(documents))
+        if self.fail:
+            return None
+        ranked = sorted(range(len(documents)), key=lambda i: -self.table[documents[i]])
+        return [_r(i, self.table[documents[i]]) for i in ranked][:top_n]
+
+
+async def _rank(items, fusion, rerank, limit=2):
+    return await rank_candidates(
+        items, query="q", text_of=lambda x: x, fusion_scorer=fusion, reranker=rerank, limit=limit
+    )
+
+
+async def test_without_a_fusion_scorer_it_is_rerank_items():
+    rr = _ByScore({"a": 0.1, "b": 0.9, "c": 0.5})
+    assert await _rank(["a", "b", "c"], None, rr) == ["b", "a", "c"]
+    assert rr.calls == [["a", "b"]]
+
+
+async def test_the_fusion_scorer_sees_every_candidate_not_just_the_head():
+    fs = _ByScore({"a": 0.1, "b": 0.2, "c": 0.9})
+    assert await _rank(["a", "b", "c"], fs, None) == ["c", "b", "a"]
+    assert fs.calls == [["a", "b", "c"]]
+
+
+async def test_the_reranker_reads_the_fusion_scorers_order():
+    """Arm E2: Jev picks the head, Cohere orders it."""
+    fs = _ByScore({"a": 0.1, "b": 0.2, "c": 0.9})
+    rr = _ByScore({"a": 0.9, "b": 0.3, "c": 0.1})
+    assert await _rank(["a", "b", "c"], fs, rr) == ["b", "c", "a"]
+    assert rr.calls == [["c", "b"]]
+
+
+async def test_a_failed_fusion_scorer_keeps_the_incoming_rrf_order():
+    fs = _ByScore({}, fail=True)
+    rr = _ByScore({"a": 0.1, "b": 0.9, "c": 0.5})
+    assert await _rank(["a", "b", "c"], fs, rr) == ["b", "a", "c"]
+
+
+async def test_an_empty_list_calls_nothing():
+    fs, rr = _ByScore({}), _ByScore({})
+    assert await _rank([], fs, rr) == []
+    assert fs.calls == [] and rr.calls == []
+
+
+# ── rerank_min_score: the opt-in admission cutoff ─────────────────────────
+
+
+def test_a_min_score_drops_low_scored_and_unscored_items():
+    out = apply_rerank(["a", "b", "c", "d"], [_r(0, 0.9), _r(1, 0.2), _r(2, 0.5)], min_score=0.3)
+    assert out == ["a", "c"]  # b below the cutoff, d never scored
+
+
+def test_a_min_score_can_leave_nothing_which_is_the_point():
+    assert apply_rerank(["a", "b"], [_r(0, 0.1), _r(1, 0.2)], min_score=0.3) == []
+
+
+def test_a_failed_scorer_never_reads_as_nothing_is_relevant():
+    assert apply_rerank(["a", "b"], None, min_score=0.3) == ["a", "b"]
+    assert apply_rerank(["a", "b"], [], min_score=0.3) == ["a", "b"]
+
+
+async def test_the_cutoff_also_drops_the_unscored_tail_past_the_head():
+    rr = _ByScore({"a": 0.9, "b": 0.1, "c": 0.9})
+    out = await rerank_items(
+        ["a", "b", "c"], query="q", text_of=str, reranker=rr, limit=2, min_score=0.5
+    )
+    assert out == ["a"]
+
+
+async def test_a_failed_reranker_with_a_cutoff_keeps_everything():
+    rr = _ByScore({}, fail=True)
+    out = await rerank_items(
+        ["a", "b", "c"], query="q", text_of=str, reranker=rr, limit=2, min_score=0.5
+    )
+    assert out == ["a", "b", "c"]
+
+
+async def test_the_cutoff_applies_to_the_fusion_scorer_when_it_is_the_last_stage():
+    """Arm E: Jev scores everything and nothing reranks after it."""
+    fs = _ByScore({"a": 0.1, "b": 0.6, "c": 0.9})
+    out = await rank_candidates(
+        ["a", "b", "c"],
+        query="q",
+        text_of=lambda x: x,
+        fusion_scorer=fs,
+        reranker=None,
+        limit=2,
+        min_score=0.5,
+    )
+    assert out == ["c", "b"]
+
+
+async def test_the_cutoff_applies_to_the_reranker_not_the_fusion_scorer_when_both_run():
+    """Arm E2: Jev picks the head unfiltered; Cohere's scores are cut."""
+    fs = _ByScore({"a": 0.1, "b": 0.2, "c": 0.9})
+    rr = _ByScore({"a": 0.9, "b": 0.6, "c": 0.1})
+    out = await rank_candidates(
+        ["a", "b", "c"],
+        query="q",
+        text_of=lambda x: x,
+        fusion_scorer=fs,
+        reranker=rr,
+        limit=2,
+        min_score=0.5,
+    )
+    assert out == ["b"]  # head is [c, b]; c scored 0.1 by the reranker, a never sent
+
+
+async def test_no_min_score_is_the_shipped_default_and_drops_nothing():
+    rr = _ByScore({"a": 0.01, "b": 0.02, "c": 0.03})
+    out = await rerank_items(["a", "b", "c"], query="q", text_of=str, reranker=rr, limit=2)
+    assert sorted(out) == ["a", "b", "c"]

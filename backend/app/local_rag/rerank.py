@@ -10,6 +10,8 @@ key, HTTP error, timeout, malformed body — and never raises. The caller
 then keeps its fused RRF order, so a reranker outage degrades a turn's
 ORDERING and never fails the turn. A raising reranker would make an
 optional quality stage into a hard dependency of answering at all.
+A 429 / 5xx is retried first (`cohere_retries`, waits capped by
+`cohere_max_retry_wait_s`); only the last attempt's failure fails open.
 
 Called with Cohere's defaults otherwise: `rerank-v3.5`, no
 `max_tokens_per_doc` override, `top_n` set because the pipeline needs a
@@ -18,11 +20,13 @@ fixed depth (Cohere returns every document without it).
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 
 import httpx
 
 from app.core import observability
+from app.core.config import settings
 from app.core.logging import log
 
 DEFAULT_MODEL = "rerank-v3.5"
@@ -33,6 +37,10 @@ DEFAULT_BASE_URL = "https://api.cohere.com/v2/rerank"
 # opening of a chunk far more often than by its end.
 DEFAULT_MAX_DOC_CHARS = 2000
 DEFAULT_TIMEOUT_S = 5.0
+_BACKOFF_S = 0.5
+# Same set as the Jev client: rate limits and transient upstream errors.
+# Anything else (401, 400, ...) will not change on a retry.
+_RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
 
 
 @dataclass(frozen=True)
@@ -53,8 +61,16 @@ class CohereReranker:
         timeout_s: float = DEFAULT_TIMEOUT_S,
         max_doc_chars: int = DEFAULT_MAX_DOC_CHARS,
         client: httpx.AsyncClient | None = None,
+        retries: int | None = None,
+        max_retry_wait_s: float | None = None,
     ) -> None:
         self._api_key = api_key
+        # None reads settings, so every construction site — chat, local_rag,
+        # the eval harnesses — picks up COHERE_RETRIES without being edited.
+        self._retries = settings.cohere_retries if retries is None else retries
+        self._max_retry_wait_s = (
+            settings.cohere_max_retry_wait_s if max_retry_wait_s is None else max_retry_wait_s
+        )
         self._model = model
         self._base_url = base_url
         self._timeout_s = timeout_s
@@ -92,12 +108,7 @@ class CohereReranker:
         )
         client = self._client or httpx.AsyncClient(timeout=self._timeout_s)
         try:
-            response = await client.post(
-                self._base_url,
-                json=payload,
-                headers={"authorization": f"Bearer {self._api_key}"},
-                timeout=self._timeout_s,
-            )
+            response = await self._post(client, payload)
             response.raise_for_status()
             body = response.json()
             raw = body["results"]
@@ -124,6 +135,30 @@ class CohereReranker:
         # this list, and a provider that returns unsorted results would
         # silently reorder the model's excerpt catalog.
         return sorted(results, key=lambda r: r.relevance_score, reverse=True)
+
+    async def _post(self, client: httpx.AsyncClient, payload: dict) -> httpx.Response:
+        """POST with retries. The last attempt's response (or exception) is
+        returned (or raised) as-is, so `rerank`'s fail-open path still decides."""
+        headers = {"authorization": f"Bearer {self._api_key}"}
+        for attempt in range(self._retries + 1):
+            last = attempt == self._retries
+            try:
+                response = await client.post(
+                    self._base_url, json=payload, headers=headers, timeout=self._timeout_s
+                )
+            except httpx.TransportError:
+                if last:
+                    raise
+                response = None
+            if last or (response is not None and response.status_code not in _RETRY_STATUSES):
+                return response  # type: ignore[return-value]
+            retry_after = response.headers.get("retry-after", "") if response is not None else ""
+            wait = float(retry_after) if retry_after.isdigit() else _BACKOFF_S * (2**attempt)
+            log.info(
+                "rerank_retry", attempt=attempt + 1, status=getattr(response, "status_code", None)
+            )
+            await asyncio.sleep(min(wait, self._max_retry_wait_s))
+        raise RuntimeError("unreachable")
 
 
 def _record_billed_units(span, body: object) -> None:

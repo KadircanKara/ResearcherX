@@ -37,6 +37,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from app.core import observability
+from app.core.config import settings
 from evals.groundedness.usage import format_usage, install_tally, summarize
 from evals.groundedness.agreement import pair_verdicts, verdict_shift
 from evals.groundedness.langfuse_export import (
@@ -55,11 +56,12 @@ from evals.groundedness.langfuse_export import (
     expected_output_json,
     new_experiment_id,
 )
-from evals.groundedness.claims import extract_claims, marker_count
+from evals.groundedness.claims import cited_numbers, extract_claims, marker_count
 from evals.groundedness.generate import AnswerGenerator, Generated
+from evals.groundedness.jev_judge import GRADES, AnswerGrade, JevJudge, is_jev_model
+from evals.groundedness.stages import stage_config_errors
 from evals.groundedness.judge import (
     DEFAULT_JUDGE_MAX_TOKENS,
-    DEFAULT_JUDGE_MODEL,
     Judge,
     QuotaExhausted,
 )
@@ -80,6 +82,7 @@ from evals.groundedness.metrics import (
     unjudged_markers,
 )
 from evals.groundedness.relevance import (
+    grade_counts,
     METRICS,
     RelevanceOutcome,
     SelfJudgeError,
@@ -155,12 +158,27 @@ async def _judge_relevance(
     # off_topic: the right answer is a refusal, which this rubric scores 0.0 by
     # design. `stance` already grades those cases; averaging a column of
     # correct refusals in as zeros would make refusing look like failing.
+    grade: AnswerGrade | None = None
     if "answer_relevance" in metrics and not case.is_negative:
         try:
-            graded = await judge.judge_answer_relevance(
-                question=case.question, answer=generated.answer
-            )
-            score, reason = graded.score, graded.reason
+            if isinstance(judge, JevJudge):
+                # A categorical judge grades the answer against what it cites
+                # and the golden set's facts, instead of scoring relevance.
+                cited = cited_numbers(generated.answer)
+                grade = await judge.judge_answer_grade(
+                    question=case.question,
+                    answer=generated.answer,
+                    cited_excerpts=[
+                        (c.n, c.title, c.text) for c in generated.chunks if c.n in cited
+                    ],
+                    expected_facts=list(case.expect_substrings),
+                )
+                reason = f"jev: {grade.grade} (confidence {grade.confidence:.2f})"
+            else:
+                graded = await judge.judge_answer_relevance(
+                    question=case.question, answer=generated.answer
+                )
+                score, reason = graded.score, graded.reason
         except QuotaExhausted:
             raise
         except Exception as exc:  # noqa: BLE001 - reported, never silently dropped
@@ -185,6 +203,8 @@ async def _judge_relevance(
         answer_relevance_reason=reason,
         shown=tuple(c.n for c in generated.chunks),
         relevant=relevant,
+        answer_grade=grade.grade if grade else None,
+        answer_grade_confidence=grade.confidence if grade else None,
     )
     error = CaseError(case.id, "relevance", "; ".join(failures)) if failures else None
     return outcome, error
@@ -683,6 +703,37 @@ def _report_relevance(relevances: list[RelevanceOutcome], outcomes: list[CaseOut
         "over excerpts SHOWN -- on off_topic it should read ~0.00, and anything above is "
         "what the distance gate let through. `ctx-P@10` is the first ten catalog positions."
     )
+    if any(r.answer_grade is not None for r in relevances):
+        _report_grades(positives, evidence)
+
+
+def _grade_row(label: str, rows: list[RelevanceOutcome]) -> str:
+    counts = grade_counts(rows)
+    graded = sum(counts.values())
+    cells = "".join(f"{counts.get(g, 0):>{max(len(g), 4) + 2}}" for g in GRADES)
+    return f"{label:<34}{graded:>5}{cells}"
+
+
+def _report_grades(positives: list[RelevanceOutcome], evidence: dict) -> None:
+    """Answer grades as COUNTS per class -- no average: the classes are not
+    points on one scale (`padded` is not "between" `fully_correct` and
+    `incomplete`)."""
+    print()
+    print("ANSWER GRADE (categorical judge; positives only, counts per class)")
+    print(f"{'group':<34}{'cases':>5}" + "".join(f"{g:>{max(len(g), 4) + 2}}" for g in GRADES))
+    print(_grade_row("positives (pooled)", positives))
+    print(
+        _grade_row(
+            "  evidence reached the model", [r for r in positives if evidence.get(r.case_id)]
+        )
+    )
+    print(
+        _grade_row(
+            "  evidence did NOT reach", [r for r in positives if evidence.get(r.case_id) is False]
+        )
+    )
+    for kind in sorted({r.kind for r in positives}):
+        print(_grade_row(f"  kind: {kind}", [r for r in positives if r.kind == kind]))
 
 
 async def main() -> None:
@@ -691,7 +742,7 @@ async def main() -> None:
     )
     parser.add_argument("--project-id", required=True)
     parser.add_argument("--set", type=Path, default=_DEFAULT_SET)
-    parser.add_argument("--judge-model", default=DEFAULT_JUDGE_MODEL)
+    parser.add_argument("--judge-model", default=settings.judge_model)
     parser.add_argument(
         "--judge-max-tokens",
         type=int,
@@ -815,7 +866,6 @@ async def main() -> None:
 
     if args.langfuse_run and not args.langfuse:
         raise SystemExit("--langfuse-run needs --langfuse")
-    from app.core.config import settings
 
     if args.langfuse and not observability.keys_configured():
         raise SystemExit("--langfuse needs LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY")
@@ -831,7 +881,23 @@ async def main() -> None:
         capture_content=settings.langfuse_capture_content if args.langfuse else False,
     )
     generator = AnswerGenerator()
-    judge = Judge(model=args.judge_model, max_tokens=args.judge_max_tokens)
+    if not args.replay:
+        stage_errors = stage_config_errors(
+            settings, generator._chat._reranker, generator._chat._fusion_scorer
+        )
+        if stage_errors:
+            for message in stage_errors:
+                print(f"\nERROR: {message}")
+            raise SystemExit(1)
+    judge: Judge | JevJudge = (
+        JevJudge(
+            model=args.judge_model,
+            api_key=settings.decisions_api_key,
+            base_url=settings.decisions_base_url,
+        )
+        if is_jev_model(args.judge_model)
+        else Judge(model=args.judge_model, max_tokens=args.judge_max_tokens)
+    )
     second_judge = (
         Judge(model=args.compare_judge, max_tokens=args.judge_max_tokens)
         if args.compare_judge
@@ -892,6 +958,10 @@ async def main() -> None:
         else:
             metadata["reasoning_effort"] = settings.llm_reasoning_effort or "-"
             metadata["max_context_chunks"] = str(settings.max_context_chunks)
+            metadata["rerank_candidates"] = str(settings.rerank_candidates)
+            metadata["rerank_min_score"] = (
+                "-" if settings.rerank_min_score is None else str(settings.rerank_min_score)
+            )
         experiment = Experiment(
             experiment_id=new_experiment_id(),
             run_name=args.langfuse_run
@@ -1093,6 +1163,10 @@ async def main() -> None:
                             "answer_relevance_reason": relevances[
                                 o.case_id
                             ].answer_relevance_reason,
+                            "answer_grade": relevances[o.case_id].answer_grade,
+                            "answer_grade_confidence": relevances[
+                                o.case_id
+                            ].answer_grade_confidence,
                             "shown_excerpts": list(relevances[o.case_id].shown),
                             "relevant_excerpts": (
                                 None

@@ -212,7 +212,11 @@ def _record_response(gen, response) -> None:
     details = observability.usage_details(usage)
     if details:
         observability.set_json(gen, "langfuse.observation.usage_details", details)
-    observability.set_metadata(gen, reasoning_tokens=observability.reasoning_tokens(usage))
+    observability.set_metadata(
+        gen,
+        reasoning_tokens=observability.reasoning_tokens(usage),
+        cached_tokens=observability.cached_tokens(usage),
+    )
 
 
 async def _traced_stream(stream, gen, started: float):
@@ -246,5 +250,9 @@ async def _traced_stream(stream, gen, started: float):
         details = observability.usage_details(usage)
         if details:
             observability.set_json(gen, "langfuse.observation.usage_details", details)
-        observability.set_metadata(gen, reasoning_tokens=observability.reasoning_tokens(usage))
+        observability.set_metadata(
+            gen,
+            reasoning_tokens=observability.reasoning_tokens(usage),
+            cached_tokens=observability.cached_tokens(usage),
+        )
         gen.end()

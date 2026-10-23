@@ -311,3 +311,13 @@ def marker_count(answer: str) -> int:
             continue
         total += len(_MARKER_RE.findall(segment))
     return total
+
+
+def cited_numbers(answer: str) -> frozenset[int]:
+    """Every excerpt number a marker in PROSE points at -- the excerpts the
+    answer presents as its sources. Same code guard as `marker_count`."""
+    cited: set[int] = set()
+    for segment, is_code in split_prose_segments(answer):
+        if not is_code:
+            cited.update(int(m) for m in _MARKER_RE.findall(segment))
+    return frozenset(cited)

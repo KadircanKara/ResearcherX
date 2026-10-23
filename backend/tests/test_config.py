@@ -199,3 +199,30 @@ def test_prod_without_require_auth_still_boots_in_dev_auth(monkeypatch):
 def test_a_negative_demo_max_users_is_refused():
     with pytest.raises(ValidationError):
         Settings(demo_max_users=-1)
+
+
+def test_jev_settings_default_to_production_behaviour():
+    s = Settings()
+    assert s.rerank_provider == "cohere"
+    assert s.fusion_mode == "rrf"
+    assert s.jev_model == "~typesafe/jev-latest"
+    assert s.decisions_base_url == "https://openrouter.ai/api/v1/systemone"
+    assert s.jev_question == "noul"
+    assert s.jev_concurrency == 16
+
+
+def test_jev_fusion_with_jev_rerank_is_refused():
+    """Jev would score the same (question, chunk) pairs twice."""
+    with pytest.raises(ValueError, match="FUSION_MODE=jev"):
+        Settings(fusion_mode="jev", rerank_provider="jev")
+
+
+def test_jev_fusion_with_rerank_disabled_is_allowed():
+    """Arm E: Jev fusion, no rerank stage at all."""
+    s = Settings(fusion_mode="jev", rerank_provider="jev", rerank_enabled=False)
+    assert s.fusion_mode == "jev"
+
+
+def test_jev_concurrency_must_be_positive():
+    with pytest.raises(ValueError):
+        Settings(jev_concurrency=0)

@@ -3,6 +3,8 @@
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from app.agents.chat_agent import (
+    REFUSAL_ANSWER,
+    REFUSAL_CUT_NOTE,
     SYSTEM,
     ChatAgent,
     ChatAgentInput,
@@ -446,3 +448,52 @@ async def test_excerpt_catalog_omits_empty_section_and_page(monkeypatch):
     assert "[1] [Title: Old Paper]\n\nt" in user
     assert "Section:" not in user
     assert "Page:" not in user
+
+
+def _fake_stream_of(*chunks, captured=None):
+    async def fake_create(**kwargs):
+        if captured is not None:
+            captured["messages"] = kwargs["messages"]
+
+        async def gen():
+            for c in chunks:
+                yield c
+
+        return gen()
+
+    return fake_create
+
+
+def _chunk(text, finish_reason=None):
+    return MagicMock(
+        choices=[MagicMock(delta=MagicMock(content=text), finish_reason=finish_reason)]
+    )
+
+
+async def test_a_refusal_with_no_text_becomes_a_visible_answer(monkeypatch):
+    monkeypatch.setattr(
+        "app.agents.chat_agent.create_chat_completion",
+        _fake_stream_of(_chunk("", finish_reason="refusal")),
+    )
+    inp = ChatAgentInput(query="q", prior_messages=[], paper_chunks=[])
+    tokens = [t async for t in ChatAgent().stream(inp)]
+    assert "".join(tokens) == REFUSAL_ANSWER
+
+
+async def test_a_refusal_after_text_says_the_answer_was_cut(monkeypatch):
+    monkeypatch.setattr(
+        "app.agents.chat_agent.create_chat_completion",
+        _fake_stream_of(_chunk("Part of it"), _chunk("", finish_reason="refusal")),
+    )
+    inp = ChatAgentInput(query="q", prior_messages=[], paper_chunks=[])
+    tokens = [t async for t in ChatAgent().stream(inp)]
+    assert "".join(tokens) == "Part of it" + REFUSAL_CUT_NOTE
+
+
+async def test_a_normal_stop_adds_nothing(monkeypatch):
+    monkeypatch.setattr(
+        "app.agents.chat_agent.create_chat_completion",
+        _fake_stream_of(_chunk("Done"), _chunk("", finish_reason="stop")),
+    )
+    inp = ChatAgentInput(query="q", prior_messages=[], paper_chunks=[])
+    assert "".join([t async for t in ChatAgent().stream(inp)]) == "Done"

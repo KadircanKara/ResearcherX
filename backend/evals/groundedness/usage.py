@@ -29,6 +29,7 @@ from app.core.config import settings
 MODEL = "langfuse.observation.model.name"
 USAGE = "langfuse.observation.usage_details"
 REASONING = "langfuse.observation.metadata.reasoning_tokens"
+CACHED = "langfuse.observation.metadata.cached_tokens"
 
 
 def install_tally(*, processors: Sequence = (), capture_content: bool = False):
@@ -75,6 +76,9 @@ def summarize(spans: Iterable) -> dict[str, dict[str, int]]:
         reasoning = attrs.get(REASONING)
         if isinstance(reasoning, int):
             row["reasoning"] += reasoning
+        cached = attrs.get(CACHED)
+        if isinstance(cached, int):
+            row["cached"] += cached
     return {model: dict(row) for model, row in sorted(totals.items())}
 
 
@@ -83,20 +87,22 @@ def format_usage(summary: dict[str, dict[str, int]]) -> list[str]:
     if not summary:
         return lines + ["  (no model calls recorded)"]
     lines.append(
-        f"  {'model':<24}{'calls':>7}{'input':>12}{'output':>10}{'reasoning':>11}{'other':>16}"
+        f"  {'model':<24}{'calls':>7}{'input':>12}{'cached':>12}{'output':>10}"
+        f"{'reasoning':>11}{'other':>16}"
     )
     for model, row in summary.items():
         other = ", ".join(
             f"{k}={v}"
             for k, v in row.items()
-            if k not in {"calls", "input", "output", "total", "reasoning"}
+            if k not in {"calls", "input", "cached", "output", "total", "reasoning"}
         )
         lines.append(
             f"  {model:<24}{row.get('calls', 0):>7}{row.get('input', 0):>12}"
-            f"{row.get('output', 0):>10}{row.get('reasoning', 0):>11}  {other}"
+            f"{row.get('cached', 0):>12}{row.get('output', 0):>10}{row.get('reasoning', 0):>11}  {other}"
         )
     lines.append(
-        "  reasoning is already inside output (billed as output); "
+        "  reasoning is already inside output (billed as output); cached is already "
+        "inside input (billed at the provider's cached rate); "
         "a model with calls but no tokens did not report usage"
     )
     return lines

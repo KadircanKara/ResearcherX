@@ -582,6 +582,37 @@ cases is a wiring check, not a measurement — but the shape is the expected one
 the rerank puts the useful excerpts first, and most of a 60-chunk budget is
 read past.
 
+### Judging with Jev (categorical, the default since 2026-10-23)
+
+`JUDGE_MODEL=~typesafe/jev-latest` (any name containing "jev") swaps the LLM
+judge for `jev_judge.JevJudge`: TypeSafe Jev through OpenRouter's `/systemone`
+endpoint, keyed by `DECISIONS_API_KEY`. Every verdict is a `choice` class with
+probabilities, never a score:
+
+| Call | Classes |
+|---|---|
+| claim gate | claim / no_claim |
+| each (claim, excerpt) pair | supports / partially_supports / silent / contradicts |
+| several partial excerpts together | supported / unsupported / contradicted |
+| stance | answered / refused / partial |
+| context relevance, per excerpt | answers / supplies_part (relevant) / same_topic_only / unrelated |
+| answer grade (positives) | fully_correct / padded / incomplete / unsupported / contradictory / off_target / refused |
+
+Claims are judged PAIRWISE because citation metrics need to know which excerpt
+carries a claim, and a choice answer names none. The answer grade replaces the
+0--1 `answer-rel` column with an ANSWER GRADE table of counts per class, and is
+checked against the excerpts the answer cites plus the golden set's
+`expect_substrings`.
+
+Measured 2026-10-23 on the 40-case set (same gpt-5-mini answers, replayed):
+Jev and gemini-2.5-flash-lite agree on every support and problem call (30 of
+31 claim verdicts, the one difference being a bullet Jev called no_claim). Jev
+reads context precision quite differently: 0.49 on positives and 0.11 on
+off_topic, against 0.22 and 0.22. **Do not compare Jev-judged ctx-P with
+earlier LLM-judged runs.** The grade put `ir2-exploration-maps` as
+contradictory: answers name Indoor/Forest/Campus where the set expects
+Corridor/Hybrid/Complex. A 40-case replay costs ~$0.03 and takes under a minute.
+
 ## Disclosed general knowledge is not hallucination
 
 Production's own system prompt (`app/agents/chat_agent.py::SYSTEM`) instructs
@@ -674,6 +705,43 @@ answering calls, so it shows judge cost and latency only.
 Units: a 2-case smoke run on 2026-09-24 sent 19 observations, 2 traces and 16
 scores; the full 51-case run with relevance sent 51 traces and 478 scores,
 comfortably inside the Hobby plan's 50k a month.
+
+## Running a Jev arm (ranking stage chosen by env)
+
+The ranking stages are settings, so an arm is an env override on the exec.
+`-e` reaches `Settings` because the harness builds `ChatService()` inside the
+exec'd process. Jev arms need `DECISIONS_API_KEY`; see "Jev experiment arms" in
+`evals/retrieval/README.md` for the arm definitions.
+
+    docker compose exec -T -e RERANK_PROVIDER=jev backend \
+      python -m evals.groundedness.run_eval --project-id <id> --langfuse \
+      --langfuse-run "arm-C jev-noul" --metrics support,answer_relevance,context_relevance
+
+| Arm | Env |
+|---|---|
+| A | `RERANK_ENABLED=false` |
+| B | none (production defaults) |
+| C | `RERANK_PROVIDER=jev` |
+| D | `RERANK_PROVIDER=jev JEV_QUESTION=score` |
+| E | `FUSION_MODE=jev RERANK_ENABLED=false` |
+| E2 | `FUSION_MODE=jev` |
+
+- `FUSION_MODE=jev` with `RERANK_PROVIDER=jev` is refused at startup while
+  `RERANK_ENABLED` is on (Jev would score the same pairs twice; arm E turns it
+  off).
+- The harness refuses to start (`ERROR:` line, exit 1) when a configured stage
+  did not build: `FUSION_MODE=jev` without `DECISIONS_API_KEY`, or
+  `RERANK_ENABLED` with no usable key for the provider (Jev without
+  `DECISIONS_API_KEY`, Cohere without `COHERE_API_KEY`). Otherwise the run
+  would measure plain RRF under an arm's label. Run arm A explicitly with
+  `RERANK_ENABLED=false`. Skipped under `--replay`, which generates nothing.
+  Logic: `evals/groundedness/stages.py`.
+- Keep the answering model and judge identical across arms, and run B twice to
+  get the answer-sampling noise floor.
+- Live `chat.turn` traces carry `fusion` and `reranker` trace metadata (the
+  stages actually built, not the settings), and a `jev.rerank` generation span
+  with usage and cost. Eval traces do not carry that metadata: there the
+  `--langfuse-run` name is the arm label, so name it after the arm.
 
 ## Reading the output
 

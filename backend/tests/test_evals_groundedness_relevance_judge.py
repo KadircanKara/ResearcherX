@@ -205,3 +205,88 @@ async def test_content_with_no_object_at_all_still_raises():
     judge, _ = _judge_with_content("I cannot grade these excerpts.")
     with pytest.raises(Exception):
         await judge.judge_stance(question="q", answer="a")
+
+
+async def test_skipped_excerpts_are_re_asked_once_and_alone():
+    def reply(user):
+        shown = _numbers_in(user)
+        if shown == [1, 2, 3]:  # first pass: the judge stops after excerpt 1
+            return ContextRelevanceResponse(verdicts=[ExcerptRelevance(n=1, relevant=True)])
+        return ContextRelevanceResponse(
+            verdicts=[ExcerptRelevance(n=n, relevant=n == 3) for n in shown]
+        )
+
+    transport = FakeTransport(reply)
+    relevant = await _judge(transport).judge_context_relevance(
+        question="q", excerpts=[(1, "A", "x"), (2, "A", "y"), (3, "B", "z")]
+    )
+    assert relevant == frozenset({1, 3})
+    assert [_numbers_in(c["user"]) for c in transport.calls] == [[1, 2, 3], [2, 3]]
+
+
+async def test_a_second_miss_still_raises_after_exactly_one_re_ask():
+    transport = FakeTransport(
+        lambda user: ContextRelevanceResponse(verdicts=[ExcerptRelevance(n=1, relevant=True)])
+    )
+    with pytest.raises(ValueError, match=r"\[2\]"):
+        await _judge(transport).judge_context_relevance(
+            question="q", excerpts=[(1, "A", "x"), (2, "A", "y")]
+        )
+    assert len(transport.calls) == 2
+
+
+class SequencedCompletions(FakeCompletions):
+    """Replies with each content in turn, then repeats the last."""
+
+    def __init__(self, contents):
+        super().__init__(contents[0])
+        self.contents = list(contents)
+
+    async def create(self, **kwargs):
+        self.content = self.contents[min(self.calls, len(self.contents) - 1)]
+        return await super().create(**kwargs)
+
+
+def _judge_with_sequence(*contents) -> tuple[Judge, SequencedCompletions]:
+    judge = Judge(model="sonnet")
+    completions = SequencedCompletions(contents)
+    judge._client.chat.completions = completions
+    return judge, completions
+
+
+async def test_a_lone_claim_verdict_without_its_list_is_wrapped():
+    """Gemini's shape on single-claim answers: the verdict, minus the list."""
+    judge, completions = _judge_with_sequence(
+        '{"index": 0, "verdict": "supported", "supporting_excerpts": [1]}'
+    )
+    verdicts = await judge.judge_claims(
+        question="q", claims=[(0, "a claim")], excerpts=[(1, "A", "x")]
+    )
+    assert verdicts[0].verdict == "supported"
+    assert verdicts[0].supporting_excerpts == [1]
+    assert completions.calls == 1
+
+
+async def test_a_lone_object_that_is_not_a_verdict_is_not_wrapped():
+    """Wrapping only restores a COMPLETE item: an object missing the verdict
+    still fails, after the one re-ask."""
+    judge, completions = _judge_with_sequence('{"index": 0}')
+    with pytest.raises(Exception):
+        await judge.judge_claims(question="q", claims=[(0, "a claim")], excerpts=[(1, "A", "x")])
+    assert completions.calls == 2
+
+
+async def test_an_unparseable_reply_is_asked_again_once():
+    judge, completions = _judge_with_sequence(
+        '{"stance": "refused" "reason": ""}',  # the missing comma seen live
+        '{"stance": "refused", "reason": ""}',
+    )
+    assert (await judge.judge_stance(question="q", answer="a")).stance == "refused"
+    assert completions.calls == 2
+
+
+async def test_two_unparseable_replies_still_raise():
+    judge, completions = _judge_with_sequence('{"stance": "refused" "reason": ""}')
+    with pytest.raises(Exception):
+        await judge.judge_stance(question="q", answer="a")
+    assert completions.calls == 2

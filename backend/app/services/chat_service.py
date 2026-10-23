@@ -32,7 +32,8 @@ from app.services.hybrid_ranker import fuse_rrf, keep_within_rank_window
 from app.services.intra_paper_ranker import keep_within_paper
 from app.local_rag.rerank import CohereReranker
 from app.services.mention_ranker import apply_per_paper_floor
-from app.services.rerank_ranker import rerank_items
+from app.services.jev_reranker import JevReranker, build_jev_reranker
+from app.services.rerank_ranker import Reranker, rank_candidates
 from app.services.paper_resolver import ResolvablePaper, resolve_papers_with_evidence
 
 _HISTORY_TOP_K = 5
@@ -219,22 +220,32 @@ class PaperInfo(BaseModel):
     title: str
 
 
-def build_chat_reranker() -> CohereReranker | None:
-    """The chat path's reranker, or None when the stage is off.
+def build_chat_reranker() -> Reranker | None:
+    """The chat path's rerank stage, or None when it is off.
 
-    None for a disabled kill switch AND for an absent key: an empty
-    COHERE_API_KEY is a supported state, and `None` here is the same
-    "no opinion" the client returns on failure, so both degrade to the
-    fused order through one code path rather than two.
+    `rerank_enabled` is the kill switch; `rerank_provider` picks Cohere or
+    Jev. An absent key for the chosen provider is the same None the client
+    returns on failure, so every "off" degrades through one code path.
 
     Deliberately not `local_rag.rag.build_reranker`, which would be a
     circular import (`rag` imports `chat_service` for `renumber_citations`)
     and which ignores `rerank_enabled` because that flag is this path's
     kill switch, not local_rag's.
     """
-    if not settings.rerank_enabled or not settings.cohere_api_key:
+    if not settings.rerank_enabled:
+        return None
+    if settings.rerank_provider == "jev":
+        return build_jev_reranker()
+    if not settings.cohere_api_key:
         return None
     return CohereReranker(api_key=settings.cohere_api_key, model=settings.cohere_rerank_model)
+
+
+def build_fusion_scorer() -> Reranker | None:
+    """Jev over every fused candidate (FUSION_MODE=jev), or None for plain RRF."""
+    if settings.fusion_mode != "jev":
+        return None
+    return build_jev_reranker()
 
 
 def _section_tuple(raw) -> tuple[str, ...]:
@@ -285,6 +296,21 @@ async def _fetch_traced(name: str, db: AsyncSession, sql, params: dict) -> list:
     return rows
 
 
+def stage_labels(reranker: Reranker | None, fusion_scorer: Reranker | None) -> tuple[str, str]:
+    """(reranker, fusion) trace labels from what was BUILT, never from settings.
+
+    A configured stage whose key is missing builds to None; labelling from
+    settings would name a stage that never ran.
+    """
+    if isinstance(reranker, JevReranker):
+        rerank_label = "jev"
+    elif isinstance(reranker, CohereReranker):
+        rerank_label = "cohere"
+    else:
+        rerank_label = "none"
+    return rerank_label, "jev" if fusion_scorer is not None else "rrf"
+
+
 class ChatService:
     def __init__(self) -> None:
         self._embedding_svc = EmbeddingService()
@@ -293,6 +319,7 @@ class ChatService:
         self._chat_agent = ChatAgent()
         self._conv_svc = ConversationService()
         self._reranker = build_chat_reranker()
+        self._fusion_scorer = build_fusion_scorer()
 
     async def respond(
         self,
@@ -307,6 +334,7 @@ class ChatService:
         await that opens spans of its own runs `under(turn)` or inside a
         stage span parented to it explicitly.
         """
+        rerank_label, fusion_label = stage_labels(self._reranker, self._fusion_scorer)
         turn = observability.start_span(
             "chat.turn",
             root=True,
@@ -314,6 +342,8 @@ class ChatService:
                 "langfuse.trace.name": "chat.turn",
                 "langfuse.session.id": conversation_id,
                 "langfuse.trace.metadata.mentions": len(mentioned_paper_ids or []),
+                "langfuse.trace.metadata.fusion": fusion_label,
+                "langfuse.trace.metadata.reranker": rerank_label,
             },
         )
         observability.set_content(turn, "langfuse.trace.input", user_content)
@@ -522,6 +552,7 @@ class ChatService:
                                 retrieval_query,
                                 widened,
                                 reranker=self._reranker,
+                                fusion_scorer=self._fusion_scorer,
                             )
                         scope = paper_infos if widened else scope_infos
                     else:
@@ -533,6 +564,7 @@ class ChatService:
                                     retrieval_embedding,
                                     retrieval_query,
                                     reranker=self._reranker,
+                                    fusion_scorer=self._fusion_scorer,
                                 )
 
             if mentioned and not mentioned_infos:
@@ -719,7 +751,8 @@ class ChatService:
         embedding: list[float],
         query_text: str,
         widened: bool,
-        reranker: CohereReranker | None = None,
+        reranker: Reranker | None = None,
+        fusion_scorer: Reranker | None = None,
     ) -> tuple[list[ChunkContext], bool]:
         """Retrieve chunks for a turn scoped to explicitly NAMED papers.
 
@@ -806,6 +839,7 @@ class ChatService:
                 pool_limit=budget,
                 guarantee_per_paper=floor,
                 reranker=reranker,
+                fusion_scorer=fusion_scorer,
             )
 
         if not (widened or not candidates):
@@ -848,6 +882,7 @@ class ChatService:
                     query_text,
                     pool_limit=budget + len(pinned),
                     reranker=reranker,
+                    fusion_scorer=fusion_scorer,
                 )
             extra = [c for c in fill if (c.paper_id, c.chunk_index) not in pinned_keys][:remaining]
 
@@ -896,7 +931,8 @@ class ChatService:
         query_text: str,
         pool_limit: int | None = None,
         guarantee_per_paper: int = 0,
-        reranker: CohereReranker | None = None,
+        reranker: Reranker | None = None,
+        fusion_scorer: Reranker | None = None,
     ) -> list[ChunkContext]:
         """Retrieve the nearest chunks from `paper_infos`, ranked by distance.
 
@@ -1061,7 +1097,9 @@ class ChatService:
                     [score for _, score in fused], window=settings.intra_paper_rank_window
                 )
             ]
-        keys = await self._reranked_keys([key for key, _ in fused], by_id, query_text, reranker)
+        keys = await self._reranked_keys(
+            [key for key, _ in fused], by_id, query_text, reranker, fusion_scorer
+        )
         ranked = [by_id[key] for key in keys[:pool]]
         ranked = await self._with_guaranteed_rows(db, ranked, ids, qvec, threshold, guarantee)
         return self._to_chunk_contexts(ranked, paper_title_map)
@@ -1071,7 +1109,8 @@ class ChatService:
         keys: list,
         by_id: dict,
         query_text: str,
-        reranker: CohereReranker | None,
+        reranker: Reranker | None,
+        fusion_scorer: Reranker | None = None,
     ) -> list:
         """`keys` reordered by a cross-encoder pass, or `keys` unchanged.
 
@@ -1092,22 +1131,29 @@ class ChatService:
           "presence, not promotion". Scoring them here would let a row that
           entered on a per-paper guarantee outrank candidates that earned a
           fused rank.
-        - IT NEVER FILTERS. `apply_rerank` keeps every unscored candidate at
-          the tail; shrinking the list here would turn an ordering stage
-          into an admission stage and could return fewer chunks than the
-          budget allows.
+        - IT NEVER FILTERS by default. `apply_rerank` keeps every unscored
+          candidate at the tail; shrinking the list here would turn an
+          ordering stage into an admission stage and could return fewer
+          chunks than the budget allows. The opt-in exception is
+          `rerank_min_score`, which does exactly that on purpose.
 
         The head/tail split, the fail-open and the "score everything sent"
-        rule all live in `rerank_items`, which the eval harnesses call too --
+        rule all live in `rank_candidates`, which the eval harnesses call too --
         a hand-rolled copy here would be a second implementation of the
         policy under measurement.
+
+        With FUSION_MODE=jev, `fusion_scorer` first scores the WHOLE fused list
+        (see `rank_candidates`); it still never sees the guaranteed rows and
+        never filters.
         """
-        return await rerank_items(
+        return await rank_candidates(
             keys,
             query=query_text,
             text_of=lambda key: by_id[key].text,
+            fusion_scorer=fusion_scorer,
             reranker=reranker,
             limit=settings.rerank_candidates,
+            min_score=settings.rerank_min_score,
         )
 
     async def _with_guaranteed_rows(

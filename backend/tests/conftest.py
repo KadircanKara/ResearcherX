@@ -29,6 +29,18 @@ os.environ["LLM_FALLBACKS"] = "[]"
 # LLM's endpoint"), which is also what the judge config tests assert against.
 os.environ["JUDGE_BASE_URL"] = ""
 os.environ["JUDGE_API_KEY"] = ""
+# Paired with JUDGE_BASE_URL: an OpenRouter id from .env would otherwise reach
+# the default --judge-model while the endpoint above is blanked.
+os.environ["JUDGE_MODEL"] = "gpt-4.1-mini"
+# Jev's OpenRouter key: same repr-leak rule as the judge pair.
+os.environ["DECISIONS_API_KEY"] = ""
+# A dev .env carrying a Jev arm (RERANK_PROVIDER=jev, FUSION_MODE=jev, ...)
+# must not change the stage defaults the suite assumes, or trip the Jev
+# validator at import.
+os.environ["RERANK_PROVIDER"] = "cohere"
+os.environ["FUSION_MODE"] = "rrf"
+os.environ["RERANK_ENABLED"] = "true"
+os.environ["JEV_QUESTION"] = "noul"
 # Tracing stays OFF under test (no exporter, no network), and the Langfuse
 # secret must not reach Settings for the same repr-leak reason as above.
 # Tests that assert on spans install an in-memory provider themselves.

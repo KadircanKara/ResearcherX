@@ -100,14 +100,28 @@ def test_every_retrieval_call_is_handed_productions_reranker():
         assert _call_passes_reranker(harness, call), f"harness drops the reranker: {call}"
 
 
-def _call_passes_reranker(source: str, call: str) -> bool:
+def test_every_retrieval_call_is_handed_productions_fusion_scorer():
+    """FUSION_MODE=jev reorders the whole candidate list. A harness that drops
+    `fusion_scorer=` grades arm E and E2 as plain RRF with nothing failing."""
+    production = inspect.getsource(chat_service.ChatService.respond)
+    harness = inspect.getsource(generate.AnswerGenerator.generate)
+    for call in ("_retrieve_mentioned_chunks(", "_retrieve_paper_chunks("):
+        assert _call_passes(production, call, "fusion_scorer="), f"production changed: {call}"
+        assert _call_passes(harness, call, "fusion_scorer="), f"harness drops it: {call}"
+
+
+def _call_passes(source: str, call: str, keyword: str) -> bool:
     start = source.index(call)
     depth, end = 0, start
     for end in range(start + len(call) - 1, len(source)):
         depth += {"(": 1, ")": -1}.get(source[end], 0)
         if depth == 0:
             break
-    return "reranker=" in source[start:end]
+    return keyword in source[start:end]
+
+
+def _call_passes_reranker(source: str, call: str) -> bool:
+    return _call_passes(source, call, "reranker=")
 
 
 def test_the_judged_catalog_keeps_the_section_and_page_the_model_was_shown():
