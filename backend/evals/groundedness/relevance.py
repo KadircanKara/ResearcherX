@@ -67,6 +67,11 @@ class RelevanceOutcome:
     # "measured, nothing relevant" (an empty set -- the expected result on an
     # off_topic question).
     relevant: frozenset[int] | None
+    # A CLASS, from a judge that grades by category (`jev_judge.JevJudge`):
+    # one of `jev_judge.GRADES`, or None when that judge did not run. The LLM
+    # judge fills `answer_relevance` instead; a case has one or the other.
+    answer_grade: str | None = None
+    answer_grade_confidence: float | None = None
 
 
 def context_precision(outcomes: Sequence[RelevanceOutcome], k: int | None = None) -> float | None:
@@ -219,3 +224,12 @@ def write_csv(handle: IO[str], rows: Iterable[Mapping[str, object]]) -> None:
     writer = csv.DictWriter(handle, fieldnames=CSV_COLUMNS)
     writer.writeheader()
     writer.writerows(rows)
+
+
+def grade_counts(outcomes: Iterable[RelevanceOutcome]) -> dict[str, int]:
+    """How many graded cases landed in each class. Ungraded cases are left out."""
+    counts: dict[str, int] = {}
+    for outcome in outcomes:
+        if outcome.answer_grade is not None:
+            counts[outcome.answer_grade] = counts.get(outcome.answer_grade, 0) + 1
+    return counts

@@ -582,6 +582,37 @@ cases is a wiring check, not a measurement — but the shape is the expected one
 the rerank puts the useful excerpts first, and most of a 60-chunk budget is
 read past.
 
+### Judging with Jev (categorical, the default since 2026-10-23)
+
+`JUDGE_MODEL=~typesafe/jev-latest` (any name containing "jev") swaps the LLM
+judge for `jev_judge.JevJudge`: TypeSafe Jev through OpenRouter's `/systemone`
+endpoint, keyed by `DECISIONS_API_KEY`. Every verdict is a `choice` class with
+probabilities, never a score:
+
+| Call | Classes |
+|---|---|
+| claim gate | claim / no_claim |
+| each (claim, excerpt) pair | supports / partially_supports / silent / contradicts |
+| several partial excerpts together | supported / unsupported / contradicted |
+| stance | answered / refused / partial |
+| context relevance, per excerpt | answers / supplies_part (relevant) / same_topic_only / unrelated |
+| answer grade (positives) | fully_correct / padded / incomplete / unsupported / contradictory / off_target / refused |
+
+Claims are judged PAIRWISE because citation metrics need to know which excerpt
+carries a claim, and a choice answer names none. The answer grade replaces the
+0--1 `answer-rel` column with an ANSWER GRADE table of counts per class, and is
+checked against the excerpts the answer cites plus the golden set's
+`expect_substrings`.
+
+Measured 2026-10-23 on the 40-case set (same gpt-5-mini answers, replayed):
+Jev and gemini-2.5-flash-lite agree on every support and problem call (30 of
+31 claim verdicts, the one difference being a bullet Jev called no_claim). Jev
+reads context precision quite differently: 0.49 on positives and 0.11 on
+off_topic, against 0.22 and 0.22. **Do not compare Jev-judged ctx-P with
+earlier LLM-judged runs.** The grade put `ir2-exploration-maps` as
+contradictory: answers name Indoor/Forest/Campus where the set expects
+Corridor/Hybrid/Complex. A 40-case replay costs ~$0.03 and takes under a minute.
+
 ## Disclosed general knowledge is not hallucination
 
 Production's own system prompt (`app/agents/chat_agent.py::SYSTEM`) instructs
