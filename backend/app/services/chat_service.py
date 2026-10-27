@@ -348,24 +348,6 @@ async def _apply_dense_path(db: AsyncSession, pool: int, *, exact: bool) -> None
         await db.execute(text(statement))
 
 
-# The dense candidate scan, shared by `_dense_only_rows` and `_hybrid_rows`
-# so the two arms cannot drift. A bare `ORDER BY distance LIMIT` over the
-# scope, MATERIALIZED so the planner cannot inline it into the outer gate --
-# that is the only shape HNSW serves. Needs the `scope` CTE before it.
-_DENSE_RAW_CTE = """
-            dense_raw AS MATERIALIZED (
-                SELECT c.id, c.paper_id, c.chunk_index, c.text, c.section, c.page,
-                       c.embedding <=> CAST(:qvec AS halfvec(768)) AS distance
-                FROM paper_chunk_embeddings c
-                WHERE c.project_id = :project_id AND c.model = :model
-                  AND c.paper_id IN (SELECT paper_id FROM scope)
-                ORDER BY c.embedding <=> CAST(:qvec AS halfvec(768))
-                LIMIT :dense_pool
-            ),
-            dense_n AS (
-                SELECT COUNT(*) AS dense_raw_n FROM dense_raw
-            )"""
-
 _SCOPE_CTE = """
             scope AS (
                 SELECT value AS paper_id
@@ -373,11 +355,58 @@ _SCOPE_CTE = """
             )"""
 
 
-def _dense_raw_count(rows) -> int:
-    """How many rows the dense scan returned before the gate. Every row of a
-    dense query carries it (`dense_n` is LEFT JOINed, so even an all-gated
-    result returns one placeholder row); no rows at all reads as 0."""
-    return rows[0].dense_raw_n if rows else 0
+def _dense_ctes(*, exact: bool) -> str:
+    """The dense candidate CTEs, shared by `_dense_only_rows` and
+    `_hybrid_rows` so the two arms cannot drift. Needs `scope` before it.
+
+    `dense_raw` is a bare `ORDER BY distance LIMIT dense_pool`, MATERIALIZED
+    so the planner cannot inline it into the outer gate.
+
+    - HNSW (`exact=False`, the whole-project scope): `dense_raw` filters on
+      project and model ONLY. A scope semi-join inside it steers the planner
+      to the (project_id, paper_id) btree -- measured live: a nested loop
+      over 2,024 papers, linear in project size, the ANN never ran. Chunks
+      outside the scope (papers not `ready`, e.g. a failed re-upload that
+      kept its old rows) are dropped OUTSIDE, in `dense_scoped`.
+    - Exact (`exact=True`, an explicit paper scope): the scope filter is
+      inside `dense_raw`, served by the btree and bitmap scans. The outer
+      filter is then a no-op, kept so both shapes expose one interface.
+
+    `dense_n` carries both counts out. The caller's fallback reads the
+    scoped one, which is never larger: rows that survive the scope filter
+    but are fewer than `dense_pool` mean the scan was cut short or ate its
+    pool on out-of-scope chunks.
+    """
+    inner_scope = (
+        "\n                  AND c.paper_id IN (SELECT paper_id FROM scope)" if exact else ""
+    )
+    return f"""
+            dense_raw AS MATERIALIZED (
+                SELECT c.id, c.paper_id, c.chunk_index, c.text, c.section, c.page,
+                       c.embedding <=> CAST(:qvec AS halfvec(768)) AS distance
+                FROM paper_chunk_embeddings c
+                WHERE c.project_id = :project_id AND c.model = :model{inner_scope}
+                ORDER BY c.embedding <=> CAST(:qvec AS halfvec(768))
+                LIMIT :dense_pool
+            ),
+            dense_scoped AS (
+                SELECT * FROM dense_raw
+                WHERE paper_id IN (SELECT paper_id FROM scope)
+            ),
+            dense_n AS (
+                SELECT (SELECT COUNT(*) FROM dense_raw) AS dense_raw_n,
+                       (SELECT COUNT(*) FROM dense_scoped) AS dense_scoped_n
+            )"""
+
+
+def _dense_counts(rows) -> tuple[int, int]:
+    """(rows the scan returned, rows that survived the scope filter), both
+    before the distance gate. Every row of a dense query carries them
+    (`dense_n` is LEFT JOINed, so even an all-gated result returns one
+    placeholder row); no rows at all reads as (0, 0)."""
+    if not rows:
+        return 0, 0
+    return rows[0].dense_raw_n, rows[0].dense_scoped_n
 
 
 def stage_labels(reranker: Reranker | None, fusion_scorer: Reranker | None) -> tuple[str, str]:
@@ -1152,11 +1181,13 @@ class ChatService:
         anywhere saying so. So:
           - `exact=True` for any scope narrower than the project's ready
             papers (mentions, resolver scopes): an exact scan, no HNSW.
-          - `exact=False` only for the whole project: HNSW, and if the scan
-            returned fewer than `dense_pool` rows the same query re-runs
-            exact -- either the project is smaller than the pool (exact is
-            cheap) or the scan was cut short (exact is correct). A full pool
-            costs one query, as before.
+          - `exact=False` only for the whole project: HNSW over project and
+            model alone (the scope, i.e. ready papers, is filtered outside the
+            scan), and if fewer than `dense_pool` rows survive that filter the
+            query re-runs in its exact shape -- the project is smaller than
+            the pool (exact is cheap), or the scan was cut short or spent on
+            non-ready papers' chunks (exact is correct). A full pool costs one
+            query, as before.
         """
         if not paper_infos:
             return []
@@ -1427,7 +1458,7 @@ class ChatService:
     ):
         """Dense candidates for the kill-switch path.
 
-        `_DENSE_RAW_CTE` is the scan. The distance gate runs OUTSIDE it, over
+        `_dense_ctes` is the scan. The distance gate runs OUTSIDE it, over
         a re-sort: under `relaxed_order` the scan may return rows slightly out
         of order, and a gate inside it would cut the scan instead of the
         result. Top-`pool` then gate is the same set as gate then top-`pool`,
@@ -1440,19 +1471,22 @@ class ChatService:
         rejects everything (a placeholder row with a NULL id, dropped by
         `_dense_query`).
         """
-        sql = text(
-            "WITH"
-            + _SCOPE_CTE
-            + ","
-            + _DENSE_RAW_CTE
-            + """
+
+        def sql(exact: bool):
+            return text(
+                "WITH"
+                + _SCOPE_CTE
+                + ","
+                + _dense_ctes(exact=exact)
+                + """
             SELECT d.id, d.paper_id, d.chunk_index, d.text, d.section, d.page,
-                   d.distance, n.dense_raw_n
+                   d.distance, n.dense_raw_n, n.dense_scoped_n
             FROM dense_n n
-            LEFT JOIN dense_raw d ON d.distance < :threshold
+            LEFT JOIN dense_scoped d ON d.distance < :threshold
             ORDER BY d.distance ASC, d.id
         """
-        )
+            )
+
         return await self._dense_query(
             db,
             "retrieval.dense",
@@ -1471,17 +1505,26 @@ class ChatService:
     async def _dense_query(self, db: AsyncSession, name: str, sql, params: dict, *, exact: bool):
         """Run a dense candidate query on the scan the caller chose.
 
-        HNSW (`exact=False`) re-runs exact when `dense_raw` came back shorter
-        than `dense_pool`: see `_retrieve_paper_chunks`. Either way the
-        `dense_n` placeholder row is dropped before returning.
+        `sql(exact)` builds the query for a scan. HNSW (`exact=False`) re-runs
+        the EXACT shape when fewer than `dense_pool` rows survived the scope
+        filter: see `_retrieve_paper_chunks`. Either way the `dense_n`
+        placeholder row is dropped before returning.
         """
         pool = params["dense_pool"]
         await _apply_dense_path(db, pool, exact=exact)
-        rows = await _fetch_traced(name, db, sql, params)
-        if not exact and (got := _dense_raw_count(rows)) < pool:
-            log.debug("hnsw_short_scan_exact_fallback", query=name, rows=got, dense_pool=pool)
-            await _apply_dense_path(db, pool, exact=True)
-            rows = await _fetch_traced(f"{name}.exact", db, sql, params)
+        rows = await _fetch_traced(name, db, sql(exact), params)
+        if not exact:
+            raw, scoped = _dense_counts(rows)
+            if min(raw, scoped) < pool:
+                log.debug(
+                    "hnsw_short_scan_exact_fallback",
+                    query=name,
+                    rows=raw,
+                    scoped_rows=scoped,
+                    dense_pool=pool,
+                )
+                await _apply_dense_path(db, pool, exact=True)
+                rows = await _fetch_traced(f"{name}.exact", db, sql(True), params)
         return [row for row in rows if row.id is not None]
 
     async def _hybrid_rows(
@@ -1520,24 +1563,26 @@ class ChatService:
         constants (dense 200 against a <= 110 pool) the `max()` returns 200
         unchanged and nothing about the tuned fusion moves.
 
-        The dense arm is `_DENSE_RAW_CTE`, with the gate and `d_rank`
+        The dense arm is `_dense_ctes`, with the gate and `d_rank`
         assigned outside it over a re-sort (`distance, id`, so ties rank
         deterministically). `dense_n` is LEFT JOINed onto the FULL OUTER JOIN
         so the scan's row count survives both arms coming back empty.
         """
         dense_pool = max(settings.hybrid_dense_pool, pool)
-        sql = text(
-            "WITH"
-            + _SCOPE_CTE
-            + """,
+
+        def sql(exact: bool):
+            return text(
+                "WITH"
+                + _SCOPE_CTE
+                + """,
             q AS (
                 SELECT websearch_to_tsquery('english', :qtext) AS tsq
             ),"""
-            + _DENSE_RAW_CTE
-            + """,
+                + _dense_ctes(exact=exact)
+                + """,
             dense AS (
                 SELECT *, ROW_NUMBER() OVER (ORDER BY distance, id) AS d_rank
-                FROM dense_raw
+                FROM dense_scoped
                 WHERE distance < :threshold
             ),
             sparse AS (
@@ -1570,11 +1615,13 @@ class ChatService:
                    d.distance                              AS distance,
                    d.d_rank                                AS d_rank,
                    sp.s_rank                                AS s_rank,
-                   n.dense_raw_n                           AS dense_raw_n
+                   n.dense_raw_n                           AS dense_raw_n,
+                   n.dense_scoped_n                        AS dense_scoped_n
             FROM dense_n n
             LEFT JOIN (dense d FULL OUTER JOIN sparse sp ON sp.id = d.id) ON true
         """
-        )
+            )
+
         return await self._dense_query(
             db,
             "retrieval.hybrid",

@@ -179,6 +179,7 @@ def _mock_db_returning(n_rows: int) -> MagicMock:
             page=None,
             # The dense scan's own row count, carried on every row.
             dense_raw_n=n_rows,
+            dense_scoped_n=n_rows,
         )
         for i in range(n_rows)
     ]
@@ -256,7 +257,8 @@ def _hybrid_db(rows: list[dict]) -> MagicMock:
     """Fake AsyncSession returning explicitly-ranked hybrid rows."""
     mock_result = MagicMock()
     mock_result.fetchall.return_value = [
-        MagicMock(**{"dense_raw_n": _FULL_SCAN, **row}) for row in rows
+        MagicMock(**{"dense_raw_n": _FULL_SCAN, "dense_scoped_n": _FULL_SCAN, **row})
+        for row in rows
     ]
     mock_db = MagicMock()
     mock_db.execute = AsyncMock(return_value=mock_result)
@@ -1421,6 +1423,7 @@ def _row(i: int, paper_id: str) -> MagicMock:
         section=[],
         page=None,
         dense_raw_n=_FULL_SCAN,
+        dense_scoped_n=_FULL_SCAN,
     )
 
 
@@ -1641,7 +1644,7 @@ def test_both_arms_share_one_dense_scan_fragment():
         chat_service.ChatService._hybrid_rows,
     ):
         source = inspect.getsource(method)
-        assert "_DENSE_RAW_CTE" in source
+        assert "_dense_ctes(exact=exact)" in source
         assert "embedding <=> CAST" not in source
 
 
@@ -1665,7 +1668,8 @@ async def test_threshold_is_applied_outside_the_ann_scan(hybrid):
     body, after = _cte_body(sql, "dense_raw")
     assert ":threshold" not in body
     assert "distance < :threshold" in after
-    assert "COUNT(*) AS dense_raw_n FROM dense_raw" in after
+    assert "(SELECT COUNT(*) FROM dense_raw) AS dense_raw_n" in after
+    assert "(SELECT COUNT(*) FROM dense_scoped) AS dense_scoped_n" in after
     assert "FROM dense_n n\n            LEFT JOIN" in after
     if hybrid:
         assert "ROW_NUMBER() OVER (ORDER BY distance, id) AS d_rank" in after
@@ -1786,8 +1790,63 @@ async def test_a_short_global_hnsw_scan_re_runs_exact(hybrid):
         "SET LOCAL enable_indexscan = off",
         str(second.args[0]),
     ]
-    assert first.args == second.args
+    assert first.args[1] == second.args[1]
+    # The re-run is the exact SHAPE: scope inside the scan, not just a
+    # different planner setting over the unscoped HNSW shape.
+    assert "scope" not in _cte_body(first.args[0].text, "dense_raw")[0]
+    assert "IN (SELECT paper_id FROM scope)" in _cte_body(second.args[0].text, "dense_raw")[0]
     assert len(chunks) == 7
+
+
+@pytest.mark.parametrize("hybrid", [True, False])
+async def test_the_global_ann_scan_never_joins_the_scope(hybrid):
+    """A scope semi-join inside `dense_raw` steered the planner to the
+    (project_id, paper_id) btree -- measured live: a nested loop over 2,024
+    papers, 369 ms, the ANN never ran. The global scan filters on project
+    and model only; the scope (ready papers) is applied OUTSIDE it, before
+    the distance gate."""
+    sql, _, _ = await _dense_sql(hybrid, exact=False)
+    body, after = _cte_body(sql, "dense_raw")
+    assert "scope" not in body
+    assert "WHERE c.project_id = :project_id AND c.model = :model" in body
+    scoped, sep, rest = after.partition("dense_n AS (")
+    assert sep
+    assert (
+        "FROM dense_raw\n                WHERE paper_id IN (SELECT paper_id FROM scope)" in scoped
+    )
+    # The gate reads the scoped rows, never the raw scan.
+    assert "FROM dense_raw\n                WHERE distance" not in rest
+    assert ("FROM dense_scoped\n                WHERE distance < :threshold" in rest) or (
+        "LEFT JOIN dense_scoped d ON d.distance < :threshold" in rest
+    )
+
+
+@pytest.mark.parametrize("hybrid", [True, False])
+async def test_an_explicit_scope_filters_inside_the_exact_scan(hybrid):
+    sql, _, _ = await _dense_sql(hybrid, exact=True)
+    body, _ = _cte_body(sql, "dense_raw")
+    assert "AND c.paper_id IN (SELECT paper_id FROM scope)" in body
+
+
+async def test_a_full_scan_eaten_by_out_of_scope_chunks_re_runs_exact():
+    """The HNSW scan filled its pool, but non-ready papers' chunks took part
+    of it, so fewer than `dense_pool` rows survived the scope filter. That is
+    a shortfall like any other: re-run exact."""
+    from app.services.chat_service import ChatService, PaperInfo
+
+    pool = settings.hybrid_dense_pool
+    rows = [MagicMock(**row, dense_raw_n=pool, dense_scoped_n=pool - 5) for row in _dense_rows(3)]
+    result = MagicMock()
+    result.fetchall.return_value = rows
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=result)
+    papers = [PaperInfo(paper_id="p1", title="A"), PaperInfo(paper_id="p2", title="B")]
+    with patch.object(settings, "hybrid_retrieval", True):
+        await ChatService()._retrieve_paper_chunks(
+            db, papers, [0.0] * 768, "q", project_id="proj-1", exact=False
+        )
+
+    assert len(_candidate_calls(db)) == 2
 
 
 async def test_the_placeholder_row_of_an_all_gated_scan_never_reaches_the_model():
@@ -1795,7 +1854,8 @@ async def test_the_placeholder_row_of_an_all_gated_scan_never_reaches_the_model(
     every row; that placeholder (NULL id) must be dropped."""
     from app.services.chat_service import ChatService, PaperInfo
 
-    placeholder = MagicMock(id=None, dense_raw_n=settings.hybrid_dense_pool)
+    full = settings.hybrid_dense_pool
+    placeholder = MagicMock(id=None, dense_raw_n=full, dense_scoped_n=full)
     result = MagicMock()
     result.fetchall.return_value = [placeholder]
     db = MagicMock()
