@@ -1412,6 +1412,20 @@ runner refuses to compute one without usable negatives.
 Results are model-specific. Re-baseline after any change to
 `EMBEDDING_MODEL` or either `EMBEDDING_*_PREFIX`.
 
+## `sparse_backend` and the harness guard
+
+Production's lexical arm is selected by `SPARSE_BACKEND` (`postgres`, the
+default, or `bm25s`). `run_eval --hybrid` and the `mention_eval` mirror arms
+execute the Postgres `tsv` SQL directly, so under `bm25s` they would report a
+backend that is not serving. `arms.sparse_backend_refusal` makes them refuse
+to run unless `sparse_backend == postgres`.
+
+The `--bm25` arm is NOT production's bm25s path: it fuses through its own
+`fuse_with_bm25`, a second implementation. Its numbers (plan 1: hybrid_bm25
+0.350 vs hybrid_sql 0.329 macro MRR, not established on the test split) justify
+an experiment, not a default flip. Before the default changes, route the arm
+through `ChatService._hybrid_rows` so it measures what production runs.
+
 ## Findings
 
 Dated measurements from the live dev corpus at the time this branch's final
