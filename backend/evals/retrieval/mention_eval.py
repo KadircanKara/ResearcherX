@@ -401,6 +401,7 @@ async def _run_arm(
     qvec: str,
     qtext: str,
     scope_ids: list[str],
+    project_id: str,
     embedding: list[float] | None = None,
     titles: dict[str, str] | None = None,
 ) -> list[Scored]:
@@ -436,6 +437,7 @@ async def _run_arm(
             embedding or [],
             qtext,
             False,
+            project_id=project_id,
             reranker=_build_reranker(arm),
         )
         return [
@@ -941,6 +943,7 @@ async def main() -> None:  # noqa: PLR0912 — a report script, not a library AP
                         qvec=qvec,
                         qtext=case.question,
                         scope_ids=scope_ids,
+                        project_id=args.project_id,
                         embedding=embedding,
                         titles=titles_by_id,
                     )
@@ -978,6 +981,7 @@ async def main() -> None:  # noqa: PLR0912 — a report script, not a library AP
                     qvec=qvec,
                     qtext=comparison.question,
                     scope_ids=scope_ids,
+                    project_id=args.project_id,
                     embedding=embedding,
                     titles=titles_by_id,
                 )

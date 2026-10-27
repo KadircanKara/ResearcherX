@@ -145,6 +145,7 @@ class AnswerGenerator:
                 embedding,
                 question,
                 widened,
+                project_id=project_id,
                 reranker=self._chat._reranker,
                 fusion_scorer=self._chat._fusion_scorer,
             )
@@ -155,6 +156,7 @@ class AnswerGenerator:
                     paper_infos,
                     embedding,
                     question,
+                    project_id=project_id,
                     reranker=self._chat._reranker,
                     fusion_scorer=self._chat._fusion_scorer,
                 )

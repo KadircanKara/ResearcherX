@@ -208,6 +208,17 @@ class Settings(BaseSettings):
     hybrid_dense_pool: int = 200
     hybrid_sparse_pool: int = 100
 
+    # HNSW query-time settings, applied with SET LOCAL before every dense
+    # candidate query (`chat_service._hnsw_settings_sql`). The dense arm asks
+    # the index for `hybrid_dense_pool` rows inside a project/paper filter;
+    # a plain HNSW scan stops at ef_search candidates and returns fewer rows
+    # than exact search when the filter discards most of them. The iterative
+    # scan (relaxed_order) keeps walking the graph until the LIMIT is met or
+    # `hnsw_max_scan_tuples` tuples were visited. ef_search is
+    # max(hnsw_ef_search, pool), clamped to pgvector's maximum of 1000.
+    hnsw_ef_search: int = 200
+    hnsw_max_scan_tuples: int = 100_000
+
     # Single-paper cut under hybrid. Replaces intra_paper_delta, which is a
     # distance-space rule (best + delta) and has no meaning against a fused
     # rank. TUNED BY THE SWEEP -- see the measured block in
@@ -640,6 +651,16 @@ class Settings(BaseSettings):
             raise ValueError(
                 "HYBRID_DENSE_POOL/HYBRID_SPARSE_POOL must be >= 1 "
                 "(a pool of 0 silently disables that arm)"
+            )
+        if not 1 <= self.hnsw_ef_search <= 1000:
+            raise ValueError(
+                "HNSW_EF_SEARCH must be in [1, 1000] (pgvector rejects anything "
+                "else, so every dense query's SET LOCAL would fail the turn)"
+            )
+        if self.hnsw_max_scan_tuples <= 0:
+            raise ValueError(
+                "HNSW_MAX_SCAN_TUPLES must be >= 1 (pgvector's minimum; the "
+                "SET LOCAL before every dense query would fail the turn)"
             )
         if self.intra_paper_rank_window <= 0:
             raise ValueError(

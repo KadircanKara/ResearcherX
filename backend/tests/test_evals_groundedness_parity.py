@@ -110,6 +110,16 @@ def test_every_retrieval_call_is_handed_productions_fusion_scorer():
         assert _call_passes(harness, call, "fusion_scorer="), f"harness drops it: {call}"
 
 
+def test_every_retrieval_call_is_scoped_to_the_project():
+    """The dense candidate query filters `c.project_id` so the HNSW scan stays
+    inside one project; a call that drops `project_id=` cannot run at all."""
+    production = inspect.getsource(chat_service.ChatService.respond)
+    harness = inspect.getsource(generate.AnswerGenerator.generate)
+    for call in ("_retrieve_mentioned_chunks(", "_retrieve_paper_chunks("):
+        assert _call_passes(production, call, "project_id="), f"production changed: {call}"
+        assert _call_passes(harness, call, "project_id="), f"harness drops it: {call}"
+
+
 def _call_passes(source: str, call: str, keyword: str) -> bool:
     start = source.index(call)
     depth, end = 0, start

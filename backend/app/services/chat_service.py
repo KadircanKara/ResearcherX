@@ -296,6 +296,48 @@ async def _fetch_traced(name: str, db: AsyncSession, sql, params: dict) -> list:
     return rows
 
 
+# pgvector's upper bound on hnsw.ef_search. A larger pool is still served in
+# full: the iterative scan keeps returning rows past ef_search.
+_HNSW_EF_SEARCH_MAX = 1000
+
+
+def _sql_int(value) -> int:
+    """`value` if it is a real int, else TypeError. The HNSW settings are
+    spliced into SQL text because SET takes no bind parameters, so nothing
+    but an int may ever reach that f-string."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"expected an int, got {type(value).__name__}")
+    return value
+
+
+def _hnsw_settings_sql(pool: int) -> list[str]:
+    """The three `SET LOCAL` statements every dense candidate query runs first.
+
+    Without them an HNSW scan stops after `ef_search` candidates (pgvector's
+    default is 40) and THEN applies the project/model/paper filter, so a
+    filtered query returns fewer rows than exact search -- silently, since a
+    short candidate list looks like a strict distance gate. `relaxed_order`
+    keeps scanning until the LIMIT is met or `hnsw_max_scan_tuples` tuples
+    were visited; it may return rows slightly out of order, which is why the
+    dense SQL re-sorts outside the scan.
+
+    SET LOCAL lasts until the transaction ends, so these run on the same
+    session immediately before each dense query, never once per process.
+    """
+    ef_search = min(max(_sql_int(settings.hnsw_ef_search), _sql_int(pool)), _HNSW_EF_SEARCH_MAX)
+    max_scan = _sql_int(settings.hnsw_max_scan_tuples)
+    return [
+        "SET LOCAL hnsw.iterative_scan = relaxed_order",
+        f"SET LOCAL hnsw.ef_search = {ef_search}",
+        f"SET LOCAL hnsw.max_scan_tuples = {max_scan}",
+    ]
+
+
+async def _apply_hnsw_settings(db: AsyncSession, pool: int) -> None:
+    for statement in _hnsw_settings_sql(pool):
+        await db.execute(text(statement))
+
+
 def stage_labels(reranker: Reranker | None, fusion_scorer: Reranker | None) -> tuple[str, str]:
     """(reranker, fusion) trace labels from what was BUILT, never from settings.
 
@@ -559,6 +601,7 @@ class ChatService:
                                 retrieval_embedding,
                                 retrieval_query,
                                 widened,
+                                project_id=conv.project_id,
                                 reranker=self._reranker,
                                 fusion_scorer=self._fusion_scorer,
                             )
@@ -571,6 +614,7 @@ class ChatService:
                                     paper_infos,
                                     retrieval_embedding,
                                     retrieval_query,
+                                    project_id=conv.project_id,
                                     reranker=self._reranker,
                                     fusion_scorer=self._fusion_scorer,
                                 )
@@ -759,6 +803,8 @@ class ChatService:
         embedding: list[float],
         query_text: str,
         widened: bool,
+        *,
+        project_id: str,
         reranker: Reranker | None = None,
         fusion_scorer: Reranker | None = None,
     ) -> tuple[list[ChunkContext], bool]:
@@ -844,6 +890,7 @@ class ChatService:
                 scope,
                 embedding,
                 query_text,
+                project_id=project_id,
                 pool_limit=budget,
                 guarantee_per_paper=floor,
                 reranker=reranker,
@@ -888,6 +935,7 @@ class ChatService:
                     all_papers,
                     embedding,
                     query_text,
+                    project_id=project_id,
                     pool_limit=budget + len(pinned),
                     reranker=reranker,
                     fusion_scorer=fusion_scorer,
@@ -937,6 +985,8 @@ class ChatService:
         paper_infos: list[PaperInfo],
         query_embedding: list[float],
         query_text: str,
+        *,
+        project_id: str,
         pool_limit: int | None = None,
         guarantee_per_paper: int = 0,
         reranker: Reranker | None = None,
@@ -1058,7 +1108,7 @@ class ChatService:
         ids = json.dumps([p.paper_id for p in paper_infos])
 
         if not settings.hybrid_retrieval:
-            rows = await self._dense_only_rows(db, ids, qvec, threshold, pool)
+            rows = await self._dense_only_rows(db, project_id, ids, qvec, threshold, pool)
             # Re-applied in Python on purpose. LIMIT bounds what crosses the wire;
             # this bounds what reaches the model. The budget is the single
             # invariant that keeps chat working at any library size, so it must
@@ -1073,7 +1123,7 @@ class ChatService:
             rows = await self._with_guaranteed_rows(db, rows, ids, qvec, threshold, guarantee)
             return self._to_chunk_contexts(rows, paper_title_map)
 
-        rows = await self._hybrid_rows(db, ids, qvec, query_text, threshold, pool)
+        rows = await self._hybrid_rows(db, project_id, ids, qvec, query_text, threshold, pool)
         by_id = {row.id: row for row in rows}
         dense_ranked = [
             row.id
@@ -1299,25 +1349,42 @@ class ChatService:
         ]
 
     async def _dense_only_rows(
-        self, db: AsyncSession, ids: str, qvec: str, threshold: float, pool: int
+        self, db: AsyncSession, project_id: str, ids: str, qvec: str, threshold: float, pool: int
     ):
-        # `paper_chunk_embeddings` is global, so this query MUST be scoped to
-        # the project. The ids ride in as one jsonb param rather than an IN
-        # list: 100 papers would otherwise need 100 bind params, and asyncpg
-        # array binding through text() needs casts that differ per driver.
+        """Dense candidates for the kill-switch path, in the shape HNSW serves.
+
+        `dense_raw` is a bare `ORDER BY distance LIMIT pool` over the scope,
+        MATERIALIZED so the planner cannot inline it into the outer filter --
+        the HNSW index serves exactly that shape and nothing else. The
+        distance gate runs OUTSIDE it, over a re-sort: under `relaxed_order`
+        the scan may return rows slightly out of order, and a gate inside it
+        would cut the scan instead of the result. Top-`pool` then gate is the
+        same set as gate then top-`pool`, because the gate keeps a prefix of
+        the distance order.
+
+        `paper_chunk_embeddings` is global, so the query MUST be scoped:
+        `project_id` keeps the scan inside one project and the ids (one jsonb
+        param rather than an IN list of 100 binds) narrow it to the scope.
+        """
+        await _apply_hnsw_settings(db, pool)
         sql = text("""
             WITH scope AS (
                 SELECT value AS paper_id
                 FROM jsonb_array_elements_text(CAST(:ids AS jsonb))
+            ),
+            dense_raw AS MATERIALIZED (
+                SELECT c.id, c.paper_id, c.chunk_index, c.text, c.section, c.page,
+                       c.embedding <=> CAST(:qvec AS halfvec(768)) AS distance
+                FROM paper_chunk_embeddings c
+                WHERE c.project_id = :project_id AND c.model = :model
+                  AND c.paper_id IN (SELECT paper_id FROM scope)
+                ORDER BY c.embedding <=> CAST(:qvec AS halfvec(768))
+                LIMIT :dense_pool
             )
-            SELECT c.id, c.paper_id, c.chunk_index, c.text, c.section, c.page,
-                   (c.embedding <=> CAST(:qvec AS halfvec(768))) AS distance
-            FROM paper_chunk_embeddings c
-            JOIN scope s ON s.paper_id = c.paper_id
-            WHERE c.model = :model
-              AND (c.embedding <=> CAST(:qvec AS halfvec(768))) < :threshold
-            ORDER BY distance ASC
-            LIMIT :max_chunks
+            SELECT id, paper_id, chunk_index, text, section, page, distance
+            FROM dense_raw
+            WHERE distance < :threshold
+            ORDER BY distance ASC, id
         """)
         rows = await _fetch_traced(
             "retrieval.dense",
@@ -1326,15 +1393,23 @@ class ChatService:
             {
                 "qvec": qvec,
                 "ids": ids,
+                "project_id": project_id,
                 "model": settings.embedding_model,
                 "threshold": threshold,
-                "max_chunks": pool,
+                "dense_pool": pool,
             },
         )
         return rows
 
     async def _hybrid_rows(
-        self, db: AsyncSession, ids: str, qvec: str, qtext: str, threshold: float, pool: int
+        self,
+        db: AsyncSession,
+        project_id: str,
+        ids: str,
+        qvec: str,
+        qtext: str,
+        threshold: float,
+        pool: int,
     ):
         """Both arms in ONE round trip, each carrying its own rank.
 
@@ -1359,7 +1434,15 @@ class ChatService:
         would change which lexical chunks are admitted. At the shipped
         constants (dense 200 against a <= 110 pool) the `max()` returns 200
         unchanged and nothing about the tuned fusion moves.
+
+        The dense arm has the HNSW shape `_dense_only_rows` documents: a
+        MATERIALIZED `ORDER BY distance LIMIT dense_pool` scan, with the gate
+        and `d_rank` assigned outside it over a re-sort (`distance, id`, so
+        ties rank deterministically), after the `SET LOCAL` iterative-scan
+        settings.
         """
+        dense_pool = max(settings.hybrid_dense_pool, pool)
+        await _apply_hnsw_settings(db, dense_pool)
         sql = text("""
             WITH scope AS (
                 SELECT value AS paper_id
@@ -1368,18 +1451,19 @@ class ChatService:
             q AS (
                 SELECT websearch_to_tsquery('english', :qtext) AS tsq
             ),
-            dense AS (
+            dense_raw AS MATERIALIZED (
                 SELECT c.id, c.paper_id, c.chunk_index, c.text, c.section, c.page,
-                       (c.embedding <=> CAST(:qvec AS halfvec(768))) AS distance,
-                       ROW_NUMBER() OVER (
-                           ORDER BY c.embedding <=> CAST(:qvec AS halfvec(768))
-                       ) AS d_rank
+                       c.embedding <=> CAST(:qvec AS halfvec(768)) AS distance
                 FROM paper_chunk_embeddings c
-                JOIN scope s ON s.paper_id = c.paper_id
-                WHERE c.model = :model
-                  AND (c.embedding <=> CAST(:qvec AS halfvec(768))) < :threshold
-                ORDER BY distance ASC
+                WHERE c.project_id = :project_id AND c.model = :model
+                  AND c.paper_id IN (SELECT paper_id FROM scope)
+                ORDER BY c.embedding <=> CAST(:qvec AS halfvec(768))
                 LIMIT :dense_pool
+            ),
+            dense AS (
+                SELECT *, ROW_NUMBER() OVER (ORDER BY distance, id) AS d_rank
+                FROM dense_raw
+                WHERE distance < :threshold
             ),
             sparse AS (
                 SELECT c.id, c.paper_id, c.chunk_index, c.text, c.section, c.page,
@@ -1422,9 +1506,10 @@ class ChatService:
                 "qvec": qvec,
                 "qtext": qtext,
                 "ids": ids,
+                "project_id": project_id,
                 "model": settings.embedding_model,
                 "threshold": threshold,
-                "dense_pool": max(settings.hybrid_dense_pool, pool),
+                "dense_pool": dense_pool,
                 "sparse_pool": settings.hybrid_sparse_pool,
             },
         )
