@@ -56,7 +56,7 @@ async def write_record(
     summary; it leaves the row `ready` with no embedding and is logged.
     Raises only if the summary write itself fails.
     """
-    paper_id, title, abstract = paper.id, paper.title, paper.abstract
+    paper_id, abstract = paper.id, paper.abstract
     if generated is not None:
         summary, keywords = generated.record.summary, list(generated.record.keywords)
         summary_model, source, status, error = generated.model, SOURCE_LLM, READY, None
@@ -98,11 +98,32 @@ async def write_record(
     await db.commit()
 
     if status == READY:
-        await _write_embedding(db, paper_id, embed_text(title, abstract, summary))
+        await embed_summary(db, paper_id)
     return status
 
 
-async def _write_embedding(db: AsyncSession, paper_id: str, doc: str) -> None:
+async def embed_summary(db: AsyncSession, paper_id: str) -> bool:
+    """Embed a ready row's stored summary, with no LLM call. True on success.
+
+    The ONE embedding writer: `write_record` calls it as its second commit,
+    and the backfill's repair pass calls it for a ready row left with no
+    vector (a shutdown between the two commits) or one from another
+    embedding model. Never raises; a failure leaves the row ready and is
+    logged.
+    """
+    row = (
+        await db.execute(
+            select(Paper.title, Paper.abstract, PaperSummary.summary)
+            .join(PaperSummary, PaperSummary.paper_id == Paper.id)
+            .where(Paper.id == paper_id, PaperSummary.status == READY)
+        )
+    ).first()
+    if row is None or not row.summary:
+        return False
+    return await _write_embedding(db, paper_id, embed_text(row.title, row.abstract, row.summary))
+
+
+async def _write_embedding(db: AsyncSession, paper_id: str, doc: str) -> bool:
     """Second commit: the doc embedding, recorded with the model that made it."""
     try:
         vec = await _embedding_svc.embed(doc, task_type="RETRIEVAL_DOCUMENT")
@@ -125,6 +146,8 @@ async def _write_embedding(db: AsyncSession, paper_id: str, doc: str) -> None:
             paper_id=paper_id,
             error=f"{type(exc).__name__}: {str(exc)[:_ERROR_MAX]}",
         )
+        return False
+    return True
 
 
 async def _ready_paper(db: AsyncSession, paper_id: str) -> Paper | None:
