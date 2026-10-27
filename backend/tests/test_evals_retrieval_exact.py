@@ -228,3 +228,33 @@ async def test_mention_eval_mirror_uses_productions_exact_shape():
     assert "AND c.paper_id IN (SELECT paper_id FROM scope)" in statements[1]
     assert "websearch_to_tsquery('english', :qtext)" in statements[1]
     assert db.execute.await_args_list[1].args[1]["project_id"] == "proj-1"
+
+
+# --- exit code ------------------------------------------------------------------
+
+
+async def _main_with(argv: list[str]):
+    from evals.retrieval import run_eval
+
+    with (
+        patch("sys.argv", ["run_eval", "--project-id", "proj-1", *argv]),
+        patch.object(settings, "cohere_api_key", ""),
+    ):
+        return await run_eval.main()
+
+
+async def test_an_exact_run_that_measures_nothing_exits_2():
+    """`--exact` is a recall GATE: a run that stops before comparing anything
+    must not exit 0, or a broken setup reads as a passed guard."""
+    assert await _main_with(["--hybrid", "--rerank", "--exact"]) == 2
+
+
+async def test_an_exact_run_with_no_positive_cases_exits_2():
+    from evals.retrieval import run_eval
+
+    with patch.object(run_eval, "_run", AsyncMock(return_value=None)):
+        assert await _main_with(["--hybrid", "--exact"]) == 2
+
+
+async def test_the_same_early_stop_without_exact_keeps_its_exit_code():
+    assert not await _main_with(["--hybrid", "--rerank"])

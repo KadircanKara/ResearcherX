@@ -835,7 +835,22 @@ def _report_exact(
     }
 
 
-async def main() -> int | None:  # noqa: PLR0912, PLR0915 — a report script, not a library API
+async def main() -> int | None:
+    """Exit code: 1 when `--exact` finds an answer HNSW misses, 2 when
+    `--exact` measured nothing at all, else 0 (None on an early stop).
+
+    `--exact` is a recall GATE, so a run that stopped before comparing a
+    single case -- a refused flag, a model mismatch, no positive case scored
+    -- must not exit 0 and read as a passed guard."""
+    args = _parse_args()
+    rc = await _run(args)
+    if args.exact and rc is None:
+        print("\nERROR: --exact compared no cases; the recall gate did not run")
+        return 2
+    return rc
+
+
+def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Measure retrieval quality.")
     parser.add_argument(
         "--k",
@@ -930,7 +945,11 @@ async def main() -> int | None:  # noqa: PLR0912, PLR0915 — a report script, n
         parser.error("--sweep requires --hybrid and --bm25")
     if args.exact and not args.hybrid:
         parser.error("--exact requires --hybrid (it compares the hybrid arm's dense scan)")
+    return args
 
+
+async def _run(args: argparse.Namespace) -> int | None:  # noqa: PLR0912, PLR0915 — a report script
+    """The run itself. None means it stopped before measuring anything."""
     # The rerank consumes a fused candidate list, and there is no fused list
     # without the hybrid arm. Refusing is better than silently reranking the
     # dense-only ordering, which is a policy production never runs.
@@ -1779,6 +1798,8 @@ async def main() -> int | None:  # noqa: PLR0912, PLR0915 — a report script, n
         )
         print(f"\nwrote {args.json}")
 
+    if args.exact and exact_payload is None:
+        return None
     if exact_payload is not None and exact_payload["misses"]:
         return 1
     return 0
