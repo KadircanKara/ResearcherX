@@ -1210,7 +1210,7 @@ async def main() -> None:  # noqa: PLR0912, PLR0915 — a report script, not a l
             print("  (weights and rrf_k were tuned on ts_rank_cd, not on bm25s)")
             print()
             if args.hybrid:
-                print(f"per-kind recall / MRR (split={args.split}, k={args.k}):")
+                print(f"per-kind recall (r@10/20/60) / MRR@60 (split={args.split}):")
                 for kind in dict.fromkeys(r.kind for r in per_kind_rows):
                     print(f"  {kind}")
                     print(

@@ -5,9 +5,10 @@ own indexed form. `local_rag/index.py` and the retrieval harness both import
 this module rather than repeating the stopword list and stemmer. PURE: only
 `bm25s` and `Stemmer`, no DB, ORM or service imports.
 
-`TOKENIZER_CONFIG` is stamped onto anything persisted from this tokenizer, so
-a change here (stopwords, stemmer, version bump) can be detected as a stale
-index instead of silently mixing two vocabularies.
+`TOKENIZER_CONFIG` is meant to be stamped onto anything persisted from this
+tokenizer (nothing persists it yet), so a change here (stopwords, stemmer,
+version bump) can be detected as a stale index instead of silently mixing two
+vocabularies.
 """
 
 from __future__ import annotations

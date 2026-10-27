@@ -241,7 +241,8 @@ Reading it:
   paraphrase-type questions are not in their own dense top-10. This is the
   set measuring what it was built to measure, not a retriever regression.
 - **The sparse arm is the keyword retriever and the SQL FTS arm is not one**:
-  `sparse_sql` (`websearch_to_tsquery`, all terms ANDed) holds the evidence
+  `sparse_sql` (the OR-of-lexemes candidate query `SPARSE_TSQUERY_SQL`, not the
+  AND-ed `websearch_to_tsquery` that production still runs) holds the evidence
   for 60% of keyword cases at r@60 against 100% for `sparse_bm25`. Fused,
   `hybrid_bm25` beats `hybrid_sql` on r@60 in every kind (0.67/0.93/0.93
   against 0.63/0.87/0.80), but on `keyword` the fused MRR (0.477) is far
@@ -1217,14 +1218,28 @@ them to measure separately.
 Edit `golden_set.json`. Ground truth is **substrings, not chunk ids** — ids are
 regenerated on every re-index, so id-based truth would rot immediately.
 
-    {"id": "unique-slug", "kind": "content",
+    {"id": "unique-slug", "kind": "paraphrase", "split": "tune",
      "question": "...",
      "paper_title_contains": "distinctive part of the title",
      "expect_substrings": ["phrase that must appear in a correct chunk"]}
 
-`kind` is `content`, `metadata`, `figure`, or `off_topic`. A case passes when a
-retrieved chunk is from the expected paper **and** contains **every** listed
-substring.
+`kind` is named for the retriever the case exercises: `paraphrase` (dense
+should win), `paraphrase_keyword` (a paraphrase that also carries a
+distinctive term; hybrid should win), `keyword` (a bare keyword query) or
+`off_topic`. `split` is required and is `tune` or `test`: the RRF sweep
+chooses its point on `tune` only and `test` checks it afterwards. `keyword`
+(the distinctive term, which must appear in the question) is required on
+`paraphrase_keyword` cases and rejected on every other kind. A case passes
+when a retrieved chunk is from the expected paper **and** contains **every**
+listed substring.
+
+Before committing, run the validator against the dev project. It checks that
+exactly one paper holds all the substrings (across every chunk, whatever its
+title), that this paper's title contains `paper_title_contains`, and that the
+question does not leak the evidence's rare tokens:
+
+    docker compose exec -T backend python -m evals.retrieval.validate_golden_set \
+      --project-id <uuid> --set evals/retrieval/golden_set.json
 
 **Do not add two-paper comparison questions here.** They go in
 `comparison_set.json`, which has its own loader, its own schema (two title
