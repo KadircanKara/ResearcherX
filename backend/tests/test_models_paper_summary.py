@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import Paper, PaperSummary, Project, ProjectMember, User
 from app.db.seed import seed_users
+from app.services.paper_summary_prompt import SUMMARY_VER
 
 
 @pytest.fixture
@@ -39,7 +40,7 @@ async def test_summary_row_defaults(db_session: AsyncSession, project: Project):
     ).scalar_one()
     assert row.status == "pending"
     assert row.keywords == []
-    assert row.summary_ver == 1
+    assert row.summary_ver == SUMMARY_VER
     assert row.model == ""
     assert row.summary is None
     assert row.doc_embedding is None
