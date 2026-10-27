@@ -131,7 +131,16 @@ async def stored_chunk_count(db: AsyncSession, paper_id: str) -> int:
 
 
 async def _claim_hash(db: AsyncSession, paper: Paper, digest: str) -> None:
-    """Mark the paper `pending` under `digest` and COMMIT, before any parse.
+    """Mark the paper `pending` under `digest`, drop its old chunks, and
+    COMMIT, before any parse.
+
+    The chunks go in the same commit as `pending`. A re-upload's old chunks
+    can never be served again -- the route has already overwritten the
+    stored file, and a pending or failed paper is invisible to chat -- but
+    left in place they sit in the HNSW index, where the ready filter drops
+    them from a scan's top candidates and forces the whole-project exact
+    fallback on every turn that meets them, for as long as a failed or
+    cancelled re-upload leaves them there.
 
     The existence check is the detection mechanism. The unique index is only
     the backstop for two requests that both passed it; that race is mapped to
@@ -141,6 +150,7 @@ async def _claim_hash(db: AsyncSession, paper: Paper, digest: str) -> None:
     holder = await _find_holder(db, project_id, digest, paper_id)
     if holder is not None:
         raise DuplicateSource(*holder)
+    await db.execute(delete(PaperChunkEmbedding).where(PaperChunkEmbedding.paper_id == paper_id))
     paper.status = PaperStatus.PENDING
     paper.source_hash = digest
     paper.ingest_error = None
@@ -282,8 +292,11 @@ async def ingest(
     `ready` under them return its stored chunk count and do no work (a retry
     after a timeout). The same bytes held by ANOTHER paper of the project
     raise `DuplicateSource`. Otherwise the paper is committed `pending` with
-    the new hash before anything is parsed, `index_chunks` flips it `ready`
-    with its chunks, and any exception marks it `failed` and re-raises. Only
+    the new hash, and with its old chunks deleted, before anything is
+    parsed; `index_chunks` flips it `ready` with its new chunks, and any
+    exception marks it `failed` and re-raises. A failed or cancelled
+    re-upload therefore leaves the paper with no chunks rather than the
+    previous file's: the stored file is already the new one. Only
     a `ready` row short-circuits, so a failed or crashed ingest is retried
     in full, and so is a ready paper with no chunks under the configured
     embedding model (a re-upload after a model change re-indexes).

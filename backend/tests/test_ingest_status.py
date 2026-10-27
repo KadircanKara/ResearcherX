@@ -566,3 +566,61 @@ async def test_a_manual_create_race_is_a_409_not_a_500(client, db_session, you, 
     async with SessionLocal() as db:
         titles = (await db.execute(select(Paper.title))).scalars().all()
     assert titles == ["M"]
+
+
+# ── a re-upload drops the old chunks with the claim ──────────────────────────
+
+
+async def _chunks(paper_id: str) -> int:
+    async with SessionLocal() as db:
+        return len(
+            (
+                await db.execute(
+                    select(PaperChunkEmbedding.id).where(PaperChunkEmbedding.paper_id == paper_id)
+                )
+            ).all()
+        )
+
+
+async def test_a_claim_drops_the_old_chunks_before_parsing(db_session, project):
+    """A re-upload commits `pending` and the old chunks' removal together: a
+    stale chunk left in the HNSW index is dropped by the ready filter and
+    forces the whole-project exact fallback on every turn that meets it."""
+    pid = (await _paper(db_session, project, "A")).id
+    assert await _ingest(db_session, pid) > 0
+    seen = {}
+    real = svc.extract_markdown
+
+    def spy(fmt, data):
+        import asyncio
+
+        async def read():
+            seen["status"] = (await _fresh(pid)).status
+            seen["chunks"] = await _chunks(pid)
+
+        asyncio.run(read())
+        return real(fmt, data)
+
+    with patch.object(svc, "extract_markdown", spy):
+        await _ingest(db_session, pid, b"Entirely new text.")
+    assert seen == {"status": PaperStatus.PENDING, "chunks": 0}
+
+
+async def test_a_failed_reupload_leaves_no_chunks(db_session, project):
+    pid = (await _paper(db_session, project, "A")).id
+    assert await _ingest(db_session, pid) > 0
+    with pytest.raises(RuntimeError):
+        await _ingest(
+            db_session, pid, b"Entirely new text.", embed=AsyncMock(side_effect=RuntimeError("x"))
+        )
+    assert (await _fresh(pid)).status == PaperStatus.FAILED
+    assert await _chunks(pid) == 0
+
+
+async def test_a_duplicate_retry_leaves_a_ready_papers_chunks_alone(db_session, project):
+    pid = (await _paper(db_session, project, "A")).id
+    n = await _ingest(db_session, pid)
+    assert n > 0
+    assert await _ingest(db_session, pid) == n
+    assert await _chunks(pid) == n
+    assert (await _fresh(pid)).status == PaperStatus.READY
