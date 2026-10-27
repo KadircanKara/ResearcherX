@@ -115,6 +115,7 @@ async def fresh_db():
         await conn.run_sync(Base.metadata.create_all)
     yield
     await registry.cancel_all()
+    registry.closing = False  # module-global: reopen it for the next test
     await cancel_watchers()  # grace-window watchers aren't in the registry
     # Give aiosqlite worker threads time to drain after task cancellation.
     # asyncio.gather returns once the coroutine is done, but the underlying

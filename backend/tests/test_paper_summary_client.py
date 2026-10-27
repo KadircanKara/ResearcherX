@@ -88,6 +88,33 @@ async def test_finish_reason_length_counts_as_unusable(fake_create):
     assert fake_create.await_args_list[1].kwargs["extra_body"]["models"] == CHAIN[2:]
 
 
+async def test_finish_reason_content_filter_counts_as_unusable(fake_create):
+    fake_create.side_effect = [
+        _response(CHAIN[0], finish_reason="content_filter"),
+        _response(CHAIN[1]),
+    ]
+    out = await _run()
+    assert out is not None and out.model == CHAIN[1]
+
+
+async def test_missing_finish_reason_is_accepted(fake_create):
+    fake_create.return_value = _response(CHAIN[0], finish_reason=None)
+    out = await _run()
+    assert out is not None and out.model == CHAIN[0]
+
+
+async def test_empty_key_logs_no_key_once_per_process(fake_create, monkeypatch):
+    log = MagicMock()
+    monkeypatch.setattr(client_mod, "log", log)
+    monkeypatch.setattr(client_mod, "_warned_no_key", False)
+    monkeypatch.setattr(settings, "summary_api_key", "")
+    assert await _run() is None
+    assert await _run() is None
+    events = [c.args[0] for c in log.warning.call_args_list]
+    assert events.count("paper_summary_no_key") == 1
+    fake_create.assert_not_awaited()
+
+
 @pytest.mark.parametrize(
     "bad",
     [

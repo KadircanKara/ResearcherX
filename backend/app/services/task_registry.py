@@ -23,6 +23,11 @@ from app.core.logging import log
 class TaskRegistry:
     def __init__(self) -> None:
         self._tasks: dict[str, asyncio.Task] = {}
+        # Set by `cancel_all`. Schedulers that spawn tasks from a done
+        # callback (`schedule_summary`) check it: a task started after
+        # `cancel_all` took its snapshot is never cancelled and would run
+        # against a disposed engine.
+        self.closing = False
 
     def register(self, run_id: str, task: asyncio.Task) -> None:
         """Track a run task; it removes itself when done."""
@@ -55,7 +60,9 @@ class TaskRegistry:
         return False
 
     async def cancel_all(self) -> None:
-        """Cancel every in-flight run and wait for them to unwind."""
+        """Cancel every in-flight run and wait for them to unwind. Closes the
+        registry first (see `closing`)."""
+        self.closing = True
         tasks = [t for t in self._tasks.values() if not t.done()]
         for task in tasks:
             task.cancel()

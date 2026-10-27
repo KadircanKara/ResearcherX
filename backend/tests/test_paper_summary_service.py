@@ -471,3 +471,67 @@ async def test_a_failing_summary_check_never_fails_the_ingest(db_session, projec
     ):
         assert await _ingest(db_session, paper.id) == first  # the short-circuit
     schedule.assert_not_called()
+
+
+# ---- final review fixes ---------------------------------------------------
+
+
+async def test_an_abstract_row_needs_a_summary_only_once_a_key_is_set(
+    db_session, project, monkeypatch
+):
+    """A row written by the no-key fallback heals once a key arrives."""
+    paper = await _paper(db_session, project, abstract="An abstract.")
+    db_session.add(
+        PaperSummary(
+            paper_id=paper.id,
+            summary="An abstract.",
+            source="abstract",
+            status="ready",
+            summary_ver=SUMMARY_VER,
+        )
+    )
+    await db_session.commit()
+    monkeypatch.setattr(settings, "summary_api_key", "")
+    assert not await svc.needs_summary(db_session, paper.id)
+    monkeypatch.setattr(settings, "summary_api_key", "sk-test")
+    assert await svc.needs_summary(db_session, paper.id)
+
+
+async def test_an_llm_row_never_needs_a_summary_with_a_key(db_session, project, monkeypatch):
+    paper = await _paper(db_session, project, abstract="An abstract.")
+    db_session.add(
+        PaperSummary(
+            paper_id=paper.id, summary="s", source="llm", status="ready", summary_ver=SUMMARY_VER
+        )
+    )
+    await db_session.commit()
+    monkeypatch.setattr(settings, "summary_api_key", "sk-test")
+    assert not await svc.needs_summary(db_session, paper.id)
+
+
+async def test_a_closing_registry_schedules_nothing():
+    """`cancel_all` closes the registry: a STALE run finishing during the
+    shutdown gather must not start an untracked replacement."""
+    calls: list[str] = []
+
+    async def fake(paper_id):
+        calls.append(paper_id)
+        return "ready"
+
+    with patch.object(svc, "apply_summary", new=fake):
+        await registry.cancel_all()
+        assert registry.closing
+        try:
+            REAL_SCHEDULE("p1")
+            await asyncio.sleep(0)
+            assert calls == []
+            assert registry.get("summary:p1") is None
+        finally:
+            registry.closing = False
+
+
+async def test_cancel_all_sets_closing_on_a_fresh_registry():
+    reg = TaskRegistry()
+    assert not reg.closing
+    await reg.cancel_all()
+    assert reg.closing

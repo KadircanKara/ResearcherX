@@ -9,6 +9,7 @@ from app.services.paper_summary_prompt import (
     messages,
     parse,
     response_format,
+    usable_content,
 )
 
 
@@ -88,3 +89,24 @@ def test_clean_keywords_skips_non_strings():
 def test_full_text_sorts_missing_page_last_and_skips_bad_text():
     pages = [{"page": None, "text": "end"}, {"page": 1, "text": "one"}, {"page": 2, "text": 5}]
     assert full_text(pages, None, None, cap=100) == "one\n\nend"
+
+
+GOOD_JSON = json.dumps({"summary": "It works.", "keywords": ["UAV"]})
+
+
+def test_usable_content_accepts_stop_and_a_missing_finish_reason():
+    rec = usable_content("stop", GOOD_JSON, max_keywords=5)
+    assert rec is not None and rec.summary == "It works." and rec.keywords == ("UAV",)
+    # Some providers omit finish_reason entirely; that is not a truncation.
+    assert usable_content(None, GOOD_JSON, max_keywords=5) == rec
+
+
+def test_usable_content_rejects_any_other_finish_reason():
+    for reason in ("length", "content_filter", "tool_calls", "error"):
+        assert usable_content(reason, GOOD_JSON, max_keywords=5) is None
+
+
+def test_usable_content_rejects_non_string_or_unparseable_content():
+    assert usable_content("stop", None, max_keywords=5) is None
+    assert usable_content("stop", {"summary": "x"}, max_keywords=5) is None
+    assert usable_content("stop", '{"summary": "x"}', max_keywords=5) is None

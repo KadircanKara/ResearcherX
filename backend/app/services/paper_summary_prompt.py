@@ -111,5 +111,21 @@ def parse(content: str | None, *, max_keywords: int) -> SummaryRecord | None:
     )
 
 
+def usable_content(
+    finish_reason: str | None, content: object, *, max_keywords: int
+) -> SummaryRecord | None:
+    """The ONE "is this answer usable" rule, for the live client and the
+    batch backfill alike: a record only from a choice that stopped normally
+    and parses. Any finish_reason other than "stop" (length, content_filter,
+    ...) is unusable, however valid the JSON looks. A missing finish_reason
+    is accepted: some providers omit it, and a missing value is not a
+    truncation."""
+    if finish_reason is not None and finish_reason != "stop":
+        return None
+    if not isinstance(content, str):
+        return None
+    return parse(content, max_keywords=max_keywords)
+
+
 def embed_text(title: str, abstract: str | None, summary: str) -> str:
     return f"{title}\n\n{abstract or ''}\n\n{summary}"

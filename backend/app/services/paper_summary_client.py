@@ -6,7 +6,8 @@ written by whichever chat provider happened to be active.
 
 The chain goes out as OpenRouter's `models` list, so an HTTP-level failure
 falls through server-side. A 200 does not: DeepSeek can answer OK with JSON
-that fails the schema, or stop on `length`. Either is UNUSABLE, and the
+that fails the schema, or stop on `length` (any finish_reason but `stop`;
+`paper_summary_prompt.usable_content` is the rule). Either is UNUSABLE, and the
 client retries with the chain cut to the models after the one that served.
 
 `generate_summary` never raises (a cancellation still propagates) and fails
@@ -25,8 +26,8 @@ from app.core.logging import log
 from app.services.paper_summary_prompt import (
     SummaryRecord,
     messages,
-    parse,
     response_format,
+    usable_content,
 )
 
 # Keyed by the credentials it was built with, so a changed key or base URL
@@ -35,6 +36,8 @@ _client: tuple[tuple[str, str], AsyncOpenAI] | None = None
 # OpenRouter already falls back between models server-side; SDK retries only
 # cover a transient transport error, and each one can wait out the timeout.
 _MAX_RETRIES = 2
+# `paper_summary_no_key` is logged once per process, not once per paper.
+_warned_no_key = False
 
 
 @dataclass(frozen=True)
@@ -70,7 +73,13 @@ def reset_client() -> None:
 
 
 async def generate_summary(title: str, abstract: str | None, text: str) -> GeneratedSummary | None:
+    global _warned_no_key
     if not settings.summary_api_key:
+        # Otherwise invisible: every paper silently gets its abstract as the
+        # summary (the prod compose once passed no key at all).
+        if not _warned_no_key:
+            _warned_no_key = True
+            log.warning("paper_summary_no_key", fallback="abstract")
         return None
     chain = list(settings.summary_models)
     if not chain:
@@ -148,9 +157,11 @@ def _usable(response: Any, model: str) -> GeneratedSummary | None:
     """A record only from a complete, schema-valid, non-empty choice."""
     if not getattr(response, "choices", None):
         return None
-    if _finish_reason(response) == "length":
-        return None
-    record = parse(_content(response), max_keywords=settings.paper_summary_max_keywords)
+    record = usable_content(
+        _finish_reason(response),
+        _content(response),
+        max_keywords=settings.paper_summary_max_keywords,
+    )
     if record is None:
         return None
     usage = getattr(response, "usage", None)

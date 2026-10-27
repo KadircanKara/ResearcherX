@@ -19,8 +19,9 @@ flight over a GOOD summary, and nothing that goes wrong with the batch may
 touch that summary: every failure path only clears `batch_id` there.
 
 `submit` selects ready papers with no row, a `failed` row, a `pending` row
-not in flight, or an older prompt version (`--force`: every ready paper),
-never a row already in flight. It refuses when the larger of two estimates
+not in flight, an older prompt version, or (while a key is set) an
+`abstract` fallback row (`--force`: every ready paper), never a row already
+in flight. It refuses when the larger of two estimates
 (per paper, per char; both from the spike) exceeds `--max-cost`. Per chunk:
 
   1. mark the rows `batch_id='submitting:<uuid>'` in one transaction;
@@ -38,7 +39,9 @@ never a row already in flight. It refuses when the larger of two estimates
 `collect` is safe to run at any time, as often as wanted: a batch still
 running is reported and left alone; a finished one is written through
 `write_record`, which clears `batch_id`, so a second run finds nothing to
-fetch. A result is written only while its row is still in flight under
+fetch. A result that errored or is unusable never falls back to the
+abstract: a pending row becomes `failed` with the reason (the next `submit`
+retries it), a ready row only loses its `batch_id`. A result is written only while its row is still in flight under
 THAT batch id (row locked FOR UPDATE): a deleted paper, or a row a live
 ingest rewrote since, is skipped. It ends with a repair pass that embeds
 ready rows missing a doc vector (or holding one from another embedding
@@ -59,6 +62,7 @@ from typing import Any
 
 import httpx
 from sqlalchemy import case, null, or_, select, text, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -68,8 +72,14 @@ from app.db.models import Paper, PaperStatus, PaperSummary, _now
 from app.db.session import SessionLocal, engine
 from app.services import openrouter_batch as ob
 from app.services.paper_summary_client import GeneratedSummary
-from app.services.paper_summary_prompt import SUMMARY_VER, full_text, parse
-from app.services.paper_summary_service import FAILED, READY, embed_summary, write_record
+from app.services.paper_summary_prompt import SUMMARY_VER, full_text, usable_content
+from app.services.paper_summary_service import (
+    FAILED,
+    READY,
+    SOURCE_ABSTRACT,
+    embed_summary,
+    write_record,
+)
 
 PENDING = "pending"
 MARKER_PREFIX = "submitting:"
@@ -233,13 +243,11 @@ def _candidates(*, project_id: str | None, force: bool, limit: int | None):
         .order_by(Paper.created_at, Paper.id)
     )
     if not force:
-        stmt = stmt.where(
-            or_(
-                s.paper_id.is_(None),
-                s.status.in_([FAILED, PENDING]),
-                s.summary_ver < SUMMARY_VER,
-            )
-        )
+        due = [s.paper_id.is_(None), s.status.in_([FAILED, PENDING]), s.summary_ver < SUMMARY_VER]
+        if settings.summary_api_key:
+            # The no-key fallback: worth an LLM summary once there is a key.
+            due.append(s.source == SOURCE_ABSTRACT)
+        stmt = stmt.where(or_(*due))
     if project_id is not None:
         # String compare: papers.project_id is varchar.
         stmt = stmt.where(Paper.project_id == str(project_id))
@@ -303,15 +311,31 @@ def _print_unknown(marker: str, n: int, why: str) -> None:
     )
 
 
-async def _submit_group(
-    ids: Sequence[str], *, model: str, provider: str, client: httpx.AsyncClient | None
-) -> str:
+async def _load_and_mark(ids: Sequence[str], marker: str) -> list[ob.Paper]:
+    """Load the group and mark it. A paper deleted between the load and the
+    mark violates the FK and rolls the whole mark back: re-load (the deleted
+    paper drops out) and mark again, once. Nothing has been sent yet."""
     async with SessionLocal() as db:
         papers = await _load(db, ids)
+    try:
+        await _mark([p[0] for p in papers], marker)
+    except IntegrityError:
+        async with SessionLocal() as db:
+            papers = await _load(db, ids)
+        await _mark([p[0] for p in papers], marker)
+    return papers
+
+
+async def _submit_group(
+    ids: Sequence[str], *, model: str, provider: str, client: httpx.AsyncClient | None
+) -> str | None:
+    marker = f"{MARKER_PREFIX}{uuid.uuid4()}"
+    papers = await _load_and_mark(ids, marker)
+    if not papers:
+        print(f"  skipped a group of {len(ids)}: every paper was deleted")
+        return None
     body = ob.batch_body(papers, model=model, provider=provider)
     sent = [p[0] for p in papers]
-    marker = f"{MARKER_PREFIX}{uuid.uuid4()}"
-    await _mark(sent, marker)
     try:
         batch_id = await ob.submit(body, client=client)
     except ob.BatchError as exc:
@@ -401,9 +425,9 @@ async def _submit(*, project_id, force, limit, chunk, dry_run, max_cost, client,
         raise CostExceeded(f"estimate ${est['max']:.2f} exceeds --max-cost ${max_cost:.2f}")
 
     for group in groups:
-        result["batch_ids"].append(
-            await _submit_group(group, model=model, provider=provider, client=client)
-        )
+        submitted = await _submit_group(group, model=model, provider=provider, client=client)
+        if submitted is not None:
+            result["batch_ids"].append(submitted)
     print(f"submitted {len(ids)} papers in {len(result['batch_ids'])} batch(es)")
     return result
 
@@ -417,24 +441,26 @@ def _error_text(value: Any, default: str) -> str:
     return default
 
 
-def _generated(result: dict, fallback_model: str) -> GeneratedSummary | None:
-    """A record only from a 200, complete, schema-valid choice; else None."""
+def _generated(result: dict, fallback_model: str) -> tuple[GeneratedSummary | None, str]:
+    """A record only from a 200, complete, schema-valid choice. Otherwise
+    (None, why): the reason is stored on a `failed` row."""
     response = result.get("response")
     if not isinstance(response, dict) or response.get("status_code") != 200:
-        return None
+        status = response.get("status_code") if isinstance(response, dict) else None
+        why = _error_text(result.get("error"), f"status {status}")
+        return None, f"request failed: {why}"
     body = response.get("body")
     if not isinstance(body, dict):
-        return None
+        return None, "request failed: no response body"
     try:
         choice = body["choices"][0]
         content = choice["message"]["content"]
-    except (KeyError, IndexError, TypeError):
-        return None
-    if choice.get("finish_reason") == "length" or not isinstance(content, str):
-        return None
-    record = parse(content, max_keywords=settings.paper_summary_max_keywords)
+        finish = choice.get("finish_reason")
+    except (KeyError, IndexError, TypeError, AttributeError):
+        return None, "request failed: no choice in the response"
+    record = usable_content(finish, content, max_keywords=settings.paper_summary_max_keywords)
     if record is None:
-        return None
+        return None, f"unusable answer (finish_reason={finish})"
     usage = body.get("usage") if isinstance(body.get("usage"), dict) else {}
 
     def _int(v: Any) -> int:
@@ -450,7 +476,7 @@ def _generated(result: dict, fallback_model: str) -> GeneratedSummary | None:
         cost_usd=float(cost)
         if isinstance(cost, (int, float)) and not isinstance(cost, bool)
         else None,
-    )
+    ), ""
 
 
 def _ours_stmt(paper_id: str):
@@ -534,29 +560,35 @@ async def _collect_batch(batch: dict, totals: Counter, providers: Counter) -> No
         async with SessionLocal() as db:
             # Deleted papers cascade their row away; a row a live ingest
             # rewrote no longer carries this batch id. Both are skipped.
-            paper = await db.get(Paper, paper_id)
+            # Only the columns needed: a full Paper hydrates extracted_pages.
+            paper = (
+                await db.execute(
+                    select(Paper.id, Paper.status, Paper.title, Paper.abstract).where(
+                        Paper.id == paper_id
+                    )
+                )
+            ).first()
             row_status = await _still_ours(db, paper_id, batch_id) if paper else None
             if row_status is None:
                 totals["skipped"] += 1
                 await db.rollback()
                 continue
-            generated = _generated(result, batch_model)
-            paper_ready = paper.status == PaperStatus.READY
-            if not paper_ready or (generated is None and row_status == READY):
+            generated, why = _generated(result, batch_model)
+            if paper.status != PaperStatus.READY:
+                generated, why = None, "paper was not ready at collect"
+            if generated is None:
                 # Paper re-ingesting / failed (this text may be stale), or a
-                # failed request over a good summary: the one release path,
-                # which leaves a ready row's summary alone.
+                # request that errored or answered unusably (spec Part 2 s5:
+                # it stays `failed`, never an abstract fallback). The one
+                # release path: a pending row fails with the reason, a ready
+                # row keeps its summary and only loses its batch_id.
                 await db.rollback()
-                why = "request failed" if paper_ready else "paper was not ready at collect"
                 kept, failed = await _release(batch_id, error=why, fail=True, only=[paper_id])
                 totals["kept"] += kept
                 totals["failed"] += failed
                 continue
-            written = await write_record(db, paper, generated)
-        if written == READY:
-            totals["llm" if generated is not None else "fallback"] += 1
-        else:
-            totals["failed"] += 1
+            await write_record(db, paper, generated)
+        totals["llm"] += 1
 
     # A request with no result at all would otherwise stay in flight forever.
     kept, missing = await _release(batch_id, error="no result for this paper", fail=True)
@@ -728,14 +760,12 @@ async def _collect(*, batch_id, adopt, release, abandon, force_abandon, client) 
     repaired = await _repair_embeddings()
     cost = totals["cost_micro"] / 1_000_000
     print(
-        f"done: {totals['llm']} llm, {totals['fallback']} abstract fallback, "
-        f"{totals['failed']} failed, {totals['released']} released, "
+        f"done: {totals['llm']} llm, {totals['failed']} failed, {totals['released']} released, "
         f"{totals['kept']} ready kept, {totals['skipped']} skipped; "
         f"billed ${cost:.4f}; providers {dict(providers) or '{}'}"
     )
     return {
         "llm": totals["llm"],
-        "fallback": totals["fallback"],
         "failed": totals["failed"],
         "released": totals["released"],
         "kept": totals["kept"],

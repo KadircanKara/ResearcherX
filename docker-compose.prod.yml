@@ -54,6 +54,11 @@ services:
       EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:?EMBEDDING_API_KEY is required}
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-3-small}
       EMBEDDING_DIMENSIONS: ${EMBEDDING_DIMENSIONS:-768}
+      # Paper summaries (OpenRouter). Optional on purpose: an empty key is
+      # never a startup failure, every summary falls back to the abstract and
+      # `paper_summary_no_key` is logged once. Those abstract rows are
+      # re-summarised once a key is set (live re-ingest or backfill submit).
+      SUMMARY_API_KEY: ${SUMMARY_API_KEY:-}
       # Cosine-distance retrieval cutoff — MODEL-SPECIFIC (see config.py).
       # The 0.75 default was measured against dev's nomic-embed-text only;
       # it has not been measured for OpenAI text-embedding-3-small. Tune via

@@ -1,8 +1,17 @@
 """One summary record per paper, written after ingest and by the backfill.
 
-`write_record` is the ONLY writer of `paper_summaries`: the live path
-(`apply_summary`, scheduled by ingest) and the batch backfill both call it,
-so every row, backfilled or live, gets the same fields and a doc embedding.
+`write_record` is the ONLY writer of summary CONTENT (`summary`, `keywords`,
+`source`, `summary_model`, `summary_ver`): the live path (`apply_summary`,
+scheduled by ingest) and the batch backfill both call it, so every row,
+backfilled or live, gets the same fields and a doc embedding. The doc vector
+(`doc_embedding`, `model`) is written only by `_write_embedding`, reached
+through `write_record` or `embed_summary`. The backfill writes in-flight
+state (`batch_id`, `pending`/`failed` status, `error`, placeholder rows)
+only through its `_mark` / `_release` / `_repoint`, and never content.
+
+A row whose `source` is `abstract` is the no-LLM fallback. It counts as due
+again (`needs_summary`, the backfill's `submit`) whenever a
+`SUMMARY_API_KEY` is set, so rows written before the key existed heal.
 
 The summary is never load-bearing. It runs after the paper is `ready`, in
 its own sessions, as an unawaited task registered under
@@ -12,6 +21,7 @@ row, or a ready row without an embedding; the backfill picks it up.
 """
 
 import asyncio
+from typing import Protocol
 
 from sqlalchemy import null, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -30,6 +40,7 @@ from app.services.task_registry import registry
 READY = "ready"
 FAILED = "failed"
 SOURCE_LLM = "llm"
+SOURCE_ABSTRACT = "abstract"
 # apply_summary's outcomes besides a row status.
 SKIPPED = "skipped"  # paper missing, or not ready
 STALE = "stale"  # the paper was re-ingested during generation; rescheduled
@@ -41,17 +52,28 @@ _ERROR_MAX = 300
 _embedding_svc = EmbeddingService()
 
 
+class PaperRef(Protocol):
+    """What `write_record` reads from a paper: a `Paper`, or a narrow row
+    (the backfill selects only the columns it needs)."""
+
+    id: str
+    abstract: str | None
+
+
 async def write_record(
     db: AsyncSession,
-    paper: Paper,
+    paper: PaperRef,
     generated: GeneratedSummary | None,
     *,
-    source_if_none: str = "abstract",
+    source_if_none: str = SOURCE_ABSTRACT,
 ) -> str:
     """Upsert `paper`'s summary row, then embed it. Returns the row status.
 
-    No `generated` record falls back to the abstract (`source_if_none`), and
-    with no abstract either the row is `failed`. Two commits: the summary
+    No `generated` record falls back to the abstract, stored with
+    `source=source_if_none` (`abstract`: re-selected once a key is set), and
+    with no abstract either the row is `failed`. Only the live path falls
+    back; the backfill never passes None (a failed batch request stays
+    `failed`). Two commits: the summary
     first, then the doc embedding, so an embedding error cannot lose the
     summary; it leaves the row `ready` with no embedding and is logged.
     Raises only if the summary write itself fails.
@@ -193,7 +215,7 @@ async def apply_summary(paper_id: str) -> str:
                 # describes the old text. `schedule_summary` runs it again.
                 log.info("paper_summary_stale", paper_id=paper_id)
                 return STALE
-            status = await write_record(db, paper, generated)
+            status = await write_record(db, paper, generated, source_if_none=SOURCE_ABSTRACT)
     except Exception as exc:  # noqa: BLE001 -- a summary must never fail anything
         log.warning(
             "paper_summary_apply_failed",
@@ -217,15 +239,21 @@ async def apply_summary(paper_id: str) -> str:
 
 async def needs_summary(db: AsyncSession, paper_id: str) -> bool:
     """True when the paper has no summary row, or one that is not ready, or
-    one written by an older prompt version. One cheap query."""
+    one written by an older prompt version, or (only while a
+    `SUMMARY_API_KEY` is set) an abstract fallback. One cheap query."""
     row = (
         await db.execute(
-            select(PaperSummary.status, PaperSummary.summary_ver).where(
+            select(PaperSummary.status, PaperSummary.summary_ver, PaperSummary.source).where(
                 PaperSummary.paper_id == paper_id
             )
         )
     ).first()
-    return row is None or row.status != READY or row.summary_ver < SUMMARY_VER
+    return (
+        row is None
+        or row.status != READY
+        or row.summary_ver < SUMMARY_VER
+        or (row.source == SOURCE_ABSTRACT and bool(settings.summary_api_key))
+    )
 
 
 def schedule_summary(paper_id: str) -> None:
@@ -235,6 +263,12 @@ def schedule_summary(paper_id: str) -> None:
     scripts: their process exits before the task finishes; the backfill
     covers those papers.
     """
+    if registry.closing:
+        # Shutting down: `cancel_all` has taken its snapshot, so a task
+        # started now would be untracked and outlive the engine. The
+        # backfill picks the paper up.
+        log.info("paper_summary_not_scheduled_closing", paper_id=paper_id)
+        return
     key = f"summary:{paper_id}"
     if registry.is_running(key):
         log.info("paper_summary_already_running", paper_id=paper_id)

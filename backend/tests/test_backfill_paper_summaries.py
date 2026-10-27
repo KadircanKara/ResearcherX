@@ -370,17 +370,17 @@ async def test_collect_writes_records_and_clears_batch_id(db_session, project, s
     assert ra.summary_model == "deepseek/deepseek-v4.1-flash"
     assert list(ra.keywords) == ["UAV", "swarm"]
     assert ra.doc_embedding is not None and ra.model == settings.embedding_model
+    # Spec Part 2 section 5: an errored or unparseable result stays `failed`
+    # (with its reason) for the next submit; it never becomes an abstract row.
     rb = await _row(b.id)
-    assert (rb.status, rb.batch_id, rb.source, rb.summary) == (
-        "ready",
-        None,
-        "abstract",
-        "B's abstract.",
-    )
-    assert (await _row(c.id)).source == "abstract"
+    assert (rb.status, rb.batch_id, rb.source, rb.summary) == ("failed", None, None, None)
+    assert "boom" in rb.error
+    rc = await _row(c.id)
+    assert (rc.status, rc.batch_id, rc.source) == ("failed", None, None)
+    assert rc.error
     assert result["cost_usd"] == pytest.approx(0.0016)
     assert result["providers"] == {"Sail Research": 1}
-    assert result["llm"] == 1 and result["fallback"] == 2
+    assert result["llm"] == 1 and result["failed"] == 2
 
 
 async def test_collect_twice_is_a_noop(db_session, project, server, embed):
@@ -395,7 +395,7 @@ async def test_collect_twice_is_a_noop(db_session, project, server, embed):
     assert len(server.requests) == fetches  # nothing pending: no batch fetched
     assert embed.await_count == embeds  # and nothing re-embedded
     assert await _row(a.id) == first
-    assert second["llm"] == 0 and second["fallback"] == 0
+    assert second["llm"] == 0 and second["failed"] == 0
 
 
 async def test_collect_skips_deleted_papers(db_session, project, server):
@@ -620,20 +620,86 @@ async def test_collect_request_error_over_a_ready_row_keeps_the_summary(
         result = await script.run_collect(client=client)
     row = await _row(good.id)
     assert (row.status, row.batch_id, row.summary) == ("ready", None, "good summary")
-    assert result["kept"] == 1 and result["fallback"] == 0
+    assert result["kept"] == 1 and result["failed"] == 0
 
 
-async def test_collect_finish_length_on_a_new_row_falls_back_to_the_abstract(
+@pytest.mark.parametrize("finish", ["length", "content_filter"])
+async def test_collect_unusable_finish_on_a_new_row_stays_failed(
+    db_session, project, server, finish
+):
+    a = await _paper(db_session, project, title="A", abstract="The abstract.")
+    await _set_row(a.id, status="pending", batch_id="batch_1")
+    server.batches["batch_1"] = (200, _batch("completed", results=[_ok(a.id, finish=finish)]))
+    async with server.client() as client:
+        result = await script.run_collect(client=client)
+    row = await _row(a.id)
+    assert (row.status, row.batch_id, row.source, row.summary) == ("failed", None, None, None)
+    assert finish in row.error
+    assert result["failed"] == 1
+
+
+async def test_collect_errored_result_on_a_pending_row_is_failed_with_its_message(
     db_session, project, server
 ):
     a = await _paper(db_session, project, title="A", abstract="The abstract.")
     await _set_row(a.id, status="pending", batch_id="batch_1")
-    server.batches["batch_1"] = (200, _batch("completed", results=[_ok(a.id, finish="length")]))
+    server.batches["batch_1"] = (200, _batch("completed", results=[_err(a.id)]))
     async with server.client() as client:
-        result = await script.run_collect(client=client)
-    row = await _row(a.id)
-    assert (row.status, row.source, row.summary) == ("ready", "abstract", "The abstract.")
-    assert result["fallback"] == 1
+        await script.run_collect(client=client)
+        row = await _row(a.id)
+        assert (row.status, row.batch_id, row.source) == ("failed", None, None)
+        assert "boom" in row.error
+        # ...and the next submit picks it up.
+        server.submit_response = (202, {"id": "batch_2"})
+        await script.run_submit(client=client)
+    assert [r["custom_id"] for r in server.posted()[0]["requests"]] == [a.id]
+
+
+async def test_an_abstract_row_is_reselected_only_when_a_key_is_set(
+    db_session, project, monkeypatch
+):
+    a = await _paper(db_session, project, title="A", abstract="The abstract.")
+    await _set_row(
+        a.id, status="ready", source="abstract", summary="The abstract.", summary_ver=SUMMARY_VER
+    )
+    llm = await _paper(db_session, project, title="L")
+    await _set_row(llm.id, status="ready", source="llm", summary="s", summary_ver=SUMMARY_VER)
+    monkeypatch.setattr(settings, "summary_api_key", "")
+    assert (await script.run_submit(dry_run=True))["papers"] == 0
+    monkeypatch.setattr(settings, "summary_api_key", KEY)
+    assert (await script.run_submit(dry_run=True))["papers"] == 1
+
+
+async def test_submit_retries_once_when_a_paper_is_deleted_before_marking(
+    db_session, project, server
+):
+    """M-5: a paper deleted between `_load` and `_mark` violates the FK. The
+    group is re-loaded without it and marked again; nothing is sent twice."""
+    a = await _paper(db_session, project, title="A")
+    gone = await _paper(db_session, project, title="Gone")
+    real_mark = script._mark
+    calls = 0
+
+    async def flaky_mark(ids, marker):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            async with SessionLocal() as db:
+                await db.execute(delete(Paper).where(Paper.id == gone.id))
+                await db.commit()
+            return await real_mark(ids, marker)  # FK violation on `gone`
+        return await real_mark(ids, marker)
+
+    with patch.object(script, "_mark", new=flaky_mark):
+        async with server.client() as client:
+            result = await script.run_submit(client=client)
+    assert calls == 2
+    assert result["batch_ids"] == ["batch_1"]
+    sent = server.posted()
+    assert len(sent) == 1
+    assert [r["custom_id"] for r in sent[0]["requests"]] == [a.id]
+    assert ((await _row(a.id)).status, (await _row(a.id)).batch_id) == ("pending", "batch_1")
+    assert await _row(gone.id) is None
 
 
 async def test_collect_404_on_a_named_batch_fails_its_rows(db_session, project, server):
