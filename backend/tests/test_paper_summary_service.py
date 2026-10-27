@@ -387,3 +387,87 @@ async def test_registry_is_running_reports_only_live_tasks():
     await task
     await asyncio.sleep(0)
     assert not reg.is_running("k")
+
+
+# ---- fix round 1 ----------------------------------------------------------
+
+
+async def test_write_record_upserts_atomically_over_a_row_it_did_not_see(db_session, project):
+    """The upsert is ONE ON CONFLICT statement: a row inserted between any
+    check and the write (the backfill racing a live task) is updated, not
+    a primary-key error."""
+    paper = await _paper(db_session, project, abstract="An abstract.")
+    async with SessionLocal() as other:
+        other.add(PaperSummary(paper_id=paper.id, summary="racer", status="pending"))
+        await other.commit()
+    with _embed():
+        assert await svc.write_record(db_session, paper, GENERATED) == "ready"
+    row = await _row(paper.id)
+    assert row.summary == "A swarm searches a grid."
+    assert row.keywords == ["UAV", "swarm"]
+    assert json.loads(row.doc_embedding) == VEC
+    assert row.updated_at >= row.created_at
+
+
+async def test_a_finished_task_does_not_untrack_its_replacement():
+    reg = TaskRegistry()
+    gate_a, gate_b = asyncio.Event(), asyncio.Event()
+    a = asyncio.create_task(gate_a.wait())
+    reg.register("k", a)
+    b = asyncio.create_task(gate_b.wait())
+    reg.register("k", b)  # replaces a while a is still running
+    gate_a.set()
+    await a  # a's done callbacks have run by the time this await resumes
+    assert reg.get("k") is b
+    assert reg.is_running("k")
+    gate_b.set()
+    await b
+    assert reg.get("k") is None
+
+
+async def test_reingest_during_generation_writes_nothing_and_reschedules(db_session, project):
+    paper = await _paper(db_session, project, abstract="An abstract.", source_hash="old")
+    paper_id = paper.id
+
+    async def reingest_then_answer(*_args):
+        async with SessionLocal() as db:
+            (await db.get(Paper, paper_id)).source_hash = "new"
+            await db.commit()
+        return GENERATED
+
+    with patch.object(svc, "generate_summary", new=reingest_then_answer), _embed() as emb:
+        assert await svc.apply_summary(paper_id) == svc.STALE
+    emb.assert_not_awaited()
+    assert await _row(paper_id) is None
+
+    outcomes = iter([svc.STALE, "ready"])
+    calls: list[str] = []
+
+    async def fake_apply(pid):
+        calls.append(pid)
+        return next(outcomes)
+
+    # The reschedule looks `schedule_summary` up in the module, where
+    # conftest has stubbed it: put the real one back for this block.
+    with (
+        patch.object(svc, "apply_summary", new=fake_apply),
+        patch.object(svc, "schedule_summary", new=REAL_SCHEDULE),
+    ):
+        REAL_SCHEDULE(paper_id)
+        first = registry.get(f"summary:{paper_id}")
+        await first
+        second = registry.get(f"summary:{paper_id}")
+        assert second is not None and second is not first
+        await second
+    assert calls == [paper_id, paper_id]
+
+
+async def test_a_failing_summary_check_never_fails_the_ingest(db_session, project):
+    paper = await _paper(db_session, project, status=PaperStatus.PENDING)
+    first = await _ingest(db_session, paper.id)
+    with (
+        patch.object(svc, "needs_summary", new=AsyncMock(side_effect=RuntimeError("db hiccup"))),
+        patch.object(svc, "schedule_summary") as schedule,
+    ):
+        assert await _ingest(db_session, paper.id) == first  # the short-circuit
+    schedule.assert_not_called()

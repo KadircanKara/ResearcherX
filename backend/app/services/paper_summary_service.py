@@ -13,12 +13,14 @@ row, or a ready row without an embedding; the backfill picks it up.
 
 import asyncio
 
-from sqlalchemy import insert, null, select, text, update
+from sqlalchemy import null, select, text
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.logging import log
-from app.db.models import Paper, PaperStatus, PaperSummary
+from app.db.models import Paper, PaperStatus, PaperSummary, _now
 from app.db.session import SessionLocal
 from app.services.embedding_service import EmbeddingService, vector_literal
 from app.services.paper_summary_client import GeneratedSummary, generate_summary
@@ -30,6 +32,7 @@ FAILED = "failed"
 SOURCE_LLM = "llm"
 # apply_summary's outcomes besides a row status.
 SKIPPED = "skipped"  # paper missing, or not ready
+STALE = "stale"  # the paper was re-ingested during generation; rescheduled
 ERROR = "error"  # the work raised; nothing (or only the summary) was written
 
 _NO_TEXT = "no summary was generated and the paper has no abstract"
@@ -80,17 +83,18 @@ async def write_record(
         "batch_id": None,
         "model": "",
     }
-    exists = (
-        await db.execute(select(PaperSummary.paper_id).where(PaperSummary.paper_id == paper_id))
-    ).first()
-    if exists is None:
-        await db.execute(insert(PaperSummary).values(paper_id=paper_id, **values))
-    else:
-        await db.execute(
-            update(PaperSummary)
-            .where(PaperSummary.paper_id == paper_id)
-            .values(doc_embedding=null(), **values)
+    # One atomic upsert, so a live task and the backfill writing the same
+    # paper cannot race between a check and an insert.
+    dialect = db.get_bind().dialect.name
+    dialect_insert = pg_insert if dialect == "postgresql" else sqlite_insert
+    stmt = dialect_insert(PaperSummary).values(paper_id=paper_id, **values)
+    await db.execute(
+        stmt.on_conflict_do_update(
+            index_elements=["paper_id"],
+            # Python-side `onupdate` does not fire in an ON CONFLICT set.
+            set_={**values, "doc_embedding": null(), "updated_at": _now()},
         )
+    )
     await db.commit()
 
     if status == READY:
@@ -132,7 +136,9 @@ async def apply_summary(paper_id: str) -> str:
     """Generate and store one paper's summary. Never raises.
 
     Returns the row status (`ready` / `failed`), `skipped` when the paper is
-    gone or not ready, or `error` when the work raised. Catches `Exception`
+    gone or not ready, `stale` when its source changed during generation
+    (nothing written; `schedule_summary` re-runs it), or `error` when the
+    work raised. Catches `Exception`
     only, so a cancellation propagates. The paper is read in one session and
     written in another, so no pooled connection is held across the LLM call.
     """
@@ -142,7 +148,7 @@ async def apply_summary(paper_id: str) -> str:
             if paper is None:
                 log.info("paper_summary_skipped", paper_id=paper_id)
                 return SKIPPED
-            title, abstract = paper.title, paper.abstract
+            title, abstract, digest = paper.title, paper.abstract, paper.source_hash
             source_text = full_text(
                 paper.extracted_pages,
                 paper.body,
@@ -159,6 +165,11 @@ async def apply_summary(paper_id: str) -> str:
             if paper is None:
                 log.info("paper_summary_skipped", paper_id=paper_id, after_generation=True)
                 return SKIPPED
+            if paper.source_hash != digest:
+                # Re-ingested while the model was writing: this summary
+                # describes the old text. `schedule_summary` runs it again.
+                log.info("paper_summary_stale", paper_id=paper_id)
+                return STALE
             status = await write_record(db, paper, generated)
     except Exception as exc:  # noqa: BLE001 -- a summary must never fail anything
         log.warning(
@@ -205,4 +216,13 @@ def schedule_summary(paper_id: str) -> None:
     if registry.is_running(key):
         log.info("paper_summary_already_running", paper_id=paper_id)
         return
-    registry.register(key, asyncio.create_task(apply_summary(paper_id)))
+    task = asyncio.create_task(apply_summary(paper_id))
+    registry.register(key, task)
+    # Added after the registry's own callback, so the key is already free
+    # when a stale run schedules its replacement.
+    task.add_done_callback(lambda t: _reschedule_if_stale(paper_id, t))
+
+
+def _reschedule_if_stale(paper_id: str, task: asyncio.Task) -> None:
+    if not task.cancelled() and task.exception() is None and task.result() == STALE:
+        schedule_summary(paper_id)

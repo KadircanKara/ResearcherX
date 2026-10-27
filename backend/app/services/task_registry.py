@@ -27,7 +27,7 @@ class TaskRegistry:
     def register(self, run_id: str, task: asyncio.Task) -> None:
         """Track a run task; it removes itself when done."""
         self._tasks[run_id] = task
-        task.add_done_callback(lambda _: self.discard(run_id))
+        task.add_done_callback(lambda done: self._discard_if(run_id, done))
 
     def get(self, run_id: str) -> asyncio.Task | None:
         return self._tasks.get(run_id)
@@ -36,6 +36,12 @@ class TaskRegistry:
         """True while a task under this key is tracked and not finished."""
         task = self._tasks.get(run_id)
         return task is not None and not task.done()
+
+    def _discard_if(self, run_id: str, task: asyncio.Task) -> None:
+        """Drop the key only if it still holds `task`: a finished task must
+        not untrack a newer one registered under the same key."""
+        if self._tasks.get(run_id) is task:
+            del self._tasks[run_id]
 
     def discard(self, run_id: str) -> None:
         self._tasks.pop(run_id, None)

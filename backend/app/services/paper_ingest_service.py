@@ -345,8 +345,12 @@ async def ingest(
             log.info("paper_ingest_unchanged", paper_id=paper_id, chunks=n)
             # A retry of the same file still gets a summary it never got (a
             # shutdown mid-task) or one from an older prompt version.
-            if await paper_summary_service.needs_summary(db, paper_id):
-                paper_summary_service.schedule_summary(paper_id)
+            try:
+                if await paper_summary_service.needs_summary(db, paper_id):
+                    paper_summary_service.schedule_summary(paper_id)
+            except Exception:  # noqa: BLE001 -- a summary check never fails an ingest
+                await db.rollback()
+                log.warning("paper_summary_check_failed", paper_id=paper_id, exc_info=True)
             observability.set_attributes(
                 span, {"langfuse.trace.metadata.chunks": n, "langfuse.trace.metadata.skipped": True}
             )
