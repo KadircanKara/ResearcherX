@@ -97,3 +97,14 @@ def test_sparse_holds_answer_reads_only_sparse_rows():
     )
     assert sparse_holds_answer(CASE, fused)
     assert sparse_row_count(fused) == 1
+
+
+def test_sparse_only_ranking_maps_bm25_order_to_scored_rows():
+    from evals.retrieval.bm25_arm import sparse_only_ranking
+
+    corpus = Bm25Corpus(CHUNKS)
+    rows = sparse_only_ranking(corpus, "battery flight time", 10)
+    assert [r.chunk_id for r in rows] == corpus.sparse_ranked("battery flight time", 10)
+    assert [r.s_rank for r in rows] == list(range(1, len(rows) + 1))
+    assert all(r.distance is None and r.d_rank is None for r in rows)
+    assert rows[0].paper_title == corpus.by_id[rows[0].chunk_id].paper_title

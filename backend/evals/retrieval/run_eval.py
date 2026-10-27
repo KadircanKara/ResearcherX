@@ -50,10 +50,13 @@ from evals.retrieval.bm25_arm import (
     Bm25Corpus,
     CorpusChunk,
     fuse_with_bm25,
+    sparse_only_ranking,
     sparse_holds_answer,
     sparse_row_count,
 )
 from evals.retrieval.golden_set import Case, load_golden_set
+from evals.retrieval.per_kind import ARMS as PER_KIND_ARMS
+from evals.retrieval.per_kind import macro, per_kind_table
 from evals.retrieval.metrics import (
     rerank_lost_count,
     rerank_rescued_count,
@@ -702,6 +705,12 @@ async def main() -> None:  # noqa: PLR0912, PLR0915 — a report script, not a l
         ),
     )
     parser.add_argument("--set", type=Path, default=_DEFAULT_SET)
+    parser.add_argument(
+        "--split",
+        choices=("all", "tune", "test"),
+        default="all",
+        help="which golden-set split to run (default all)",
+    )
     parser.add_argument("--json", type=Path, default=None, help="also dump results here")
     parser.add_argument(
         "--targeted",
@@ -825,7 +834,7 @@ async def main() -> None:  # noqa: PLR0912, PLR0915 — a report script, not a l
     # arm_results[(arm, repeat)] = list[(Case, list[Scored])], case-aligned with hybrid_positives
     arm_results: dict[tuple[str, int], list] = {}
 
-    cases = load_golden_set(args.set)
+    cases = load_golden_set(args.set, split=args.split)
     svc = EmbeddingService()
 
     positives: list[tuple[Case, list[Scored]]] = []
@@ -852,6 +861,10 @@ async def main() -> None:  # noqa: PLR0912, PLR0915 — a report script, not a l
     # `hybrid_positives`, and the same raw fused shape (see bm25_arm.py).
     bm25_positives: list[tuple[Case, list[Scored]]] = []
     bm25_corpus: Bm25Corpus | None = None
+    # Per-kind tables (--hybrid --bm25). Case-aligned lists per arm, kept apart
+    # from the arm lists above because they need the sparse-only rankings too.
+    pk_cases: list[Case] = []
+    pk_lists: dict[str, list[list[Scored]]] = {arm: [] for arm in PER_KIND_ARMS}
 
     async with SessionLocal() as db:
         counts = {r.model: r.n for r in (await db.execute(_MODEL_COUNTS_SQL)).fetchall()}
@@ -957,20 +970,30 @@ async def main() -> None:  # noqa: PLR0912, PLR0915 — a report script, not a l
                 hybrid_positives.append((case, hybrid_chunks))
 
                 if bm25_corpus is not None:
-                    bm25_positives.append(
-                        (
-                            case,
-                            fuse_with_bm25(
-                                hybrid_chunks,
-                                bm25_corpus,
-                                case.question,
-                                sparse_pool=settings.hybrid_sparse_pool,
-                                w_dense=settings.hybrid_dense_weight,
-                                w_sparse=settings.hybrid_sparse_weight,
-                                k=settings.hybrid_rrf_k,
-                            ),
+                    bm25_fused = fuse_with_bm25(
+                        hybrid_chunks,
+                        bm25_corpus,
+                        case.question,
+                        sparse_pool=settings.hybrid_sparse_pool,
+                        w_dense=settings.hybrid_dense_weight,
+                        w_sparse=settings.hybrid_sparse_weight,
+                        k=settings.hybrid_rrf_k,
+                    )
+                    bm25_positives.append((case, bm25_fused))
+                    pk_cases.append(case)
+                    pk_lists["dense"].append(chunks)
+                    # The SQL sparse arm alone: the hybrid rows it ranked.
+                    pk_lists["sparse_sql"].append(
+                        sorted(
+                            (c for c in hybrid_chunks if c.s_rank is not None),
+                            key=lambda c: c.s_rank,
                         )
                     )
+                    pk_lists["sparse_bm25"].append(
+                        sparse_only_ranking(bm25_corpus, case.question, settings.hybrid_sparse_pool)
+                    )
+                    pk_lists["hybrid_sql"].append(hybrid_chunks)
+                    pk_lists["hybrid_bm25"].append(bm25_fused)
 
                 for name in arm_names:
                     spec = ARMS[name]
@@ -1133,6 +1156,7 @@ async def main() -> None:  # noqa: PLR0912, PLR0915 — a report script, not a l
     # ranking differs. `holds answer` asks whether the sparse arm ALONE
     # returned an answering chunk at any rank -- the ceiling on what it can
     # contribute, whatever the weights.
+    per_kind_rows = per_kind_table(pk_cases, pk_lists) if pk_cases else []
     if args.bm25:
         print()
         if bm25_positives:
@@ -1164,6 +1188,25 @@ async def main() -> None:  # noqa: PLR0912, PLR0915 — a report script, not a l
             print(f"  vs sql-fts at the budget edge: {moved_in} answers gained, {moved_out} lost")
             print("  (weights and rrf_k were tuned on ts_rank_cd, not on bm25s)")
             print()
+            if args.hybrid:
+                print(f"per-kind recall / MRR (split={args.split}, k={args.k}):")
+                for kind in dict.fromkeys(r.kind for r in per_kind_rows):
+                    print(f"  {kind}")
+                    print(
+                        f"    {'arm':<12} {'n':>3} {'r@10':>5} {'r@20':>5} {'r@60':>5} {'MRR':>6}"
+                    )
+                    for r in (x for x in per_kind_rows if x.kind == kind):
+                        print(
+                            f"    {r.arm:<12} {r.n:>3} {r.recall[10]:>5.2f} "
+                            f"{r.recall[20]:>5.2f} {r.recall[60]:>5.2f} {r.mrr:>6.3f}"
+                        )
+                print("  macro (unweighted mean over kinds)")
+                for arm in PER_KIND_ARMS:
+                    print(
+                        f"    {arm:<12} r@60 {macro(per_kind_rows, arm, 'r@60'):>5.2f}  "
+                        f"MRR {macro(per_kind_rows, arm, 'mrr'):>6.3f}"
+                    )
+                print()
         else:
             print("bm25s arm: skipped — no positive cases scored (see ERRORS above)")
             print()
@@ -1482,6 +1525,17 @@ async def main() -> None:  # noqa: PLR0912, PLR0915 — a report script, not a l
                     "separation": separation,
                     "targeted": targeted_rows if args.targeted else None,
                     "hybrid": hybrid_payload,
+                    "per_kind": [
+                        {
+                            "kind": r.kind,
+                            "arm": r.arm,
+                            "n": r.n,
+                            "recall": {str(k): v for k, v in r.recall.items()},
+                            "mrr": r.mrr,
+                        }
+                        for r in per_kind_rows
+                    ]
+                    or None,
                     "bm25": (
                         None
                         if not (args.bm25 and bm25_positives)

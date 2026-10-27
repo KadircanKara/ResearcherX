@@ -101,6 +101,29 @@ def fuse_with_bm25(
     return out
 
 
+def sparse_only_ranking(corpus: Bm25Corpus, query: str, limit: int) -> list[Scored]:
+    """The bm25s sparse arm ALONE as `Scored` rows, best first.
+
+    There is no dense half here, so `distance`/`d_rank` are None -- the same
+    convention a sparse-only admission uses in the fused lists. Score it with
+    `presorted=True` only.
+    """
+    out: list[Scored] = []
+    for rank, cid in enumerate(corpus.sparse_ranked(query, limit), start=1):
+        chunk = corpus.by_id[cid]
+        out.append(
+            Scored(
+                paper_id=chunk.paper_id,
+                paper_title=chunk.paper_title,
+                chunk_text=chunk.text,
+                distance=None,
+                chunk_id=cid,
+                s_rank=rank,
+            )
+        )
+    return out
+
+
 def sparse_holds_answer(case: Case, chunks: Sequence[Scored]) -> bool:
     """Did the SPARSE arm alone return an answering chunk, at any rank?
 
