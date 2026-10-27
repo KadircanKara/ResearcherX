@@ -18,7 +18,7 @@
    "question": "Why did purely random robot motion cover the area nearly as completely as more structured decentralized strategies?",
    "paper_title_contains": "Centralization vs. decentralization in multi-robot sweep coverage",
    "expect_substrings": [
-    "simple random walk seems to often be underestimated"
+    "when run for a long time, can reach quite high coverage completeness"
    ]
   },
   {
@@ -35,7 +35,7 @@
    "id": "collocation-segment-violation",
    "kind": "paraphrase",
    "split": "test",
-   "question": "Why isn't it enough to only check that the sampled trajectory points lie beyond an obstacle's protective radius?",
+   "question": "Why isn't checking only the sampled trajectory points against an obstacle's safety radius enough to guarantee clearance?",
    "paper_title_contains": "Potential Field Approach for Dynamic Collision Avoida",
    "expect_substrings": [
     "is still passing through the safety sphere"
@@ -85,7 +85,7 @@
    "id": "global-games-capable-forager",
    "kind": "paraphrase",
    "split": "tune",
-   "question": "As the external condition rises, which robot starts gathering food first in the game-theoretic upkeep allocation?",
+   "question": "As the environmental signal rises, which of two differently capable robots is assigned to food gathering first in the game-theoretic allocation?",
    "paper_title_contains": "Colony Maintenance Problem",
    "expect_substrings": [
     "the more capable robot will be assigned to the foraging task"
@@ -98,7 +98,7 @@
    "question": "Why can the learned graph controller for spreading robots over an area ignore communication lag?",
    "paper_title_contains": "Coverage Control in Multi-Robot Systems via Graph Neural Networks",
    "expect_substrings": [
-    "at most secondorder graph polynomials"
+    "the accrued communication delay is negligible"
    ]
   },
   {
@@ -108,7 +108,8 @@
    "question": "In what two ways can a person supply observations to the robot in the human-assisted planning and sensing framework?",
    "paper_title_contains": "HARPS",
    "expect_substrings": [
-    "passive semantic sensor"
+    "passive semantic sensor",
+    "active semantic sensor"
    ]
   },
   {
@@ -145,7 +146,7 @@
    "id": "koopman-butterfly-gain",
    "kind": "paraphrase",
    "split": "tune",
-   "question": "On which obstacle path shape did the learned linear-operator predictor improve most over the Gaussian-process baseline?",
+   "question": "On which obstacle trajectory did the data-driven linear predictor beat the Gaussian process model by the widest margin?",
    "paper_title_contains": "Distributed Switching Model Predictive Control Meets Koopman",
    "expect_substrings": [
     "The most significant gains appear in the 3-dimensional butterfly trajectory"
@@ -235,7 +236,7 @@
    "id": "occlusion-transport-limitation",
    "kind": "paraphrase",
    "split": "tune",
-   "question": "What is the drawback of having swarm robots shove an object each time it hides the destination from view?",
+   "question": "What goes wrong when swarm robots move an object by acting only when it blocks their view of the goal?",
    "paper_title_contains": "Occlusion-Based Object Transportation",
    "expect_substrings": [
     "not effective in complex environments where an obstacle may impede"
@@ -295,10 +296,10 @@
    "id": "urban-waste-bins-reduced",
    "kind": "paraphrase",
    "split": "tune",
-   "question": "Did the self-organised robot collective lower how much garbage piles up in city containers compared with the existing collection service?",
+   "question": "When tuning the self-organised city garbage-collecting robots, which behaviour keeps fewer containers full and which reduces uncollected garbage?",
    "paper_title_contains": "Urban Swarms",
    "expect_substrings": [
-    "average number of full trash bins"
+    "higher exploration (needed to reduce the FTB)"
    ]
   },
   {
@@ -352,7 +353,7 @@
    "question": "Why does CE-MRS keep only the most important differences between two plans?",
    "paper_title_contains": "CE-MRS",
    "expect_substrings": [
-    "abstracting explanations to include only the most important factors"
+    "leads to improved user understanding"
    ],
    "keyword": "CE-MRS"
   },
@@ -396,7 +397,7 @@
    "question": "Why is D3QN considered more stable than the other value-based learners in the drone data-gathering study?",
    "paper_title_contains": "Learning-Based UAV Path Planning for Data Collection",
    "expect_substrings": [
-    "D3QN is more stable than the other three algorithms"
+    "D3QN does not have this issue"
    ],
    "keyword": "D3QN"
   },
@@ -418,7 +419,7 @@
    "question": "What two kinds of reasoning does the example scenario given to DynaCon's language model cover?",
    "paper_title_contains": "DynaCon",
    "expect_substrings": [
-    "two distinct types of reasoning"
+    "pattern-based reasoning"
    ],
    "keyword": "DynaCon"
   },
@@ -451,7 +452,7 @@
    "question": "What is Ford Fulkerson used for when routing several drones to their formation positions?",
    "paper_title_contains": "Flow-Based Path Planning for Multiple Homogenous UAVs",
    "expect_substrings": [
-    "We use the Ford Fulkerson Algorithm"
+    "to find a solution to the maximum flow problem"
    ],
    "keyword": "Ford Fulkerson"
   },
@@ -539,20 +540,9 @@
    "question": "How long does the language model take to produce formation plans for 30 drones in SkySim?",
    "paper_title_contains": "SkySim",
    "expect_substrings": [
-    "generating actionable plans within"
+    "50 seconds (for N=30)"
    ],
    "keyword": "SkySim"
-  },
-  {
-   "id": "smart-llm-benchmark-size",
-   "kind": "paraphrase_keyword",
-   "split": "tune",
-   "question": "How many plain-language tasks does the SMART-LLM benchmark built on AI2-THOR contain?",
-   "paper_title_contains": "SMART-LLM",
-   "expect_substrings": [
-    "36 high-level instructions"
-   ],
-   "keyword": "AI2-THOR"
   },
   {
    "id": "stgcs-no-revisits",
@@ -568,18 +558,18 @@
   {
    "id": "subsurface-csqmi-planning",
    "kind": "paraphrase_keyword",
-   "split": "test",
+   "split": "tune",
    "question": "In the underground drone exploration planner, what does CSQMI score?",
    "paper_title_contains": "Subsurface Exploration with Multiple Aerial Robots",
    "expect_substrings": [
-    "Cauchy-Schwarz Quadratic Mutual Information (CSQMI)"
+    "for a set of motion primitives over a user-specified time horizon"
    ],
    "keyword": "CSQMI"
   },
   {
    "id": "survey-boustrophedon-merge",
    "kind": "paraphrase_keyword",
-   "split": "tune",
+   "split": "test",
    "question": "How does the planner join the pieces of a split area into longer boustrophedon sweeps?",
    "paper_title_contains": "exclusion zones",
    "expect_substrings": [
@@ -601,13 +591,24 @@
   {
    "id": "vln-pilot-fsm-states",
    "kind": "paraphrase_keyword",
-   "split": "test",
+   "split": "tune",
    "question": "What states does the finite state machine in VLN-Pilot include?",
    "paper_title_contains": "VLN-Pilot",
    "expect_substrings": [
     "These states include room recognition, door navigation"
    ],
    "keyword": "VLN-Pilot"
+  },
+  {
+   "id": "wet-full-csi-pilot-signals",
+   "kind": "paraphrase_keyword",
+   "split": "test",
+   "question": "In the full-CSI wireless charging scheme for buried sensor devices, what does the power station transmit so each device can estimate its CSI?",
+   "paper_title_contains": "Wireless-Powered Underground Communication",
+   "expect_substrings": [
+    "In the full-CSI scheme, the PS transmits pilot signals"
+   ],
+   "keyword": "CSI"
   },
   {
    "id": "wildfire-mip-benders",
@@ -635,7 +636,7 @@
    "id": "air-ground-3d-spf",
    "kind": "keyword",
    "split": "test",
-   "question": "3D-SPF frozen VLM JSON truck pixel position height command",
+   "question": "3D-SPF VLM truck pixel position",
    "paper_title_contains": "Air-Ground Collaborative Vision-and-Language Navigation",
    "expect_substrings": [
     "a frozen VLM receives the downward view"
@@ -645,7 +646,7 @@
    "id": "ambulance-dispatch-las",
    "kind": "keyword",
    "split": "tune",
-   "question": "market-based multirobot task allocation ambulance dispatch LAS London",
+   "question": "market-based task allocation ambulance dispatch LAS",
    "paper_title_contains": "Ambulance Dispatch",
    "expect_substrings": [
     "applied market-based multirobot routing techniques to the ambulance dispatch problem"
@@ -655,7 +656,7 @@
    "id": "buzz-virtual-stigmergy-clock",
    "kind": "keyword",
    "split": "tune",
-   "question": "Buzz virtual stigmergy BVM Lamport clock timestamp hash map",
+   "question": "Buzz virtual stigmergy Lamport clock",
    "paper_title_contains": "Buzz: An Extensible Programming Language",
    "expect_substrings": [
     "timestamp is a Lamport clock"
@@ -665,7 +666,7 @@
    "id": "c3bf-hocbf-comparison",
    "kind": "keyword",
    "split": "test",
-   "question": "C3BF HO-CBF higher order control barrier functions collision cone",
+   "question": "C3BF HO-CBF comparison",
    "paper_title_contains": "Collision Cone Approach for Control Barrier Functions",
    "expect_substrings": [
     "compare with the proposed C3BF"
@@ -675,7 +676,7 @@
    "id": "cmtab-infeasible-constraint",
    "kind": "keyword",
    "split": "tune",
-   "question": "CMTAB task-trait matrix infeasible assignment drops constraint",
+   "question": "CMTAB infeasible assignment drops constraint",
    "paper_title_contains": "Concurrent Constrained Optimization of Unknown Rewards",
    "expect_substrings": [
     "CMTAB drops the constraint"
@@ -685,7 +686,7 @@
    "id": "composite-cbf-hardware",
    "kind": "keyword",
    "split": "tune",
-   "question": "PX4 NVIDIA Orin NX Ouster OS0-64 quadrotor takeoff mass",
+   "question": "quadrotor Orin NX Ouster OS0-64",
    "paper_title_contains": "Composite Control Barrier Functions",
    "expect_substrings": [
     "NVIDIA Orin NX single-board computer"
@@ -695,7 +696,7 @@
    "id": "connectivity-robot-hardware",
    "kind": "keyword",
    "split": "test",
-   "question": "DJI Mecanum wheel chassis RPLIDAR A2 Jetson TX2 holonomic robot",
+   "question": "Mecanum RPLIDAR Jetson TX2 robot",
    "paper_title_contains": "Decentralized Global Connectivity Maintenance",
    "expect_substrings": [
     "DJI Mecanum wheel chassis"
@@ -705,7 +706,7 @@
    "id": "dcad-jerk-flip",
    "kind": "keyword",
    "split": "tune",
-   "question": "DCAD jerk limits roll pitch flat MPC flipping",
+   "question": "DCAD jerk limits quadrotor flipping",
    "paper_title_contains": "DCAD",
    "expect_substrings": [
     "prevent quadrotors from flipping over"
@@ -715,7 +716,7 @@
    "id": "drrt-xeon-disks",
    "kind": "keyword",
    "split": "tune",
-   "question": "dRRT disk robots polygons Xeon E5-4650 tensor roadmap",
+   "question": "dRRT Xeon E5-4650",
    "paper_title_contains": "Scalable Asymptotically-Optimal Multi-Robot Motion Planning",
    "expect_substrings": [
     "Intel(R) Xeon(R) CPU E5-4650"
@@ -725,7 +726,7 @@
    "id": "fanet-mec-slices",
    "kind": "keyword",
    "split": "test",
-   "question": "FANET MEC facilities network slices UAV swarm edge computing",
+   "question": "FANET MEC network slices",
    "paper_title_contains": "Swarm-Enabled Edge Computing",
    "expect_substrings": [
     "Flying Ad-Hoc Network (FANET) consisting of the UAVs equipped with MEC facilities"
@@ -735,7 +736,7 @@
    "id": "haucs-glop-hpp",
    "kind": "keyword",
    "split": "tune",
-   "question": "HAUCS aquaculture ponds GLOP HPP routing",
+   "question": "HAUCS ponds GLOP HPP",
    "paper_title_contains": "Robotic Aquaculture Monitoring",
    "expect_substrings": [
     "GLOP is the most efficient solver for 50 to 200 ponds"
@@ -745,7 +746,7 @@
    "id": "intermittent-faults-llr",
    "kind": "keyword",
    "split": "tune",
-   "question": "LLR backup path sample covariance runtime intermittent faults",
+   "question": "LLR backup path runtime",
    "paper_title_contains": "Proactive-reactive detection and mitigation of intermittent faults",
    "expect_substrings": [
     "sorting the LLRs"
@@ -755,7 +756,7 @@
    "id": "lidar-slam-corridor-zdrift",
    "kind": "keyword",
    "split": "test",
-   "question": "LIDAR-SLAM corridor problem featureless corridors Z-drift sensor fusion",
+   "question": "LIDAR-SLAM corridor problem Z-drift",
    "paper_title_contains": "Search and Rescue Real World",
    "expect_substrings": [
     "solution to Z-drift caused by the corridor problem"
@@ -765,7 +766,7 @@
    "id": "llm-dmas-cmas-hmas",
    "kind": "keyword",
    "split": "tune",
-   "question": "DMAS CMAS HMAS LLM dialogue frameworks multi-robot task planning",
+   "question": "DMAS CMAS HMAS LLM frameworks",
    "paper_title_contains": "Scalable Multi-Robot Collaboration with Large Language Models",
    "expect_substrings": [
     "The first approach (DMAS)"
@@ -775,7 +776,7 @@
    "id": "myerson-auction-payment",
    "kind": "keyword",
    "split": "tune",
-   "question": "Myerson virtual valuation bidder payment auction",
+   "question": "Myerson virtual valuation payment",
    "paper_title_contains": "Aerial Data Collection in Smart City Surveillance",
    "expect_substrings": [
     "the second-highest virtual valuation"
@@ -785,7 +786,7 @@
    "id": "oran-uav-relays",
    "kind": "keyword",
    "split": "test",
-   "question": "UAV relays O-RAN O-RU GUs uplink",
+   "question": "UAV relays O-RAN O-RU uplink",
    "paper_title_contains": "Security-Aware Resource Allocation Framework for UAV-Assisted O-RAN",
    "expect_substrings": [
     "O-RAN Radio Units (O-RU)"
@@ -795,7 +796,7 @@
    "id": "pheromone-repel-deposit",
    "kind": "keyword",
    "split": "tune",
-   "question": "repel attract pheromones deposited Boids flocking target search",
+   "question": "repel pheromones deposited target search",
    "paper_title_contains": "Connectivity-Aware Pheromone Mobility Model",
    "expect_substrings": [
     "Repel pheromones are deposited when no target is found"
@@ -805,27 +806,27 @@
    "id": "propeller-arduino-testbed",
    "kind": "keyword",
    "split": "tune",
-   "question": "Arduino Uno PWM brushless motor ESC event camera propeller testbed",
+   "question": "propeller testbed Arduino Uno PWM",
    "paper_title_contains": "Count Every Rotation",
    "expect_substrings": [
-    "Arduino Uno"
+    "The laptop transmits the PWM parameters to the Arduino Uno"
    ]
   },
   {
    "id": "racil-composite-il",
    "kind": "keyword",
    "split": "test",
-   "question": "RaCIL composite imitation learning PPO behavior cloning GAIL ray tracing",
+   "question": "RaCIL composite imitation learning GAIL",
    "paper_title_contains": "RaCIL",
    "expect_substrings": [
-    "Generative Adversarial Imitation Learning (GAIL)"
+    "composite imitation learning framework combining Proximal Policy Optimization"
    ]
   },
   {
    "id": "radium-baselines",
    "kind": "keyword",
    "split": "tune",
-   "question": "RADIUM baselines GDr GDa L2C counterexamples",
+   "question": "RADIUM baselines L2C counterexamples",
    "paper_title_contains": "RADIUM",
    "expect_substrings": [
     "Learning to collide (L2C)"
@@ -845,7 +846,7 @@
    "id": "roman-kimera-baseline",
    "kind": "keyword",
    "split": "test",
-   "question": "ROMAN Kimera-Multi SALAD SuperPoint LightGlue loop closure baseline",
+   "question": "ROMAN loop closure Kimera-Multi",
    "paper_title_contains": "Language-Grounded Hierarchical Planning",
    "expect_substrings": [
     "SALAD [15] for place descriptors"
@@ -855,7 +856,7 @@
    "id": "scand-robots",
    "kind": "keyword",
    "split": "tune",
-   "question": "SCAND Clearpath Jackal Boston Dynamics Spot teleoperated demonstrations",
+   "question": "SCAND Jackal Spot robots",
    "paper_title_contains": "SCAND",
    "expect_substrings": [
     "a Clearpath Jackal and a Boston Dynamics Spot"
@@ -865,7 +866,7 @@
    "id": "semantic-nav-aruco-realsense",
    "kind": "keyword",
    "split": "tune",
-   "question": "Aruco markers Intel Realsense D435 real robot deployment",
+   "question": "Aruco markers Realsense D435",
    "paper_title_contains": "Semantic Navigation of Mobile Robots in Dynamic Environments",
    "expect_substrings": [
     "Fiducial Aruco markers"
@@ -875,7 +876,7 @@
    "id": "skyway-landing-spots",
    "kind": "keyword",
    "split": "test",
-   "question": "skyway network landing spots rooftops SOA registry swarm delivery",
+   "question": "skyway network landing spots",
    "paper_title_contains": "In-Flight Energy-Driven Composition",
    "expect_substrings": [
     "skyway network with landing spots (LS)"
@@ -885,17 +886,17 @@
    "id": "slidegraph-clipper-delaunay",
    "kind": "keyword",
    "split": "tune",
-   "question": "SlideGraph CLIPPER maximum clique Delaunay triangulation descriptor loop closure",
+   "question": "SlideGraph Delaunay descriptors CLIPPER",
    "paper_title_contains": "SlideSLAM",
    "expect_substrings": [
-    "Delaunay triangulation"
+    "applies Delaunay triangulation to two sets of object landmarks"
    ]
   },
   {
    "id": "spot-st-rrt",
    "kind": "keyword",
    "split": "tune",
-   "question": "ST-RRT spatio-temporal RRT travel time root node occupancy",
+   "question": "spatio-temporal RRT travel time root node",
    "paper_title_contains": "SPOT: Spatio-Temporal Obstacle-free",
    "expect_substrings": [
     "Spatio-Temporal RRT"
@@ -905,7 +906,7 @@
    "id": "storm-jerk-linearized",
    "kind": "keyword",
    "split": "test",
-   "question": "STORM temporal constraints jerk acceleration control points linearized decoupling",
+   "question": "STORM jerk constraints linearized",
    "paper_title_contains": "STORM",
    "expect_substrings": [
     "the constraints on acceleration and jerk are linearized"
@@ -915,7 +916,7 @@
    "id": "thz-backhaul-fronthaul",
    "kind": "keyword",
    "split": "tune",
-   "question": "THz backhaul fronthaul links mmWave SBSs UAV trajectory",
+   "question": "THz backhaul fronthaul UAV links",
    "paper_title_contains": "Directional THz Links",
    "expect_substrings": [
     "assisted backhaul/fronthaul links are proposed"
@@ -925,7 +926,7 @@
    "id": "xtdrone-stereo-parameters",
    "kind": "keyword",
    "split": "tune",
-   "question": "XTDrone stereo camera parameters baseline radial tangential distortion",
+   "question": "XTDrone stereo camera parameters",
    "paper_title_contains": "XTDrone",
    "expect_substrings": [
     "PARAMETERS OF STEREO CAMERA"
