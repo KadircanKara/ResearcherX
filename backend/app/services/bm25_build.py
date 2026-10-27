@@ -5,8 +5,9 @@ Runs as a SUBPROCESS (`python -m app.services.bm25_build <project_id>
 its memory, and it opens its own engine instead of sharing the app's pool.
 
 A version directory is complete only when it holds `DONE`. It is written to a
-sibling `.tmp` directory, `DONE` last, then renamed into place: a crash leaves
-either nothing or a `.tmp` leftover, never a half-written version a loader
+sibling `<version>.tmp.<pid>.<random>` directory, unique to this attempt, `DONE`
+last, then renamed into place: a crash leaves either nothing or a `.tmp.*`
+leftover (the scheduler's GC removes it), never a half-written version a loader
 could pick up. Versions are unique -- an existing target is an error.
 
 A project with nothing to index (no ready chunks, or text that is all
@@ -23,6 +24,7 @@ import logging
 import os
 import shutil
 import sys
+import uuid
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -82,9 +84,10 @@ def _write_atomically(out_dir: Path, retriever: bm25s.BM25 | None, chunk_ids: Se
     out_dir = Path(out_dir)
     if out_dir.exists():
         raise FileExistsError(f"index version already exists: {out_dir}")
-    tmp = out_dir.with_name(out_dir.name + ".tmp")
-    if tmp.exists():
-        shutil.rmtree(tmp)  # leftover of a crashed run
+    # Unique per attempt: an orphaned build of the same version (its parent
+    # died, so its lock is gone) can never write into this directory, and the
+    # rename onto a non-empty target fails, so two builds never mix.
+    tmp = out_dir.with_name(f"{out_dir.name}.tmp.{os.getpid()}.{uuid.uuid4().hex[:12]}")
     tmp.mkdir(parents=True)
     try:
         if retriever is not None:

@@ -81,6 +81,13 @@ async def users(db_session: AsyncSession):
     await db_session.commit()
 
 
+@pytest.fixture(autouse=True)
+def no_backoff_leak():
+    bm25_scheduler._backoff.clear()
+    yield
+    bm25_scheduler._backoff.clear()
+
+
 @pytest.fixture
 def index_dir(tmp_path: Path, monkeypatch) -> Path:
     monkeypatch.setattr(settings, "bm25_index_dir", str(tmp_path))
@@ -177,7 +184,9 @@ async def test_failed_build_leaves_project_dirty(users, db_session, lock, builds
     s = await _state(pid)
     assert s.dirty_since is not None and s.current_version == 0
 
-    # The next tick retries with the same version number: nothing was published.
+    # The retry (after the backoff window) reuses the version number:
+    # nothing was published.
+    bm25_scheduler._backoff.clear()
     behaviour["count"] = 2
     assert await bm25_scheduler.tick(_later()) == [pid]
     assert calls[-1] == (pid, 1)
@@ -335,17 +344,23 @@ async def test_tokenizer_version_mismatch_marks_dirty(users, db_session, lock, b
 
 
 async def test_run_build_kills_a_build_that_times_out(tmp_path, monkeypatch):
-    monkeypatch.setattr(settings, "bm25_build_timeout_s", 0.5)
-    (tmp_path / "1.tmp").mkdir()  # what a killed build leaves behind
+    monkeypatch.setattr(settings, "bm25_build_timeout_s", 1.0)
+    other = tmp_path / "1.tmp.1.someone-else"  # another build's: not ours to remove
+    other.mkdir()
+    script = (
+        "import os, pathlib, sys, time;"
+        "pathlib.Path(sys.argv[1], f'1.tmp.{os.getpid()}.x').mkdir();"
+        "time.sleep(30)"
+    )
     monkeypatch.setattr(
         bm25_scheduler,
         "build_argv",
-        lambda pid, version, root: [sys.executable, "-c", "import time; time.sleep(30)"],
+        lambda pid, version, root: [sys.executable, "-c", script, str(root)],
     )
     started = time.monotonic()
     assert await bm25_scheduler.run_build("p", 1, tmp_path) is None
     assert time.monotonic() - started < 10
-    assert not (tmp_path / "1.tmp").exists()
+    assert [p.name for p in tmp_path.iterdir()] == [other.name]
 
 
 async def test_run_build_parses_the_count_and_ignores_stderr(tmp_path, monkeypatch):
@@ -446,3 +461,259 @@ async def test_a_published_version_missing_on_disk_is_marked_dirty(users, db_ses
     assert await bm25_scheduler.mark_unindexed_projects() == 1
     assert (await _state(lost)).dirty_since is not None
     assert (await _state(kept)).dirty_since is None
+
+
+# ── fix round 1 ──────────────────────────────────────────────────────────
+
+
+async def test_a_failing_project_backs_off_without_blocking_others(
+    users, db_session, lock, monkeypatch, index_dir
+):
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(bm25_scheduler, "_clock", lambda: clock["t"])
+    calls = []
+    bad = await _new_project(db_session, "bad")
+    good = await _new_project(db_session, "good")
+
+    async def fake(project_id, version, root):
+        calls.append(project_id)
+        if project_id == bad:
+            return None
+        out = root / str(version)
+        out.mkdir(parents=True)
+        (out / "DONE").write_text("1\n")
+        return 1
+
+    monkeypatch.setattr(bm25_scheduler, "run_build", fake)
+    await _dirty(bad)  # older change: sorts first
+    await _dirty(good)
+
+    assert await bm25_scheduler.tick(_later()) == [good]
+    assert calls == [bad, good]
+
+    # Inside the first backoff window (~60s) the failing project is skipped.
+    await _dirty(good)
+    clock["t"] += 30
+    assert await bm25_scheduler.tick(_later()) == [good]
+    assert calls == [bad, good, good]
+
+    # After it, one more attempt; the next window doubles.
+    clock["t"] += 31
+    assert await bm25_scheduler.tick(_later()) == []
+    assert calls[-1] == bad
+    n = len(calls)
+    clock["t"] += 119  # the second window is 120s
+    assert await bm25_scheduler.tick(_later()) == []
+    assert len(calls) == n
+    clock["t"] += 2
+    await bm25_scheduler.tick(_later())
+    assert len(calls) == n + 1
+
+
+def test_backoff_doubles_and_caps():
+    assert [bm25_scheduler.backoff_delay(n) for n in (1, 2, 3, 7, 30)] == [
+        60,
+        120,
+        240,
+        3600,
+        3600,
+    ]
+
+
+async def test_a_successful_build_resets_the_backoff(users, db_session, lock, builds, monkeypatch):
+    clock = {"t": 0.0}
+    monkeypatch.setattr(bm25_scheduler, "_clock", lambda: clock["t"])
+    calls, behaviour = builds
+    pid = await _new_project(db_session, "flaky")
+    await _dirty(pid)
+    behaviour["count"] = None
+    await bm25_scheduler.tick(_later())
+    await bm25_scheduler.tick(_later())  # backing off
+    assert len(calls) == 1
+    clock["t"] += 61
+    behaviour["count"] = 2
+    assert await bm25_scheduler.tick(_later()) == [pid]
+    assert pid not in bm25_scheduler._backoff
+    await _dirty(pid)
+    assert await bm25_scheduler.tick(_later()) == [pid]  # no window left over
+
+
+async def test_a_swap_that_raises_is_reported_not_ok(users, db_session, lock, builds, monkeypatch):
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    from app.core import observability
+
+    async def boom(*a, **k):
+        raise RuntimeError("db gone")
+
+    monkeypatch.setattr(bm25_state, "swap_version", boom)
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    observability.install_provider(provider)
+    try:
+        pid = await _new_project(db_session, "swapfail")
+        await _dirty(pid)
+        assert await bm25_scheduler.tick(_later()) == []
+    finally:
+        observability.install_provider(None)
+    (s,) = [s for s in exporter.get_finished_spans() if s.name == "bm25.build"]
+    assert s.attributes["ok"] is False
+    assert (await _state(pid)).current_version == 0
+
+
+async def test_a_project_deleted_mid_build_drops_its_index_dir(
+    users, db_session, lock, builds, index_dir
+):
+    from sqlalchemy import delete
+
+    calls, behaviour = builds
+    pid = await _new_project(db_session, "doomed")
+    await _dirty(pid)
+
+    async def delete_project(project_id):
+        async with SessionLocal() as db:
+            await db.execute(delete(Bm25IndexState).where(Bm25IndexState.project_id == project_id))
+            await db.execute(delete(ProjectMember).where(ProjectMember.project_id == project_id))
+            await db.execute(delete(Project).where(Project.id == project_id))
+            await db.commit()
+
+    behaviour["during"] = delete_project
+    assert await bm25_scheduler.tick(_later()) == []
+    assert calls == [(pid, 1)]
+    assert not (index_dir / pid).exists()
+    assert pid not in bm25_scheduler._backoff
+
+
+def test_gc_removes_stale_tmp_dirs_after_grace(tmp_path: Path):
+    now = time.time()
+    old_tmp = tmp_path / "5.tmp.123.abcd"
+    fresh_tmp = tmp_path / "6.tmp.456.ef01"
+    for d, age in ((old_tmp, 3600), (fresh_tmp, 10)):
+        d.mkdir()
+        os.utime(d, (now - age, now - age))
+    _version(tmp_path, 4, 3600, now)
+
+    removed = bm25_scheduler.gc_old_versions(tmp_path, {4}, now=now, grace_s=600)
+
+    assert [p.name for p in removed] == [old_tmp.name]
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["4", fresh_tmp.name]
+
+
+class _FakeConn:
+    def __init__(self, *, lock_result=True, fail_commit_at=None, fail_unlock=False):
+        self.lock_result = lock_result
+        self.fail_commit_at = fail_commit_at
+        self.fail_unlock = fail_unlock
+        self.statements: list[str] = []
+        self.commits = 0
+        self.invalidated = False
+
+    async def execute(self, stmt, params):
+        sql = str(stmt)
+        self.statements.append("unlock" if "unlock" in sql else "lock")
+        if "unlock" in sql and self.fail_unlock:
+            raise RuntimeError("connection lost")
+
+        class R:
+            def scalar(_):
+                return self.lock_result
+
+        return R()
+
+    async def commit(self):
+        self.commits += 1
+        if self.fail_commit_at == self.commits:
+            raise RuntimeError("commit failed")
+
+    async def invalidate(self):
+        self.invalidated = True
+
+
+class _FakeEngine:
+    def __init__(self, conn):
+        self.conn = conn
+
+    def connect(self):
+        conn = self.conn
+
+        class Ctx:
+            async def __aenter__(_):
+                return conn
+
+            async def __aexit__(_, *exc):
+                return False
+
+        return Ctx()
+
+
+async def test_advisory_lock_unlocks_when_the_body_raises(monkeypatch):
+    conn = _FakeConn()
+    monkeypatch.setattr(bm25_scheduler, "engine", _FakeEngine(conn))
+    with pytest.raises(ValueError):
+        async with bm25_scheduler.advisory_lock("p") as got:
+            assert got is True
+            raise ValueError
+    assert conn.statements == ["lock", "unlock"]
+    assert not conn.invalidated
+
+
+async def test_advisory_lock_invalidates_when_the_commit_after_acquire_raises(monkeypatch):
+    conn = _FakeConn(fail_commit_at=1)
+    monkeypatch.setattr(bm25_scheduler, "engine", _FakeEngine(conn))
+    with pytest.raises(RuntimeError):
+        async with bm25_scheduler.advisory_lock("p"):
+            pytest.fail("body must not run")
+    assert conn.invalidated
+
+
+async def test_advisory_lock_invalidates_when_unlock_fails(monkeypatch):
+    conn = _FakeConn(fail_unlock=True)
+    monkeypatch.setattr(bm25_scheduler, "engine", _FakeEngine(conn))
+    async with bm25_scheduler.advisory_lock("p") as got:
+        assert got
+    assert conn.invalidated
+
+
+async def test_advisory_lock_not_taken_yields_false(monkeypatch):
+    conn = _FakeConn(lock_result=False)
+    monkeypatch.setattr(bm25_scheduler, "engine", _FakeEngine(conn))
+    async with bm25_scheduler.advisory_lock("p") as got:
+        assert got is False
+    assert conn.statements == ["lock"]
+
+
+async def test_run_build_cancelled_kills_the_child_and_its_tmp(tmp_path, monkeypatch):
+    import asyncio
+
+    pids = []
+    script = (
+        "import os, pathlib, sys, time;"
+        "pathlib.Path(sys.argv[1], f'1.tmp.{os.getpid()}.x').mkdir();"
+        "print(os.getpid(), flush=True); time.sleep(30)"
+    )
+    monkeypatch.setattr(
+        bm25_scheduler,
+        "build_argv",
+        lambda pid, version, root: [sys.executable, "-c", script, str(root)],
+    )
+    real = asyncio.create_subprocess_exec
+
+    async def spy(*a, **k):
+        proc = await real(*a, **k)
+        pids.append(proc)
+        return proc
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spy)
+    task = asyncio.create_task(bm25_scheduler.run_build("p", 1, tmp_path))
+    for _ in range(100):
+        await asyncio.sleep(0.05)
+        if any(tmp_path.glob("1.tmp.*")):
+            break
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert pids[0].returncode is not None
+    assert not list(tmp_path.glob("1.tmp.*"))

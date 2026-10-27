@@ -58,14 +58,29 @@ def test_save_version_is_atomic(tmp_path: Path, monkeypatch):
     assert not out.exists()
 
 
-def test_a_stale_tmp_dir_is_replaced(tmp_path: Path):
-    stale = tmp_path / "1.tmp"
-    stale.mkdir()
-    (stale / "junk").write_text("x")
+def test_the_tmp_dir_is_unique_per_build_and_never_shared(tmp_path: Path, monkeypatch):
+    # Another (possibly orphaned) build's tmp of the same version is left
+    # alone: two writers never share a directory, so a published version can
+    # never pair one build's id map with another build's matrices.
+    other = tmp_path / "1.tmp.99999.deadbeef"
+    other.mkdir()
+    (other / "junk").write_text("x")
+    seen = []
+    real_rename = os.rename
+
+    def spy(src, dst):
+        seen.append(Path(src).name)
+        return real_rename(src, dst)
+
+    monkeypatch.setattr(os, "rename", spy)
     save_version(tmp_path / "1", build_index(IDS, TEXTS), IDS)
-    assert not stale.exists()
+    assert (other / "junk").is_file()
     assert (tmp_path / "1" / "DONE").is_file()
     assert not (tmp_path / "1" / "junk").exists()
+    (name,) = seen
+    assert name.startswith(f"1.tmp.{os.getpid()}.") and name != "1.tmp"
+    names = {p.name for p in tmp_path.iterdir()}
+    assert names == {"1", other.name}
 
 
 def test_an_existing_version_is_never_overwritten(tmp_path: Path):

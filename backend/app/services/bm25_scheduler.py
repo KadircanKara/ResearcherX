@@ -26,6 +26,7 @@ and the advisory lock.
 from __future__ import annotations
 
 import asyncio
+import re
 import shutil
 import sys
 import time
@@ -44,6 +45,17 @@ from app.db.session import SessionLocal, engine
 from app.services import bm25_state
 from app.services.bm25_build import DONE
 from app.services.bm25_tokenizer import TOKENIZER_CONFIG
+
+# A failed or timed-out build is not retried until its backoff expires, so a
+# project that always fails cannot pay a full rebuild every tick or hold the
+# serial queue for `bm25_build_timeout_s` each time. In-process on purpose: a
+# second process only repeats an attempt, and the advisory lock serialises it.
+BACKOFF_BASE_S = 60
+BACKOFF_MAX_S = 3600
+_backoff: dict[str, tuple[int, float]] = {}  # project_id -> (failures, next attempt)
+_clock = time.monotonic
+
+_VERSION_TMP = re.compile(r"^\d+\.tmp(\..*)?$")
 
 # The directory `-m app.services.bm25_build` must run from.
 _BACKEND_ROOT = Path(__file__).resolve().parents[2]
@@ -123,8 +135,14 @@ async def advisory_lock(project_id: str) -> AsyncIterator[bool]:
     away, which releases the lock with it.
     """
     async with engine.connect() as conn:
-        got = bool((await conn.execute(_LOCK_SQL, {"project_id": project_id})).scalar())
-        await conn.commit()
+        try:
+            got = bool((await conn.execute(_LOCK_SQL, {"project_id": project_id})).scalar())
+            await conn.commit()
+        except BaseException:
+            # The lock may be held with nothing left to release it: drop the
+            # connection rather than return a locked session to the pool.
+            await conn.invalidate()
+            raise
         if not got:
             yield False
             return
@@ -134,19 +152,37 @@ async def advisory_lock(project_id: str) -> AsyncIterator[bool]:
             try:
                 await conn.execute(_UNLOCK_SQL, {"project_id": project_id})
                 await conn.commit()
-            except Exception:
+            except BaseException as exc:
                 log.warning("bm25_unlock_failed", project_id=project_id, exc_info=True)
                 await conn.invalidate()
+                if not isinstance(exc, Exception):
+                    raise
 
 
 def build_argv(project_id: str, version: int, root: Path) -> list[str]:
     return [sys.executable, "-m", "app.services.bm25_build", project_id, str(version), str(root)]
 
 
-def _discard(root: Path, version: int) -> None:
-    """Remove an unpublished version and its `.tmp` leftover."""
-    shutil.rmtree(root / f"{version}.tmp", ignore_errors=True)
-    shutil.rmtree(root / str(version), ignore_errors=True)
+def backoff_delay(failures: int) -> float:
+    return min(BACKOFF_BASE_S * 2 ** (failures - 1), BACKOFF_MAX_S)
+
+
+def _record_failure(project_id: str) -> None:
+    failures = _backoff.get(project_id, (0, 0.0))[0] + 1
+    delay = backoff_delay(failures)
+    _backoff[project_id] = (failures, _clock() + delay)
+    log.warning("bm25_build_backoff", project_id=project_id, failures=failures, delay_s=delay)
+
+
+def _backing_off(project_id: str) -> bool:
+    entry = _backoff.get(project_id)
+    return entry is not None and entry[1] > _clock()
+
+
+def _remove_child_tmp(root: Path, version: int, pid: int) -> None:
+    """Remove the `.tmp` of THIS child only; another build's is not ours."""
+    for d in root.glob(f"{version}.tmp.{pid}.*"):
+        shutil.rmtree(d, ignore_errors=True)
 
 
 async def _kill(proc: asyncio.subprocess.Process) -> None:
@@ -173,7 +209,7 @@ async def run_build(project_id: str, version: int, root: Path) -> int | None:
         out, err = await asyncio.wait_for(proc.communicate(), timeout=settings.bm25_build_timeout_s)
     except TimeoutError:
         await _kill(proc)
-        shutil.rmtree(root / f"{version}.tmp", ignore_errors=True)
+        _remove_child_tmp(root, version, proc.pid)
         log.warning(
             "bm25_build_timeout",
             project_id=project_id,
@@ -183,10 +219,10 @@ async def run_build(project_id: str, version: int, root: Path) -> int | None:
     except BaseException:
         # Cancelled (shutdown): the build must not outlive the app.
         await _kill(proc)
-        shutil.rmtree(root / f"{version}.tmp", ignore_errors=True)
+        _remove_child_tmp(root, version, proc.pid)
         raise
     if proc.returncode != 0:
-        shutil.rmtree(root / f"{version}.tmp", ignore_errors=True)
+        _remove_child_tmp(root, version, proc.pid)
         log.warning(
             "bm25_build_failed",
             project_id=project_id,
@@ -202,13 +238,19 @@ async def run_build(project_id: str, version: int, root: Path) -> int | None:
 
 
 def gc_old_versions(project_dir: Path, keep: set[int], now: float, grace_s: int) -> list[Path]:
-    """Delete version directories not in `keep` whose mtime is older than
-    `grace_s`. Anything that is not a numbered directory is left alone."""
+    """Delete version directories not in `keep`, and leftover `<v>.tmp.*`
+    directories of dead or killed builds, once their mtime is older than
+    `grace_s`. Anything else is left alone."""
     if not project_dir.is_dir():
         return []
     removed = []
     for d in sorted(project_dir.iterdir(), key=lambda p: p.name):
-        if not (d.is_dir() and d.name.isdigit()) or int(d.name) in keep:
+        if not d.is_dir():
+            continue
+        if d.name.isdigit():
+            if int(d.name) in keep:
+                continue
+        elif not _VERSION_TMP.match(d.name):
             continue
         if now - d.stat().st_mtime < grace_s:
             continue
@@ -227,18 +269,20 @@ async def _build_locked(project_id: str) -> bool:
     root = Path(settings.bm25_index_dir) / project_id
     # A version this number may exist unpublished: a build whose swap never
     # landed. Nothing can be reading it, and the build refuses to overwrite.
-    _discard(root, version)
+    # Other builds' `.tmp.*` directories are not touched; GC ages them out.
+    shutil.rmtree(root / str(version), ignore_errors=True)
     root.mkdir(parents=True, exist_ok=True)
 
     started = time.monotonic()
     ok = False
     cleared = False
+    gone = False
     count: int | None = None
     with observability.span("bm25.build", attributes={"project_id": project_id}) as s:
         try:
             count = await run_build(project_id, version, root)
-            ok = count is not None and (root / str(version) / DONE).is_file()
-            if ok:
+            built = count is not None and (root / str(version) / DONE).is_file()
+            if built:
                 async with SessionLocal() as db:
                     cleared = await bm25_state.swap_version(
                         db,
@@ -248,14 +292,24 @@ async def _build_locked(project_id: str) -> bool:
                         chunk_count=count,
                         tokenizer_ver=TOKENIZER_CONFIG["version"],
                     )
+                    if not cleared:
+                        # No row matched: the project was deleted mid-build
+                        # (the state row cascades with it).
+                        gone = await db.get(Bm25IndexState, project_id) is None
                     await db.commit()
-            else:
-                _discard(root, version)
+                ok = not gone
+            if not ok:
+                shutil.rmtree(root / str(version), ignore_errors=True)
         finally:
             duration = round(time.monotonic() - started, 3)
             observability.set_attributes(
                 s, {"chunk_count": count, "duration_s": duration, "ok": ok}
             )
+    if gone:
+        shutil.rmtree(root, ignore_errors=True)
+        _backoff.pop(project_id, None)
+        log.info("bm25_project_gone", project_id=project_id, version=version)
+        return False
     log.info(
         "bm25_build_done" if ok else "bm25_build_not_published",
         project_id=project_id,
@@ -264,13 +318,16 @@ async def _build_locked(project_id: str) -> bool:
         duration_s=duration,
         still_dirty=ok and not cleared,
     )
-    if ok:
-        removed = gc_old_versions(
-            root, {version, version - 1}, now=time.time(), grace_s=settings.bm25_gc_grace_s
-        )
-        if removed:
-            log.info("bm25_versions_removed", project_id=project_id, count=len(removed))
-    return ok
+    if not ok:
+        _record_failure(project_id)
+        return False
+    _backoff.pop(project_id, None)
+    removed = gc_old_versions(
+        root, {version, version - 1}, now=time.time(), grace_s=settings.bm25_gc_grace_s
+    )
+    if removed:
+        log.info("bm25_versions_removed", project_id=project_id, count=len(removed))
+    return True
 
 
 async def build_project(project_id: str) -> bool:
@@ -289,11 +346,14 @@ async def tick(now: datetime) -> list[str]:
         due = await bm25_state.due_projects(db, quiet_s=settings.bm25_quiet_period_s, now=now)
     built = []
     for project_id in due:  # one at a time, deliberately
+        if _backing_off(project_id):
+            continue
         try:
             if await build_project(project_id):
                 built.append(project_id)
         except Exception:
             log.error("bm25_build_error", project_id=project_id, exc_info=True)
+            _record_failure(project_id)
     return built
 
 
