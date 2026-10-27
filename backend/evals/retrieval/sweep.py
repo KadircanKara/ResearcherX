@@ -16,6 +16,7 @@ import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
+from app.core.config import settings
 from app.services.hybrid_ranker import fuse_rrf
 from evals.retrieval.golden_set import Case
 from evals.retrieval.metrics import Scored
@@ -23,8 +24,12 @@ from evals.retrieval.per_kind import ARMS, macro, per_kind_table
 
 W_DENSE_GRID: tuple[float, ...] = (0.3, 0.4, 0.5, 0.6, 0.7, 0.8)
 K_GRID: tuple[int, ...] = (5, 10, 20, 30, 60, 100)
-CURRENT: tuple[float, int] = (0.7, 30)
 _ARM = "hybrid_bm25"
+
+
+def current_point() -> tuple[float, int]:
+    """The (w_dense, k) production runs with, read from settings when asked."""
+    return (settings.hybrid_dense_weight, settings.hybrid_rrf_k)
 
 
 @dataclass(frozen=True)
@@ -93,7 +98,8 @@ def sweep(rankings: Sequence[CaseRankings], *, budget: int) -> list[GridPoint]:
 
 
 def _distance_to_current(p: GridPoint) -> float:
-    return abs(p.w_dense - CURRENT[0]) / 0.1 + abs(math.log(p.k / CURRENT[1]))
+    w, k = current_point()
+    return abs(p.w_dense - w) / 0.1 + abs(math.log(p.k / k))
 
 
 def best(points: Sequence[GridPoint]) -> GridPoint:
@@ -126,8 +132,10 @@ def report(tune: Sequence[CaseRankings], test: Sequence[CaseRankings], *, budget
     """
     points = sweep(tune, budget=budget)
     chosen = best(points)
-    current = next(p for p in points if (p.w_dense, p.k) == CURRENT)
     by_cell = {(p.w_dense, p.k): p for p in points}
+    # The shipped settings may sit off the grid; evaluate them explicitly then.
+    cur = current_point()
+    current = by_cell.get(cur) or evaluate_point(tune, *cur, budget=budget)
 
     print(f"RRF sweep on the tune split ({len(tune)} positive cases, bm25s sparse, no rerank):")
     print("  macro MRR; rows w_dense, cols k")
@@ -149,7 +157,7 @@ def report(tune: Sequence[CaseRankings], test: Sequence[CaseRankings], *, budget
     }
     if test:
         chosen_test = evaluate_point(test, chosen.w_dense, chosen.k, budget=budget)
-        current_test = evaluate_point(test, *CURRENT, budget=budget)
+        current_test = evaluate_point(test, *cur, budget=budget)
         print(f"  held out: test split ({len(test)} positive cases)")
         for line in _fmt_point("best (test)", chosen_test) + _fmt_point(
             "current (test)", current_test

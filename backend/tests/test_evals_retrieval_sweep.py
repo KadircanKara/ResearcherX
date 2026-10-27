@@ -2,12 +2,12 @@ from evals.retrieval import sweep as sw
 from evals.retrieval.golden_set import Case
 from evals.retrieval.metrics import Scored
 from evals.retrieval.sweep import (
-    CURRENT,
     K_GRID,
     W_DENSE_GRID,
     CaseRankings,
     GridPoint,
     best,
+    current_point,
     report,
     sweep,
 )
@@ -86,8 +86,9 @@ def test_best_picks_highest_macro_mrr():
 
 
 def test_best_breaks_ties_toward_current_settings():
-    pts = [_point(0.3, 5, 0.8), _point(0.8, 100, 0.8), _point(0.6, 30, 0.8), _point(*CURRENT, 0.8)]
-    assert (best(pts).w_dense, best(pts).k) == CURRENT
+    cur = current_point()
+    pts = [_point(0.3, 5, 0.8), _point(0.8, 100, 0.8), _point(0.6, 30, 0.8), _point(*cur, 0.8)]
+    assert (best(pts).w_dense, best(pts).k) == cur
     pts = [_point(0.3, 5, 0.8, 0.9), _point(0.8, 100, 0.8, 1.0)]
     assert best(pts).k == 100  # r@60 breaks the tie before distance does
 
@@ -133,3 +134,23 @@ def test_tune_point_is_chosen_without_test_cases():
     assert payload["best_test"] == vars(expected)
     assert payload["best_test"]["macro_mrr"] < 1.0
     assert report([tune], [], budget=60)["best_test"] is None
+
+
+def test_current_point_is_read_from_settings(monkeypatch):
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "hybrid_dense_weight", 0.4)
+    monkeypatch.setattr(settings, "hybrid_rrf_k", 10)
+    assert current_point() == (0.4, 10)
+    pts = [_point(0.3, 5, 0.8), _point(0.4, 10, 0.8), _point(0.8, 100, 0.8)]
+    assert (best(pts).w_dense, best(pts).k) == (0.4, 10)
+
+
+def test_report_evaluates_an_off_grid_current_point(monkeypatch):
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "hybrid_dense_weight", 0.65)
+    monkeypatch.setattr(settings, "hybrid_rrf_k", 45)
+    payload = report([_rankings()], [_rankings(split="test", cid="t")], budget=60)
+    assert (payload["current_tune"]["w_dense"], payload["current_tune"]["k"]) == (0.65, 45)
+    assert (payload["current_test"]["w_dense"], payload["current_test"]["k"]) == (0.65, 45)
