@@ -103,9 +103,21 @@ export default function PapersPage() {
     setSelectedIds((prev) => retainVisible(prev, stillVisible));
   }
 
-  function toggleOpen(paper: Paper) {
-    setOpenId(openId === paper.id ? null : paper.id);
-  }
+  // Row callbacks are stable (functional updates, no closure over state) so
+  // a memoized row re-renders only when its own props change: toggling one
+  // row must not re-render the other two thousand.
+  const toggleOpen = useCallback((paper: Paper) => {
+    setOpenId((prev) => (prev === paper.id ? null : paper.id));
+  }, []);
+
+  const toggleSelect = useCallback((paper: Paper) => {
+    setSelectedIds((prev) => toggle(prev, paper.id));
+  }, []);
+
+  const startRename = useCallback((paper: Paper) => {
+    setRenameError(null);
+    setRenamePaper(paper);
+  }, []);
 
   function openAdd(files: File[]) {
     setDroppedFiles(files);
@@ -177,27 +189,30 @@ export default function PapersPage() {
     load({ silent: true });
   }
 
-  async function handleDownload(paper: Paper) {
-    setDownloadingId(paper.id);
-    setError(null);
-    try {
-      const blob = await fetchPaperPdf(projectId, paper.id);
-      // Named for the paper, not its id: an id names nothing in a downloads
-      // folder. Same character rules as the chat transcript export.
-      const safe =
-        paper.title
-          .replace(/[\\/:*?"<>|]/g, "-")
-          .trim()
-          .slice(0, 80) || "paper";
-      // The served type names the extension: an upload may be any of the
-      // supported formats, not only a PDF.
-      saveBlob(blob, `${safe}${extensionForType(blob.type)}`);
-    } catch {
-      setError("Could not download that file. Please try again.");
-    } finally {
-      setDownloadingId(null);
-    }
-  }
+  const handleDownload = useCallback(
+    async (paper: Paper) => {
+      setDownloadingId(paper.id);
+      setError(null);
+      try {
+        const blob = await fetchPaperPdf(projectId, paper.id);
+        // Named for the paper, not its id: an id names nothing in a downloads
+        // folder. Same character rules as the chat transcript export.
+        const safe =
+          paper.title
+            .replace(/[\\/:*?"<>|]/g, "-")
+            .trim()
+            .slice(0, 80) || "paper";
+        // The served type names the extension: an upload may be any of the
+        // supported formats, not only a PDF.
+        saveBlob(blob, `${safe}${extensionForType(blob.type)}`);
+      } catch {
+        setError("Could not download that file. Please try again.");
+      } finally {
+        setDownloadingId(null);
+      }
+    },
+    [projectId]
+  );
 
   return (
     <div className="space-y-5">
@@ -288,17 +303,14 @@ export default function PapersPage() {
               papers={visible}
               editing={editing}
               selectedIds={selectedIds}
-              onToggleSelect={(paper) => setSelectedIds(toggle(selectedIds, paper.id))}
+              onToggleSelect={toggleSelect}
               openId={openId}
               onToggleOpen={toggleOpen}
               downloadingId={downloadingId}
               deletingId={deletingId}
-              onRename={(paper) => {
-                setRenameError(null);
-                setRenamePaper(paper);
-              }}
+              onRename={startRename}
               onRemove={setRemovePaper}
-              onDownload={(paper) => void handleDownload(paper)}
+              onDownload={handleDownload}
             />
           )}
         </div>

@@ -9,33 +9,47 @@ import type { Paper, PaperSummary } from "@/lib/types";
 const KEYWORDS_SHOWN = 24;
 
 /**
+ * Summaries already fetched this session, keyed by paper id and summary
+ * status, so a reopened row renders at full height on its first frame and a
+ * paper whose summary moved on (pending to ready) is fetched again.
+ */
+const cache = new Map<string, PaperSummary | null>();
+const cacheKey = (paper: Paper) => `${paper.id}:${paper.summary_status}`;
+
+/**
  * The paper's summary and keywords, in the opened row.
  *
  * Fetched when the row opens, never with the list: the list would otherwise
  * carry ~1.4k characters of summary for every paper in the library. Nothing
- * renders for a paper with no summary record yet.
+ * renders for a paper with no summary record yet. While the first fetch is in
+ * flight a placeholder holds roughly the summary's height, so the row's open
+ * animation is not chasing a target that grows halfway through.
  */
 export function PaperSummaryBlock({ paper }: { paper: Paper }) {
-  const [record, setRecord] = useState<PaperSummary | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [allKeywords, setAllKeywords] = useState(false);
+  const key = cacheKey(paper);
   const hasRecord = paper.summary_status !== "none";
+  const [record, setRecord] = useState<PaperSummary | null>(() => cache.get(key) ?? null);
+  const [loading, setLoading] = useState(() => hasRecord && !cache.has(key));
+  const [allKeywords, setAllKeywords] = useState(false);
 
   useEffect(() => {
-    if (!hasRecord) return;
+    if (!hasRecord || cache.has(key)) return;
     let live = true;
     setLoading(true);
     getPaperSummary(paper.project_id, paper.id)
-      .then((r) => live && setRecord(r))
+      .then((r) => {
+        cache.set(key, r);
+        if (live) setRecord(r);
+      })
       .catch(() => live && setRecord(null))
       .finally(() => live && setLoading(false));
     return () => {
       live = false;
     };
-  }, [paper.project_id, paper.id, hasRecord]);
+  }, [paper.project_id, paper.id, hasRecord, key]);
 
   if (!hasRecord) return null;
-  if (loading) return <p className="text-muted-foreground">Loading the summary…</p>;
+  if (loading) return <SummaryPlaceholder />;
   if (!record || !record.summary) return null;
 
   const keywords = allKeywords ? record.keywords : record.keywords.slice(0, KEYWORDS_SHOWN);
@@ -83,6 +97,21 @@ export function PaperSummaryBlock({ paper }: { paper: Paper }) {
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+/** Label, about seven lines of summary and two rows of keyword chips. */
+function SummaryPlaceholder() {
+  return (
+    <div className="space-y-2" aria-busy="true" aria-label="Loading the summary">
+      <div className="h-[15px] w-40 animate-pulse rounded bg-muted" />
+      <div className="space-y-[7px]">
+        {[100, 98, 100, 96, 100, 99, 62].map((w, i) => (
+          <div key={i} className="h-[14px] animate-pulse rounded bg-muted" style={{ width: `${w}%` }} />
+        ))}
+      </div>
+      <div className="h-[54px] animate-pulse rounded bg-muted/60" />
     </div>
   );
 }

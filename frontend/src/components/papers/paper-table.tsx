@@ -1,7 +1,6 @@
 "use client";
 
 import { PaperRow } from "@/components/papers/paper-row";
-import { paperState } from "@/lib/papers";
 import type { Paper } from "@/lib/types";
 
 /**
@@ -35,7 +34,7 @@ export function PaperTable({
   deletingId: string | null;
   onRename: (paper: Paper) => void;
   onRemove: (paper: Paper) => void;
-  onDownload: (paper: Paper) => void;
+  onDownload: (paper: Paper) => void | Promise<void>;
 }) {
   return (
     <div className="rounded-lg border">
@@ -53,17 +52,16 @@ export function PaperTable({
           <PaperRow
             key={paper.id}
             paper={paper}
-            state={paperState(paper)}
             editing={editing}
             selected={selectedIds.has(paper.id)}
-            onToggleSelect={() => onToggleSelect(paper)}
+            onToggleSelect={onToggleSelect}
             isOpen={openId === paper.id}
-            onToggleOpen={() => onToggleOpen(paper)}
+            onToggleOpen={onToggleOpen}
             downloading={downloadingId === paper.id}
             deleting={deletingId === paper.id}
-            onRename={() => onRename(paper)}
-            onRemove={() => onRemove(paper)}
-            onDownload={() => onDownload(paper)}
+            onRename={onRename}
+            onRemove={onRemove}
+            onDownload={onDownload}
           />
         ))}
       </div>
