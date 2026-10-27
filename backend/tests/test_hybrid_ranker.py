@@ -111,11 +111,11 @@ def test_window_on_empty_input_keeps_nothing():
     assert keep_within_rank_window([], window=10) == 0
 
 
-def test_every_sparse_query_uses_the_shared_or_tsquery():
-    """The sparse arm's query rule has ONE copy. Production and both
-    retrieval harnesses paste `SPARSE_TSQUERY_SQL` into their own SQL; a
-    harness that kept the old AND query would measure a sparse arm that does
-    not ship."""
+def test_only_the_run_eval_candidate_arms_use_the_or_tsquery():
+    """The OR query is a measured CANDIDATE, not production. `run_eval`'s
+    hybrid_sql/sparse_sql arms paste the one shared copy; `chat_service` and
+    the `mention_eval` mirror stay on the AND-ed `websearch_to_tsquery` that
+    ships."""
     import inspect
 
     from app.services import chat_service
@@ -124,10 +124,12 @@ def test_every_sparse_query_uses_the_shared_or_tsquery():
 
     assert "plainto_tsquery" in SPARSE_TSQUERY_SQL
     assert "' | '" in SPARSE_TSQUERY_SQL
-    for module in (chat_service, run_eval, mention_eval):
-        source = inspect.getsource(module)
-        assert "websearch_to_tsquery" not in source, module.__name__
-        assert "{SPARSE_TSQUERY_SQL}" in source, module.__name__
+    run_eval_source = inspect.getsource(run_eval)
+    assert "{SPARSE_TSQUERY_SQL}" in run_eval_source
     assert SPARSE_TSQUERY_SQL in str(run_eval._HYBRID_SQL)
     assert SPARSE_TSQUERY_SQL in str(run_eval._HYBRID_SQL_PAPER)
-    assert SPARSE_TSQUERY_SQL in str(mention_eval._SCOPED_HYBRID_SQL)
+    for module in (chat_service, mention_eval):
+        source = inspect.getsource(module)
+        assert "SPARSE_TSQUERY_SQL" not in source, module.__name__
+        assert "websearch_to_tsquery('english', :qtext)" in source, module.__name__
+    assert "websearch_to_tsquery" in str(mention_eval._SCOPED_HYBRID_SQL)

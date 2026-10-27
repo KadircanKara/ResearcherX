@@ -139,7 +139,11 @@ _SQL = text("""
     ORDER BY distance ASC
 """)
 
-# Mirrors chat_service._hybrid_rows exactly (dense pool + sparse pool, fused
+# The sparse arm here uses SPARSE_TSQUERY_SQL (OR of lexemes), a CANDIDATE
+# measured by this harness, not production: chat_service still runs the
+# AND-ed websearch_to_tsquery, so this arm differs from production on
+# purpose.
+# Mirrors chat_service._hybrid_rows apart from that query (dense pool + sparse pool, fused
 # in Python via fuse_rrf), with `_SQL`'s project scoping (`p.project_id`)
 # substituted for production's per-request `scope` CTE of paper ids, plus
 # `c.id AS chunk_id` so the harness can tell rescued chunks apart from each
