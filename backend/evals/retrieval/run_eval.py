@@ -54,7 +54,14 @@ from app.services.hybrid_ranker import SPARSE_TSQUERY_SQL, fuse_rrf, keep_within
 from app.services.intra_paper_ranker import keep_within_paper
 from app.services.jev_reranker import JevReranker
 from app.services.rerank_ranker import rank_candidates, rerank_items
-from evals.retrieval.arms import ARMS, ArmReranker, MemoReranker, needs, parse_arms
+from evals.retrieval.arms import (
+    ARMS,
+    ArmReranker,
+    MemoReranker,
+    needs,
+    parse_arms,
+    sparse_backend_refusal,
+)
 from evals.retrieval.bm25_arm import (
     Bm25Corpus,
     CorpusChunk,
@@ -950,6 +957,12 @@ def _parse_args() -> argparse.Namespace:
 
 async def _run(args: argparse.Namespace) -> int | None:  # noqa: PLR0912, PLR0915 — a report script
     """The run itself. None means it stopped before measuring anything."""
+    # The hybrid arm IS `_hybrid_sql`, the Postgres tsv arm; under another
+    # sparse backend it would measure a query production is not running.
+    refusal = sparse_backend_refusal(settings.sparse_backend) if args.hybrid else None
+    if refusal:
+        print(f"\nERROR: --hybrid refused. {refusal}")
+        return
     # The rerank consumes a fused candidate list, and there is no fused list
     # without the hybrid arm. Refusing is better than silently reranking the
     # dense-only ordering, which is a policy production never runs.

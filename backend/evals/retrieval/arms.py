@@ -93,3 +93,21 @@ class ArmReranker:
         elif result:
             self._distinct.append(len({r.relevance_score for r in result}) / len(result))
         return result
+
+
+def sparse_backend_refusal(backend: str) -> str | None:
+    """Why a harness arm that runs `chat_service._hybrid_sql` directly must
+    not run under `backend`, or None when it may.
+
+    Those arms measure the Postgres `tsv` lexical arm. Under any other
+    `SPARSE_BACKEND` production does not run that query, so the arm would
+    report numbers for a backend that is not serving -- silently, since its
+    output looks exactly like a production measurement.
+    """
+    if backend == "postgres":
+        return None
+    return (
+        f"SPARSE_BACKEND={backend}: this arm runs the Postgres tsv hybrid query, "
+        "which production does not run under this backend. Set SPARSE_BACKEND=postgres "
+        "to measure it."
+    )

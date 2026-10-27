@@ -1665,20 +1665,24 @@ class ChatService:
         rejects everything (a placeholder row with a NULL id, dropped by
         `_dense_query`).
         """
-        rows, _ = await _dense_query(
-            db,
-            "retrieval.dense",
-            _dense_only_sql,
-            {
-                "qvec": qvec,
-                "ids": ids,
-                "project_id": project_id,
-                "model": settings.embedding_model,
-                "threshold": threshold,
-                "dense_pool": pool,
-            },
-            exact=exact,
-        )
+        # Every path's dense scan runs inside one `retrieval.dense` span, so
+        # `_dense_query`'s `retrieval.dense.fallback` always lands there.
+        with observability.span("retrieval.dense", kind="retriever") as dense_span:
+            rows, _ = await _dense_query(
+                db,
+                "retrieval.dense.sql",
+                _dense_only_sql,
+                {
+                    "qvec": qvec,
+                    "ids": ids,
+                    "project_id": project_id,
+                    "model": settings.embedding_model,
+                    "threshold": threshold,
+                    "dense_pool": pool,
+                },
+                exact=exact,
+            )
+            observability.set_attributes(dense_span, {"retrieval.hits": len(rows)})
         return rows
 
     async def _hybrid_rows(
@@ -1829,9 +1833,21 @@ class ChatService:
                         {"ids": ids, "project_id": project_id, "model": settings.embedding_model},
                     )
                     allowed = [row.id for row in scope_rows]
-                hits = await asyncio.to_thread(
-                    store.search, idx, qtext, settings.hybrid_sparse_pool, allowed
-                )
+                try:
+                    hits = await asyncio.to_thread(
+                        store.search, idx, qtext, settings.hybrid_sparse_pool, allowed
+                    )
+                except Exception as exc:
+                    # Fail open to the neutral value: an index that breaks at
+                    # query time costs this turn its lexical arm, never the turn.
+                    log.warning(
+                        "bm25_search_failed",
+                        project_id=project_id,
+                        version=idx.version,
+                        error=str(exc),
+                    )
+                    observability.set_attributes(sparse_span, {"retrieval.sparse.failed": True})
+                    hits = []
 
             s_rank = {cid: rank for rank, cid in enumerate(hits, 1)}
             rows = [
