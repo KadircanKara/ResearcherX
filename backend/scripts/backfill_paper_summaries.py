@@ -5,7 +5,8 @@ Run (from /app in the backend container, `docker compose exec -T backend ...`):
   python -m scripts.backfill_paper_summaries submit [--project-id UUID] [--force]
       [--limit N] [--chunk N] [--max-cost USD] [--dry-run]
   python -m scripts.backfill_paper_summaries collect [--batch-id ID]
-      [--adopt submitting:<nonce>] [--release submitting:<nonce>] [--abandon ID]
+      [--adopt submitting:<nonce>] [--release submitting:<nonce>]
+      [--abandon ID [--force-abandon]]
   python -m scripts.backfill_paper_summaries list [--limit N]
 
 The `-m` form is required: `scripts` is not an installed package. The prod
@@ -24,12 +25,15 @@ never a row already in flight. It refuses when the larger of two estimates
 
   1. mark the rows `batch_id='submitting:<uuid>'` in one transaction;
   2. POST;
-  3. 202: re-point the rows to the real id. A definite refusal (BatchError,
-     402 included): release the rows (a pending row becomes `failed`).
-     Anything else (timeout, dropped connection): the batch may exist, so
-     the marker STAYS, which keeps a re-run from paying twice. Find the
-     batch with `list`, then `collect --batch-id ID --adopt <marker>`, or
-     `collect --release <marker>` when no batch was created.
+  3. 202 with an id: re-point the rows to the real id. A definite refusal
+     (400/401/402/403/404/413/422, or no key): release the rows (a pending
+     row becomes `failed`). Anything else (5xx, 408, 429, a gateway
+     timeout, an unreadable 202, a dropped connection): the batch may
+     exist, so the marker STAYS, which keeps a re-run from paying twice.
+     Find the batch with `list`, then `collect --batch-id ID --adopt
+     <marker>` (checked against GET: it must exist and its request total
+     must match the marker's rows), or `collect --release <marker>` when no
+     batch was created.
 
 `collect` is safe to run at any time, as often as wanted: a batch still
 running is reported and left alone; a finished one is written through
@@ -115,14 +119,28 @@ async def _try_lock(conn) -> bool:
 async def _run_lock() -> AsyncIterator[None]:
     """Hold the advisory lock on a dedicated connection for the whole run."""
     async with engine.connect() as conn:
-        if not await _try_lock(conn):
+        locked = await _try_lock(conn)
+        # Session-level lock: it outlives this transaction, so end it at once
+        # rather than leave the connection idle in a transaction for the run.
+        await conn.commit()
+        if not locked:
             raise LockBusy("another backfill submit/collect is running; try again when it ends")
         try:
             yield
         finally:
-            if conn.dialect.name == "postgresql":
-                await conn.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": LOCK_KEY})
-                await conn.commit()
+            await _unlock(conn)
+
+
+async def _unlock(conn) -> None:
+    """Best-effort: never masks the run's own exception. Closing the
+    connection releases a session lock anyway."""
+    if conn.dialect.name != "postgresql":
+        return
+    try:
+        await conn.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": LOCK_KEY})
+        await conn.commit()
+    except Exception as exc:  # noqa: BLE001
+        print(f"warning: advisory unlock failed ({type(exc).__name__})", file=sys.stderr)
 
 
 # --- row state ---------------------------------------------------------------
@@ -276,6 +294,15 @@ def _estimates(papers: int, chars: int) -> dict[str, float]:
     return {"per_paper": per_paper, "per_char": per_char, "max": max(per_paper, per_char)}
 
 
+def _print_unknown(marker: str, n: int, why: str) -> None:
+    print(
+        f"outcome unknown ({why}): check GET /api/v1/batches before resubmitting "
+        f"({n} papers held by {marker}). Then either "
+        f"`collect --batch-id <id> --adopt {marker}` or `collect --release {marker}`.",
+        file=sys.stderr,
+    )
+
+
 async def _submit_group(
     ids: Sequence[str], *, model: str, provider: str, client: httpx.AsyncClient | None
 ) -> str:
@@ -288,16 +315,16 @@ async def _submit_group(
     try:
         batch_id = await ob.submit(body, client=client)
     except ob.BatchError as exc:
-        # A definite answer: no batch exists. Nothing was charged.
-        await _release(marker, error=f"submit refused: {exc.status}: {exc.message}", fail=True)
-        raise
+        if exc.definite:
+            # A refusal that proves no batch exists. Nothing was charged.
+            await _release(marker, error=f"submit refused: {exc.status}: {exc.message}", fail=True)
+            raise
+        # 5xx, 408, 429, a gateway timeout, an unreadable 202: the batch may
+        # exist. Keep the marker.
+        _print_unknown(marker, len(sent), f"{exc.status}: {exc.message}")
+        raise OutcomeUnknown(marker) from exc
     except BaseException as exc:
-        print(
-            f"outcome unknown: check GET /api/v1/batches before resubmitting "
-            f"({len(sent)} papers held by {marker}). Then either "
-            f"`collect --batch-id <id> --adopt {marker}` or `collect --release {marker}`.",
-            file=sys.stderr,
-        )
+        _print_unknown(marker, len(sent), type(exc).__name__)
         if isinstance(exc, Exception):
             raise OutcomeUnknown(marker) from exc
         raise
@@ -581,22 +608,71 @@ async def run_collect(
     adopt: str | None = None,
     release: str | None = None,
     abandon: str | None = None,
+    force_abandon: bool = False,
     client: httpx.AsyncClient | None = None,
 ) -> dict[str, Any]:
     async with _run_lock():
         return await _collect(
-            batch_id=batch_id, adopt=adopt, release=release, abandon=abandon, client=client
+            batch_id=batch_id,
+            adopt=adopt,
+            release=release,
+            abandon=abandon,
+            force_abandon=force_abandon,
+            client=client,
         )
 
 
-async def _collect(*, batch_id, adopt, release, abandon, client) -> dict[str, Any]:
+async def _check_adopt(marker: str, batch_id: str, client) -> None:
+    """Refuse to re-point unless `batch_id` exists (200, or 402 with results
+    withheld) and its request total, when reported, matches the marker's
+    row count. A wrong id would otherwise strand the rows under a batch
+    that never carried them."""
+    try:
+        batch = await ob.fetch(batch_id, client=client)
+    except ob.BatchError as exc:
+        raise ValueError(
+            f"--adopt refused: GET {batch_id} answered {exc.status}: {exc.message}"
+        ) from exc
+    rows = len(await _batch_paper_ids(marker))
+    if rows == 0:
+        raise ValueError(f"--adopt refused: no rows carry {marker}")
+    counts = batch.get("request_counts")
+    total = counts.get("total") if isinstance(counts, dict) else None
+    if isinstance(total, int) and not isinstance(total, bool) and total != rows:
+        raise ValueError(
+            f"--adopt refused: {batch_id} has {total} requests, {marker} holds {rows} rows"
+        )
+
+
+async def _check_abandon(batch_id: str, client) -> None:
+    """Abandon only a batch that can no longer produce results: final, or
+    unknown to OpenRouter (404), or with results already gone (410)."""
+    try:
+        batch = await ob.fetch(batch_id, client=client)
+    except ob.BatchError as exc:
+        if exc.status in (404, 410):
+            return
+        raise ValueError(
+            f"--abandon refused: GET {batch_id} answered {exc.status}: {exc.message}; "
+            "pass --force-abandon to abandon anyway"
+        ) from exc
+    if batch.get("status") not in ob.FINAL:
+        raise ValueError(
+            f"--abandon refused: {batch_id} is {batch.get('status')}, not final; it may still "
+            "be billed and return results. Pass --force-abandon to abandon anyway"
+        )
+
+
+async def _collect(*, batch_id, adopt, release, abandon, force_abandon, client) -> dict[str, Any]:
     totals: Counter = Counter()
     providers: Counter = Counter()
 
     if adopt is not None:
         if batch_id is None:
             raise ValueError("--adopt needs --batch-id: the batch the marker's rows went to")
-        n = await _repoint(_require_marker(adopt), batch_id)
+        _require_marker(adopt)
+        await _check_adopt(adopt, batch_id, client)
+        n = await _repoint(adopt, batch_id)
         print(f"adopted {n} rows from {adopt} into {batch_id}")
     if release is not None:
         kept, n = await _release(
@@ -604,6 +680,8 @@ async def _collect(*, batch_id, adopt, release, abandon, client) -> dict[str, An
         )
         print(f"released {n + kept} rows held by {release}")
     if abandon is not None:
+        if not force_abandon:
+            await _check_abandon(abandon, client)
         kept, n = await _release(abandon, error=f"batch {abandon} abandoned", fail=True)
         totals["failed"] += n
         totals["kept"] += kept
@@ -719,7 +797,14 @@ def _parser() -> argparse.ArgumentParser:
         "--adopt", metavar="MARKER", help="re-point a submit marker's rows to --batch-id"
     )
     c.add_argument("--release", metavar="MARKER", help="free a marker's rows: no batch exists")
-    c.add_argument("--abandon", metavar="ID", help="take a batch's rows out of flight")
+    c.add_argument(
+        "--abandon", metavar="ID", help="take a finished (or unknown) batch's rows out of flight"
+    )
+    c.add_argument(
+        "--force-abandon",
+        action="store_true",
+        help="with --abandon: skip the check that the batch is final or unknown",
+    )
     ls = sub.add_parser("list", help="list recent batches on OpenRouter")
     ls.add_argument("--limit", type=int, default=20, help="1..100 (default 20)")
     return parser
@@ -743,6 +828,7 @@ async def main() -> None:
                 adopt=args.adopt,
                 release=args.release,
                 abandon=args.abandon,
+                force_abandon=args.force_abandon,
             )
         else:
             await run_list(limit=args.limit)

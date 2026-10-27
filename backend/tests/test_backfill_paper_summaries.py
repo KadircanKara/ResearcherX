@@ -6,6 +6,7 @@ OpenRouter. Rows are only ever written through Core statements or
 and read here with Core selects.
 """
 
+import contextlib
 import json
 from unittest.mock import AsyncMock, patch
 
@@ -532,7 +533,9 @@ async def test_collect_adopt_repoints_marker_rows_and_collects(db_session, proje
     async with server.client() as client:
         swept = await script.run_collect(client=client)
     assert swept["markers"] == [marker] and (await _row(a.id)).batch_id == marker
-    server.batches["batch_9"] = (200, _batch("completed", results=[_ok(a.id)]))
+    adopted = _batch("completed", results=[_ok(a.id)])
+    adopted["request_counts"] = {"total": 1, "completed": 1, "failed": 0}
+    server.batches["batch_9"] = (200, adopted)
     async with server.client() as client:
         await script.run_collect(batch_id="batch_9", adopt=marker, client=client)
     row = await _row(a.id)
@@ -721,9 +724,10 @@ async def test_collect_abandon_takes_a_batch_out_of_flight(db_session, project, 
     good = await _paper(db_session, project, title="Good")
     await _set_row(a.id, status="pending", batch_id="batch_x")
     await _set_row(good.id, status="ready", summary="kept", batch_id="batch_x")
+    # Unknown to OpenRouter (GET 404): nothing can still arrive, so allowed.
     async with server.client() as client:
         await script.run_collect(abandon="batch_x", client=client)
-    assert server.requests == []
+    assert [r.method for r in server.requests] == ["GET"]
     assert ((await _row(a.id)).status, (await _row(a.id)).batch_id) == ("failed", None)
     assert ((await _row(good.id)).status, (await _row(good.id)).summary) == ("ready", "kept")
 
@@ -780,3 +784,150 @@ def test_still_ours_locks_the_row_for_update():
 
     sql = str(script._ours_stmt("p").compile(dialect=postgresql.dialect()))
     assert "FOR UPDATE" in sql
+
+
+# --- fix round 2: only a definite refusal releases; checked adopt/abandon ---
+
+
+@pytest.mark.parametrize("status", [503, 429, 500, 408, 504, 524])
+async def test_submit_unclear_status_keeps_the_marker(db_session, project, server, status):
+    a = await _paper(db_session, project, title="A")
+    server.submit_response = (status, {"error": {"message": "upstream trouble"}})
+    async with server.client() as client:
+        with pytest.raises(script.OutcomeUnknown) as info:
+            await script.run_submit(client=client)
+    marker = await _marker_of(a.id)
+    assert info.value.marker == marker
+    assert (await _row(a.id)).status == "pending"
+
+
+@pytest.mark.parametrize("payload", [{"status": "validating"}, {"id": ""}, None])
+async def test_submit_202_without_a_readable_id_keeps_the_marker(
+    db_session, project, server, payload
+):
+    a = await _paper(db_session, project, title="A")
+
+    def handler(request):
+        server.requests.append(request)
+        if payload is None:
+            return httpx.Response(202, content=b"<html>accepted</html>")
+        return httpx.Response(202, json=payload)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(script.OutcomeUnknown):
+            await script.run_submit(client=client)
+    await _marker_of(a.id)
+
+
+@pytest.mark.parametrize("status", [400, 401, 403, 404, 413, 422])
+async def test_submit_definite_refusal_releases_the_marker(db_session, project, server, status):
+    a = await _paper(db_session, project, title="A")
+    server.submit_response = (status, {"error": {"message": "refused"}})
+    async with server.client() as client:
+        with pytest.raises(ob.BatchError) as info:
+            await script.run_submit(client=client)
+    assert info.value.definite
+    row = await _row(a.id)
+    assert (row.status, row.batch_id) == ("failed", None)
+
+
+def test_batch_error_is_not_definite_unless_said_so():
+    assert not ob.BatchError(500, "x").definite
+    assert ob.BatchError(402, "x", definite=True).definite
+    assert ob.DEFINITE_REFUSALS == {400, 401, 402, 403, 404, 413, 422}
+
+
+async def _orphan(project, db_session, server, n: int = 1) -> tuple[list[Paper], str]:
+    papers = [await _paper(db_session, project, title=f"O{i}") for i in range(n)]
+    async with _raising_client(httpx.ReadTimeout("slow"), server) as client:
+        with pytest.raises(script.OutcomeUnknown):
+            await script.run_submit(client=client)
+    return papers, await _marker_of(papers[0].id)
+
+
+async def test_adopt_refuses_an_unknown_batch(db_session, project, server):
+    (a,), marker = await _orphan(project, db_session, server)
+    async with server.client() as client:  # batch_wrong: GET 404
+        with pytest.raises(ValueError, match="404"):
+            await script.run_collect(batch_id="batch_wrong", adopt=marker, client=client)
+    assert (await _row(a.id)).batch_id == marker
+
+
+async def test_adopt_refuses_a_request_count_mismatch(db_session, project, server):
+    papers, marker = await _orphan(project, db_session, server, n=2)
+    other = _batch("in_progress")
+    other["request_counts"] = {"total": 200, "completed": 0, "failed": 0}
+    server.batches["batch_other"] = (200, other)
+    async with server.client() as client:
+        with pytest.raises(ValueError, match="200 requests"):
+            await script.run_collect(batch_id="batch_other", adopt=marker, client=client)
+    for p in papers:
+        assert (await _row(p.id)).batch_id == marker
+
+
+async def test_adopt_accepts_a_402_batch_and_leaves_it_in_flight(db_session, project, server):
+    (a,), marker = await _orphan(project, db_session, server)
+    withheld = _batch("completed", results=None)
+    withheld["request_counts"] = {"total": 1, "completed": 1, "failed": 0}
+    server.batches["batch_9"] = (402, withheld)
+    async with server.client() as client:
+        await script.run_collect(batch_id="batch_9", adopt=marker, client=client)
+    assert (await _row(a.id)).batch_id == "batch_9"
+
+
+async def test_abandon_refuses_a_batch_still_in_progress(db_session, project, server):
+    a = await _paper(db_session, project, title="A")
+    await _set_row(a.id, status="pending", batch_id="batch_1")
+    server.batches["batch_1"] = (200, _batch("in_progress"))
+    async with server.client() as client:
+        with pytest.raises(ValueError, match="not final"):
+            await script.run_collect(abandon="batch_1", client=client)
+        assert (await _row(a.id)).batch_id == "batch_1"
+        # A 5xx is not proof either.
+        server.batches["batch_1"] = (503, {"error": {"message": "down"}})
+        with pytest.raises(ValueError, match="503"):
+            await script.run_collect(abandon="batch_1", client=client)
+        assert (await _row(a.id)).batch_id == "batch_1"
+        await script.run_collect(abandon="batch_1", force_abandon=True, client=client)
+    row = await _row(a.id)
+    assert (row.status, row.batch_id) == ("failed", None)
+
+
+async def test_abandon_accepts_a_final_batch(db_session, project, server):
+    a = await _paper(db_session, project, title="A")
+    await _set_row(a.id, status="pending", batch_id="batch_1")
+    server.batches["batch_1"] = (200, _batch("cancelled"))
+    async with server.client() as client:
+        await script.run_collect(abandon="batch_1", client=client)
+    assert ((await _row(a.id)).status, (await _row(a.id)).batch_id) == ("failed", None)
+
+
+async def test_the_lock_connection_commits_after_locking_and_unlock_never_masks(monkeypatch):
+    """Postgres path, faked: the lock connection ends its transaction right
+    after locking, and a failing unlock does not replace the run's error."""
+    calls: list[str] = []
+
+    class Conn:
+        dialect = type("D", (), {"name": "postgresql"})()
+
+        async def execute(self, stmt, params=None):
+            sql = str(stmt)
+            calls.append(sql)
+            if "unlock" in sql:
+                raise RuntimeError("connection gone")
+            return type("R", (), {"scalar": lambda self: True})()
+
+        async def commit(self):
+            calls.append("COMMIT")
+
+    class Engine:
+        @contextlib.asynccontextmanager
+        async def connect(self):
+            yield Conn()
+
+    monkeypatch.setattr(script, "engine", Engine())
+    with pytest.raises(KeyError, match="original"):
+        async with script._run_lock():
+            assert calls == ["SELECT pg_try_advisory_lock(:k)", "COMMIT"]
+            raise KeyError("original")
+    assert calls[-1] == "SELECT pg_advisory_unlock(:k)"

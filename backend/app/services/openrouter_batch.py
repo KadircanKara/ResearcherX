@@ -47,13 +47,26 @@ _MESSAGE_MAX = 500
 Paper = tuple[str, str, str | None, str]  # (paper_id, title, abstract, text)
 
 
-class BatchError(Exception):
-    """A non-success answer from the Batch API. Never carries the key."""
+# Submit answers that PROVE no batch was created: the request was refused
+# as written (bad input, auth, balance, policy, size, constraint). Anything
+# else after a POST (5xx, 408, 429, a gateway timeout, a 202 we cannot read)
+# may have stored a batch, so it is never treated as definite.
+DEFINITE_REFUSALS = frozenset({400, 401, 402, 403, 404, 413, 422})
 
-    def __init__(self, status: int, message: str) -> None:
+
+class BatchError(Exception):
+    """A non-success answer from the Batch API. Never carries the key.
+
+    `definite` is True only when the answer proves no batch exists (a
+    `DEFINITE_REFUSALS` status, or a refusal before any request was sent).
+    It defaults to False so a new caller can never release work by accident.
+    """
+
+    def __init__(self, status: int, message: str, *, definite: bool = False) -> None:
         super().__init__(f"OpenRouter batch error {status}: {message}")
         self.status = status
         self.message = message
+        self.definite = definite
 
 
 def _request(paper: Paper) -> dict:
@@ -120,7 +133,7 @@ def chunk_papers(
 
 def _headers() -> dict[str, str]:
     if not settings.summary_api_key:
-        raise BatchError(0, "SUMMARY_API_KEY is not set")
+        raise BatchError(0, "SUMMARY_API_KEY is not set", definite=True)
     return {
         "Authorization": f"Bearer {settings.summary_api_key}",
         "Content-Type": "application/json",
@@ -154,18 +167,22 @@ async def _send(method: str, path: str, client: httpx.AsyncClient | None, **kw) 
 
 
 async def submit(body: dict, *, client: httpx.AsyncClient | None = None) -> str:
-    """POST one batch; its id. BatchError on anything but 202 (402 included)."""
+    """POST one batch; its id. BatchError on anything but a readable 202;
+    `definite` only for a `DEFINITE_REFUSALS` status (402 included)."""
     # Serialised here, not via `json=`, so the bytes sent are the bytes
     # `chunk_papers` measured, in the key order `batch_body` built.
     response = await _send("POST", "/batches", client, content=json.dumps(body).encode())
-    if response.status_code != 202:
-        raise BatchError(response.status_code, _message(response))
+    status = response.status_code
+    if status != 202:
+        raise BatchError(status, _message(response), definite=status in DEFINITE_REFUSALS)
     try:
-        batch_id = response.json().get("id")
-    except (ValueError, AttributeError):
-        batch_id = None
+        data = response.json()
+    except ValueError:
+        data = None
+    batch_id = data.get("id") if isinstance(data, dict) else None
     if not isinstance(batch_id, str) or not batch_id:
-        raise BatchError(response.status_code, "202 without a batch id")
+        # Stored, probably; we just cannot tell under which id.
+        raise BatchError(status, "202 without a readable batch id", definite=False)
     return batch_id
 
 
