@@ -28,6 +28,18 @@ from typing import TypeVar
 
 K = TypeVar("K", bound=Hashable)
 
+# The sparse arm's query: the question's lexemes OR'd together, so a chunk
+# qualifies on ANY of them and `ts_rank_cd` decides the order. Its
+# predecessor, `websearch_to_tsquery`, ANDs every lexeme, and a full-sentence
+# question carries 12-16 of them: no chunk held them all, and the arm
+# returned 3 rows across 20 golden questions (2026-10-26). `plainto_tsquery`
+# emits only `&` between quoted lexemes (no phrase or negation operators),
+# so swapping each `&` for `|` is the whole rewrite, and a stopword-only
+# question still becomes an empty query that matches nothing. A SQL
+# fragment, not a function: production and every harness paste this one
+# string into their own query, so the rule has a single copy.
+SPARSE_TSQUERY_SQL = "replace(plainto_tsquery('english', :qtext)::text, ' & ', ' | ')::tsquery"
+
 
 def fuse_rrf(
     dense_ranked: Sequence[K],

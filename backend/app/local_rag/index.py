@@ -5,8 +5,9 @@ IDF and no length normalisation, which is why the SQL sparse arm needed a
 lowered RRF `k` before it could contribute at all (CLAUDE.md).
 
 Index and query MUST tokenise identically — same stopword list, same
-stemmer — or a query term never matches its own indexed form. `_tokenize`
-is the single place that decides it, and both paths call it.
+stemmer — or a query term never matches its own indexed form.
+`app.services.bm25_tokenizer` is the single place that decides it, and both
+paths call it.
 
 Queries are tokenised with `return_ids=False`, i.e. as plain strings, so
 the query is looked up in the INDEX's vocabulary. A `Tokenized` object
@@ -21,23 +22,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import bm25s
-import Stemmer
 
-_STOPWORDS = "english"
-
-
-def _stemmer() -> Stemmer.Stemmer:
-    return Stemmer.Stemmer("english")
-
-
-def _tokenize(texts: list[str], *, return_ids: bool):
-    return bm25s.tokenize(
-        texts,
-        stopwords=_STOPWORDS,
-        stemmer=_stemmer(),
-        return_ids=return_ids,
-        show_progress=False,
-    )
+from app.services.bm25_tokenizer import tokenize
 
 
 @dataclass
@@ -60,7 +46,7 @@ class BM25Index:
             return []
         # bm25s RAISES when k > corpus size, where a SQL LIMIT returns fewer.
         k = min(limit, self.n_docs)
-        tokens = _tokenize([query], return_ids=False)
+        tokens = tokenize([query], return_ids=False)
         indices, scores = self.retriever.retrieve(tokens, k=k, show_progress=False)
         return [
             (int(doc), float(score))
@@ -73,7 +59,7 @@ def build_bm25(texts: list[str]) -> BM25Index:
     if not texts:
         return BM25Index(retriever=None, n_docs=0)
     retriever = bm25s.BM25()
-    retriever.index(_tokenize(texts, return_ids=True), show_progress=False)
+    retriever.index(tokenize(texts, return_ids=True), show_progress=False)
     return BM25Index(retriever=retriever, n_docs=len(texts))
 
 

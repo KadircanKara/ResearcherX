@@ -15,7 +15,7 @@ def test_both_arms_empty_fuses_to_nothing():
 
 
 def test_empty_sparse_arm_preserves_dense_order():
-    """The stopword-only question. websearch_to_tsquery returns an empty
+    """The stopword-only question. The sparse tsquery comes back empty
     query, `@@` matches nothing, and fusion must collapse to exactly the
     dense ordering rather than doing something surprising."""
     fused = fuse_rrf(["a", "b", "c"], [], w_dense=0.7, w_sparse=0.3, k=60)
@@ -109,3 +109,27 @@ def test_window_truncates_to_its_size():
 
 def test_window_on_empty_input_keeps_nothing():
     assert keep_within_rank_window([], window=10) == 0
+
+
+def test_only_the_run_eval_candidate_arms_use_the_or_tsquery():
+    """The OR query is a measured CANDIDATE, not production. `run_eval`'s
+    hybrid_sql/sparse_sql arms paste the one shared copy; `chat_service` and
+    the `mention_eval` mirror stay on the AND-ed `websearch_to_tsquery` that
+    ships."""
+    import inspect
+
+    from app.services import chat_service
+    from app.services.hybrid_ranker import SPARSE_TSQUERY_SQL
+    from evals.retrieval import mention_eval, run_eval
+
+    assert "plainto_tsquery" in SPARSE_TSQUERY_SQL
+    assert "' | '" in SPARSE_TSQUERY_SQL
+    run_eval_source = inspect.getsource(run_eval)
+    assert "{SPARSE_TSQUERY_SQL}" in run_eval_source
+    assert SPARSE_TSQUERY_SQL in str(run_eval._HYBRID_SQL)
+    assert SPARSE_TSQUERY_SQL in str(run_eval._HYBRID_SQL_PAPER)
+    for module in (chat_service, mention_eval):
+        source = inspect.getsource(module)
+        assert "SPARSE_TSQUERY_SQL" not in source, module.__name__
+        assert "websearch_to_tsquery('english', :qtext)" in source, module.__name__
+    assert "websearch_to_tsquery" in str(mention_eval._SCOPED_HYBRID_SQL)

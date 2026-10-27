@@ -38,7 +38,7 @@ from evals.retrieval.golden_set import Case
 # comparison, because a negative needs no second paper to be negative about.
 # The kind exists only so `golden_set.Case` (and everything keyed off
 # `case.kind`) accepts a projected side.
-_SIDE_KIND = "content"
+_SIDE_KIND = "paraphrase"
 
 
 class ComparisonSetError(ValueError):

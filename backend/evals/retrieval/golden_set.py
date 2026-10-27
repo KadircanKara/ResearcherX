@@ -12,7 +12,13 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
-_KINDS = {"content", "metadata", "figure", "off_topic"}
+# Kinds are named for the retriever each case is meant to exercise: a pure
+# paraphrase (dense should win), a paraphrase that also carries a distinctive
+# term (`paraphrase_keyword`, hybrid should win), a bare keyword query, and
+# off-topic negatives.
+POSITIVE_KINDS = ("paraphrase", "paraphrase_keyword", "keyword")
+_KINDS = {*POSITIVE_KINDS, "off_topic"}
+_SPLITS = ("tune", "test")
 
 
 class GoldenSetError(ValueError):
@@ -27,6 +33,8 @@ class Case:
     question: str
     paper_title_contains: str | None
     expect_substrings: tuple[str, ...]
+    split: str = "tune"
+    keyword: str | None = None
 
     @property
     def is_negative(self) -> bool:
@@ -44,6 +52,27 @@ def _parse_case(raw: dict) -> Case:
         raise GoldenSetError(
             f"case {case_id!r}: unknown kind {kind!r}, expected one of {sorted(_KINDS)}"
         )
+
+    split = raw.get("split")
+    if split not in _SPLITS:
+        raise GoldenSetError(
+            f"case {case_id!r}: split must be one of {list(_SPLITS)}, got {split!r}"
+        )
+
+    keyword = raw.get("keyword")
+    if kind == "paraphrase_keyword" or keyword is not None:
+        if kind != "paraphrase_keyword":
+            raise GoldenSetError(
+                f"case {case_id!r}: keyword is only allowed on paraphrase_keyword "
+                f"cases, not {kind!r}"
+            )
+        if not isinstance(keyword, str) or not keyword.strip():
+            raise GoldenSetError(f"case {case_id!r}: {kind} case needs a non-empty keyword")
+        keyword = keyword.strip()
+        if keyword.lower() not in raw["question"].lower():
+            raise GoldenSetError(
+                f"case {case_id!r}: keyword {keyword!r} does not appear in the question"
+            )
 
     title = raw.get("paper_title_contains")
 
@@ -80,10 +109,14 @@ def _parse_case(raw: dict) -> Case:
         question=raw["question"],
         paper_title_contains=title,
         expect_substrings=subs,
+        split=split,
+        keyword=keyword,
     )
 
 
-def load_golden_set(path: Path) -> list[Case]:
+def load_golden_set(path: Path, *, split: str = "all") -> list[Case]:
+    if split != "all" and split not in _SPLITS:
+        raise GoldenSetError(f"split must be 'all' or one of {list(_SPLITS)}, got {split!r}")
     payload = json.loads(Path(path).read_text())
     raw_cases = payload.get("cases")
     if not raw_cases:
@@ -103,7 +136,9 @@ def load_golden_set(path: Path) -> list[Case]:
         if case.id in seen:
             raise GoldenSetError(f"duplicate case id {case.id!r}")
         seen.add(case.id)
-    return cases
+    if split == "all":
+        return cases
+    return [c for c in cases if c.split == split]
 
 
 def chunk_satisfies(case: Case, paper_title: str, chunk_text: str) -> bool:
