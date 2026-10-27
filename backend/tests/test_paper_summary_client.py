@@ -88,6 +88,45 @@ async def test_finish_reason_length_counts_as_unusable(fake_create):
     assert fake_create.await_args_list[1].kwargs["extra_body"]["models"] == CHAIN[2:]
 
 
+@pytest.mark.parametrize(
+    "bad",
+    [
+        SimpleNamespace(model=CHAIN[0], choices=[], usage=None),
+        _response(CHAIN[0], content=None),
+    ],
+    ids=["no_choices", "content_none"],
+)
+async def test_empty_answer_retries_from_next_model(fake_create, bad):
+    fake_create.side_effect = [bad, _response(CHAIN[1])]
+    out = await _run()
+    assert out is not None and out.model == CHAIN[1]
+    assert fake_create.await_args_list[1].kwargs["extra_body"]["models"] == CHAIN[1:]
+
+
+async def test_empty_chain_logs_and_makes_no_call(fake_create, monkeypatch):
+    log = MagicMock()
+    monkeypatch.setattr(client_mod, "log", log)
+    monkeypatch.setattr(settings, "summary_models", [])
+    assert await _run() is None
+    fake_create.assert_not_awaited()
+    log.warning.assert_called_once_with("paper_summary_no_models")
+
+
+def test_client_is_rebuilt_when_credentials_change(monkeypatch):
+    client_mod.reset_client()
+    monkeypatch.setattr(settings, "summary_api_key", "sk-one")
+    first = client_mod._get_client()
+    assert client_mod._get_client() is first
+    assert first.max_retries == 2
+    assert first.timeout == settings.paper_summary_timeout_s == 180.0
+    monkeypatch.setattr(settings, "summary_api_key", "sk-two")
+    second = client_mod._get_client()
+    assert second is not first and second.api_key == "sk-two"
+    monkeypatch.setattr(settings, "summary_base_url", "http://localhost:1/v1")
+    assert client_mod._get_client() is not second
+    client_mod.reset_client()
+
+
 async def test_unknown_served_model_drops_only_the_head(fake_create):
     fake_create.side_effect = [_response("someone/else", content="nope"), _response(CHAIN[1])]
     out = await _run()

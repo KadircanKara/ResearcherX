@@ -341,6 +341,9 @@ class Settings(BaseSettings):
     paper_summary_max_keywords: int = 120
     # The largest paper in the eval project is 459k chars.
     paper_summary_input_chars: int = 600_000
+    # Per HTTP call. A stalled call must not hold the summary task for long;
+    # the client also caps SDK retries at 2 (OpenRouter falls back itself).
+    paper_summary_timeout_s: float = Field(default=180.0, gt=0)
     # Backfill via OpenRouter's batch API: the normal slug (`:batch` slugs are
     # rejected on chat/completions), pinned to one provider.
     summary_batch_model: str = "deepseek/deepseek-v4.1-flash"

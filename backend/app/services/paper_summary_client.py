@@ -29,7 +29,12 @@ from app.services.paper_summary_prompt import (
     response_format,
 )
 
-_client: AsyncOpenAI | None = None
+# Keyed by the credentials it was built with, so a changed key or base URL
+# never reuses a client holding the old ones.
+_client: tuple[tuple[str, str], AsyncOpenAI] | None = None
+# OpenRouter already falls back between models server-side; SDK retries only
+# cover a transient transport error, and each one can wait out the timeout.
+_MAX_RETRIES = 2
 
 
 @dataclass(frozen=True)
@@ -44,17 +49,22 @@ class GeneratedSummary:
 def _get_client() -> AsyncOpenAI:
     """Built on first use, so an empty key or a test never constructs one."""
     global _client
-    if _client is None:
-        _client = AsyncOpenAI(
-            base_url=settings.summary_base_url,
-            api_key=settings.summary_api_key,
-            max_retries=settings.llm_max_retries,
+    key = (settings.summary_base_url, settings.summary_api_key)
+    if _client is None or _client[0] != key:
+        _client = (
+            key,
+            AsyncOpenAI(
+                base_url=settings.summary_base_url,
+                api_key=settings.summary_api_key,
+                timeout=settings.paper_summary_timeout_s,
+                max_retries=_MAX_RETRIES,
+            ),
         )
-    return _client
+    return _client[1]
 
 
 def reset_client() -> None:
-    """Drop the cached client (tests, or after a settings change)."""
+    """Drop the cached client."""
     global _client
     _client = None
 
@@ -63,6 +73,9 @@ async def generate_summary(title: str, abstract: str | None, text: str) -> Gener
     if not settings.summary_api_key:
         return None
     chain = list(settings.summary_models)
+    if not chain:
+        log.warning("paper_summary_no_models")
+        return None
     try:
         msgs = messages(title, abstract, text)
         while chain:
