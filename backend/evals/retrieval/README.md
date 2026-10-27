@@ -183,7 +183,106 @@ off_topic case means the ceiling itself is too loose, independent of delta.
 In `--json`, this is the `targeted` key (a list of the same per-case rows,
 or `null` when `--targeted` wasn't passed).
 
-### Measured — 2026-08-12
+### Measured — 2026-10-27 (new golden set, per retriever type)
+
+The golden set was replaced on 2026-10-27: 110 cases typed by the retriever
+each one stresses. Every number in the "old golden set" blocks below is
+denominated in the previous 51 cases and is not comparable with this block.
+
+| kind | cases | tune | test | what it stresses |
+|---|---|---|---|---|
+| `paraphrase` | 30 | 20 | 10 | question shares no rare token with its evidence (dense must carry it) |
+| `paraphrase_keyword` | 30 | 20 | 10 | paraphrase plus one distinctive keyword |
+| `keyword` | 30 | 20 | 10 | exact rare tokens (sparse should carry it) |
+| `off_topic` | 20 | 13 | 7 | near-domain negatives |
+
+Run: `docker compose exec -T backend python -m evals.retrieval.run_eval
+--project-id fa2ab869-6b13-4b31-be5e-ff0c22652922 --hybrid --bm25 --sweep
+--split all --json /tmp/sweep.json` (no rerank, k=60, ~6.5 min). Corpus at
+measurement: 99,828 chunks across 2,024 papers, `text-embedding-3-small`.
+Hybrid = weights 0.7/0.3, rrf_k=30 (production), fused over a dense pool of
+200 and sparse pool of 100.
+
+Per-kind recall@10/@20/@60 and MRR (split=all, 30 cases per kind):
+
+| kind | arm | r@10 | r@20 | r@60 | MRR |
+|---|---|---|---|---|---|
+| paraphrase | dense | 0.40 | 0.57 | 0.67 | 0.133 |
+| | sparse_sql | 0.00 | 0.00 | 0.00 | 0.000 |
+| | sparse_bm25 | 0.10 | 0.13 | 0.30 | 0.068 |
+| | hybrid_sql | 0.40 | 0.57 | 0.63 | 0.127 |
+| | hybrid_bm25 | 0.50 | 0.63 | 0.67 | 0.185 |
+| paraphrase_keyword | dense | 0.53 | 0.70 | 0.87 | 0.336 |
+| | sparse_sql | 0.17 | 0.17 | 0.27 | 0.058 |
+| | sparse_bm25 | 0.53 | 0.63 | 0.83 | 0.327 |
+| | hybrid_sql | 0.60 | 0.77 | 0.87 | 0.362 |
+| | hybrid_bm25 | 0.70 | 0.87 | 0.93 | 0.388 |
+| keyword | dense | 0.57 | 0.67 | 0.77 | 0.375 |
+| | sparse_sql | 0.37 | 0.47 | 0.60 | 0.106 |
+| | sparse_bm25 | 0.97 | 1.00 | 1.00 | 0.747 |
+| | hybrid_sql | 0.63 | 0.70 | 0.80 | 0.498 |
+| | hybrid_bm25 | 0.70 | 0.80 | 0.93 | 0.477 |
+
+Macro (unweighted mean over the three positive kinds):
+
+| arm | r@60 | MRR |
+|---|---|---|
+| dense | 0.77 | 0.281 |
+| sparse_sql | 0.29 | 0.054 |
+| sparse_bm25 | 0.71 | 0.381 |
+| hybrid_sql | 0.77 | 0.329 |
+| hybrid_bm25 | 0.84 | 0.350 |
+
+Reading it:
+
+- **Low dense recall on `paraphrase` is by design.** Those questions were
+  written to share no rare token with their evidence; 34 of the 60
+  paraphrase-type questions are not in their own dense top-10. This is the
+  set measuring what it was built to measure, not a retriever regression.
+- **The sparse arm is the keyword retriever and the SQL FTS arm is not one**:
+  `sparse_sql` (`websearch_to_tsquery`, all terms ANDed) holds the evidence
+  for 60% of keyword cases at r@60 against 100% for `sparse_bm25`. Fused,
+  `hybrid_bm25` beats `hybrid_sql` on r@60 in every kind (0.67/0.93/0.93
+  against 0.63/0.87/0.80), but on `keyword` the fused MRR (0.477) is far
+  below bm25s alone (0.747): the 0.7 dense weight drags exact-match hits down.
+- Aggregate (all 90 positives): dense r@60 0.77, hybrid_sql 0.77 (rescued
+  0/90), bm25s 0.84 with 7 answers gained and 0 lost against sql-fts. The
+  bm25s arm was run with weights and k tuned on ts_rank_cd, not on it.
+- Threshold sweep and separation: the 0.75 `similarity_threshold` accepts 100%
+  of the 20 off-topic cases, and no threshold separates (21 positives have
+  no satisfying chunk in their own top-60). The best off-topic distance is
+  0.4221, below the 0.45-0.50 range where content recall climbs.
+
+RRF weight x k sweep on the **tune split** (60 positives), macro MRR, bm25s
+sparse arm, no rerank (rows w_dense, columns rrf_k):
+
+| w_dense | 5 | 10 | 20 | 30 | 60 | 100 |
+|---|---|---|---|---|---|---|
+| 0.3 | **0.442** | 0.418 | 0.422 | 0.429 | 0.421 | 0.433 |
+| 0.4 | 0.428 | 0.433 | 0.434 | 0.432 | 0.434 | 0.422 |
+| 0.5 | 0.415 | 0.421 | 0.420 | 0.422 | 0.420 | 0.414 |
+| 0.6 | 0.407 | 0.395 | 0.409 | 0.414 | 0.422 | 0.419 |
+| 0.7 | 0.380 | 0.391 | 0.379 | 0.378 | 0.397 | 0.422 |
+| 0.8 | 0.349 | 0.351 | 0.384 | 0.374 | 0.377 | 0.384 |
+
+| point | split | macro MRR | macro r@60 | paraphrase MRR / r@60 | paraphrase_keyword MRR / r@60 | keyword MRR / r@60 |
+|---|---|---|---|---|---|---|
+| best tune (w_dense 0.3, k=5) | tune | 0.442 | 0.85 | 0.080 / 0.60 | 0.421 / 0.95 | 0.824 / 1.00 |
+| best tune (w_dense 0.3, k=5) | **test** | 0.345 | 0.87 | 0.156 / 0.70 | 0.352 / 0.90 | 0.527 / 1.00 |
+| current (0.7, 30) | tune | 0.378 | 0.87 | 0.187 / 0.65 | 0.467 / 0.95 | 0.479 / 1.00 |
+| current (0.7, 30) | **test** | 0.294 | 0.80 | 0.180 / 0.70 | 0.229 / 0.90 | 0.473 / 0.80 |
+
+The tuned point beats the current setting by +0.051 macro MRR on the held-out
+test split (30 positives) and +0.064 on tune; it gains on keyword and
+paraphrase_keyword and loses on paraphrase MRR on tune (0.080 vs 0.187). The
+grid is flat within ~0.02 across most of the w_dense 0.3-0.5 band, so the
+choice of k inside it is not resolved by 60 cases, and the test split's n=10
+per kind makes every per-kind test cell coarse. No production setting was
+changed by this measurement. Consistency check: the (0.7, 30) point
+reproduces the `hybrid_bm25` row (macro MRR (2x0.378 + 0.294)/3 = 0.350,
+r@60 0.84).
+
+### Measured — 2026-08-12 [old golden set, pre-2026-10-27]
 
 The delta sweep that set `intra_paper_delta`. Re-measure after any change to
 `EMBEDDING_MODEL`, either `EMBEDDING_*_PREFIX`, or the corpus.
@@ -293,7 +392,7 @@ process and every row is the same delta measured five times. One run costs one
 embedding API call per case, so a five-point sweep over ~40 cases is ~200
 calls — cheap, but not free; do not re-run it to confirm a documentation edit.
 
-### Measured — 2026-08-15 (hybrid: dense + sparse RRF)
+### Measured — 2026-08-15 (hybrid: dense + sparse RRF) [old golden set, pre-2026-10-27]
 
 The sweep that measures the hybrid arm (`--hybrid`). Re-measure after any
 change to `EMBEDDING_MODEL`, either `EMBEDDING_*_PREFIX`, the corpus, or the
@@ -542,7 +641,7 @@ measured N times. The weights must sum to exactly 1.0 or `Settings` refuses
 to start. One run is ~one embedding call per case plus one per targeted
 positive (~72 calls on this set), so a full grid is not free.
 
-### Measured — 2026-08-22 (fresh baseline, k=30 hybrid RRF in place)
+### Measured — 2026-08-22 (fresh baseline, k=30 hybrid RRF in place) [old golden set, pre-2026-10-27]
 
 The first full re-baseline since `hybrid_rrf_k` moved 60 → 30 on 2026-08-15.
 Command: `--targeted --hybrid`, no env overrides, shipped constants.
@@ -592,7 +691,7 @@ Companion harnesses on the same corpus, same day:
   arm exists.
 - `evals/metadata`: 5/6 correct, 1 wrong (authors), **0 hallucinated**.
 
-### Measured — 2026-09-07 (rerank: Cohere cross-encoder over the fused candidates)
+### Measured — 2026-09-07 (rerank: Cohere cross-encoder over the fused candidates) [old golden set, pre-2026-10-27]
 
     docker compose exec -T backend python -m evals.retrieval.run_eval \
         --project-id <uuid> --hybrid --rerank
@@ -824,7 +923,7 @@ here is a defect, not a cost. The `gate band` table gains a
 against the BLENDED question that names both — the datum the synthetic arms
 structurally cannot produce.
 
-### Measured — 2026-08-18 (multi-mention gate)
+### Measured — 2026-08-18 (multi-mention gate) [old golden set, pre-2026-10-27]
 
 - corpus: **4527 chunks / 100 papers** (project `fa2ab869…52922`) — the same
   project the 2026-08-12 and 2026-08-15 blocks used
@@ -994,7 +1093,7 @@ lower bound together. Check the printed `gates:` header changes across points,
 or every row is one configuration measured N times. One run costs one
 embedding call per case (~42) and ~14 queries per case.
 
-### Measured — 2026-08-18b (REAL two-paper comparisons)
+### Measured — 2026-08-18b (REAL two-paper comparisons) [old golden set, pre-2026-10-27]
 
 Same corpus, model, gates and arms as the 2026-08-18 block above; the
 synthetic pairings re-ran identically, so these rows are directly comparable

@@ -188,6 +188,15 @@ Read the agreement block in this order:
 a candidate swapping one for the other disagrees on detail, not on decisions —
 that is what the `on problem/not-a-problem` column separates out.
 
+> **2026-10-27 — the golden set was replaced.** `evals/retrieval/golden_set.json`
+> now holds 110 cases typed by retriever (30 `paraphrase`, 30
+> `paraphrase_keyword`, 30 `keyword`, 20 `off_topic`; 20 tune + 10 test per
+> positive kind, 13/7 for `off_topic`). Every "Measured" block below was taken
+> on the previous 51-case set (39 positives, 12 `off_topic`) and is not
+> comparable with a run on the new one; no groundedness run has been taken on
+> the new set yet. Per-kind retrieval numbers for it are in
+> `evals/retrieval/README.md`, "Measured — 2026-10-27".
+
 ## Measured — 2026-08-22 (first reference run)
 
 - corpus 4594 chunks / 102 papers (project `fa2ab869…52922`), the same project
