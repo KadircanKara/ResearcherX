@@ -47,8 +47,16 @@ def _load(project_id: str, version: int) -> LoadedIndex | None:
     if not (directory / DONE).is_file():
         log.warning("bm25_index_dir_missing", project_id=project_id, version=version)
         return None
-    chunk_ids = np.load(directory / "chunk_ids.npy")
-    retriever = None if (directory / EMPTY).exists() else bm25s.BM25.load(str(directory), mmap=True)
+    try:
+        chunk_ids = np.load(directory / "chunk_ids.npy")
+        retriever = (
+            None if (directory / EMPTY).exists() else bm25s.BM25.load(str(directory), mmap=True)
+        )
+    except Exception as exc:  # corrupt or truncated index: lexical leg is empty, never an error
+        log.warning(
+            "bm25_index_load_failed", project_id=project_id, version=version, error=str(exc)
+        )
+        return None
     position = {str(cid): i for i, cid in enumerate(chunk_ids)}
     return LoadedIndex(project_id, version, retriever, chunk_ids, position)
 

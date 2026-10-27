@@ -135,3 +135,33 @@ async def test_concurrent_gets_load_once(db_session, index_dir, monkeypatch):
     await s._current_version(db_session, pid)  # one session cannot run concurrent queries
     await asyncio.gather(*(s.get(db_session, pid) for _ in range(4)))
     assert len(calls) == 1
+
+
+async def test_corrupt_index_returns_none_and_drops_cache(db_session, index_dir):
+    pid = await _project(db_session, "corrupt", version=1)
+    _build(index_dir, pid, 1, DOCS)
+    s = Bm25Store(version_ttl_s=0)
+    assert await s.get(db_session, pid) is not None
+    bad = index_dir / pid / "2"
+    bad.mkdir()
+    (bad / "DONE").write_text("1\n")
+    (bad / "chunk_ids.npy").write_bytes(b"garbage")
+    (bad / "params.index.json").write_text("{not json")
+    await _set_version(db_session, pid, 2)
+    assert await s.get(db_session, pid) is None
+    assert pid not in s._cache
+
+
+async def test_search_clamps_limit_and_orders_best_first(db_session, index_dir):
+    pid = await _project(db_session, "clamp", version=1)
+    docs = {
+        "a": "zebra zebra zebra",
+        "b": "zebra zebra apple",
+        "c": "zebra apple banana",
+        "d": "apple banana cherry",
+    }
+    _build(index_dir, pid, 1, docs)
+    s = Bm25Store()
+    idx = await s.get(db_session, pid)
+    assert s.search(idx, "zebra", 100) == ["a", "b", "c"]
+    assert s.search(idx, "zebra", 2) == ["a", "b"]
