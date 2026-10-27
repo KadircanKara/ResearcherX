@@ -6,7 +6,9 @@ imports this module and passes it to `context.configure(include_object=...)`.
 """
 
 _EXCLUDED_COLUMNS = {("paper_chunk_embeddings", "tsv")}
-_EXCLUDED_INDEXES = {"ix_paper_chunk_embeddings_tsv"}
+# The HNSW index is over `embedding`, which is halfvec(768) in Postgres but
+# declared Text on the model (SQLite tests), so metadata cannot describe it.
+_EXCLUDED_INDEXES = {"ix_paper_chunk_embeddings_tsv", "ix_paper_chunk_embeddings_hnsw"}
 
 
 def include_object(obj, name, type_, reflected, compare_to, **kw) -> bool:

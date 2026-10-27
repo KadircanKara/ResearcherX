@@ -131,7 +131,7 @@ _SQL = text("""
            c.paper_id AS paper_id,
            p.title AS paper_title,
            c.text AS chunk_text,
-           (c.embedding <=> CAST(:qvec AS vector)) AS distance
+           (c.embedding <=> CAST(:qvec AS halfvec(768))) AS distance
     FROM paper_chunk_embeddings c
     JOIN papers p ON p.id = c.paper_id
     WHERE c.model = :model
@@ -159,14 +159,14 @@ _HYBRID_SQL = text(f"""
     ),
     dense AS (
         SELECT c.id, c.paper_id, c.text,
-               (c.embedding <=> CAST(:qvec AS vector)) AS distance,
+               (c.embedding <=> CAST(:qvec AS halfvec(768))) AS distance,
                ROW_NUMBER() OVER (
-                   ORDER BY c.embedding <=> CAST(:qvec AS vector)
+                   ORDER BY c.embedding <=> CAST(:qvec AS halfvec(768))
                ) AS d_rank
         FROM paper_chunk_embeddings c
         JOIN scope s ON s.paper_id = c.paper_id
         WHERE c.model = :model
-          AND (c.embedding <=> CAST(:qvec AS vector)) < :threshold
+          AND (c.embedding <=> CAST(:qvec AS halfvec(768))) < :threshold
         ORDER BY distance ASC
         LIMIT :dense_pool
     ),
@@ -218,14 +218,14 @@ _HYBRID_SQL_PAPER = text(f"""
     ),
     dense AS (
         SELECT c.id, c.paper_id, c.text,
-               (c.embedding <=> CAST(:qvec AS vector)) AS distance,
+               (c.embedding <=> CAST(:qvec AS halfvec(768))) AS distance,
                ROW_NUMBER() OVER (
-                   ORDER BY c.embedding <=> CAST(:qvec AS vector)
+                   ORDER BY c.embedding <=> CAST(:qvec AS halfvec(768))
                ) AS d_rank
         FROM paper_chunk_embeddings c
         JOIN scope s ON s.paper_id = c.paper_id
         WHERE c.model = :model
-          AND (c.embedding <=> CAST(:qvec AS vector)) < :threshold
+          AND (c.embedding <=> CAST(:qvec AS halfvec(768))) < :threshold
         ORDER BY distance ASC
         LIMIT :dense_pool
     ),

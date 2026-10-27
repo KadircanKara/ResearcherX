@@ -1223,15 +1223,15 @@ class ChatService:
             ),
             ranked AS (
                 SELECT c.id, c.paper_id, c.chunk_index, c.text, c.section, c.page,
-                       (c.embedding <=> CAST(:qvec AS vector)) AS distance,
+                       (c.embedding <=> CAST(:qvec AS halfvec(768))) AS distance,
                        ROW_NUMBER() OVER (
                            PARTITION BY c.paper_id
-                           ORDER BY c.embedding <=> CAST(:qvec AS vector), c.id
+                           ORDER BY c.embedding <=> CAST(:qvec AS halfvec(768)), c.id
                        ) AS p_rank
                 FROM paper_chunk_embeddings c
                 JOIN scope s ON s.paper_id = c.paper_id
                 WHERE c.model = :model
-                  AND (c.embedding <=> CAST(:qvec AS vector)) < :threshold
+                  AND (c.embedding <=> CAST(:qvec AS halfvec(768))) < :threshold
             )
             SELECT id, paper_id, chunk_index, text, section, page, distance, p_rank
             FROM ranked
@@ -1303,11 +1303,11 @@ class ChatService:
                 FROM jsonb_array_elements_text(CAST(:ids AS jsonb))
             )
             SELECT c.id, c.paper_id, c.chunk_index, c.text, c.section, c.page,
-                   (c.embedding <=> CAST(:qvec AS vector)) AS distance
+                   (c.embedding <=> CAST(:qvec AS halfvec(768))) AS distance
             FROM paper_chunk_embeddings c
             JOIN scope s ON s.paper_id = c.paper_id
             WHERE c.model = :model
-              AND (c.embedding <=> CAST(:qvec AS vector)) < :threshold
+              AND (c.embedding <=> CAST(:qvec AS halfvec(768))) < :threshold
             ORDER BY distance ASC
             LIMIT :max_chunks
         """)
@@ -1362,14 +1362,14 @@ class ChatService:
             ),
             dense AS (
                 SELECT c.id, c.paper_id, c.chunk_index, c.text, c.section, c.page,
-                       (c.embedding <=> CAST(:qvec AS vector)) AS distance,
+                       (c.embedding <=> CAST(:qvec AS halfvec(768))) AS distance,
                        ROW_NUMBER() OVER (
-                           ORDER BY c.embedding <=> CAST(:qvec AS vector)
+                           ORDER BY c.embedding <=> CAST(:qvec AS halfvec(768))
                        ) AS d_rank
                 FROM paper_chunk_embeddings c
                 JOIN scope s ON s.paper_id = c.paper_id
                 WHERE c.model = :model
-                  AND (c.embedding <=> CAST(:qvec AS vector)) < :threshold
+                  AND (c.embedding <=> CAST(:qvec AS halfvec(768))) < :threshold
                 ORDER BY distance ASC
                 LIMIT :dense_pool
             ),

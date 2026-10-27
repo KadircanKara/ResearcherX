@@ -49,6 +49,7 @@ async def paper(db_session: AsyncSession, project: Project) -> Paper:
         [
             PaperChunkEmbedding(
                 paper_id=p.id,
+                project_id=p.project_id,
                 chunk_index=0,
                 text="The first chunk about connectivity.",
                 embedding="[0.0]",
@@ -56,6 +57,7 @@ async def paper(db_session: AsyncSession, project: Project) -> Paper:
             ),
             PaperChunkEmbedding(
                 paper_id=p.id,
+                project_id=p.project_id,
                 chunk_index=1,
                 text="The reward is a weighted sum.",
                 embedding="[0.0]",
@@ -63,6 +65,7 @@ async def paper(db_session: AsyncSession, project: Project) -> Paper:
             ),
             PaperChunkEmbedding(
                 paper_id=p.id,
+                project_id=p.project_id,
                 chunk_index=7,
                 text="STALE text from an old model.",
                 embedding="[0.0]",

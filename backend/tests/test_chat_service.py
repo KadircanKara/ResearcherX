@@ -95,7 +95,7 @@ async def test_respond_yields_events(
 def _mock_db_returning_no_rows() -> MagicMock:
     """A fake AsyncSession whose execute() returns an empty result set.
 
-    Real pgvector SQL (`<=>`, `CAST(... AS vector)`) can't run against the
+    Real pgvector SQL (`<=>`, `CAST(... AS halfvec(768))`) can't run against the
     sqlite test DB, so these tests mock the session at the execute() level
     and inspect the params it was called with instead of the result.
     """

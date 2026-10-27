@@ -18,7 +18,7 @@ import json
 import re
 import uuid
 
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -72,19 +72,26 @@ async def index_chunks(
         [embed_text(title, c.section, c.text) for c in chunks], task_type="RETRIEVAL_DOCUMENT"
     )
 
-    # ORM insert sends embedding as varchar; asyncpg rejects it against vector(768).
-    # Raw INSERT with explicit CAST so Postgres receives the right type.
+    # project_id is the PAPER's, read here rather than taken from the caller,
+    # so the denormalised copy on each chunk cannot disagree with papers.
+    project_id = (
+        await db.execute(select(Paper.project_id).where(Paper.id == paper_id))
+    ).scalar_one()
+
+    # ORM insert sends embedding as varchar; asyncpg rejects it against
+    # halfvec(768). Raw INSERT with explicit CAST so Postgres receives the
+    # right type.
     now = _now()
     for i, (chunk, emb) in enumerate(zip(chunks, embeddings, strict=True)):
         vec_str = "[" + ",".join(str(x) for x in emb) + "]"
         await db.execute(
             text("""
             INSERT INTO paper_chunk_embeddings
-                (id, paper_id, chunk_index, text, section, section_text, page,
-                 embedding, model, created_at)
+                (id, paper_id, project_id, chunk_index, text, section, section_text,
+                 page, embedding, model, created_at)
             VALUES
-                (:id, :paper_id, :chunk_index, :text, :section, :section_text, :page,
-                 CAST(:emb AS vector), :model, :now)
+                (:id, :paper_id, :project_id, :chunk_index, :text, :section,
+                 :section_text, :page, CAST(:emb AS halfvec(768)), :model, :now)
             ON CONFLICT (paper_id, chunk_index) DO UPDATE
                 SET text = EXCLUDED.text,
                     section = EXCLUDED.section,
@@ -96,6 +103,7 @@ async def index_chunks(
             {
                 "id": str(uuid.uuid4()),
                 "paper_id": paper_id,
+                "project_id": project_id,
                 "chunk_index": i,
                 "text": chunk.text,
                 "section": json.dumps(list(chunk.section)),

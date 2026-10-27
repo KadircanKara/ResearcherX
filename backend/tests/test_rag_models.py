@@ -76,6 +76,7 @@ async def test_paper_chunk_embedding_creates(db_session: AsyncSession, project: 
     await db_session.flush()
     chunk = PaperChunkEmbedding(
         paper_id=paper.id,
+        project_id=project.id,
         chunk_index=0,
         text="sample chunk text",
         embedding="[0.1,0.2,0.3]",  # TEXT column in SQLite test DB

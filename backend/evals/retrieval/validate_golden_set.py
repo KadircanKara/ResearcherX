@@ -92,7 +92,7 @@ def validate_case(
 
 _NEAREST_SQL = text("""
     SELECT p.title AS paper_title, c.text AS chunk_text,
-           (c.embedding <=> CAST(:qvec AS vector)) AS distance
+           (c.embedding <=> CAST(:qvec AS halfvec(768))) AS distance
     FROM paper_chunk_embeddings c
     JOIN papers p ON p.id = c.paper_id
     WHERE c.model = :model
