@@ -45,6 +45,7 @@ async def _add_paper(
         db.add(
             PaperChunkEmbedding(
                 paper_id=paper.id,
+                project_id=paper.project_id,
                 chunk_index=i,
                 text=f"chunk {i}",
                 embedding="[0.0]",

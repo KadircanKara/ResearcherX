@@ -21,6 +21,7 @@ from app.db.models import (
     PaperChunkEmbedding,
     PaperFile,
     PaperSource,
+    PaperStatus,
     ProjectMember,
     ResearchRun,
     User,
@@ -212,6 +213,27 @@ async def _chunk_counts(db: AsyncSession, paper_ids: list[str]) -> dict[str, int
     return {paper_id: count for paper_id, count in rows.all()}
 
 
+def _duplicate_source(exc) -> HTTPException:
+    """409 naming the paper that already holds these bytes. Its title is the
+    user's own data in their own project; nothing about the failure leaks."""
+    return HTTPException(
+        status_code=409,
+        detail={"error": "duplicate_source", "paper_id": exc.paper_id, "title": exc.title},
+    )
+
+
+def _ready_if_textless_manual(paper: Paper) -> None:
+    """A manual paper with no text is `ready` with 0 chunks -- the empty-
+    document rule `index_chunks` applies -- for the paths that never reach
+    it. Left `pending`, nothing would ever flip it, and it would drop out of
+    the PAPERS block for good."""
+    if paper.source == PaperSource.MANUAL and not (
+        (paper.abstract or "").strip() or (paper.body or "").strip()
+    ):
+        paper.status = PaperStatus.READY
+        paper.ingest_error = None
+
+
 async def _paper_out(db: AsyncSession, paper: Paper) -> PaperOut:
     out = PaperOut.model_validate(paper)
     counts = await _chunk_counts(db, [paper.id])
@@ -248,13 +270,18 @@ async def create_paper(
     await db.flush()  # assigns paper.id without committing
 
     if paper.source == PaperSource.MANUAL and (paper.abstract or paper.body):
-        from app.services.paper_ingest_service import index_manual
+        from app.services.paper_ingest_service import DuplicateSource, index_manual
 
         # index_manual commits — the flushed paper rides along in the same
         # transaction, so an embedding failure rolls back the paper too rather
         # than leaving a durable row whose chunks never got written.
-        await index_manual(db, paper.id, paper.abstract, paper.body)
+        try:
+            await index_manual(db, paper.id, paper.abstract, paper.body)
+        except DuplicateSource as exc:
+            await db.rollback()
+            raise _duplicate_source(exc) from None
     else:
+        _ready_if_textless_manual(paper)
         await db.commit()
 
     await db.refresh(paper)
@@ -298,11 +325,16 @@ async def update_paper(
         setattr(paper, key, value)
 
     if paper.source == PaperSource.MANUAL and text_changed:
-        from app.services.paper_ingest_service import index_manual
+        from app.services.paper_ingest_service import DuplicateSource, index_manual
 
         # Same transaction as the text change — see create_paper.
-        await index_manual(db, paper.id, paper.abstract, paper.body)
+        try:
+            await index_manual(db, paper.id, paper.abstract, paper.body)
+        except DuplicateSource as exc:
+            await db.rollback()
+            raise _duplicate_source(exc) from None
     else:
+        _ready_if_textless_manual(paper)
         await db.commit()
 
     await db.refresh(paper)
@@ -493,11 +525,25 @@ async def ingest_paper(
         text_extraction.format_for_extension(ext)
     except text_extraction.UnsupportedFileType as exc:
         raise HTTPException(status_code=422, detail=exc.message) from None
-    await usage_service.enforce_ingest(db, user)
     paper = await db.get(Paper, paper_id)
     if paper is None or paper.project_id != project_id:
         raise HTTPException(status_code=404, detail="Paper not found")
     file_bytes = await _read_capped_body(request)
+
+    from app.services.paper_ingest_service import DuplicateSource, ingest, precheck_source
+
+    # Decided BEFORE the meter is charged and before the file is stored. A
+    # file that is already ANOTHER paper of this project is refused (it is not
+    # this paper's file); a retry of this paper's own unchanged, searchable
+    # file is answered from the stored count. Neither is paid work. `ingest`
+    # decides again itself.
+    try:
+        unchanged = await precheck_source(db, paper_id, file_bytes)
+    except DuplicateSource as exc:
+        raise _duplicate_source(exc) from None
+    if unchanged is not None:
+        return {"chunks_stored": unchanged}
+    await usage_service.enforce_ingest(db, user)
 
     # Content is confirmed against the extension BEFORE anything is stored:
     # a refused file is not the user's paper, and a .docx's decompression
@@ -507,8 +553,6 @@ async def ingest_paper(
         file_format = await run_in_threadpool(text_extraction.detect_format, ext, file_bytes)
     except (text_extraction.UnsupportedFileType, text_extraction.UnreadableFile) as exc:
         raise HTTPException(status_code=422, detail=exc.message) from None
-
-    from app.services.paper_ingest_service import ingest
 
     # Stored BEFORE extraction, deliberately. Keeping the user's own file is
     # the whole point of this table, and extraction is the part that fails --
@@ -525,6 +569,8 @@ async def ingest_paper(
 
     try:
         n = await ingest(db, paper_id, file_bytes, file_format=file_format)
+    except DuplicateSource as exc:
+        raise _duplicate_source(exc) from None
     except text_extraction.UnreadableFile as exc:
         raise HTTPException(status_code=422, detail=exc.message) from None
     return {"chunks_stored": n}
@@ -607,7 +653,7 @@ async def ingest_paper_from_url(
         raise HTTPException(status_code=404, detail="Paper not found")
 
     from app.services.paper_fetch_service import UnsafeUrl, fetch_pdf, PaywallError
-    from app.services.paper_ingest_service import ingest
+    from app.services.paper_ingest_service import DuplicateSource, ingest, precheck_source
 
     try:
         pdf_bytes, served_by = await fetch_pdf(body.url)
@@ -627,13 +673,28 @@ async def ingest_paper_from_url(
                 "message": "No open-access version found. Upload the PDF directly.",
             },
         )
+    # Unlike the upload route, the meter is charged BEFORE this check: the
+    # bytes do not exist until the fetch, and the fetch is part of the
+    # metered work. The check still runs before any extraction or embedding.
+    try:
+        unchanged = await precheck_source(db, paper_id, pdf_bytes)
+    except DuplicateSource as exc:
+        raise _duplicate_source(exc) from None
+
     # Recorded only when it DIFFERS: a null means "the URL the user pasted
     # served the file", which is the common case and needs no second copy.
     if served_by != body.url:
         paper.resolved_pdf_url = served_by
+    if unchanged is not None:
+        # `ingest` would return without a commit on this path, so the URL
+        # that served the file is committed here or lost.
+        await db.commit()
+        return {"chunks_stored": unchanged}
 
     try:
         n = await ingest(db, paper_id, pdf_bytes, source_url=body.url)
+    except DuplicateSource as exc:
+        raise _duplicate_source(exc) from None
     except RateLimitError:
         # The PDF fetched and parsed fine — only the embedding provider is out
         # of quota. A 500 here reads to the user as "this paper is unreachable"

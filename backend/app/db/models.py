@@ -8,11 +8,13 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     LargeBinary,
     String,
     Text,
     UniqueConstraint,
+    text as sql_text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -108,6 +110,18 @@ class PaperSource(StrEnum):
     MANUAL = "manual"
 
 
+class PaperStatus(StrEnum):
+    """Where a paper is in ingest. Only READY papers are retrieved.
+
+    String(16) over a Python-side StrEnum, like RunStatus: adding a member
+    needs no migration, and the value read back is a plain str.
+    """
+
+    PENDING = "pending"
+    READY = "ready"
+    FAILED = "failed"
+
+
 class Project(Base):
     __tablename__ = "projects"
 
@@ -145,6 +159,19 @@ class ProjectMember(Base):
 
 class Paper(Base):
     __tablename__ = "papers"
+    __table_args__ = (
+        # One copy of a given file per project. Partial, because a paper
+        # with nothing ingested yet (and a textless manual entry) has a NULL
+        # hash.
+        Index(
+            "uq_papers_project_source_hash",
+            "project_id",
+            "source_hash",
+            unique=True,
+            postgresql_where=sql_text("source_hash IS NOT NULL"),
+            sqlite_where=sql_text("source_hash IS NOT NULL"),
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     project_id: Mapped[str] = mapped_column(
@@ -190,6 +217,17 @@ class Paper(Base):
     source: Mapped[str] = mapped_column(
         String(16), default=PaperSource.MANUAL, server_default="manual"
     )
+    # PaperStatus. Rows that already had chunks when migration a1b2c3d4e5f7
+    # ran were backfilled to "ready"; everything else starts "pending".
+    status: Mapped[str] = mapped_column(
+        String(16), default=PaperStatus.PENDING, server_default="pending"
+    )
+    # SHA-256 hex of the uploaded bytes. A manual entry hashes its text
+    # (abstract + "\n" + body), and is NULL while it has none.
+    source_hash: Mapped[str | None] = mapped_column(String(64), default=None)
+    # Why ingest failed, for the logs and operators. Internal only: client-
+    # visible error text stays generic, so this is never sent to the browser.
+    ingest_error: Mapped[str | None] = mapped_column(Text, default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
     chunks: Mapped[list["PaperChunkEmbedding"]] = relationship(
@@ -410,12 +448,21 @@ class PaperFile(Base):
 
 class PaperChunkEmbedding(Base):
     __tablename__ = "paper_chunk_embeddings"
-    __table_args__ = (UniqueConstraint("paper_id", "chunk_index"),)
+    __table_args__ = (
+        UniqueConstraint("paper_id", "chunk_index"),
+        Index("ix_paper_chunk_embeddings_project_paper", "project_id", "paper_id"),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     paper_id: Mapped[str] = mapped_column(
         ForeignKey("papers.id", ondelete="CASCADE", name="fk_paper_chunks_paper_id"),
         index=True,
+    )
+    # papers.project_id, denormalised so dense retrieval can filter a project
+    # inside the HNSW scan without joining papers. Always the paper's own
+    # project: index_chunks reads it from the paper, never from a caller.
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE", name="fk_paper_chunks_project_id"),
     )
     chunk_index: Mapped[int] = mapped_column(Integer())
     text: Mapped[str] = mapped_column(Text)
@@ -430,7 +477,10 @@ class PaperChunkEmbedding(Base):
     section_text: Mapped[str] = mapped_column(Text, default="", server_default="")
     page: Mapped[int | None] = mapped_column(Integer(), default=None)
     # Declared as Text so SQLite tests (create_all) don't fail on unknown type.
-    # The Alembic migration converts this to vector(768) in Postgres.
+    # In Postgres it is halfvec(768) since migration a1b2c3d4e5f7 (vector(768)
+    # before), with the HNSW index ix_paper_chunk_embeddings_hnsw, which
+    # autogenerate is told to ignore (app/db/autogenerate.py). Raw SQL must
+    # cast query vectors to halfvec(768): pgvector has no halfvec <=> vector.
     embedding: Mapped[str] = mapped_column(Text)
     # Which embedding model produced this vector. Filtering retrieval on this
     # prevents a provider switch from silently mixing two vector spaces in one

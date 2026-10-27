@@ -153,6 +153,15 @@ async def test_index_chunks_records_configured_model(db_session: AsyncSession, p
     assert {r.model for r in rows} == {"nomic-embed-text"}
 
 
+async def test_index_chunks_stores_the_papers_project_id(db_session: AsyncSession, paper: Paper):
+    """project_id is denormalised onto every chunk so dense retrieval can
+    filter a project without joining papers; it must be the PAPER's."""
+    with patch.object(svc._embedding_svc, "embed_batch", _fake_embed()):
+        await svc.index_chunks(db_session, paper.id, [_rec("one"), _rec("two")], title="T")
+    rows = await _rows(db_session, paper.id)
+    assert [r.project_id for r in rows] == [paper.project_id, paper.project_id]
+
+
 _MINIMAL_PDF = (
     b"%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n"
     b"2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n"
@@ -178,7 +187,9 @@ async def test_ingest_persists_extracted_text(db_session: AsyncSession, paper: P
 async def test_chunk_rows_carry_section_and_page_columns(db_session: AsyncSession, paper: Paper):
     """The columns exist and default to 'no section, no page' so rows
     written before the re-index keep working."""
-    row = PaperChunkEmbedding(paper_id=paper.id, chunk_index=0, text="t", embedding="[0]")
+    row = PaperChunkEmbedding(
+        paper_id=paper.id, project_id=paper.project_id, chunk_index=0, text="t", embedding="[0]"
+    )
     db_session.add(row)
     await db_session.commit()
     await db_session.refresh(row)

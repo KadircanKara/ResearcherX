@@ -39,7 +39,7 @@ from sqlalchemy import select
 from app.agents.chat_agent import ChatAgent, ChatAgentInput, ChunkContext, PaperMetaContext
 from app.agents.scope_widener import ScopeWidenerAgent, WidenerInput
 from app.core.config import settings
-from app.db.models import Paper
+from app.db.models import Paper, PaperStatus
 from app.db.session import SessionLocal
 from app.services.chat_service import (
     ChatService,
@@ -89,8 +89,14 @@ class AnswerGenerator:
         self._chat = ChatService()
 
     async def _papers(self, project_id: str) -> list[Paper]:
+        # READY papers only, exactly as `respond` loads them: a pending or
+        # failed paper is outside both the scope and the PAPERS block.
         async with SessionLocal() as db:
-            rows = await db.execute(select(Paper).where(Paper.project_id == project_id))
+            rows = await db.execute(
+                select(Paper).where(
+                    Paper.project_id == project_id, Paper.status == PaperStatus.READY
+                )
+            )
             return list(rows.scalars().all())
 
     async def generate(self, *, project_id: str, question: str) -> Generated:
@@ -139,6 +145,7 @@ class AnswerGenerator:
                 embedding,
                 question,
                 widened,
+                project_id=project_id,
                 reranker=self._chat._reranker,
                 fusion_scorer=self._chat._fusion_scorer,
             )
@@ -149,6 +156,8 @@ class AnswerGenerator:
                     paper_infos,
                     embedding,
                     question,
+                    project_id=project_id,
+                    exact=False,
                     reranker=self._chat._reranker,
                     fusion_scorer=self._chat._fusion_scorer,
                 )

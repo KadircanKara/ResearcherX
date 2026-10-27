@@ -115,6 +115,27 @@ def test_hybrid_pools_must_be_positive():
         Settings(hybrid_sparse_pool=0)
 
 
+@pytest.mark.parametrize("value", [0, 1001])
+def test_hnsw_ef_search_must_be_within_pgvectors_range(value):
+    """pgvector accepts hnsw.ef_search in [1, 1000]; outside it every dense
+    query's SET LOCAL errors and the chat turn fails."""
+    with pytest.raises(ValidationError):
+        Settings(hnsw_ef_search=value)
+
+
+def test_hnsw_max_scan_tuples_must_be_positive():
+    with pytest.raises(ValidationError):
+        Settings(hnsw_max_scan_tuples=0)
+
+
+def test_hnsw_defaults():
+    """600 is the smallest ef_search at which `run_eval --exact` finds no
+    answer HNSW loses against exact search (2026-10-27, README)."""
+    s = Settings()
+    assert s.hnsw_ef_search == 600
+    assert s.hnsw_max_scan_tuples == 100_000
+
+
 def test_intra_paper_rank_window_must_be_positive():
     """Window 0 empties every single-paper retrieval, and a single-paper
     project has no untargeted scope to fall back to -- the model would answer

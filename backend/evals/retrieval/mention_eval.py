@@ -71,6 +71,7 @@ from sqlalchemy import text
 from app.core.config import settings
 from app.local_rag.rerank import CohereReranker
 from app.db.session import SessionLocal
+from app.services.chat_service import _dense_only_sql, _dense_query, _hybrid_sql
 from app.services.embedding_service import EmbeddingService
 from app.services.hybrid_ranker import fuse_rrf, keep_within_rank_window
 from app.services.intra_paper_ranker import keep_within_paper
@@ -110,14 +111,18 @@ _DEFAULT_COMPARISON_SET = Path(__file__).parent / "comparison_set.json"
 # the second mention is chosen from the whole project the way a user picking
 # from the `@` menu would be — not from whatever survived a gate. Ordered
 # `best ASC, paper_id ASC` so `nearest_other` walks a deterministic list.
+# Ready papers only, as production scopes them: a pending or failed paper
+# is out of retrieval, so pairing with one would measure a scope chat never
+# assembles.
 _PAPER_BEST_SQL = text("""
     SELECT c.paper_id AS paper_id,
            p.title AS paper_title,
-           MIN(c.embedding <=> CAST(:qvec AS vector)) AS best
+           MIN(c.embedding <=> CAST(:qvec AS halfvec(768))) AS best
     FROM paper_chunk_embeddings c
     JOIN papers p ON p.id = c.paper_id
     WHERE c.model = :model
       AND p.project_id = :project_id
+      AND p.status = 'ready'
     GROUP BY c.paper_id, p.title
     ORDER BY best ASC, c.paper_id ASC
 """)
@@ -133,77 +138,13 @@ _PAPER_TEXT_SQL = text("""
       AND c.paper_id = :paper_id
 """)
 
-# Mirrors chat_service._dense_only_rows exactly — same `<=>` operator, same
-# `WHERE c.model = :model` filter, same jsonb scope CTE, same ORDER/LIMIT —
-# with `p.title` joined on so the golden set's title predicate can be applied.
-# This is the `hybrid_retrieval=False` kill-switch path.
-_SCOPED_DENSE_SQL = text("""
-    WITH scope AS (
-        SELECT value AS paper_id
-        FROM jsonb_array_elements_text(CAST(:ids AS jsonb))
-    )
-    SELECT c.id AS chunk_id, c.paper_id AS paper_id, p.title AS paper_title,
-           c.text AS chunk_text,
-           (c.embedding <=> CAST(:qvec AS vector)) AS distance
-    FROM paper_chunk_embeddings c
-    JOIN scope s ON s.paper_id = c.paper_id
-    JOIN papers p ON p.id = c.paper_id
-    WHERE c.model = :model
-      AND (c.embedding <=> CAST(:qvec AS vector)) < :threshold
-    ORDER BY distance ASC
-    LIMIT :max_chunks
-""")
-
-# Mirrors chat_service._hybrid_rows exactly: both arms in one round trip, the
-# dense LIMIT raised to the caller's pool via `max(hybrid_dense_pool, pool)`
-# while the sparse LIMIT stays exactly `hybrid_sparse_pool` (that arm's
-# admission rule, not a candidate bound). Fusion, the budget and every cut
-# stay in Python and are IMPORTED from production.
-_SCOPED_HYBRID_SQL = text("""
-    WITH scope AS (
-        SELECT value AS paper_id
-        FROM jsonb_array_elements_text(CAST(:ids AS jsonb))
-    ),
-    q AS (
-        SELECT websearch_to_tsquery('english', :qtext) AS tsq
-    ),
-    dense AS (
-        SELECT c.id, c.paper_id, c.text,
-               (c.embedding <=> CAST(:qvec AS vector)) AS distance,
-               ROW_NUMBER() OVER (
-                   ORDER BY c.embedding <=> CAST(:qvec AS vector)
-               ) AS d_rank
-        FROM paper_chunk_embeddings c
-        JOIN scope s ON s.paper_id = c.paper_id
-        WHERE c.model = :model
-          AND (c.embedding <=> CAST(:qvec AS vector)) < :threshold
-        ORDER BY distance ASC
-        LIMIT :dense_pool
-    ),
-    sparse AS (
-        SELECT c.id, c.paper_id, c.text,
-               ROW_NUMBER() OVER (
-                   ORDER BY ts_rank_cd(c.tsv, q.tsq) DESC, c.id
-               ) AS s_rank
-        FROM paper_chunk_embeddings c
-        JOIN scope s ON s.paper_id = c.paper_id
-        CROSS JOIN q
-        WHERE c.model = :model
-          AND c.tsv @@ q.tsq
-        ORDER BY ts_rank_cd(c.tsv, q.tsq) DESC, c.id
-        LIMIT :sparse_pool
-    )
-    SELECT COALESCE(d.id, sp.id)             AS chunk_id,
-           COALESCE(d.paper_id, sp.paper_id) AS paper_id,
-           p.title                           AS paper_title,
-           COALESCE(d.text, sp.text)         AS chunk_text,
-           d.distance                        AS distance,
-           d.d_rank                          AS d_rank,
-           sp.s_rank                         AS s_rank
-    FROM dense d
-    FULL OUTER JOIN sparse sp ON sp.id = d.id
-    JOIN papers p ON p.id = COALESCE(d.paper_id, sp.paper_id)
-""")
+# The flat and per-paper arms run production's candidate SQL itself --
+# `chat_service._dense_only_sql` on the `hybrid_retrieval=False` kill-switch
+# path, `_hybrid_sql` otherwise -- through `chat_service._dense_query`, always
+# on the EXACT scan, because every scope here is an explicit set of named
+# papers and production scans those exactly. What the arms still mirror is
+# the WIRING around that SQL (which scope, which cutoff, which cut), since
+# policies A and B do not exist in production.
 
 
 @dataclass(frozen=True)
@@ -270,13 +211,15 @@ def _vec(embedding: list[float]) -> str:
     return "[" + ",".join(str(x) for x in embedding) + "]"
 
 
-def _row_to_scored(row) -> Scored:
+def _row_to_scored(row, titles: dict[str, str]) -> Scored:
+    """A production candidate row as the metrics read it. Production's SQL
+    carries no title, so it comes from the project's papers."""
     return Scored(
         paper_id=row.paper_id,
-        paper_title=row.paper_title,
-        chunk_text=row.chunk_text,
+        paper_title=titles.get(row.paper_id, ""),
+        chunk_text=row.text,
         distance=None if row.distance is None else float(row.distance),
-        chunk_id=row.chunk_id,
+        chunk_id=row.id,
         d_rank=getattr(row, "d_rank", None),
         s_rank=getattr(row, "s_rank", None),
     )
@@ -290,6 +233,8 @@ async def _fetch_scope(
     paper_ids: list[str],
     threshold: float,
     pool: int,
+    project_id: str,
+    titles: dict[str, str],
 ) -> list[Scored]:
     """Production's candidate list for a scope, in production's own order,
     with NO cut applied yet.
@@ -307,44 +252,44 @@ async def _fetch_scope(
     """
     if not paper_ids:
         return []
-    ids = json.dumps(paper_ids)
+    params = {
+        "qvec": qvec,
+        "ids": json.dumps(paper_ids),
+        "project_id": project_id,
+        "model": settings.embedding_model,
+        "threshold": threshold,
+    }
+    # One session runs every arm, and SET LOCAL lasts until the transaction
+    # ends; a fresh one per query keeps each scan's settings its own.
+    await db.rollback()
     if not settings.hybrid_retrieval:
-        rows = (
-            await db.execute(
-                _SCOPED_DENSE_SQL,
-                {
-                    "qvec": qvec,
-                    "ids": ids,
-                    "model": settings.embedding_model,
-                    "threshold": threshold,
-                    "max_chunks": pool,
-                },
-            )
-        ).fetchall()
-        return [_row_to_scored(r) for r in rows[:pool]]
-
-    rows = (
-        await db.execute(
-            _SCOPED_HYBRID_SQL,
-            {
-                "qvec": qvec,
-                "qtext": qtext,
-                "ids": ids,
-                "model": settings.embedding_model,
-                "threshold": threshold,
-                "dense_pool": max(settings.hybrid_dense_pool, pool),
-                "sparse_pool": settings.hybrid_sparse_pool,
-            },
+        rows, _ = await _dense_query(
+            db,
+            "eval.mention.dense",
+            _dense_only_sql,
+            {**params, "dense_pool": pool},
+            exact=True,
         )
-    ).fetchall()
-    by_id = {r.chunk_id: r for r in rows}
+        return [_row_to_scored(r, titles) for r in rows[:pool]]
+
+    rows, _ = await _dense_query(
+        db,
+        "eval.mention.hybrid",
+        _hybrid_sql,
+        {
+            **params,
+            "qtext": qtext,
+            "dense_pool": max(settings.hybrid_dense_pool, pool),
+            "sparse_pool": settings.hybrid_sparse_pool,
+        },
+        exact=True,
+    )
+    by_id = {r.id: r for r in rows}
     dense_ranked = [
-        r.chunk_id
-        for r in sorted((x for x in rows if x.d_rank is not None), key=lambda x: x.d_rank)
+        r.id for r in sorted((x for x in rows if x.d_rank is not None), key=lambda x: x.d_rank)
     ]
     sparse_ranked = [
-        r.chunk_id
-        for r in sorted((x for x in rows if x.s_rank is not None), key=lambda x: x.s_rank)
+        r.id for r in sorted((x for x in rows if x.s_rank is not None), key=lambda x: x.s_rank)
     ]
     fused = fuse_rrf(
         dense_ranked,
@@ -353,7 +298,7 @@ async def _fetch_scope(
         w_sparse=settings.hybrid_sparse_weight,
         k=settings.hybrid_rrf_k,
     )
-    return [_row_to_scored(by_id[key]) for key, _ in fused[:pool]]
+    return [_row_to_scored(by_id[key], titles) for key, _ in fused[:pool]]
 
 
 def _single_paper_cut(chunks: list[Scored]) -> list[Scored]:
@@ -401,6 +346,7 @@ async def _run_arm(
     qvec: str,
     qtext: str,
     scope_ids: list[str],
+    project_id: str,
     embedding: list[float] | None = None,
     titles: dict[str, str] | None = None,
 ) -> list[Scored]:
@@ -436,6 +382,7 @@ async def _run_arm(
             embedding or [],
             qtext,
             False,
+            project_id=project_id,
             reranker=_build_reranker(arm),
         )
         return [
@@ -461,6 +408,8 @@ async def _run_arm(
             paper_ids=scope_ids,
             threshold=arm.threshold,
             pool=budget + floor * len(scope_ids),
+            project_id=project_id,
+            titles=titles or {},
         )
         return apply_per_paper_floor(
             candidates,
@@ -479,6 +428,8 @@ async def _run_arm(
             paper_ids=[paper_id],
             threshold=arm.threshold,
             pool=budget,
+            project_id=project_id,
+            titles=titles or {},
         )
         per_paper[paper_id] = chunks
     bests = {pid: _best_distance(chunks) for pid, chunks in per_paper.items()}
@@ -941,6 +892,7 @@ async def main() -> None:  # noqa: PLR0912 — a report script, not a library AP
                         qvec=qvec,
                         qtext=case.question,
                         scope_ids=scope_ids,
+                        project_id=args.project_id,
                         embedding=embedding,
                         titles=titles_by_id,
                     )
@@ -978,6 +930,7 @@ async def main() -> None:  # noqa: PLR0912 — a report script, not a library AP
                     qvec=qvec,
                     qtext=comparison.question,
                     scope_ids=scope_ids,
+                    project_id=args.project_id,
                     embedding=embedding,
                     titles=titles_by_id,
                 )

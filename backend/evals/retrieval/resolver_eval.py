@@ -38,7 +38,7 @@ from pathlib import Path
 from sqlalchemy import select
 
 from app.core.config import settings
-from app.db.models import Paper
+from app.db.models import Paper, PaperStatus
 from app.db.session import SessionLocal
 from app.services.paper_resolver import ResolvablePaper, resolve_papers
 
@@ -125,7 +125,15 @@ async def main() -> None:
 
     async with SessionLocal() as db:
         rows = (
-            (await db.execute(select(Paper).where(Paper.project_id == args.project_id)))
+            # READY papers only: production's resolver never sees the rest.
+            (
+                await db.execute(
+                    select(Paper).where(
+                        Paper.project_id == args.project_id,
+                        Paper.status == PaperStatus.READY,
+                    )
+                )
+            )
             .scalars()
             .all()
         )

@@ -84,3 +84,20 @@ def test_fallback_branch_scopes_by_column_table_when_no_parent_table_kwarg():
     assert (
         include_object(other_table.c["tsv"], "tsv", "column", True, None) is True
     )  # still compared: same column name, different table
+
+
+def test_the_hnsw_index_is_excluded_from_autogenerate():
+    """The HNSW index is over a halfvec(768) column the model declares as
+    Text (SQLite tests), so metadata cannot describe it. Without the guard
+    autogenerate proposes dropping it, and dense retrieval silently falls back
+    to a sequential scan."""
+    assert (
+        include_object(
+            _Obj("ix_paper_chunk_embeddings_hnsw"),
+            "ix_paper_chunk_embeddings_hnsw",
+            "index",
+            True,
+            None,
+        )
+        is False
+    )

@@ -33,13 +33,22 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import sys
+import time
+from dataclasses import dataclass
 from pathlib import Path
 
-from sqlalchemy import text
+from sqlalchemy import TextClause, text
 
 from app.core.config import settings
 from app.db.session import SessionLocal
 from app.local_rag.rerank import CohereReranker
+from app.services.chat_service import (
+    _EXACT_SCAN_SQL,
+    _dense_only_sql,
+    _dense_query,
+    _hybrid_sql,
+)
 from app.services.embedding_service import EmbeddingService
 from app.services.hybrid_ranker import SPARSE_TSQUERY_SQL, fuse_rrf, keep_within_rank_window
 from app.services.intra_paper_ranker import keep_within_paper
@@ -54,9 +63,16 @@ from evals.retrieval.bm25_arm import (
     sparse_holds_answer,
     sparse_row_count,
 )
-from evals.retrieval.golden_set import Case, load_golden_set
+from evals.retrieval.golden_set import Case, chunk_satisfies, load_golden_set
 from evals.retrieval.per_kind import ARMS as PER_KIND_ARMS
-from evals.retrieval.per_kind import macro, per_kind_table
+from evals.retrieval.per_kind import (
+    differing_id_sets,
+    exact_vs_hnsw_by_kind,
+    hnsw_misses,
+    latency_summary,
+    macro,
+    per_kind_table,
+)
 from evals.retrieval.sweep import CaseRankings, build_rankings
 from evals.retrieval.sweep import report as sweep_report
 from evals.retrieval.metrics import (
@@ -107,6 +123,7 @@ _CORPUS_SQL = text("""
     JOIN papers p ON p.id = c.paper_id
     WHERE c.model = :model
       AND p.project_id = :project_id
+      AND p.status = 'ready'
     ORDER BY c.id
 """)
 
@@ -126,133 +143,101 @@ _CORPUS_SQL = text("""
 # does"): this embeds the golden-set question verbatim, while production
 # reformulates through a QueryReformulatorAgent when the conversation has prior
 # turns. For the single-turn golden set the two paths agree.
+#
+# This is the WHOLE-CORPUS dense ranking, not production's dense query: it has
+# no LIMIT because `_positive_case_status` and the threshold sweep need every
+# chunk. An HNSW scan could only cut it short, so `_chunks_for` always runs it
+# with index scans off. Production's own dense shape is what the hybrid arm
+# and `_dense_probe` run.
 _SQL = text("""
     SELECT c.id AS chunk_id,
            c.paper_id AS paper_id,
            p.title AS paper_title,
            c.text AS chunk_text,
-           (c.embedding <=> CAST(:qvec AS vector)) AS distance
+           (c.embedding <=> CAST(:qvec AS halfvec(768))) AS distance
     FROM paper_chunk_embeddings c
     JOIN papers p ON p.id = c.paper_id
     WHERE c.model = :model
       AND p.project_id = :project_id
+      AND p.status = 'ready'
     ORDER BY distance ASC
 """)
+
 
 # The sparse arm here uses SPARSE_TSQUERY_SQL (OR of lexemes), a CANDIDATE
 # measured by this harness, not production: chat_service still runs the
 # AND-ed websearch_to_tsquery, so this arm differs from production on
 # purpose.
-# Mirrors chat_service._hybrid_rows apart from that query (dense pool + sparse pool, fused
-# in Python via fuse_rrf), with `_SQL`'s project scoping (`p.project_id`)
-# substituted for production's per-request `scope` CTE of paper ids, plus
-# `c.id AS chunk_id` so the harness can tell rescued chunks apart from each
-# other and match rows back after fusion. Ranking stops at the ranks here too
-# -- fusion, the budget, and the single-paper cut all stay in Python and are
-# IMPORTED from app.services.hybrid_ranker, never reimplemented.
-_HYBRID_SQL = text(f"""
-    WITH scope AS (
-        SELECT id AS paper_id FROM papers WHERE project_id = :project_id
-    ),
-    q AS (
-        SELECT {SPARSE_TSQUERY_SQL} AS tsq
-    ),
-    dense AS (
-        SELECT c.id, c.paper_id, c.text,
-               (c.embedding <=> CAST(:qvec AS vector)) AS distance,
-               ROW_NUMBER() OVER (
-                   ORDER BY c.embedding <=> CAST(:qvec AS vector)
-               ) AS d_rank
-        FROM paper_chunk_embeddings c
-        JOIN scope s ON s.paper_id = c.paper_id
-        WHERE c.model = :model
-          AND (c.embedding <=> CAST(:qvec AS vector)) < :threshold
-        ORDER BY distance ASC
-        LIMIT :dense_pool
-    ),
-    sparse AS (
-        SELECT c.id, c.paper_id, c.text,
-               ROW_NUMBER() OVER (
-                   ORDER BY ts_rank_cd(c.tsv, q.tsq) DESC, c.id
-               ) AS s_rank
-        FROM paper_chunk_embeddings c
-        JOIN scope s ON s.paper_id = c.paper_id
-        CROSS JOIN q
-        WHERE c.model = :model
-          AND c.tsv @@ q.tsq
-        ORDER BY ts_rank_cd(c.tsv, q.tsq) DESC, c.id
-        LIMIT :sparse_pool
-    )
-    SELECT COALESCE(d.id, sp.id)             AS chunk_id,
-           COALESCE(d.paper_id, sp.paper_id) AS paper_id,
-           p.title                           AS paper_title,
-           COALESCE(d.text, sp.text)         AS chunk_text,
-           d.distance                        AS distance,
-           d.d_rank                          AS d_rank,
-           sp.s_rank                         AS s_rank
-    FROM dense d
-    FULL OUTER JOIN sparse sp ON sp.id = d.id
-    JOIN papers p ON p.id = COALESCE(d.paper_id, sp.paper_id)
-""")
-
-# Targeted mode's hybrid counterpart to `_HYBRID_SQL`: `scope` narrows to ONE
-# paper instead of the whole project. This is not an optimization -- it is
-# required for correctness. Production's `_retrieve_paper_chunks` issues the
-# hybrid query already scoped to `paper_infos`, so when scope is a single
-# paper (a single `@` mention, or a single-paper project), THAT paper gets
-# the entire `dense_pool`/
-# `sparse_pool` to itself and its d_rank/s_rank are computed against only its
-# own chunks. Filtering `_HYBRID_SQL`'s project-wide result down to one paper
-# post-hoc would instead have that paper compete with 99 others for the same
-# pools, which changes both which chunks are admitted and their fused rank --
-# not what production computes. `:threshold` is also bound differently by the
-# caller here: targeted mode always passes `intra_paper_ceiling`, matching
+#
+# Everything else IS production's query: `chat_service._hybrid_sql`, imported,
+# with its `scope` CTE fed the project's ready paper ids (or one paper's id in
+# targeted mode) and run through `chat_service._dense_query`, so the dense arm
+# takes production's own scan -- HNSW plus the `SET LOCAL`s and the short-scan
+# exact fallback for the whole project, the exact scan for an explicit scope.
+# Ranking stops at the ranks here too -- fusion, the budget, and the
+# single-paper cut all stay in Python and are IMPORTED from
+# app.services.hybrid_ranker, never reimplemented.
+#
+# Targeted mode scopes to ONE paper rather than filtering the project-wide
+# result. This is not an optimization -- it is required for correctness.
+# Production issues the hybrid query already scoped to `paper_infos`, so when
+# scope is a single paper (a single `@` mention, or a single-paper project),
+# THAT paper gets the entire `dense_pool`/`sparse_pool` to itself and its
+# d_rank/s_rank are computed against only its own chunks. Filtering the
+# project-wide result down to one paper post-hoc would instead have that
+# paper compete with every other for the same pools, which changes both which
+# chunks are admitted and their fused rank -- not what production computes.
+# `:threshold` is also bound differently by the caller there: targeted mode
+# always passes `intra_paper_ceiling`, matching
 # `chat_service._retrieve_paper_chunks`'s `single_paper` branch, never
 # `similarity_threshold` (see `_hybrid_chunks_for`'s `threshold` parameter).
-_HYBRID_SQL_PAPER = text(f"""
-    WITH scope AS (
-        SELECT id AS paper_id FROM papers WHERE id = :paper_id
-    ),
-    q AS (
-        SELECT {SPARSE_TSQUERY_SQL} AS tsq
-    ),
-    dense AS (
-        SELECT c.id, c.paper_id, c.text,
-               (c.embedding <=> CAST(:qvec AS vector)) AS distance,
-               ROW_NUMBER() OVER (
-                   ORDER BY c.embedding <=> CAST(:qvec AS vector)
-               ) AS d_rank
-        FROM paper_chunk_embeddings c
-        JOIN scope s ON s.paper_id = c.paper_id
-        WHERE c.model = :model
-          AND (c.embedding <=> CAST(:qvec AS vector)) < :threshold
-        ORDER BY distance ASC
-        LIMIT :dense_pool
-    ),
-    sparse AS (
-        SELECT c.id, c.paper_id, c.text,
-               ROW_NUMBER() OVER (
-                   ORDER BY ts_rank_cd(c.tsv, q.tsq) DESC, c.id
-               ) AS s_rank
-        FROM paper_chunk_embeddings c
-        JOIN scope s ON s.paper_id = c.paper_id
-        CROSS JOIN q
-        WHERE c.model = :model
-          AND c.tsv @@ q.tsq
-        ORDER BY ts_rank_cd(c.tsv, q.tsq) DESC, c.id
-        LIMIT :sparse_pool
-    )
-    SELECT COALESCE(d.id, sp.id)             AS chunk_id,
-           COALESCE(d.paper_id, sp.paper_id) AS paper_id,
-           p.title                           AS paper_title,
-           COALESCE(d.text, sp.text)         AS chunk_text,
-           d.distance                        AS distance,
-           d.d_rank                          AS d_rank,
-           sp.s_rank                         AS s_rank
-    FROM dense d
-    FULL OUTER JOIN sparse sp ON sp.id = d.id
-    JOIN papers p ON p.id = COALESCE(d.paper_id, sp.paper_id)
+def _hybrid_candidate_sql(exact: bool) -> TextClause:
+    return _hybrid_sql(exact, tsquery_sql=SPARSE_TSQUERY_SQL)
+
+
+# The project's ready papers: production's whole-project scope, and the
+# titles the golden set's paper predicate reads. Read once per run.
+_READY_PAPERS_SQL = text("""
+    SELECT id, title FROM papers
+    WHERE project_id = :project_id AND status = 'ready'
+    ORDER BY id
 """)
+
+
+@dataclass(frozen=True)
+class _Project:
+    project_id: str
+    ready_ids: tuple[str, ...]
+    titles: dict[str, str]
+
+
+async def _load_project(db, project_id: str) -> _Project:
+    rows = (await db.execute(_READY_PAPERS_SQL, {"project_id": project_id})).fetchall()
+    return _Project(
+        project_id=project_id,
+        ready_ids=tuple(r.id for r in rows),
+        titles={r.id: r.title for r in rows},
+    )
+
+
+async def _fresh_transaction(db) -> None:
+    """End the open transaction before a dense query.
+
+    Every case runs on one session, and SET LOCAL lasts until the transaction
+    ends: without this an exact query's `enable_indexscan = off` would
+    silently turn the next HNSW query exact too. The harness never writes, so
+    rolling back loses nothing."""
+    await db.rollback()
+
+
+_embeddings: dict[str, list[float]] = {}
+
+
+async def _embed(svc: EmbeddingService, question: str) -> list[float]:
+    """One embedding call per question per run, however many arms read it."""
+    if question not in _embeddings:
+        _embeddings[question] = await svc.embed(question, task_type="RETRIEVAL_QUERY")
+    return _embeddings[question]
 
 
 def _vec(embedding: list[float]) -> str:
@@ -381,12 +366,14 @@ _shared_text: dict = {}
 
 
 async def _chunks_for(db, svc: EmbeddingService, case: Case, project_id: str) -> list[Scored]:
-    embedding = await svc.embed(case.question, task_type="RETRIEVAL_QUERY")
+    embedding = await _embed(svc, case.question)
     params = {
         "qvec": _vec(embedding),
         "model": settings.embedding_model,
         "project_id": project_id,
     }
+    await _fresh_transaction(db)
+    await db.execute(text(_EXACT_SCAN_SQL))
     rows = (await db.execute(_SQL, params)).fetchall()
     return [
         Scored(
@@ -399,18 +386,30 @@ async def _chunks_for(db, svc: EmbeddingService, case: Case, project_id: str) ->
     ]
 
 
+def _scope_params(project: _Project, paper_id: str | None) -> tuple[str, bool]:
+    """(the `:ids` scope, whether production scans it exactly).
+
+    The whole project takes HNSW; an explicit paper scope takes the exact
+    scan, exactly as `chat_service._retrieve_paper_chunks` decides it."""
+    if paper_id is None:
+        return json.dumps(list(project.ready_ids)), False
+    return json.dumps([paper_id]), True
+
+
 async def _hybrid_chunks_for(
     db,
     svc: EmbeddingService,
     case: Case,
-    project_id: str,
+    project: _Project,
     *,
     threshold: float,
     paper_id: str | None = None,
+    exact: bool = False,
 ) -> list[Scored]:
     """The hybrid arm, in production's exact order.
 
-    fuse_rrf and keep_within_rank_window are IMPORTED from
+    The SQL and its scan are production's (`_hybrid_candidate_sql` through
+    `chat_service._dense_query`), and fuse_rrf is IMPORTED from
     app.services.hybrid_ranker rather than reproduced, for the same reason
     keep_within_paper is: a re-implementation here would drift and the harness
     would measure a policy that does not ship.
@@ -418,13 +417,15 @@ async def _hybrid_chunks_for(
     `threshold` and `paper_id` mirror the two things production's own
     `single_paper` branch changes together (see
     `chat_service._retrieve_paper_chunks`'s docstring): the GLOBAL scope
-    (`paper_id=None`) uses `similarity_threshold` and pools against the whole
-    project (`_HYBRID_SQL`); single-paper/targeted scope MUST pass
-    `threshold=settings.intra_paper_ceiling` and a `paper_id`, which switches
-    to `_HYBRID_SQL_PAPER` so the named paper gets the dense/sparse pools to
-    itself, exactly as production's own per-request scope does. Passing a
-    `paper_id` with `similarity_threshold` (or vice versa) reproduces neither
-    policy production runs.
+    (`paper_id=None`) uses `similarity_threshold` and pools against the
+    project's ready papers; single-paper/targeted scope MUST pass
+    `threshold=settings.intra_paper_ceiling` and a `paper_id`, so the named
+    paper gets the dense/sparse pools to itself, exactly as production's own
+    per-request scope does. Passing a `paper_id` with `similarity_threshold`
+    (or vice versa) reproduces neither policy production runs.
+
+    `exact=True` (`--exact`) forces the exact scan on the global scope too;
+    a paper scope is exact either way.
 
     The returned list is already in FUSED order and its `distance` may be
     None (a sparse-only admission). It must never be handed to
@@ -434,30 +435,28 @@ async def _hybrid_chunks_for(
     this only to recall_at_k / mean_reciprocal_rank with `presorted=True`,
     rescued_count, and _hybrid_production_cut.
     """
-    embedding = await svc.embed(case.question, task_type="RETRIEVAL_QUERY")
+    embedding = await _embed(svc, case.question)
+    ids, scoped_exact = _scope_params(project, paper_id)
     params = {
         "qvec": _vec(embedding),
         "qtext": case.question,
+        "ids": ids,
+        "project_id": project.project_id,
         "model": settings.embedding_model,
         "threshold": threshold,
         "dense_pool": settings.hybrid_dense_pool,
         "sparse_pool": settings.hybrid_sparse_pool,
     }
-    if paper_id is not None:
-        sql = _HYBRID_SQL_PAPER
-        params["paper_id"] = paper_id
-    else:
-        sql = _HYBRID_SQL
-        params["project_id"] = project_id
-    rows = (await db.execute(sql, params)).fetchall()
-    by_id = {r.chunk_id: r for r in rows}
+    await _fresh_transaction(db)
+    rows, _ = await _dense_query(
+        db, "eval.hybrid", _hybrid_candidate_sql, params, exact=exact or scoped_exact
+    )
+    by_id = {r.id: r for r in rows}
     dense_ranked = [
-        r.chunk_id
-        for r in sorted((x for x in rows if x.d_rank is not None), key=lambda x: x.d_rank)
+        r.id for r in sorted((x for x in rows if x.d_rank is not None), key=lambda x: x.d_rank)
     ]
     sparse_ranked = [
-        r.chunk_id
-        for r in sorted((x for x in rows if x.s_rank is not None), key=lambda x: x.s_rank)
+        r.id for r in sorted((x for x in rows if x.s_rank is not None), key=lambda x: x.s_rank)
     ]
     fused = fuse_rrf(
         dense_ranked,
@@ -469,8 +468,8 @@ async def _hybrid_chunks_for(
     return [
         Scored(
             paper_id=by_id[key].paper_id,
-            paper_title=by_id[key].paper_title,
-            chunk_text=by_id[key].chunk_text,
+            paper_title=project.titles.get(by_id[key].paper_id, ""),
+            chunk_text=by_id[key].text,
             distance=None if by_id[key].distance is None else float(by_id[key].distance),
             chunk_id=key,
             d_rank=by_id[key].d_rank,
@@ -478,6 +477,49 @@ async def _hybrid_chunks_for(
         )
         for key, _ in fused
     ]
+
+
+@dataclass(frozen=True)
+class _DenseProbe:
+    """One dense candidate query, as `--exact` compares them."""
+
+    ids: list[str]
+    chunks: list[Scored]
+    ms: float
+    fell_back: bool
+
+
+async def _dense_probe(db, qvec: str, project: _Project, *, exact: bool) -> _DenseProbe:
+    """Production's dense candidates for the whole project, timed.
+
+    `chat_service._dense_only_sql` at the hybrid arm's pool and the global
+    gate: the same `dense_raw` scan and the same gated rows the hybrid
+    query's dense arm ranks, without the sparse arm in the timing. The clock
+    covers the `SET LOCAL`s and, on HNSW, the exact fallback when it fires,
+    because production pays for both."""
+    params = {
+        "qvec": qvec,
+        "ids": json.dumps(list(project.ready_ids)),
+        "project_id": project.project_id,
+        "model": settings.embedding_model,
+        "threshold": settings.similarity_threshold,
+        "dense_pool": settings.hybrid_dense_pool,
+    }
+    await _fresh_transaction(db)
+    start = time.perf_counter()
+    rows, fell_back = await _dense_query(db, "eval.dense", _dense_only_sql, params, exact=exact)
+    ms = (time.perf_counter() - start) * 1000
+    chunks = [
+        Scored(
+            paper_id=r.paper_id,
+            paper_title=project.titles.get(r.paper_id, ""),
+            chunk_text=r.text,
+            distance=float(r.distance),
+            chunk_id=r.id,
+        )
+        for r in rows
+    ]
+    return _DenseProbe(ids=[r.id for r in rows], chunks=chunks, ms=ms, fell_back=fell_back)
 
 
 def _scope_to_paper(chunks: list[Scored], title_contains: str) -> list[Scored]:
@@ -693,7 +735,122 @@ def _corpus_note(chunks: list[Scored]) -> str:
     return f"{len(chunks)} chunks across {papers} papers"
 
 
-async def main() -> None:  # noqa: PLR0912, PLR0915 — a report script, not a library API
+def _answer_ids(case: Case, *lists: list[Scored]) -> set[str]:
+    """Chunk ids, across `lists`, that answer `case` (`chunk_satisfies`)."""
+    return {
+        c.chunk_id
+        for chunks in lists
+        for c in chunks
+        if c.chunk_id is not None and chunk_satisfies(case, c.paper_title, c.chunk_text)
+    }
+
+
+def _report_exact(
+    cases: list[Case],
+    hnsw: list[_DenseProbe],
+    exact: list[_DenseProbe],
+    hybrid_positives: list[tuple[Case, list[Scored]]],
+    exact_hybrid: list[list[Scored]],
+) -> dict | None:
+    """Print the HNSW-vs-exact block and return its JSON payload.
+
+    The verdict is `hnsw_misses`: a positive case whose answering chunk is in
+    the exact dense candidates and not in the HNSW ones. Id-set differences
+    are reported beside it, but rows nobody needs are ANN recall loss with no
+    cost to any answer, so they do not fail the run."""
+    print()
+    if not cases:
+        print("HNSW vs exact: skipped — no positive cases scored (see ERRORS above)")
+        return None
+    hnsw_ids = [p.ids for p in hnsw]
+    exact_ids = [p.ids for p in exact]
+    answers = [
+        _answer_ids(c, h.chunks, e.chunks) for c, h, e in zip(cases, hnsw, exact, strict=True)
+    ]
+    misses = hnsw_misses(exact_ids, hnsw_ids, answers)
+    differ = set(differing_id_sets(exact_ids, hnsw_ids))
+    lost_rows = [len(set(e) - set(h)) for e, h in zip(exact_ids, hnsw_ids, strict=True)]
+    hybrid_hnsw = [chunks for _, chunks in hybrid_positives]
+    dense_rows = exact_vs_hnsw_by_kind(cases, [p.chunks for p in hnsw], [p.chunks for p in exact])
+    hybrid_rows = exact_vs_hnsw_by_kind(cases, hybrid_hnsw, exact_hybrid)
+    fallbacks = sum(p.fell_back for p in hnsw)
+    ef_search = min(max(settings.hnsw_ef_search, settings.hybrid_dense_pool), 1000)
+
+    print(
+        f"HNSW vs exact, whole-project dense scan (dense_pool={settings.hybrid_dense_pool}, "
+        f"ef_search={ef_search}, max_scan_tuples={settings.hnsw_max_scan_tuples}, "
+        f"gate={settings.similarity_threshold}), {len(cases)} positives:"
+    )
+    print(
+        f"  {'kind':<18} {'n':>3}  {'dense r@60':>17}  {'hybrid r@60':>17}  "
+        f"{'ids differ':>10}  {'misses':>6}"
+    )
+    print(f"  {'':<18} {'':>3}  {'hnsw':>8} {'exact':>8}  {'hnsw':>8} {'exact':>8}")
+    for d, h in zip(dense_rows, hybrid_rows, strict=True):
+        idx = [i for i, c in enumerate(cases) if c.kind == d.kind]
+        print(
+            f"  {d.kind:<18} {d.n:>3}  {d.hnsw:>8.2f} {d.exact:>8.2f}  "
+            f"{h.hnsw:>8.2f} {h.exact:>8.2f}  "
+            f"{sum(i in differ for i in idx):>10}  {sum(i in misses for i in idx):>6}"
+        )
+    n = len(cases)
+    print(
+        f"  id sets differ on {len(differ)}/{n} cases; exact rows HNSW lacks per case: "
+        f"mean {sum(lost_rows) / n:.1f}, max {max(lost_rows)} "
+        f"(of up to {settings.hybrid_dense_pool})"
+    )
+    print(f"  HNSW short-scan fallbacks to exact: {fallbacks}/{n}")
+    print(
+        "  answer misses (exact found it, HNSW did not): "
+        + (", ".join(cases[i].id for i in misses) if misses else "none")
+    )
+    h_mean, h_p50, h_p95 = latency_summary([p.ms for p in hnsw])
+    e_mean, e_p50, e_p95 = latency_summary([p.ms for p in exact])
+    print("  dense query latency, ms (SET LOCALs + query + any fallback):")
+    print(f"    hnsw   mean {h_mean:7.1f}  p50 {h_p50:7.1f}  p95 {h_p95:7.1f}")
+    print(f"    exact  mean {e_mean:7.1f}  p50 {e_p50:7.1f}  p95 {e_p95:7.1f}")
+    print(f"  verdict: {'FAIL' if misses else 'PASS'}")
+    return {
+        "ef_search": ef_search,
+        "max_scan_tuples": settings.hnsw_max_scan_tuples,
+        "dense_pool": settings.hybrid_dense_pool,
+        "n_cases": n,
+        "misses": [cases[i].id for i in misses],
+        "ids_differ": [cases[i].id for i in sorted(differ)],
+        "lost_rows": dict(zip((c.id for c in cases), lost_rows, strict=True)),
+        "fallbacks": fallbacks,
+        "per_kind": [
+            {
+                "kind": d.kind,
+                "n": d.n,
+                "dense": {"hnsw": d.hnsw, "exact": d.exact},
+                "hybrid": {"hnsw": h.hnsw, "exact": h.exact},
+            }
+            for d, h in zip(dense_rows, hybrid_rows, strict=True)
+        ],
+        "latency_ms": {
+            "hnsw": {"mean": h_mean, "p50": h_p50, "p95": h_p95},
+            "exact": {"mean": e_mean, "p50": e_p50, "p95": e_p95},
+        },
+    }
+
+
+async def main() -> int | None:
+    """Exit code: 1 when `--exact` finds an answer HNSW misses, 2 when
+    `--exact` measured nothing at all, else 0 (None on an early stop).
+
+    `--exact` is a recall GATE, so a run that stopped before comparing a
+    single case -- a refused flag, a model mismatch, no positive case scored
+    -- must not exit 0 and read as a passed guard."""
+    args = _parse_args()
+    rc = await _run(args)
+    if args.exact and rc is None:
+        print("\nERROR: --exact compared no cases; the recall gate did not run")
+        return 2
+    return rc
+
+
+def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Measure retrieval quality.")
     parser.add_argument(
         "--k",
@@ -768,6 +925,16 @@ async def main() -> None:  # noqa: PLR0912, PLR0915 — a report script, not a l
         ),
     )
     parser.add_argument(
+        "--exact",
+        action="store_true",
+        help=(
+            "also run every global dense query with index scans off (exact search) and "
+            "compare it with the HNSW run: per-kind r@60, id-set differences, latency. "
+            "Exits 1 if exact search finds a positive case's answer HNSW does not. "
+            "Requires --hybrid."
+        ),
+    )
+    parser.add_argument(
         "--jev-repeats",
         type=int,
         default=1,
@@ -776,7 +943,13 @@ async def main() -> None:  # noqa: PLR0912, PLR0915 — a report script, not a l
     args = parser.parse_args()
     if args.sweep and not (args.hybrid and args.bm25):
         parser.error("--sweep requires --hybrid and --bm25")
+    if args.exact and not args.hybrid:
+        parser.error("--exact requires --hybrid (it compares the hybrid arm's dense scan)")
+    return args
 
+
+async def _run(args: argparse.Namespace) -> int | None:  # noqa: PLR0912, PLR0915 — a report script
+    """The run itself. None means it stopped before measuring anything."""
     # The rerank consumes a fused candidate list, and there is no fused list
     # without the hybrid arm. Refusing is better than silently reranking the
     # dense-only ordering, which is a policy production never runs.
@@ -882,6 +1055,13 @@ async def main() -> None:  # noqa: PLR0912, PLR0915 — a report script, not a l
     pk_cases: list[Case] = []
     pk_lists: dict[str, list[list[Scored]]] = {arm: [] for arm in PER_KIND_ARMS}
     sweep_rankings: list[CaseRankings] = []
+    # --exact: case-aligned, positives only. Each probe is one dense query
+    # for the whole project; `ex_hybrid` is the hybrid arm re-run exact,
+    # case-for-case with `hybrid_positives`.
+    ex_cases: list[Case] = []
+    ex_hnsw: list[_DenseProbe] = []
+    ex_exact: list[_DenseProbe] = []
+    ex_hybrid: list[list[Scored]] = []
 
     async with SessionLocal() as db:
         counts = {r.model: r.n for r in (await db.execute(_MODEL_COUNTS_SQL)).fetchall()}
@@ -889,6 +1069,7 @@ async def main() -> None:  # noqa: PLR0912, PLR0915 — a report script, not a l
         if mismatch:
             print(f"\nERROR: {mismatch}")
             return
+        project = await _load_project(db, args.project_id)
 
         if args.bm25:
             corpus_rows = (
@@ -950,7 +1131,7 @@ async def main() -> None:  # noqa: PLR0912, PLR0915 — a report script, not a l
                             db,
                             svc,
                             case,
-                            args.project_id,
+                            project,
                             threshold=settings.intra_paper_ceiling,
                             paper_id=paper_id,
                         )
@@ -982,9 +1163,33 @@ async def main() -> None:  # noqa: PLR0912, PLR0915 — a report script, not a l
                 # (Criticals #1/#2 from review; see _hybrid_chunks_for's
                 # docstring).
                 hybrid_chunks = await _hybrid_chunks_for(
-                    db, svc, case, args.project_id, threshold=settings.similarity_threshold
+                    db, svc, case, project, threshold=settings.similarity_threshold
                 )
                 hybrid_positives.append((case, hybrid_chunks))
+
+                if args.exact:
+                    qvec = _vec(await _embed(svc, case.question))
+                    # Alternate which scan runs first, so neither one is
+                    # always the query that warms the cache for the other.
+                    if len(ex_cases) % 2:
+                        exact_probe = await _dense_probe(db, qvec, project, exact=True)
+                        hnsw_probe = await _dense_probe(db, qvec, project, exact=False)
+                    else:
+                        hnsw_probe = await _dense_probe(db, qvec, project, exact=False)
+                        exact_probe = await _dense_probe(db, qvec, project, exact=True)
+                    ex_cases.append(case)
+                    ex_hnsw.append(hnsw_probe)
+                    ex_exact.append(exact_probe)
+                    ex_hybrid.append(
+                        await _hybrid_chunks_for(
+                            db,
+                            svc,
+                            case,
+                            project,
+                            threshold=settings.similarity_threshold,
+                            exact=True,
+                        )
+                    )
 
                 if bm25_corpus is not None:
                     bm25_fused = fuse_with_bm25(
@@ -1231,6 +1436,12 @@ async def main() -> None:  # noqa: PLR0912, PLR0915 — a report script, not a l
         else:
             print("bm25s arm: skipped — no positive cases scored (see ERRORS above)")
             print()
+
+    exact_payload = (
+        _report_exact(ex_cases, ex_hnsw, ex_exact, hybrid_positives, ex_hybrid)
+        if args.exact
+        else None
+    )
 
     sweep_payload = None
     if args.sweep:
@@ -1557,6 +1768,7 @@ async def main() -> None:  # noqa: PLR0912, PLR0915 — a report script, not a l
                     "targeted": targeted_rows if args.targeted else None,
                     "hybrid": hybrid_payload,
                     "rrf_sweep": sweep_payload,
+                    "exact": exact_payload,
                     "per_kind": [
                         {
                             "kind": r.kind,
@@ -1586,6 +1798,12 @@ async def main() -> None:  # noqa: PLR0912, PLR0915 — a report script, not a l
         )
         print(f"\nwrote {args.json}")
 
+    if args.exact and exact_payload is None:
+        return None
+    if exact_payload is not None and exact_payload["misses"]:
+        return 1
+    return 0
+
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    sys.exit(asyncio.run(main()))

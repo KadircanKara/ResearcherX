@@ -110,6 +110,19 @@ def test_every_retrieval_call_is_handed_productions_fusion_scorer():
         assert _call_passes(harness, call, "fusion_scorer="), f"harness drops it: {call}"
 
 
+def test_every_retrieval_call_is_scoped_to_the_project():
+    """The dense candidate query filters `c.project_id` so the HNSW scan stays
+    inside one project; a call that drops `project_id=` cannot run at all."""
+    production = inspect.getsource(chat_service.ChatService.respond)
+    harness = inspect.getsource(generate.AnswerGenerator.generate)
+    for call in ("_retrieve_mentioned_chunks(", "_retrieve_paper_chunks("):
+        assert _call_passes(production, call, "project_id="), f"production changed: {call}"
+        assert _call_passes(harness, call, "project_id="), f"harness drops it: {call}"
+    # Both global calls declare the whole-project scope: HNSW with fallback.
+    for source in (production, harness):
+        assert _call_passes(source, "_retrieve_paper_chunks(", "exact=False")
+
+
 def _call_passes(source: str, call: str, keyword: str) -> bool:
     start = source.index(call)
     depth, end = 0, start
@@ -235,3 +248,44 @@ def test_response_format_support_is_remembered_per_model_not_per_endpoint():
     assert not a._supports_response_format()
     assert b._supports_response_format()
     _RESPONSE_FORMAT_UNSUPPORTED.clear()
+
+
+_READY_FILTER = "Paper.status == PaperStatus.READY"
+
+
+def test_production_and_both_harnesses_load_only_ready_papers():
+    """`respond` drops pending and failed papers from scope and from the
+    PAPERS block. A harness that loaded every paper would grade a catalog
+    and a resolver input production never builds."""
+    from evals.retrieval import resolver_eval
+
+    assert _READY_FILTER in inspect.getsource(chat_service.ChatService.respond)
+    assert _READY_FILTER in inspect.getsource(generate.AnswerGenerator._papers)
+    assert _READY_FILTER in inspect.getsource(resolver_eval.main)
+
+
+async def test_the_harness_paper_load_excludes_pending_and_failed(db_session):
+    """Behavioural twin of the source pin: the filter really filters."""
+    from sqlalchemy import select
+
+    from app.db.models import Paper, PaperStatus, Project, User
+    from app.db.seed import seed_users
+
+    await seed_users(db_session)
+    you = (
+        await db_session.execute(select(User).where(User.email == "you@researcherx.dev"))
+    ).scalar_one()
+    project = Project(owner_id=you.id, title="Parity", topic_keywords=[])
+    db_session.add(project)
+    await db_session.flush()
+    for title, status in (
+        ("ready", PaperStatus.READY),
+        ("pending", PaperStatus.PENDING),
+        ("failed", PaperStatus.FAILED),
+    ):
+        db_session.add(Paper(project_id=project.id, title=title, source="upload", status=status))
+    await db_session.commit()
+
+    # `_papers` reads nothing from `self`; skip building the agents.
+    rows = await generate.AnswerGenerator._papers(object(), project.id)
+    assert [p.title for p in rows] == ["ready"]
