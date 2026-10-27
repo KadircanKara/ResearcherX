@@ -160,8 +160,9 @@ class ProjectMember(Base):
 class Paper(Base):
     __tablename__ = "papers"
     __table_args__ = (
-        # One copy of a given file per project. Partial, because manual
-        # entries have no bytes and every one of them has a NULL hash.
+        # One copy of a given file per project. Partial, because a paper
+        # with nothing ingested yet (and a textless manual entry) has a NULL
+        # hash.
         Index(
             "uq_papers_project_source_hash",
             "project_id",
@@ -221,7 +222,8 @@ class Paper(Base):
     status: Mapped[str] = mapped_column(
         String(16), default=PaperStatus.PENDING, server_default="pending"
     )
-    # SHA-256 hex of the uploaded bytes; NULL for manual entries.
+    # SHA-256 hex of the uploaded bytes. A manual entry hashes its text
+    # (abstract + "\n" + body), and is NULL while it has none.
     source_hash: Mapped[str | None] = mapped_column(String(64), default=None)
     # Why ingest failed, for the logs and operators. Internal only: client-
     # visible error text stays generic, so this is never sent to the browser.

@@ -526,7 +526,7 @@ async def test_respond_skips_reformulation_on_a_first_turn(
     from app.services.chat_service import ChatService
 
     conv = conversation_with_message
-    db_session.add(Paper(project_id=project.id, title="Paper A", source="manual"))
+    db_session.add(Paper(project_id=project.id, title="Paper A", source="manual", status="ready"))
     await db_session.commit()
 
     async def fake_stream(*args, **kwargs):
@@ -565,7 +565,7 @@ async def test_respond_skips_reformulation_on_a_first_turn_despite_a_history_hit
     from app.services.chat_service import ChatService
 
     conv = conversation_with_message
-    db_session.add(Paper(project_id=project.id, title="Paper A", source="manual"))
+    db_session.add(Paper(project_id=project.id, title="Paper A", source="manual", status="ready"))
     await db_session.commit()
 
     async def fake_stream(*args, **kwargs):
@@ -600,7 +600,7 @@ async def test_respond_retrieves_with_the_reformulated_query(
     from app.services.chat_service import ChatService
 
     conv = conversation_with_message
-    db_session.add(Paper(project_id=project.id, title="Paper A", source="manual"))
+    db_session.add(Paper(project_id=project.id, title="Paper A", source="manual", status="ready"))
     # A prior turn, so reformulation runs at all.
     db_session.add(ChatMessage(conversation_id=conv.id, role="assistant", content="Earlier answer"))
     await db_session.commit()
@@ -658,7 +658,7 @@ async def test_respond_persists_citations_renumbered_from_one(
     from app.services.chat_service import ChatService
 
     conv = conversation_with_message
-    db_session.add(Paper(project_id=project.id, title="Paper A", source="manual"))
+    db_session.add(Paper(project_id=project.id, title="Paper A", source="manual", status="ready"))
     await db_session.commit()
 
     # Retrieval handed the model a catalog of three chunks; it cited the third
@@ -709,7 +709,12 @@ async def test_respond_sends_paper_metadata_on_a_metadata_question(
     conv = conversation_with_message
     db_session.add(
         Paper(
-            project_id=project.id, title="Paper A", authors=["Jane Doe"], year=2024, source="manual"
+            project_id=project.id,
+            title="Paper A",
+            authors=["Jane Doe"],
+            year=2024,
+            source="manual",
+            status="ready",
         )
     )
     await db_session.commit()
@@ -747,7 +752,12 @@ async def test_respond_sends_titles_only_on_a_content_question(
     conv = conversation_with_message
     db_session.add(
         Paper(
-            project_id=project.id, title="Paper A", authors=["Jane Doe"], year=2024, source="manual"
+            project_id=project.id,
+            title="Paper A",
+            authors=["Jane Doe"],
+            year=2024,
+            source="manual",
+            status="ready",
         )
     )
     await db_session.commit()
@@ -900,11 +910,13 @@ async def test_a_misattributed_marker_is_stripped_before_the_citation_array_is_b
         project_id=project.id,
         title="Cooperative Multi-Target Search with UAV Swarms",
         source="manual",
+        status="ready",
     )
     other = Paper(
         project_id=project.id,
         title="Deep Reinforcement Learning for Trajectory Path Planning",
         source="manual",
+        status="ready",
     )
     db_session.add_all([owner, other])
     await db_session.commit()
@@ -949,7 +961,10 @@ async def test_mentions_scope_retrieval_to_the_named_papers(
     from app.services.chat_service import ChatService
 
     conv = conversation_with_message
-    papers = [Paper(project_id=project.id, title=f"Paper {i}", source="manual") for i in range(3)]
+    papers = [
+        Paper(project_id=project.id, title=f"Paper {i}", source="manual", status="ready")
+        for i in range(3)
+    ]
     db_session.add_all(papers)
     await db_session.commit()
     for p in papers:
@@ -995,7 +1010,9 @@ async def test_no_mentions_means_no_widener_call_and_global_scope(
 
     conv = conversation_with_message
     for i in range(3):
-        db_session.add(Paper(project_id=project.id, title=f"Paper {i}", source="manual"))
+        db_session.add(
+            Paper(project_id=project.id, title=f"Paper {i}", source="manual", status="ready")
+        )
     await db_session.commit()
 
     async def fake_stream(*args, **kwargs):
@@ -1029,7 +1046,10 @@ async def test_widening_pins_the_mentioned_papers_and_fills_globally(
     from app.services.chat_service import ChatService
 
     conv = conversation_with_message
-    papers = [Paper(project_id=project.id, title=f"Paper {i}", source="manual") for i in range(3)]
+    papers = [
+        Paper(project_id=project.id, title=f"Paper {i}", source="manual", status="ready")
+        for i in range(3)
+    ]
     db_session.add_all(papers)
     await db_session.commit()
     for p in papers:
@@ -1103,7 +1123,10 @@ async def test_mentions_with_no_chunks_at_all_fall_back_to_the_library(
     from app.services.chat_service import ChatService
 
     conv = conversation_with_message
-    papers = [Paper(project_id=project.id, title=f"Paper {i}", source="manual") for i in range(2)]
+    papers = [
+        Paper(project_id=project.id, title=f"Paper {i}", source="manual", status="ready")
+        for i in range(2)
+    ]
     db_session.add_all(papers)
     await db_session.commit()
     for p in papers:
@@ -1157,8 +1180,8 @@ async def test_the_scope_titles_reach_the_chat_agent(
     from app.services.chat_service import ChatService
 
     conv = conversation_with_message
-    paper = Paper(project_id=project.id, title="Named Paper", source="manual")
-    other = Paper(project_id=project.id, title="Other Paper", source="manual")
+    paper = Paper(project_id=project.id, title="Named Paper", source="manual", status="ready")
+    other = Paper(project_id=project.id, title="Other Paper", source="manual", status="ready")
     db_session.add_all([paper, other])
     await db_session.commit()
     await db_session.refresh(paper)
@@ -1211,7 +1234,10 @@ async def test_widened_fill_is_capped_at_the_context_budget(
     from app.services.chat_service import ChatService
 
     conv = conversation_with_message
-    papers = [Paper(project_id=project.id, title=f"Paper {i}", source="manual") for i in range(3)]
+    papers = [
+        Paper(project_id=project.id, title=f"Paper {i}", source="manual", status="ready")
+        for i in range(3)
+    ]
     db_session.add_all(papers)
     await db_session.commit()
     for p in papers:
@@ -1632,7 +1658,10 @@ async def test_a_widened_turn_that_lands_no_library_chunk_is_not_reported_widene
     from app.services.chat_service import ChatService
 
     conv = conversation_with_message
-    papers = [Paper(project_id=project.id, title=f"Paper {i}", source="manual") for i in range(3)]
+    papers = [
+        Paper(project_id=project.id, title=f"Paper {i}", source="manual", status="ready")
+        for i in range(3)
+    ]
     db_session.add_all(papers)
     await db_session.commit()
     for p in papers:
@@ -1706,7 +1735,7 @@ async def test_mentions_that_resolve_to_nothing_report_widened(
     from app.services.chat_service import ChatService
 
     conv = conversation_with_message
-    paper = Paper(project_id=project.id, title="Named Paper", source="manual")
+    paper = Paper(project_id=project.id, title="Named Paper", source="manual", status="ready")
     db_session.add(paper)
     await db_session.commit()
     await db_session.refresh(paper)
@@ -1741,7 +1770,9 @@ async def test_a_grouped_citation_marker_survives_the_whole_pipeline(
     from app.services.chat_service import ChatService
 
     conv = conversation_with_message
-    paper = Paper(project_id=project.id, title="Grouped Marker Paper", source="manual")
+    paper = Paper(
+        project_id=project.id, title="Grouped Marker Paper", source="manual", status="ready"
+    )
     db_session.add(paper)
     await db_session.commit()
     await db_session.refresh(paper)
@@ -1786,8 +1817,8 @@ async def test_a_mentioned_paper_that_returns_nothing_is_reported_not_hidden(
     from app.services.chat_service import ChatService
 
     conv = conversation_with_message
-    a = Paper(project_id=project.id, title="Paper A", source="manual")
-    b = Paper(project_id=project.id, title="Paper B", source="manual")
+    a = Paper(project_id=project.id, title="Paper A", source="manual", status="ready")
+    b = Paper(project_id=project.id, title="Paper B", source="manual", status="ready")
     db_session.add_all([a, b])
     await db_session.commit()
     await db_session.refresh(a)
@@ -1827,7 +1858,7 @@ async def test_no_empty_mentions_are_reported_when_every_named_paper_contributes
     from app.services.chat_service import ChatService
 
     conv = conversation_with_message
-    paper = Paper(project_id=project.id, title="Paper A", source="manual")
+    paper = Paper(project_id=project.id, title="Paper A", source="manual", status="ready")
     db_session.add(paper)
     await db_session.commit()
     await db_session.refresh(paper)
@@ -1869,7 +1900,7 @@ async def _papers_for_resolver(db_session: AsyncSession, project: Project, title
     from app.db.models import Paper
 
     rows = [
-        Paper(project_id=project.id, title=t, source="manual")
+        Paper(project_id=project.id, title=t, source="manual", status="ready")
         for t in (titles if titles is not None else _RESOLVER_LIBRARY)
     ]
     db_session.add_all(rows)

@@ -212,6 +212,15 @@ async def _chunk_counts(db: AsyncSession, paper_ids: list[str]) -> dict[str, int
     return {paper_id: count for paper_id, count in rows.all()}
 
 
+def _duplicate_source(exc) -> HTTPException:
+    """409 naming the paper that already holds these bytes. Its title is the
+    user's own data in their own project; nothing about the failure leaks."""
+    return HTTPException(
+        status_code=409,
+        detail={"error": "duplicate_source", "paper_id": exc.paper_id, "title": exc.title},
+    )
+
+
 async def _paper_out(db: AsyncSession, paper: Paper) -> PaperOut:
     out = PaperOut.model_validate(paper)
     counts = await _chunk_counts(db, [paper.id])
@@ -248,12 +257,16 @@ async def create_paper(
     await db.flush()  # assigns paper.id without committing
 
     if paper.source == PaperSource.MANUAL and (paper.abstract or paper.body):
-        from app.services.paper_ingest_service import index_manual
+        from app.services.paper_ingest_service import DuplicateSource, index_manual
 
         # index_manual commits — the flushed paper rides along in the same
         # transaction, so an embedding failure rolls back the paper too rather
         # than leaving a durable row whose chunks never got written.
-        await index_manual(db, paper.id, paper.abstract, paper.body)
+        try:
+            await index_manual(db, paper.id, paper.abstract, paper.body)
+        except DuplicateSource as exc:
+            await db.rollback()
+            raise _duplicate_source(exc) from None
     else:
         await db.commit()
 
@@ -298,10 +311,14 @@ async def update_paper(
         setattr(paper, key, value)
 
     if paper.source == PaperSource.MANUAL and text_changed:
-        from app.services.paper_ingest_service import index_manual
+        from app.services.paper_ingest_service import DuplicateSource, index_manual
 
         # Same transaction as the text change — see create_paper.
-        await index_manual(db, paper.id, paper.abstract, paper.body)
+        try:
+            await index_manual(db, paper.id, paper.abstract, paper.body)
+        except DuplicateSource as exc:
+            await db.rollback()
+            raise _duplicate_source(exc) from None
     else:
         await db.commit()
 
@@ -508,7 +525,14 @@ async def ingest_paper(
     except (text_extraction.UnsupportedFileType, text_extraction.UnreadableFile) as exc:
         raise HTTPException(status_code=422, detail=exc.message) from None
 
-    from app.services.paper_ingest_service import ingest
+    from app.services.paper_ingest_service import DuplicateSource, check_duplicate, ingest
+
+    # A file that is already ANOTHER paper of this project is refused before
+    # it is stored: it is not this paper's file. `ingest` checks again.
+    try:
+        await check_duplicate(db, paper_id, file_bytes)
+    except DuplicateSource as exc:
+        raise _duplicate_source(exc) from None
 
     # Stored BEFORE extraction, deliberately. Keeping the user's own file is
     # the whole point of this table, and extraction is the part that fails --
@@ -525,6 +549,8 @@ async def ingest_paper(
 
     try:
         n = await ingest(db, paper_id, file_bytes, file_format=file_format)
+    except DuplicateSource as exc:
+        raise _duplicate_source(exc) from None
     except text_extraction.UnreadableFile as exc:
         raise HTTPException(status_code=422, detail=exc.message) from None
     return {"chunks_stored": n}
@@ -607,7 +633,7 @@ async def ingest_paper_from_url(
         raise HTTPException(status_code=404, detail="Paper not found")
 
     from app.services.paper_fetch_service import UnsafeUrl, fetch_pdf, PaywallError
-    from app.services.paper_ingest_service import ingest
+    from app.services.paper_ingest_service import DuplicateSource, ingest
 
     try:
         pdf_bytes, served_by = await fetch_pdf(body.url)
@@ -634,6 +660,8 @@ async def ingest_paper_from_url(
 
     try:
         n = await ingest(db, paper_id, pdf_bytes, source_url=body.url)
+    except DuplicateSource as exc:
+        raise _duplicate_source(exc) from None
     except RateLimitError:
         # The PDF fetched and parsed fine — only the embedding provider is out
         # of quota. A 500 here reads to the user as "this paper is unreachable"

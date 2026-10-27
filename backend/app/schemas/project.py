@@ -131,6 +131,10 @@ class PaperOut(BaseModel):
     # image-only PDF, a manual paper with no text, or one never re-indexed
     # after a model change.
     chunk_count: int = 0
+    # pending | ready | failed (PaperStatus). Every paper is listed whatever
+    # its status, so a stuck or failed one can be retried; only `ready`
+    # papers are retrieved. `ingest_error` is deliberately NOT exposed.
+    status: str
     created_at: datetime
     model_config = {"from_attributes": True}
 

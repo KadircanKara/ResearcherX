@@ -19,7 +19,7 @@ from app.agents.scope_widener import ScopeWidenerAgent, WidenerInput
 from app.core import observability
 from app.core.config import settings
 from app.core.logging import log
-from app.db.models import Paper
+from app.db.models import Paper, PaperStatus
 from app.db.session import SessionLocal
 from app.services.citation_attribution import (
     expand_grouped_citations,
@@ -353,13 +353,20 @@ class ChatService:
             async with SessionLocal() as db:
                 with observability.span("chat.load", parent=turn):
                     conv = await self._conv_svc.get_conversation(db, conversation_id)
-                    # Load papers assigned to this project
+                    # This project's READY papers. A pending or failed paper
+                    # has no chunks, so it is out of retrieval scope AND out
+                    # of the PAPERS block: listing it would invite questions
+                    # that have no evidence. A mention of one still validates
+                    # (it is in the project) and widens like a deleted one.
                     paper_rows = (
                         []
                         if conv is None
                         else (
                             await db.execute(
-                                select(Paper).where(Paper.project_id == conv.project_id)
+                                select(Paper).where(
+                                    Paper.project_id == conv.project_id,
+                                    Paper.status == PaperStatus.READY,
+                                )
                             )
                         )
                         .scalars()
