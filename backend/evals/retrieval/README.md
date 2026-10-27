@@ -187,7 +187,8 @@ or `null` when `--targeted` wasn't passed).
 
 The golden set was replaced on 2026-10-27: 110 cases typed by the retriever
 each one stresses. Every number in the "old golden set" blocks below is
-denominated in the previous 51 cases and is not comparable with this block.
+denominated in the previous golden set (42 cases in the August blocks, 51 from
+2026-09-20) and is not comparable with this block.
 
 | kind | cases | tune | test | what it stresses |
 |---|---|---|---|---|
@@ -236,7 +237,7 @@ Macro (unweighted mean over the three positive kinds):
 Reading it:
 
 - **Low dense recall on `paraphrase` is by design.** Those questions were
-  written to share no rare token with their evidence; 34 of the 60
+  written to share no rare token with their evidence; 32 of the 60
   paraphrase-type questions are not in their own dense top-10. This is the
   set measuring what it was built to measure, not a retriever regression.
 - **The sparse arm is the keyword retriever and the SQL FTS arm is not one**:
@@ -251,7 +252,8 @@ Reading it:
 - Threshold sweep and separation: the 0.75 `similarity_threshold` accepts 100%
   of the 20 off-topic cases, and no threshold separates (21 positives have
   no satisfying chunk in their own top-60). The best off-topic distance is
-  0.4221, below the 0.45-0.50 range where content recall climbs.
+  0.4221; content recall is already 0.37 at threshold 0.40, so some positives
+  sit farther out than the nearest off-topic question.
 
 RRF weight x k sweep on the **tune split** (60 positives), macro MRR, bm25s
 sparse arm, no rerank (rows w_dense, columns rrf_k):
@@ -272,10 +274,14 @@ sparse arm, no rerank (rows w_dense, columns rrf_k):
 | current (0.7, 30) | tune | 0.378 | 0.87 | 0.187 / 0.65 | 0.467 / 0.95 | 0.479 / 1.00 |
 | current (0.7, 30) | **test** | 0.294 | 0.80 | 0.180 / 0.70 | 0.229 / 0.90 | 0.473 / 0.80 |
 
-The tuned point beats the current setting by +0.051 macro MRR on the held-out
-test split (30 positives) and +0.064 on tune; it gains on keyword and
-paraphrase_keyword and loses on paraphrase MRR on tune (0.080 vs 0.187). The
-grid is flat within ~0.02 across most of the w_dense 0.3-0.5 band, so the
+The tuned point scores 0.051 higher macro MRR than the current setting on the
+held-out test split (n=30 positives, best of 36 grid points; not established)
+and 0.064 higher on tune. Per kind, on tune it gains on keyword only (0.824 vs
+0.479) and loses on paraphrase (0.080 vs 0.187) and paraphrase_keyword (0.421
+vs 0.467); on test it gains on paraphrase_keyword (0.352 vs 0.229) and
+keyword (0.527 vs 0.473) and loses slightly on paraphrase (0.156 vs 0.180).
+The grid is flat within ~0.02 across most of the w_dense 0.3-0.5 band, and
+the argmax is not distinguishable from w_dense 0.3-0.4 at any k, so the
 choice of k inside it is not resolved by 60 cases, and the test split's n=10
 per kind makes every per-kind test cell coarse. No production setting was
 changed by this measurement. Consistency check: the (0.7, 30) point

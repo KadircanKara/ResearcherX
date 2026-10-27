@@ -192,7 +192,8 @@ that is what the `on problem/not-a-problem` column separates out.
 > now holds 110 cases typed by retriever (30 `paraphrase`, 30
 > `paraphrase_keyword`, 30 `keyword`, 20 `off_topic`; 20 tune + 10 test per
 > positive kind, 13/7 for `off_topic`). Every "Measured" block below was taken
-> on the previous 51-case set (39 positives, 12 `off_topic`) and is not
+> on the previous golden set (42 cases in the August blocks, 51 from
+> 2026-09-20) and is not
 > comparable with a run on the new one; no groundedness run has been taken on
 > the new set yet. Per-kind retrieval numbers for it are in
 > `evals/retrieval/README.md`, "Measured — 2026-10-27".
