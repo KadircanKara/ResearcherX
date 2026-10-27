@@ -48,12 +48,15 @@ class Server:
         self.requests: list[httpx.Request] = []
         self.submit_response: tuple[int, dict] = (202, {"id": "batch_1", "status": "validating"})
         self.batches: dict[str, tuple[int, dict]] = {}
+        self.listing: dict = {"object": "list", "data": [], "has_more": False}
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
         if request.method == "POST":
             status, payload = self.submit_response
             return httpx.Response(status, json=payload)
+        if request.url.path.endswith("/batches"):
+            return httpx.Response(200, json=self.listing)
         batch_id = request.url.path.rsplit("/", 1)[-1]
         status, payload = self.batches.get(batch_id, (404, {"error": {"message": "no batch"}}))
         return httpx.Response(status, json=payload)
@@ -318,13 +321,21 @@ async def test_submit_dry_run_makes_no_network_call(db_session, project, server)
     assert result["batch_ids"] == []
 
 
-async def test_submit_402_records_nothing(db_session, project, server):
+async def test_submit_402_releases_the_marker(db_session, project, server):
+    """A definite refusal: no batch exists, so the rows leave flight at once
+    (failed, re-selected next run) and a good summary is untouched."""
     a = await _paper(db_session, project, title="A")
+    good = await _paper(db_session, project, title="Good")
+    await _set_row(good.id, status="ready", summary="good summary", source="llm")
     server.submit_response = (402, {"error": {"message": "Insufficient credits"}})
     async with server.client() as client:
         with pytest.raises(ob.BatchError):
-            await script.run_submit(client=client)
-    assert await _row(a.id) is None
+            await script.run_submit(force=True, client=client)
+    row = await _row(a.id)
+    assert (row.status, row.batch_id) == ("failed", None)
+    assert "Insufficient credits" in row.error
+    kept = await _row(good.id)
+    assert (kept.status, kept.batch_id, kept.summary) == ("ready", None, "good summary")
 
 
 # --- collect ---------------------------------------------------------------
@@ -465,3 +476,307 @@ async def test_collect_repairs_missing_and_stale_embeddings(db_session, project,
         assert row.status == "ready"
     assert (await _row(fine.id)).doc_embedding == "[1]"
     assert (await _row(failed.id)).doc_embedding is None
+
+
+# --- fix round 1: money safety ---------------------------------------------
+
+
+def _raising_client(exc: Exception, server: Server) -> httpx.AsyncClient:
+    def handler(request):
+        server.requests.append(request)
+        raise exc
+
+    return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+
+async def _marker_of(paper_id: str) -> str:
+    row = await _row(paper_id)
+    assert row.batch_id.startswith(script.MARKER_PREFIX)
+    return row.batch_id
+
+
+async def test_submit_wire_bytes_keep_key_order_and_content_type(db_session, project, server):
+    await _paper(db_session, project, title="A")
+    async with server.client() as client:
+        await script.run_submit(client=client)
+    request = server.requests[0]
+    assert request.headers["content-type"] == "application/json"
+    raw = request.content.decode()
+    order = [raw.index(f'"{k}"') for k in ("endpoint", "model", "provider", "requests")]
+    assert order == sorted(order)
+    assert raw.startswith('{"endpoint"')
+
+
+async def test_submit_connection_error_keeps_the_marker(db_session, project, server):
+    a = await _paper(db_session, project, title="A")
+    async with _raising_client(httpx.ReadTimeout("slow"), server) as client:
+        with pytest.raises(script.OutcomeUnknown) as info:
+            await script.run_submit(client=client)
+    marker = await _marker_of(a.id)
+    assert info.value.marker == marker
+    assert (await _row(a.id)).status == "pending"
+    # A re-run must not send it again: the batch may exist.
+    fresh = Server()
+    async with fresh.client() as client:
+        result = await script.run_submit(client=client)
+    assert result["papers"] == 0 and fresh.posted() == []
+
+
+async def test_collect_adopt_repoints_marker_rows_and_collects(db_session, project, server):
+    a = await _paper(db_session, project, title="A")
+    async with _raising_client(httpx.ConnectError("reset"), server) as client:
+        with pytest.raises(script.OutcomeUnknown):
+            await script.run_submit(client=client)
+    marker = await _marker_of(a.id)
+    # The sweep reports a marker but never fetches it.
+    async with server.client() as client:
+        swept = await script.run_collect(client=client)
+    assert swept["markers"] == [marker] and (await _row(a.id)).batch_id == marker
+    server.batches["batch_9"] = (200, _batch("completed", results=[_ok(a.id)]))
+    async with server.client() as client:
+        await script.run_collect(batch_id="batch_9", adopt=marker, client=client)
+    row = await _row(a.id)
+    assert (row.status, row.batch_id, row.source) == ("ready", None, "llm")
+
+
+async def test_collect_adopt_needs_a_batch_id_and_a_marker(db_session):
+    with pytest.raises(ValueError):
+        await script.run_collect(adopt="submitting:x")
+    with pytest.raises(ValueError):
+        await script.run_collect(batch_id="b", adopt="batch_1")
+
+
+async def test_collect_release_frees_marker_rows_for_the_next_submit(db_session, project, server):
+    a = await _paper(db_session, project, title="A")
+    async with _raising_client(httpx.ConnectError("reset"), server) as client:
+        with pytest.raises(script.OutcomeUnknown):
+            await script.run_submit(client=client)
+    marker = await _marker_of(a.id)
+    async with server.client() as client:
+        await script.run_collect(release=marker, client=client)
+        row = await _row(a.id)
+        assert (row.status, row.batch_id) == ("pending", None)
+        await script.run_submit(client=client)
+    assert [r["custom_id"] for r in server.posted()[0]["requests"]] == [a.id]
+
+
+async def test_list_prints_remote_batches(server, capsys):
+    server.listing = {
+        "object": "list",
+        "data": [
+            {
+                "id": "batch_x",
+                "status": "in_progress",
+                "created_at": 1_800_000_000,
+                "request_counts": {"total": 200, "completed": 3, "failed": 0},
+                "model": "deepseek/deepseek-v4.1-flash",
+                "results": None,
+            }
+        ],
+        "has_more": False,
+    }
+    async with server.client() as client:
+        batches = await script.run_list(limit=5, client=client)
+    assert [b["id"] for b in batches] == ["batch_x"]
+    assert server.requests[0].url.params["limit"] == "5"
+    out = capsys.readouterr().out
+    assert "batch_x" in out and "in_progress" in out and "200 requests" in out
+    assert "2027-01-15" in out
+
+
+async def test_resubmitting_a_ready_row_never_loses_its_summary(db_session, project, server):
+    good = await _paper(db_session, project, title="Good")
+    await _set_row(good.id, status="ready", summary="good summary", source="llm")
+    async with server.client() as client:
+        await script.run_submit(force=True, client=client)
+        row = await _row(good.id)
+        assert (row.status, row.batch_id, row.summary) == ("ready", "batch_1", "good summary")
+        # In flight over a good row: not re-selected, even with --force.
+        server.submit_response = (202, {"id": "batch_2"})
+        assert (await script.run_submit(force=True, client=client))["papers"] == 0
+        server.batches["batch_1"] = (200, _batch("expired", error={"message": "too slow"}))
+        result = await script.run_collect(client=client)
+    row = await _row(good.id)
+    assert (row.status, row.batch_id, row.summary, row.error) == (
+        "ready",
+        None,
+        "good summary",
+        None,
+    )
+    assert result["kept"] == 1 and result["failed"] == 0
+
+
+async def test_collect_request_error_over_a_ready_row_keeps_the_summary(
+    db_session, project, server
+):
+    good = await _paper(db_session, project, title="Good", abstract="abs")
+    await _set_row(good.id, status="ready", summary="good summary", batch_id="batch_1")
+    length = _ok(good.id, finish="length")
+    server.batches["batch_1"] = (200, _batch("completed", results=[length]))
+    async with server.client() as client:
+        result = await script.run_collect(client=client)
+    row = await _row(good.id)
+    assert (row.status, row.batch_id, row.summary) == ("ready", None, "good summary")
+    assert result["kept"] == 1 and result["fallback"] == 0
+
+
+async def test_collect_finish_length_on_a_new_row_falls_back_to_the_abstract(
+    db_session, project, server
+):
+    a = await _paper(db_session, project, title="A", abstract="The abstract.")
+    await _set_row(a.id, status="pending", batch_id="batch_1")
+    server.batches["batch_1"] = (200, _batch("completed", results=[_ok(a.id, finish="length")]))
+    async with server.client() as client:
+        result = await script.run_collect(client=client)
+    row = await _row(a.id)
+    assert (row.status, row.source, row.summary) == ("ready", "abstract", "The abstract.")
+    assert result["fallback"] == 1
+
+
+async def test_collect_404_on_a_named_batch_fails_its_rows(db_session, project, server):
+    a = await _paper(db_session, project, title="A")
+    await _set_row(a.id, status="pending", batch_id="batch_1")
+    # Not in server.batches: GET answers 404.
+    async with server.client() as client:
+        await script.run_collect(client=client)
+        assert (await _row(a.id)).batch_id == "batch_1"  # sweep: only reported
+        await script.run_collect(batch_id="batch_1", client=client)
+    row = await _row(a.id)
+    assert (row.status, row.batch_id) == ("failed", None)
+
+
+async def test_collect_410_fails_rows_and_keeps_ready_ones(db_session, project, server):
+    a = await _paper(db_session, project, title="A")
+    good = await _paper(db_session, project, title="Good")
+    await _set_row(a.id, status="pending", batch_id="batch_1")
+    await _set_row(good.id, status="ready", summary="kept", batch_id="batch_1")
+    server.batches["batch_1"] = (410, {"error": {"message": "results expired"}})
+    async with server.client() as client:
+        await script.run_collect(client=client)
+    row = await _row(a.id)
+    assert (row.status, row.batch_id) == ("failed", None)
+    assert "results expired" in row.error
+    kept = await _row(good.id)
+    assert (kept.status, kept.summary, kept.batch_id) == ("ready", "kept", None)
+
+
+async def test_collect_402_on_get_leaves_rows_in_flight(db_session, project, server):
+    a = await _paper(db_session, project, title="A")
+    await _set_row(a.id, status="pending", batch_id="batch_1")
+    server.batches["batch_1"] = (402, _batch("completed", results=None))
+    async with server.client() as client:
+        await script.run_collect(client=client)
+    assert (await _row(a.id)).batch_id == "batch_1"
+
+
+async def test_collect_leaves_cancelling_batches_alone(db_session, project, server):
+    a = await _paper(db_session, project, title="A")
+    await _set_row(a.id, status="pending", batch_id="batch_1")
+    server.batches["batch_1"] = (200, _batch("cancelling"))
+    async with server.client() as client:
+        await script.run_collect(client=client)
+    assert ((await _row(a.id)).status, (await _row(a.id)).batch_id) == ("pending", "batch_1")
+
+
+async def test_collect_expired_batch_fails_pending_rows(db_session, project, server):
+    a = await _paper(db_session, project, title="A")
+    await _set_row(a.id, status="pending", batch_id="batch_1")
+    server.batches["batch_1"] = (200, _batch("expired", error={"message": "past expires_at"}))
+    async with server.client() as client:
+        await script.run_collect(client=client)
+    row = await _row(a.id)
+    assert (row.status, row.batch_id) == ("failed", None)
+    assert "expired" in row.error
+
+
+async def test_collect_fails_rows_with_no_result(db_session, project, server):
+    a = await _paper(db_session, project, title="A")
+    lost = await _paper(db_session, project, title="Lost")
+    for p in (a, lost):
+        await _set_row(p.id, status="pending", batch_id="batch_1")
+    server.batches["batch_1"] = (200, _batch("completed", results=[_ok(a.id)]))
+    async with server.client() as client:
+        await script.run_collect(client=client)
+    row = await _row(lost.id)
+    assert (row.status, row.batch_id, row.error) == ("failed", None, "no result for this paper")
+    assert (await _row(a.id)).status == "ready"
+
+
+async def test_collect_fails_a_paper_no_longer_ready(db_session, project, server):
+    a = await _paper(db_session, project, title="A")
+    await _set_row(a.id, status="pending", batch_id="batch_1")
+    async with SessionLocal() as db:
+        paper = await db.get(Paper, a.id)
+        paper.status = PaperStatus.PENDING
+        await db.commit()
+    server.batches["batch_1"] = (200, _batch("completed", results=[_ok(a.id)]))
+    async with server.client() as client:
+        await script.run_collect(client=client)
+    row = await _row(a.id)
+    assert (row.status, row.batch_id, row.summary) == ("failed", None, None)
+
+
+async def test_collect_abandon_takes_a_batch_out_of_flight(db_session, project, server):
+    a = await _paper(db_session, project, title="A")
+    good = await _paper(db_session, project, title="Good")
+    await _set_row(a.id, status="pending", batch_id="batch_x")
+    await _set_row(good.id, status="ready", summary="kept", batch_id="batch_x")
+    async with server.client() as client:
+        await script.run_collect(abandon="batch_x", client=client)
+    assert server.requests == []
+    assert ((await _row(a.id)).status, (await _row(a.id)).batch_id) == ("failed", None)
+    assert ((await _row(good.id)).status, (await _row(good.id)).summary) == ("ready", "kept")
+
+
+async def test_validation_failure_fails_only_the_named_request(db_session, project, server):
+    bad = await _paper(db_session, project, title="Bad")
+    fine = await _paper(db_session, project, title="Fine")
+    for p in (bad, fine):
+        await _set_row(p.id, status="pending", batch_id="batch_1")
+    message = f"request {bad.id}: max_tokens is greater than the model limit"
+    server.batches["batch_1"] = (200, _batch("failed", error={"message": message}))
+    async with server.client() as client:
+        result = await script.run_collect(client=client)
+        assert result["failed"] == 1 and result["released"] == 1
+        row = await _row(bad.id)
+        assert (row.status, row.batch_id) == ("failed", None)
+        row = await _row(fine.id)
+        assert (row.status, row.batch_id) == ("pending", None)
+        # Both are re-selected by the next submit.
+        await script.run_submit(client=client)
+    assert {r["custom_id"] for r in server.posted()[0]["requests"]} == {bad.id, fine.id}
+
+
+async def test_submit_estimates_per_paper_and_per_char_and_refuses_over_max_cost(
+    db_session, project, server
+):
+    big = "x" * 200_000
+    await _paper(db_session, project, title="Long", body=big, abstract=None)
+    async with server.client() as client:
+        dry = await script.run_submit(dry_run=True, client=client)
+        est = dry["estimates"]
+        assert est["per_paper"] == pytest.approx(script.SPIKE_USD_PER_PAPER)
+        assert est["per_char"] == pytest.approx(200_000 * script.SPIKE_USD_PER_CHAR)
+        assert dry["estimate_usd"] == pytest.approx(max(est["per_paper"], est["per_char"]))
+        with pytest.raises(script.CostExceeded):
+            await script.run_submit(max_cost=0.001, client=client)
+    assert server.requests == []
+    assert script.SPIKE_USD_PER_CHAR == pytest.approx(0.0008 * 20 / 1_119_154)
+
+
+async def test_a_busy_lock_refuses_both_commands(db_session, project, server):
+    a = await _paper(db_session, project, title="A")
+    with patch.object(script, "_try_lock", new=AsyncMock(return_value=False)):
+        async with server.client() as client:
+            with pytest.raises(script.LockBusy):
+                await script.run_submit(client=client)
+            with pytest.raises(script.LockBusy):
+                await script.run_collect(client=client)
+    assert server.requests == [] and await _row(a.id) is None
+
+
+def test_still_ours_locks_the_row_for_update():
+    from sqlalchemy.dialects import postgresql
+
+    sql = str(script._ours_stmt("p").compile(dialect=postgresql.dialect()))
+    assert "FOR UPDATE" in sql

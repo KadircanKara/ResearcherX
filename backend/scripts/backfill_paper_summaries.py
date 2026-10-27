@@ -1,58 +1,203 @@
 """Backfill paper summaries through the OpenRouter Batch API, pinned to Sail.
 
-Run:  docker compose exec -T backend python -m scripts.backfill_paper_summaries \\
-          submit [--project-id UUID] [--force] [--limit N] [--chunk N] [--dry-run]
-      docker compose exec -T backend python -m scripts.backfill_paper_summaries \\
-          collect [--batch-id ID]
+Run (from /app in the backend container, `docker compose exec -T backend ...`):
+
+  python -m scripts.backfill_paper_summaries submit [--project-id UUID] [--force]
+      [--limit N] [--chunk N] [--max-cost USD] [--dry-run]
+  python -m scripts.backfill_paper_summaries collect [--batch-id ID]
+      [--adopt submitting:<nonce>] [--release submitting:<nonce>] [--abandon ID]
+  python -m scripts.backfill_paper_summaries list [--limit N]
 
 The `-m` form is required: `scripts` is not an installed package. The prod
 image does not contain `scripts/`; backfilling production means a local
 checkout pointed at the prod DATABASE_URL.
 
-`submit` sends every ready paper with no summary row, a `failed` row, or one
-written by an older prompt version (`--force`: every ready paper), never one
-whose row is already `pending` in a batch. Each submitted chunk's rows are
-recorded `pending` with the batch id in one transaction, AFTER the 202, so a
-refused submit (402 included) records nothing.
+Row states. A non-null `batch_id` means "in flight". On a `pending` row it is
+a paper with no usable summary; on a `ready` row it is a re-summary in
+flight over a GOOD summary, and nothing that goes wrong with the batch may
+touch that summary: every failure path only clears `batch_id` there.
+
+`submit` selects ready papers with no row, a `failed` row, a `pending` row
+not in flight, or an older prompt version (`--force`: every ready paper),
+never a row already in flight. It refuses when the larger of two estimates
+(per paper, per char; both from the spike) exceeds `--max-cost`. Per chunk:
+
+  1. mark the rows `batch_id='submitting:<uuid>'` in one transaction;
+  2. POST;
+  3. 202: re-point the rows to the real id. A definite refusal (BatchError,
+     402 included): release the rows (a pending row becomes `failed`).
+     Anything else (timeout, dropped connection): the batch may exist, so
+     the marker STAYS, which keeps a re-run from paying twice. Find the
+     batch with `list`, then `collect --batch-id ID --adopt <marker>`, or
+     `collect --release <marker>` when no batch was created.
 
 `collect` is safe to run at any time, as often as wanted: a batch still
 running is reported and left alone; a finished one is written through
 `write_record`, which clears `batch_id`, so a second run finds nothing to
-fetch. A result is written only while its row is still `pending` under THAT
-batch id: a deleted paper, or a row a live ingest rewrote since, is skipped.
-It ends with a repair pass that embeds ready rows missing a doc vector (or
-holding one from another embedding model), with no LLM call.
+fetch. A result is written only while its row is still in flight under
+THAT batch id (row locked FOR UPDATE): a deleted paper, or a row a live
+ingest rewrote since, is skipped. It ends with a repair pass that embeds
+ready rows missing a doc vector (or holding one from another embedding
+model), with no LLM call.
+
+Both `submit` and `collect` hold a Postgres advisory lock for the whole run.
 """
 
 import argparse
 import asyncio
+import contextlib
 import sys
+import uuid
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Sequence
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
-from sqlalchemy import and_, null, or_, select, update
+from sqlalchemy import case, null, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.db.models import Paper, PaperStatus, PaperSummary, _now
-from app.db.session import SessionLocal
+from app.db.session import SessionLocal, engine
 from app.services import openrouter_batch as ob
 from app.services.paper_summary_client import GeneratedSummary
 from app.services.paper_summary_prompt import SUMMARY_VER, full_text, parse
 from app.services.paper_summary_service import FAILED, READY, embed_summary, write_record
 
 PENDING = "pending"
-# Measured in the spike: Sail via the Batch API, deepseek-v4.1-flash.
+MARKER_PREFIX = "submitting:"
+# Measured in the spike (Sail via the Batch API, deepseek-v4.1-flash, 20
+# papers, one per length ventile): $0.0008 per paper on average. The spike
+# doc records each paper's length; the 20 total 1,119,154 chars, so the same
+# spend is $0.016 / 1,119,154 chars. The per-char figure scales with the
+# corpus' real lengths, the per-paper one does not; submit takes the larger.
 SPIKE_USD_PER_PAPER = 0.0008
+SPIKE_USD_PER_CHAR = 0.0008 * 20 / 1_119_154
+DEFAULT_MAX_COST = 3.0
+# One key for both commands: a submit and a collect must not interleave
+# either (collect's sweep for missing results would race submit's marking).
+LOCK_KEY = 0x5EAF_5A11
 _ERROR_MAX = 500
+
+
+class LockBusy(Exception):
+    """Another submit or collect holds the advisory lock."""
+
+
+class CostExceeded(Exception):
+    """The estimate is over `--max-cost`; nothing was sent."""
+
+
+class OutcomeUnknown(Exception):
+    """The POST failed without a definite answer; the marker was kept."""
+
+    def __init__(self, marker: str) -> None:
+        super().__init__(marker)
+        self.marker = marker
 
 
 def _dialect_insert(db: AsyncSession):
     return pg_insert if db.get_bind().dialect.name == "postgresql" else sqlite_insert
+
+
+async def _try_lock(conn) -> bool:
+    if conn.dialect.name != "postgresql":
+        return True  # sqlite (tests): a single process, nothing to guard
+    return bool(
+        (await conn.execute(text("SELECT pg_try_advisory_lock(:k)"), {"k": LOCK_KEY})).scalar()
+    )
+
+
+@contextlib.asynccontextmanager
+async def _run_lock() -> AsyncIterator[None]:
+    """Hold the advisory lock on a dedicated connection for the whole run."""
+    async with engine.connect() as conn:
+        if not await _try_lock(conn):
+            raise LockBusy("another backfill submit/collect is running; try again when it ends")
+        try:
+            yield
+        finally:
+            if conn.dialect.name == "postgresql":
+                await conn.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": LOCK_KEY})
+                await conn.commit()
+
+
+# --- row state ---------------------------------------------------------------
+
+
+async def _release(
+    batch_id: str,
+    *,
+    error: str,
+    fail: bool,
+    only: Sequence[str] | None = None,
+    exclude: Sequence[str] = (),
+) -> tuple[int, int]:
+    """Take rows out of flight. A `ready` row only loses its `batch_id` (its
+    summary is good). Any other row becomes `failed` (`fail`) or stays
+    `pending` with no batch, which the next submit re-selects either way.
+    Returns (ready rows kept, other rows released)."""
+    s = PaperSummary
+    where = [s.batch_id == batch_id]
+    if only is not None:
+        where.append(s.paper_id.in_(list(only)))
+    if exclude:
+        where.append(s.paper_id.not_in(list(exclude)))
+    async with SessionLocal() as db:
+        kept = await db.execute(
+            update(s).where(*where, s.status == READY).values(batch_id=None, updated_at=_now())
+        )
+        released = await db.execute(
+            update(s)
+            .where(*where, s.status != READY)
+            .values(
+                status=FAILED if fail else PENDING,
+                error=error[:_ERROR_MAX],
+                batch_id=None,
+                updated_at=_now(),
+            )
+        )
+        await db.commit()
+    return kept.rowcount or 0, released.rowcount or 0
+
+
+async def _repoint(old: str, new: str) -> int:
+    async with SessionLocal() as db:
+        res = await db.execute(
+            update(PaperSummary)
+            .where(PaperSummary.batch_id == old)
+            .values(batch_id=new, updated_at=_now())
+        )
+        await db.commit()
+    return res.rowcount or 0
+
+
+async def _mark(paper_ids: Sequence[str], marker: str) -> None:
+    """ONE transaction, BEFORE the POST. Core upserts that never touch
+    `doc_embedding`. A ready row keeps its status, summary and error; any
+    other row (or a new one) becomes `pending`."""
+    s = PaperSummary
+    async with SessionLocal() as db:
+        ins = _dialect_insert(db)
+        for paper_id in paper_ids:
+            await db.execute(
+                ins(s)
+                .values(paper_id=paper_id, status=PENDING, batch_id=marker, error=None)
+                .on_conflict_do_update(
+                    index_elements=["paper_id"],
+                    set_={
+                        "batch_id": marker,
+                        # The existing row's values, in both dialects.
+                        "status": case((s.status == READY, READY), else_=PENDING),
+                        "error": case((s.status == READY, s.error), else_=None),
+                        "updated_at": _now(),
+                    },
+                )
+            )
+        await db.commit()
 
 
 # --- submit ----------------------------------------------------------------
@@ -60,18 +205,22 @@ def _dialect_insert(db: AsyncSession):
 
 def _candidates(*, project_id: str | None, force: bool, limit: int | None):
     s = PaperSummary
-    in_flight = and_(s.status == PENDING, s.batch_id.is_not(None))
     stmt = (
         select(Paper.id)
         .outerjoin(s, s.paper_id == Paper.id)
         .where(Paper.status == PaperStatus.READY)
-        # NULL-safe: a paper with no row has every `s` column NULL.
-        .where(or_(s.paper_id.is_(None), ~in_flight))
+        # Never a row in flight (real batch id or submit marker). NULL-safe:
+        # a paper with no row has every `s` column NULL.
+        .where(s.batch_id.is_(None))
         .order_by(Paper.created_at, Paper.id)
     )
     if not force:
         stmt = stmt.where(
-            or_(s.paper_id.is_(None), s.status == FAILED, s.summary_ver < SUMMARY_VER)
+            or_(
+                s.paper_id.is_(None),
+                s.status.in_([FAILED, PENDING]),
+                s.summary_ver < SUMMARY_VER,
+            )
         )
     if project_id is not None:
         # String compare: papers.project_id is varchar.
@@ -103,19 +252,65 @@ async def _load(db: AsyncSession, ids: Sequence[str]) -> list[ob.Paper]:
     return [by_id[i] for i in ids if i in by_id]
 
 
-async def _record_pending(db: AsyncSession, paper_ids: Sequence[str], batch_id: str) -> None:
-    """ONE transaction. Core upserts that never touch `doc_embedding`."""
-    ins = _dialect_insert(db)
-    for paper_id in paper_ids:
-        values = {"status": PENDING, "batch_id": batch_id, "error": None}
-        await db.execute(
-            ins(PaperSummary)
-            .values(paper_id=paper_id, **values)
-            .on_conflict_do_update(
-                index_elements=["paper_id"], set_={**values, "updated_at": _now()}
-            )
+async def _plan(
+    ids: Sequence[str], *, chunk: int, max_bytes: int, model: str, provider: str
+) -> tuple[list[list[str]], int]:
+    """Batches as id lists, plus the total chars. Texts are loaded `chunk`
+    papers at a time and dropped, so the plan never holds them all."""
+    groups: list[list[str]] = []
+    chars = 0
+    for start in range(0, len(ids), chunk):
+        async with SessionLocal() as db:
+            papers = await _load(db, ids[start : start + chunk])
+        chars += sum(len(p[3]) for p in papers)
+        for part in ob.chunk_papers(
+            papers, max_count=chunk, max_bytes=max_bytes, model=model, provider=provider
+        ):
+            groups.append([p[0] for p in part])
+    return groups, chars
+
+
+def _estimates(papers: int, chars: int) -> dict[str, float]:
+    per_paper = papers * SPIKE_USD_PER_PAPER
+    per_char = chars * SPIKE_USD_PER_CHAR
+    return {"per_paper": per_paper, "per_char": per_char, "max": max(per_paper, per_char)}
+
+
+async def _submit_group(
+    ids: Sequence[str], *, model: str, provider: str, client: httpx.AsyncClient | None
+) -> str:
+    async with SessionLocal() as db:
+        papers = await _load(db, ids)
+    body = ob.batch_body(papers, model=model, provider=provider)
+    sent = [p[0] for p in papers]
+    marker = f"{MARKER_PREFIX}{uuid.uuid4()}"
+    await _mark(sent, marker)
+    try:
+        batch_id = await ob.submit(body, client=client)
+    except ob.BatchError as exc:
+        # A definite answer: no batch exists. Nothing was charged.
+        await _release(marker, error=f"submit refused: {exc.status}: {exc.message}", fail=True)
+        raise
+    except BaseException as exc:
+        print(
+            f"outcome unknown: check GET /api/v1/batches before resubmitting "
+            f"({len(sent)} papers held by {marker}). Then either "
+            f"`collect --batch-id <id> --adopt {marker}` or `collect --release {marker}`.",
+            file=sys.stderr,
         )
-    await db.commit()
+        if isinstance(exc, Exception):
+            raise OutcomeUnknown(marker) from exc
+        raise
+    print(f"  submitted {batch_id}: {len(sent)} papers")
+    try:
+        await _repoint(marker, batch_id)
+    except BaseException:
+        print(
+            f"rows still held by {marker}: run `collect --batch-id {batch_id} --adopt {marker}`",
+            file=sys.stderr,
+        )
+        raise
+    return batch_id
 
 
 async def run_submit(
@@ -125,50 +320,64 @@ async def run_submit(
     limit: int | None = None,
     chunk: int | None = None,
     dry_run: bool = False,
+    max_cost: float = DEFAULT_MAX_COST,
     client: httpx.AsyncClient | None = None,
     max_bytes: int = ob.MAX_BODY_BYTES,
 ) -> dict[str, Any]:
-    chunk = chunk or settings.summary_batch_chunk
+    async with _run_lock():
+        return await _submit(
+            project_id=project_id,
+            force=force,
+            limit=limit,
+            chunk=chunk or settings.summary_batch_chunk,
+            dry_run=dry_run,
+            max_cost=max_cost,
+            client=client,
+            max_bytes=max_bytes,
+        )
+
+
+async def _submit(*, project_id, force, limit, chunk, dry_run, max_cost, client, max_bytes):
     model, provider = settings.summary_batch_model, settings.summary_batch_provider
+    if not dry_run and not settings.summary_api_key:
+        raise ob.BatchError(0, "SUMMARY_API_KEY is not set")
     async with SessionLocal() as db:
         ids = list(
             (
                 await db.execute(_candidates(project_id=project_id, force=force, limit=limit))
             ).scalars()
         )
-    estimate = len(ids) * SPIKE_USD_PER_PAPER
-    print(
-        f"{len(ids)} papers to summarise on {model} via {provider}; "
-        f"estimate ${estimate:.2f} at ${SPIKE_USD_PER_PAPER}/paper (spike rate)"
+    groups, chars = await _plan(
+        ids, chunk=chunk, max_bytes=max_bytes, model=model, provider=provider
     )
-    result: dict[str, Any] = {"papers": len(ids), "estimate_usd": estimate, "batch_ids": []}
+    est = _estimates(len(ids), chars)
+    print(f"{len(ids)} papers, {chars:,} chars, {len(groups)} batch(es) on {model} via {provider}")
+    print(f"estimate per paper: ${est['per_paper']:.2f} (${SPIKE_USD_PER_PAPER}/paper, spike)")
+    print(f"estimate per char:  ${est['per_char']:.2f} (${SPIKE_USD_PER_CHAR:.3e}/char, spike)")
+    print(f"estimate (max):     ${est['max']:.2f}; --max-cost ${max_cost:.2f}")
+    result: dict[str, Any] = {
+        "papers": len(ids),
+        "chars": chars,
+        "chunks": len(groups),
+        "estimate_usd": est["max"],
+        "estimates": est,
+        "batch_ids": [],
+    }
+    over = est["max"] > max_cost
+    if dry_run:
+        print(
+            "dry run: nothing sent"
+            + ("; a real run would REFUSE (over --max-cost)" if over else "")
+        )
+        return result
+    if over:
+        raise CostExceeded(f"estimate ${est['max']:.2f} exceeds --max-cost ${max_cost:.2f}")
 
-    # Texts are loaded `chunk` papers at a time, so a large backfill never
-    # holds every paper's text in memory; each slice is split again by bytes.
-    n_chunks, n_chars = 0, 0
-    for start in range(0, len(ids), chunk):
-        async with SessionLocal() as db:
-            papers = await _load(db, ids[start : start + chunk])
-        n_chars += sum(len(p[3]) for p in papers)
-        for part in ob.chunk_papers(
-            papers, max_count=chunk, max_bytes=max_bytes, model=model, provider=provider
-        ):
-            n_chunks += 1
-            if dry_run:
-                continue
-            batch_id = await ob.submit(
-                ob.batch_body(part, model=model, provider=provider), client=client
-            )
-            # Printed before the DB write, so a batch whose rows fail to
-            # record can still be found and collected by hand.
-            print(f"  submitted {batch_id}: {len(part)} papers")
-            async with SessionLocal() as db:
-                await _record_pending(db, [p[0] for p in part], batch_id)
-            result["batch_ids"].append(batch_id)
-
-    result["chunks"] = n_chunks
-    verb = "would submit" if dry_run else "submitted"
-    print(f"{verb} {len(ids)} papers in {n_chunks} batch(es), {n_chars:,} chars of text")
+    for group in groups:
+        result["batch_ids"].append(
+            await _submit_group(group, model=model, provider=provider, client=client)
+        )
+    print(f"submitted {len(ids)} papers in {len(result['batch_ids'])} batch(es)")
     return result
 
 
@@ -217,41 +426,70 @@ def _generated(result: dict, fallback_model: str) -> GeneratedSummary | None:
     )
 
 
-async def _fail_pending(batch_id: str, message: str) -> int:
+def _ours_stmt(paper_id: str):
+    # FOR UPDATE: the row stays locked until write_record commits, so a live
+    # summary task cannot land between this check and the batch write.
+    return (
+        select(PaperSummary.status, PaperSummary.batch_id)
+        .where(PaperSummary.paper_id == paper_id)
+        .with_for_update()
+    )
+
+
+async def _still_ours(db: AsyncSession, paper_id: str, batch_id: str) -> str | None:
+    """The row's status while it is in flight under `batch_id`, else None."""
+    row = (await db.execute(_ours_stmt(paper_id))).first()
+    return row.status if row is not None and row.batch_id == batch_id else None
+
+
+async def _batch_paper_ids(batch_id: str) -> list[str]:
     async with SessionLocal() as db:
-        res = await db.execute(
-            update(PaperSummary)
-            .where(PaperSummary.batch_id == batch_id, PaperSummary.status == PENDING)
-            .values(status=FAILED, error=message[:_ERROR_MAX], batch_id=None, updated_at=_now())
+        return list(
+            (
+                await db.execute(
+                    select(PaperSummary.paper_id).where(PaperSummary.batch_id == batch_id)
+                )
+            ).scalars()
         )
-        await db.commit()
-        return res.rowcount or 0
 
 
-async def _still_ours(db: AsyncSession, paper_id: str, batch_id: str) -> bool:
-    row = (
-        await db.execute(
-            select(PaperSummary.status, PaperSummary.batch_id).where(
-                PaperSummary.paper_id == paper_id
-            )
+async def _fail_batch(batch_id: str, status: str, message: str, totals: Counter) -> None:
+    """A whole batch ended without results. A validation failure names the
+    request(s) at fault; when it does, only those rows fail and the rest are
+    released for the next submit. Ready rows keep their summary either way."""
+    named: list[str] = []
+    if status == "failed":
+        named = [pid for pid in await _batch_paper_ids(batch_id) if pid in message]
+    error = f"batch {status}: {message}"
+    if named:
+        kept_f, failed = await _release(batch_id, error=error, fail=True, only=named)
+        kept_r, released = await _release(
+            batch_id, error=f"released: {error}", fail=False, exclude=named
         )
-    ).first()
-    return row is not None and row.status == PENDING and row.batch_id == batch_id
+        totals["failed"] += failed
+        totals["released"] += released
+        totals["kept"] += kept_f + kept_r
+        print(
+            f"  {batch_id}: {status} ({message}); {failed} named rows failed, "
+            f"{released} released, {kept_f + kept_r} ready rows kept"
+        )
+        return
+    kept, failed = await _release(batch_id, error=error, fail=True)
+    totals["failed"] += failed
+    totals["kept"] += kept
+    print(f"  {batch_id}: {status} ({message}); {failed} rows failed, {kept} ready rows kept")
 
 
 async def _collect_batch(batch: dict, totals: Counter, providers: Counter) -> None:
     batch_id = batch["id"]
     status = batch["status"]
     if status in ob.FAILED_FINAL:
-        message = _error_text(batch.get("error"), f"batch {status}")
-        n = await _fail_pending(batch_id, f"batch {status}: {message}")
-        totals["failed"] += n
-        print(f"  {batch_id}: {status} ({message}); {n} rows marked failed")
+        await _fail_batch(batch_id, status, _error_text(batch.get("error"), "no message"), totals)
         return
     results = batch.get("results")
     if not isinstance(results, list):
         # 402 on GET withholds results until the balance covers the charge.
-        print(f"  {batch_id}: completed, results not available yet; left pending")
+        print(f"  {batch_id}: completed, results not available yet; left in flight")
         return
 
     batch_model = batch.get("model") or settings.summary_batch_model
@@ -270,39 +508,38 @@ async def _collect_batch(batch: dict, totals: Counter, providers: Counter) -> No
             # Deleted papers cascade their row away; a row a live ingest
             # rewrote no longer carries this batch id. Both are skipped.
             paper = await db.get(Paper, paper_id)
-            if paper is None or not await _still_ours(db, paper_id, batch_id):
+            row_status = await _still_ours(db, paper_id, batch_id) if paper else None
+            if row_status is None:
                 totals["skipped"] += 1
-                continue
-            if paper.status != PaperStatus.READY:
-                # Re-ingesting, or its ingest failed: this text may be stale.
-                # Failed, so the next submit (or the ingest) redoes it.
-                await _fail_pending_one(db, paper_id, "paper was not ready at collect")
-                totals["failed"] += 1
+                await db.rollback()
                 continue
             generated = _generated(result, batch_model)
-            status_written = await write_record(db, paper, generated)
-        if status_written == READY:
+            paper_ready = paper.status == PaperStatus.READY
+            if not paper_ready or (generated is None and row_status == READY):
+                # Paper re-ingesting / failed (this text may be stale), or a
+                # failed request over a good summary: the one release path,
+                # which leaves a ready row's summary alone.
+                await db.rollback()
+                why = "request failed" if paper_ready else "paper was not ready at collect"
+                kept, failed = await _release(batch_id, error=why, fail=True, only=[paper_id])
+                totals["kept"] += kept
+                totals["failed"] += failed
+                continue
+            written = await write_record(db, paper, generated)
+        if written == READY:
             totals["llm" if generated is not None else "fallback"] += 1
         else:
             totals["failed"] += 1
 
-    # A request with no result at all would leave its row pending forever.
-    missing = await _fail_pending(batch_id, "no result for this paper in the batch")
+    # A request with no result at all would otherwise stay in flight forever.
+    kept, missing = await _release(batch_id, error="no result for this paper", fail=True)
+    totals["kept"] += kept
     totals["failed"] += missing
     print(
         f"  {batch_id}: completed on {provider}, {len(results)} results"
         + (f", ${cost:.4f} billed" if isinstance(cost, (int, float)) else "")
-        + (f", {missing} missing" if missing else "")
+        + (f", {missing + kept} with no result" if missing + kept else "")
     )
-
-
-async def _fail_pending_one(db: AsyncSession, paper_id: str, message: str) -> None:
-    await db.execute(
-        update(PaperSummary)
-        .where(PaperSummary.paper_id == paper_id, PaperSummary.status == PENDING)
-        .values(status=FAILED, error=message, batch_id=None, updated_at=_now())
-    )
-    await db.commit()
 
 
 async def _repair_embeddings() -> int:
@@ -332,43 +569,81 @@ async def _repair_embeddings() -> int:
     return repaired
 
 
-async def run_collect(
-    *, batch_id: str | None = None, client: httpx.AsyncClient | None = None
-) -> dict[str, Any]:
-    if batch_id is not None:
-        batch_ids = [batch_id]
-    else:
-        async with SessionLocal() as db:
-            batch_ids = list(
-                (
-                    await db.execute(
-                        select(PaperSummary.batch_id)
-                        .where(PaperSummary.status == PENDING, PaperSummary.batch_id.is_not(None))
-                        .distinct()
-                        .order_by(PaperSummary.batch_id)
-                    )
-                ).scalars()
-            )
-    print(f"{len(batch_ids)} batch(es) pending")
+def _require_marker(value: str) -> str:
+    if not value.startswith(MARKER_PREFIX):
+        raise ValueError(f"not a submit marker: {value!r} (expected {MARKER_PREFIX}<nonce>)")
+    return value
 
+
+async def run_collect(
+    *,
+    batch_id: str | None = None,
+    adopt: str | None = None,
+    release: str | None = None,
+    abandon: str | None = None,
+    client: httpx.AsyncClient | None = None,
+) -> dict[str, Any]:
+    async with _run_lock():
+        return await _collect(
+            batch_id=batch_id, adopt=adopt, release=release, abandon=abandon, client=client
+        )
+
+
+async def _collect(*, batch_id, adopt, release, abandon, client) -> dict[str, Any]:
     totals: Counter = Counter()
     providers: Counter = Counter()
+
+    if adopt is not None:
+        if batch_id is None:
+            raise ValueError("--adopt needs --batch-id: the batch the marker's rows went to")
+        n = await _repoint(_require_marker(adopt), batch_id)
+        print(f"adopted {n} rows from {adopt} into {batch_id}")
+    if release is not None:
+        kept, n = await _release(
+            _require_marker(release), error="released: no batch was created", fail=False
+        )
+        print(f"released {n + kept} rows held by {release}")
+    if abandon is not None:
+        kept, n = await _release(abandon, error=f"batch {abandon} abandoned", fail=True)
+        totals["failed"] += n
+        totals["kept"] += kept
+        print(f"abandoned {abandon}: {n} rows failed, {kept} ready rows kept")
+
+    async with SessionLocal() as db:
+        in_flight = (
+            await db.execute(
+                select(PaperSummary.batch_id)
+                .where(PaperSummary.batch_id.is_not(None))
+                .distinct()
+                .order_by(PaperSummary.batch_id)
+            )
+        ).scalars()
+        in_flight = list(in_flight)
+    markers = [b for b in in_flight if b.startswith(MARKER_PREFIX)]
+    for marker in markers:
+        print(
+            f"  {marker}: submit outcome unknown; find the batch with `list`, then "
+            f"`collect --batch-id <id> --adopt {marker}` or `collect --release {marker}`"
+        )
+    batch_ids = [batch_id] if batch_id is not None else [b for b in in_flight if b not in markers]
+    print(f"{len(batch_ids)} batch(es) in flight")
+
     for bid in batch_ids:
         try:
             batch = await ob.fetch(bid, client=client)
         except ob.BatchError as exc:
-            if exc.status == 410:
-                # Results expired (30 days): nothing left to collect.
-                n = await _fail_pending(bid, f"batch results expired: {exc.message}")
-                totals["failed"] += n
-                print(f"  {bid}: results expired; {n} rows marked failed")
+            # 410: results expired (30 days). 404 on a batch the operator
+            # NAMED: it does not exist. Either way nothing is left to collect.
+            # A 404 found by the sweep is only reported: abandon it explicitly.
+            if exc.status == 410 or (exc.status == 404 and batch_id is not None):
+                await _fail_batch(bid, f"gone ({exc.status})", exc.message, totals)
             else:
-                print(f"  {bid}: fetch failed ({exc.status}: {exc.message}); left pending")
+                print(f"  {bid}: fetch failed ({exc.status}: {exc.message}); left in flight")
             continue
         batch["id"] = bid  # the id we asked for is the one rows carry
         if batch["status"] not in ob.FINAL:
             counts = batch.get("request_counts") or {}
-            print(f"  {bid}: {batch['status']} {counts}; left pending")
+            print(f"  {bid}: {batch['status']} {counts}; left in flight")
             continue
         await _collect_batch(batch, totals, providers)
 
@@ -376,18 +651,44 @@ async def run_collect(
     cost = totals["cost_micro"] / 1_000_000
     print(
         f"done: {totals['llm']} llm, {totals['fallback']} abstract fallback, "
-        f"{totals['failed']} failed, {totals['skipped']} skipped; "
+        f"{totals['failed']} failed, {totals['released']} released, "
+        f"{totals['kept']} ready kept, {totals['skipped']} skipped; "
         f"billed ${cost:.4f}; providers {dict(providers) or '{}'}"
     )
     return {
         "llm": totals["llm"],
         "fallback": totals["fallback"],
         "failed": totals["failed"],
+        "released": totals["released"],
+        "kept": totals["kept"],
         "skipped": totals["skipped"],
         "cost_usd": cost,
         "providers": dict(providers),
         "repaired": repaired,
+        "markers": markers,
     }
+
+
+# --- list ------------------------------------------------------------------
+
+
+def _when(ts: Any) -> str:
+    if isinstance(ts, (int, float)) and not isinstance(ts, bool):
+        return datetime.fromtimestamp(ts, UTC).strftime("%Y-%m-%d %H:%M:%SZ")
+    return "-"
+
+
+async def run_list(*, limit: int = 20, client: httpx.AsyncClient | None = None) -> list[dict]:
+    batches = ob.listed(await ob.list_batches(limit=limit, client=client))
+    for b in batches:
+        counts = b.get("request_counts") if isinstance(b.get("request_counts"), dict) else {}
+        print(
+            f"{b.get('id', '?')}  {b.get('status', '?'):<11} {_when(b.get('created_at'))}  "
+            f"{counts.get('total', '?')} requests  {b.get('model', '')}"
+        )
+    if not batches:
+        print("no batches")
+    return batches
 
 
 # --- CLI -------------------------------------------------------------------
@@ -405,9 +706,22 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument(
         "--chunk", type=int, help=f"papers per batch (default {settings.summary_batch_chunk})"
     )
+    s.add_argument(
+        "--max-cost",
+        type=float,
+        default=DEFAULT_MAX_COST,
+        help=f"refuse when the larger estimate exceeds this, USD (default {DEFAULT_MAX_COST})",
+    )
     s.add_argument("--dry-run", action="store_true", help="count and estimate; send nothing")
     c = sub.add_parser("collect", help="write finished batches' results")
     c.add_argument("--batch-id", help="only this batch")
+    c.add_argument(
+        "--adopt", metavar="MARKER", help="re-point a submit marker's rows to --batch-id"
+    )
+    c.add_argument("--release", metavar="MARKER", help="free a marker's rows: no batch exists")
+    c.add_argument("--abandon", metavar="ID", help="take a batch's rows out of flight")
+    ls = sub.add_parser("list", help="list recent batches on OpenRouter")
+    ls.add_argument("--limit", type=int, default=20, help="1..100 (default 20)")
     return parser
 
 
@@ -421,11 +735,25 @@ async def main() -> None:
                 limit=args.limit,
                 chunk=args.chunk,
                 dry_run=args.dry_run,
+                max_cost=args.max_cost,
+            )
+        elif args.command == "collect":
+            await run_collect(
+                batch_id=args.batch_id,
+                adopt=args.adopt,
+                release=args.release,
+                abandon=args.abandon,
             )
         else:
-            await run_collect(batch_id=args.batch_id)
+            await run_list(limit=args.limit)
     except ob.BatchError as exc:
         print(f"error: {exc.status}: {exc.message}", file=sys.stderr)
+        sys.exit(1)
+    except OutcomeUnknown as exc:
+        print(f"error: submit outcome unknown; rows held by {exc.marker}", file=sys.stderr)
+        sys.exit(1)
+    except (LockBusy, CostExceeded, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
         sys.exit(1)
 
 

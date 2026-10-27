@@ -169,6 +169,32 @@ async def submit(body: dict, *, client: httpx.AsyncClient | None = None) -> str:
     return batch_id
 
 
+async def list_batches(
+    *, limit: int = 20, after: str | None = None, client: httpx.AsyncClient | None = None
+) -> dict:
+    """`GET /batches`: newest first, `limit` 1..100, cursor `after`; list
+    items carry `results: null`. How an orphaned submit is found."""
+    params: dict[str, Any] = {"limit": max(1, min(limit, 100))}
+    if after:
+        params["after"] = after
+    response = await _send("GET", "/batches", client, params=params)
+    if response.status_code != 200:
+        raise BatchError(response.status_code, _message(response))
+    try:
+        data = response.json()
+    except ValueError as exc:
+        raise BatchError(response.status_code, "list answer is not JSON") from exc
+    if not isinstance(data, dict):
+        raise BatchError(response.status_code, "list answer is not an object")
+    return data
+
+
+def listed(data: dict) -> list[dict]:
+    """The batch objects of a `list_batches` answer."""
+    items = data.get("data")
+    return [b for b in items if isinstance(b, dict)] if isinstance(items, list) else []
+
+
 async def fetch(batch_id: str, *, client: httpx.AsyncClient | None = None) -> dict:
     """GET one batch. 402 still returns the batch (results withheld until
     the balance covers it); any other non-200 raises BatchError."""
