@@ -24,6 +24,7 @@ from datetime import datetime
 
 # Dense: embedded | pending | failed | none
 # Keyword: indexed | queued | pending | failed | none
+# Summary: ready | abstract | pending | failed | none
 
 
 @dataclass(frozen=True)
@@ -61,3 +62,13 @@ def keyword_status(
     if index.dirty_since is not None and newest_chunk_at >= index.dirty_since:
         return "queued"
     return "indexed"
+
+
+def summary_status(row_status: str | None, source: str | None) -> str:
+    """The paper's summary row: none when there is no row yet, and
+    `abstract` for a ready row the abstract stands in for (no LLM summary)."""
+    if row_status is None:
+        return "none"
+    if row_status == "ready" and source == "abstract":
+        return "abstract"
+    return row_status

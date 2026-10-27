@@ -48,3 +48,13 @@ def test_bm25s_change_pending_after_the_chunks_is_queued():
 def test_bm25s_does_not_mark_unembedded_papers():
     assert keyword_status("failed", 0, None, backend="bm25s", index=BUILT) == "failed"
     assert keyword_status("ready", 0, None, backend="bm25s", index=BUILT) == "none"
+
+
+def test_summary_status_reads_the_row():
+    from app.services.paper_index_status import summary_status
+
+    assert summary_status(None, None) == "none"
+    assert summary_status("ready", "llm") == "ready"
+    assert summary_status("ready", "abstract") == "abstract"
+    assert summary_status("pending", None) == "pending"
+    assert summary_status("failed", None) == "failed"

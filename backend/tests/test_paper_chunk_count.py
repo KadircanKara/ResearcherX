@@ -12,7 +12,15 @@ from sqlalchemy import event, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
-from app.db.models import Bm25IndexState, Paper, PaperChunkEmbedding, Project, ProjectMember, User
+from app.db.models import (
+    Bm25IndexState,
+    Paper,
+    PaperSummary,
+    PaperChunkEmbedding,
+    Project,
+    ProjectMember,
+    User,
+)
 from app.db.seed import seed_users
 from app.db.session import engine
 
@@ -153,3 +161,44 @@ async def test_bm25s_keyword_status_waits_for_the_index_build(
     )
     await db_session.commit()
     assert await _statuses(client, you, project) == {"New": ("embedded", "indexed")}
+
+
+async def test_list_reports_summary_status_and_the_summary_endpoint_serves_it(
+    client: AsyncClient, db_session: AsyncSession, you: User, project: Project
+):
+    done = await _add_paper(db_session, project, "Summarized", chunks=1)
+    await _add_paper(db_session, project, "Not yet", chunks=1)
+    db_session.add(
+        PaperSummary(
+            paper_id=done.id,
+            summary="A paper about swarms.",
+            keywords=["UAV", "swarm"],
+            source="llm",
+            status="ready",
+            summary_model="deepseek/deepseek-v4.1-flash",
+        )
+    )
+    await db_session.commit()
+    headers = {"X-Dev-User-Id": you.id}
+
+    r = await client.get(f"/v1/projects/{project.id}/papers", headers=headers)
+    assert {p["title"]: p["summary_status"] for p in r.json()} == {
+        "Summarized": "ready",
+        "Not yet": "none",
+    }
+
+    papers = {p["title"]: p["id"] for p in r.json()}
+    r = await client.get(
+        f"/v1/projects/{project.id}/papers/{papers['Summarized']}/summary", headers=headers
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["summary"] == "A paper about swarms."
+    assert body["keywords"] == ["UAV", "swarm"]
+    assert body["source"] == "llm"
+    assert "doc_embedding" not in body
+
+    r = await client.get(
+        f"/v1/projects/{project.id}/papers/{papers['Not yet']}/summary", headers=headers
+    )
+    assert r.status_code == 404

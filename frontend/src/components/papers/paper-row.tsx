@@ -4,7 +4,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { PaperRowBody } from "@/components/papers/paper-row-body";
 import { PaperStateDot } from "@/components/papers/paper-state-dot";
 import { formatDate } from "@/lib/format";
-import { indexCell, sourceLine, type PaperState } from "@/lib/papers";
+import { indexCell, sourceLine, summaryCell, type PaperState } from "@/lib/papers";
 import type { Paper } from "@/lib/types";
 
 /**
@@ -55,7 +55,7 @@ export function PaperRow({
         )}
         <button
           type="button"
-          className="grid flex-1 grid-cols-1 gap-1 rounded-sm text-left outline-none focus-visible:ring-2 focus-visible:ring-ring md:grid-cols-[1fr_100px_80px_110px_100px_140px] md:items-center md:gap-4"
+          className="grid flex-1 grid-cols-1 gap-1 rounded-sm text-left outline-none focus-visible:ring-2 focus-visible:ring-ring md:grid-cols-[1fr_96px_76px_104px_96px_104px_120px] md:items-center md:gap-4"
           onClick={editing ? onToggleSelect : onToggleOpen}
           aria-expanded={isOpen}
           aria-controls={bodyId}
@@ -81,6 +81,10 @@ export function PaperRow({
           <div>
             <span className="text-muted-foreground md:hidden">Keyword: </span>
             <PaperStateDot state={indexCell(paper.keyword_status)} />
+          </div>
+          <div>
+            <span className="text-muted-foreground md:hidden">Summary: </span>
+            <PaperStateDot state={summaryCell(paper.summary_status)} />
           </div>
           <div>
             <span className="text-muted-foreground md:hidden">State: </span>

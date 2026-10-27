@@ -1,5 +1,5 @@
 import { formatDate, plural } from "./format";
-import type { IndexStatus, Paper } from "./types";
+import type { IndexStatus, Paper, SummaryStatus } from "./types";
 
 /**
  * What this project can say about a paper's place in the retriever.
@@ -116,6 +116,19 @@ const INDEX_CELLS: Record<IndexStatus, StatusCell> = {
  * server) reads as nothing rather than a claim. */
 export function indexCell(status: IndexStatus | undefined): StatusCell {
   return (status && INDEX_CELLS[status]) || INDEX_CELLS.none;
+}
+
+const SUMMARY_CELLS: Record<SummaryStatus, StatusCell> = {
+  ready: { label: "ready", tone: "on" },
+  abstract: { label: "abstract only", tone: "idle" },
+  pending: { label: "processing", tone: "idle" },
+  failed: { label: "failed", tone: "bad" },
+  none: { label: "—", tone: "idle" },
+};
+
+/** The table's Summary cell. */
+export function summaryCell(status: SummaryStatus | undefined): StatusCell {
+  return (status && SUMMARY_CELLS[status]) || SUMMARY_CELLS.none;
 }
 
 /**

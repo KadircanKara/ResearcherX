@@ -7,6 +7,7 @@ import {
   libraryHeadline,
   paperState,
   indexCell,
+  summaryCell,
   sourceLine,
   stateDetail,
   summarize,
@@ -26,6 +27,7 @@ function paper(over: Partial<Paper> = {}): Paper {
     chunk_count: 0,
     dense_status: "none",
     keyword_status: "none",
+    summary_status: "none",
     source: "upload" as PaperSource,
     created_at: "2026-08-14T09:30:00Z",
     ...over,
@@ -162,6 +164,20 @@ describe("indexCell", () => {
   it("claims nothing for none or a status it does not know", () => {
     expect(indexCell("none")).toEqual({ label: "—", tone: "idle" });
     expect(indexCell(undefined)).toEqual({ label: "—", tone: "idle" });
+  });
+});
+
+describe("summaryCell", () => {
+  it("marks an LLM summary ready and an abstract stand-in as idle", () => {
+    expect(summaryCell("ready")).toEqual({ label: "ready", tone: "on" });
+    expect(summaryCell("abstract")).toEqual({ label: "abstract only", tone: "idle" });
+  });
+
+  it("shows processing, failure and absence", () => {
+    expect(summaryCell("pending")).toEqual({ label: "processing", tone: "idle" });
+    expect(summaryCell("failed")).toEqual({ label: "failed", tone: "bad" });
+    expect(summaryCell("none")).toEqual({ label: "—", tone: "idle" });
+    expect(summaryCell(undefined)).toEqual({ label: "—", tone: "idle" });
   });
 });
 
