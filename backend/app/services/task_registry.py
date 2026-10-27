@@ -32,6 +32,11 @@ class TaskRegistry:
     def get(self, run_id: str) -> asyncio.Task | None:
         return self._tasks.get(run_id)
 
+    def is_running(self, run_id: str) -> bool:
+        """True while a task under this key is tracked and not finished."""
+        task = self._tasks.get(run_id)
+        return task is not None and not task.done()
+
     def discard(self, run_id: str) -> None:
         self._tasks.pop(run_id, None)
 

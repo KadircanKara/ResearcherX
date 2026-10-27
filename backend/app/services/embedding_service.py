@@ -34,6 +34,12 @@ def _prefix_for(task_type: str) -> str:
     return settings.embedding_document_prefix
 
 
+def vector_literal(embedding: list[float]) -> str:
+    """A vector as pgvector's text form, `[0.1,0.2,...]`, for a raw-SQL
+    `CAST(:emb AS vector(...))` / `halfvec(...)` bind."""
+    return "[" + ",".join(str(x) for x in embedding) + "]"
+
+
 class EmbeddingService:
     def __init__(self) -> None:
         self._client = _embedding_client()
