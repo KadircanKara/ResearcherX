@@ -12,6 +12,7 @@ from sqlalchemy import (
     Index,
     Integer,
     LargeBinary,
+    SmallInteger,
     String,
     Text,
     UniqueConstraint,
@@ -20,6 +21,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
+from app.services.paper_summary_prompt import SUMMARY_VER
 
 
 def _uuid() -> str:
@@ -544,3 +546,36 @@ class Bm25IndexState(Base):
     last_change_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
     chunk_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     tokenizer_ver: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+
+
+class PaperSummary(Base):
+    """One LLM (or abstract-fallback) summary per paper, with its keywords.
+
+    `doc_embedding` is Text so SQLite `create_all` works; in Postgres it is
+    `vector(768)`, added by raw SQL in migration c3d4e5f6a7b9.
+    """
+
+    __tablename__ = "paper_summaries"
+
+    paper_id: Mapped[str] = mapped_column(
+        ForeignKey("papers.id", ondelete="CASCADE", name="fk_paper_summaries_paper_id"),
+        primary_key=True,
+    )
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    keywords: Mapped[list] = mapped_column(JSON, default=list, server_default="[]")
+    doc_embedding: Mapped[str | None] = mapped_column(Text, nullable=True)
+    model: Mapped[str] = mapped_column(String(64), default="", server_default="")
+    summary_model: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    source: Mapped[str | None] = mapped_column(String(16), nullable=True)  # llm | abstract
+    status: Mapped[str] = mapped_column(
+        String(16), default="pending", server_default="pending"
+    )  # pending | ready | failed
+    summary_ver: Mapped[int] = mapped_column(
+        SmallInteger(), default=SUMMARY_VER, server_default=str(SUMMARY_VER)
+    )
+    batch_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, onupdate=_now
+    )

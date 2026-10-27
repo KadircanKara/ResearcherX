@@ -34,6 +34,8 @@ os.environ["JUDGE_API_KEY"] = ""
 os.environ["JUDGE_MODEL"] = "gpt-4.1-mini"
 # Jev's OpenRouter key: same repr-leak rule as the judge pair.
 os.environ["DECISIONS_API_KEY"] = ""
+# The paper-summary OpenRouter key: same repr-leak rule as the judge pair.
+os.environ["SUMMARY_API_KEY"] = ""
 # A dev .env carrying a Jev arm (RERANK_PROVIDER=jev, FUSION_MODE=jev, ...)
 # must not change the stage defaults the suite assumes, or trip the Jev
 # validator at import.
@@ -67,7 +69,9 @@ for _limit in (
     os.environ[_limit] = "0"
 
 import asyncio  # noqa: E402
+from unittest.mock import patch  # noqa: E402
 
+import pytest  # noqa: E402
 import pytest_asyncio  # noqa: E402
 
 from app.api.v1.research import cancel_watchers  # noqa: E402
@@ -77,6 +81,16 @@ from app.db.base import Base  # noqa: E402
 from app.db.session import engine  # noqa: E402
 from app.llm.client import reset_pool  # noqa: E402
 from app.services.task_registry import registry  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def no_paper_summary_task():
+    """Ingest and manual-paper creation schedule a background summary (an LLM
+    call and an embedding, on a session of its own). Stubbed for every test
+    so none spawns one; `test_paper_summary_service.py` keeps the real
+    `schedule_summary` and drives it directly."""
+    with patch("app.services.paper_summary_service.schedule_summary") as stub:
+        yield stub
 
 
 @pytest_asyncio.fixture(autouse=True)
@@ -101,6 +115,7 @@ async def fresh_db():
         await conn.run_sync(Base.metadata.create_all)
     yield
     await registry.cancel_all()
+    registry.closing = False  # module-global: reopen it for the next test
     await cancel_watchers()  # grace-window watchers aren't in the registry
     # Give aiosqlite worker threads time to drain after task cancellation.
     # asyncio.gather returns once the coroutine is done, but the underlying

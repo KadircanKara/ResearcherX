@@ -46,7 +46,7 @@ from app.schemas.project import (
 )
 from app.schemas.research import RunOut
 from app.schemas.user import UserOut
-from app.services import bm25_state, project_service, usage_service
+from app.services import bm25_state, paper_summary_service, project_service, usage_service
 
 router = APIRouter(tags=["projects"])
 
@@ -280,6 +280,7 @@ async def create_paper(
         except DuplicateSource as exc:
             await db.rollback()
             raise _duplicate_source(exc) from None
+        paper_summary_service.schedule_summary(paper.id)
     else:
         _ready_if_textless_manual(paper)
         await db.commit()
@@ -333,6 +334,7 @@ async def update_paper(
         except DuplicateSource as exc:
             await db.rollback()
             raise _duplicate_source(exc) from None
+        paper_summary_service.schedule_summary(paper.id)
     else:
         _ready_if_textless_manual(paper)
         await db.commit()

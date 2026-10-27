@@ -30,7 +30,8 @@ from app.db.models import Paper, PaperChunkEmbedding, PaperSource, PaperStatus, 
 from app.db.session import SessionLocal
 from app.services.bm25_state import mark_dirty
 from app.services.chunk_header import embed_text, section_path_text
-from app.services.embedding_service import EmbeddingService
+from app.services import paper_summary_service
+from app.services.embedding_service import EmbeddingService, vector_literal
 from app.services.paper_metadata_service import apply_metadata
 from app.services.pdf_extraction import extract_document, outline_to_json, pages_to_json
 from app.services.structured_chunker import ChunkRecord, chunk_markdown, chunk_pages
@@ -243,7 +244,7 @@ async def index_chunks(
     # right type.
     now = _now()
     for i, (chunk, emb) in enumerate(zip(chunks, embeddings, strict=True)):
-        vec_str = "[" + ",".join(str(x) for x in emb) + "]"
+        vec_str = vector_literal(emb)
         await db.execute(
             text("""
             INSERT INTO paper_chunk_embeddings
@@ -342,6 +343,14 @@ async def ingest(
         n = await _unchanged_count(db, paper, digest)
         if n is not None:
             log.info("paper_ingest_unchanged", paper_id=paper_id, chunks=n)
+            # A retry of the same file still gets a summary it never got (a
+            # shutdown mid-task) or one from an older prompt version.
+            try:
+                if await paper_summary_service.needs_summary(db, paper_id):
+                    paper_summary_service.schedule_summary(paper_id)
+            except Exception:  # noqa: BLE001 -- a summary check never fails an ingest
+                await db.rollback()
+                log.warning("paper_summary_check_failed", paper_id=paper_id, exc_info=True)
             observability.set_attributes(
                 span, {"langfuse.trace.metadata.chunks": n, "langfuse.trace.metadata.skipped": True}
             )
@@ -363,6 +372,9 @@ async def ingest(
         # endangered by an LLM call, and a paper whose chunks committed is
         # ready whatever metadata extraction does.
         await apply_metadata(db, paper_id, markdown, source_url)
+        # Last, unawaited: the paper is ready and its metadata stored; the
+        # summary runs in the background and never fails the ingest.
+        paper_summary_service.schedule_summary(paper_id)
         observability.set_attributes(span, {"langfuse.trace.metadata.chunks": n})
         return n
 

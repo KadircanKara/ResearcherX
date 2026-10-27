@@ -23,14 +23,30 @@ from app.core.logging import log
 class TaskRegistry:
     def __init__(self) -> None:
         self._tasks: dict[str, asyncio.Task] = {}
+        # Set by `cancel_all`. Schedulers that spawn tasks from a done
+        # callback (`schedule_summary`) check it: a task started after
+        # `cancel_all` took its snapshot is never cancelled and would run
+        # against a disposed engine.
+        self.closing = False
 
     def register(self, run_id: str, task: asyncio.Task) -> None:
         """Track a run task; it removes itself when done."""
         self._tasks[run_id] = task
-        task.add_done_callback(lambda _: self.discard(run_id))
+        task.add_done_callback(lambda done: self._discard_if(run_id, done))
 
     def get(self, run_id: str) -> asyncio.Task | None:
         return self._tasks.get(run_id)
+
+    def is_running(self, run_id: str) -> bool:
+        """True while a task under this key is tracked and not finished."""
+        task = self._tasks.get(run_id)
+        return task is not None and not task.done()
+
+    def _discard_if(self, run_id: str, task: asyncio.Task) -> None:
+        """Drop the key only if it still holds `task`: a finished task must
+        not untrack a newer one registered under the same key."""
+        if self._tasks.get(run_id) is task:
+            del self._tasks[run_id]
 
     def discard(self, run_id: str) -> None:
         self._tasks.pop(run_id, None)
@@ -44,7 +60,9 @@ class TaskRegistry:
         return False
 
     async def cancel_all(self) -> None:
-        """Cancel every in-flight run and wait for them to unwind."""
+        """Cancel every in-flight run and wait for them to unwind. Closes the
+        registry first (see `closing`)."""
+        self.closing = True
         tasks = [t for t in self._tasks.values() if not t.done()]
         for task in tasks:
             task.cancel()
