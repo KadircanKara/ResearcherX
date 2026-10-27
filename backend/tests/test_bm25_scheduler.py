@@ -717,3 +717,108 @@ async def test_run_build_cancelled_kills_the_child_and_its_tmp(tmp_path, monkeyp
         await task
     assert pids[0].returncode is not None
     assert not list(tmp_path.glob("1.tmp.*"))
+
+
+# ── final review: orphan sweep (I2) ──────────────────────────────────────
+
+
+def _aged_dir(path: Path, age_s: float) -> Path:
+    path.mkdir(parents=True, exist_ok=True)
+    then = time.time() - age_s
+    os.utime(path, (then, then))
+    return path
+
+
+@pytest.fixture
+def fresh_store(monkeypatch):
+    from app.services import bm25_store
+
+    s = bm25_store.Bm25Store()
+    monkeypatch.setattr(bm25_store, "store", s)
+    return s
+
+
+async def test_an_idle_deleted_projects_dir_is_swept(
+    users, db_session, lock, index_dir, fresh_store
+):
+    import uuid
+
+    live = await _new_project(db_session, "live")
+    orphan = str(uuid.uuid4())
+    young_orphan = str(uuid.uuid4())
+    _aged_dir(index_dir / live / "1", 3600)
+    _aged_dir(index_dir / live, 3600)
+    _aged_dir(index_dir / orphan / "1", 3600)
+    _aged_dir(index_dir / orphan, 3600)
+    _aged_dir(index_dir / young_orphan, 10)
+    _aged_dir(index_dir / "not-a-uuid", 3600)
+    (index_dir / str(uuid.uuid4())).write_text("a file, not a project dir")
+    fresh_store._cache[orphan] = object()
+    fresh_store._versions[orphan] = (0.0, 1)
+
+    removed = await bm25_scheduler.sweep_orphans(now=time.time())
+
+    assert removed == [orphan]
+    assert not (index_dir / orphan).exists()
+    assert (index_dir / live / "1").is_dir()
+    assert (index_dir / young_orphan).is_dir()
+    assert (index_dir / "not-a-uuid").is_dir()
+    assert len([p for p in index_dir.iterdir() if p.is_file()]) == 1
+    assert orphan not in fresh_store._cache and orphan not in fresh_store._versions
+    _held, taken = lock
+    assert taken == [orphan]
+
+
+async def test_a_locked_orphan_is_left_for_a_later_tick(users, db_session, lock, index_dir):
+    import uuid
+
+    orphan = str(uuid.uuid4())
+    _aged_dir(index_dir / orphan, 3600)
+    held, _taken = lock
+    held.add(orphan)
+
+    assert await bm25_scheduler.sweep_orphans(now=time.time()) == []
+    assert (index_dir / orphan).is_dir()
+
+
+async def test_an_orphan_recreated_under_the_lock_is_kept(
+    users, db_session, lock, index_dir, monkeypatch
+):
+    pid = await _new_project(db_session, "recreated")
+    _aged_dir(index_dir / pid, 3600)
+
+    # The id listing ran before the project existed; the re-check under the
+    # lock must see it and keep the directory.
+    async def no_projects() -> set[str]:
+        return set()
+
+    monkeypatch.setattr(bm25_scheduler, "_project_ids", no_projects)
+    assert await bm25_scheduler.sweep_orphans(now=time.time()) == []
+    assert (index_dir / pid).is_dir()
+
+
+async def test_a_missing_index_root_sweeps_nothing(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "bm25_index_dir", str(tmp_path / "absent"))
+    assert await bm25_scheduler.sweep_orphans(now=time.time()) == []
+
+
+async def test_a_failing_sweep_never_kills_the_tick(users, db_session, lock, builds, monkeypatch):
+    calls, _ = builds
+
+    async def boom(now):
+        raise OSError("disk gone")
+
+    monkeypatch.setattr(bm25_scheduler, "sweep_orphans", boom)
+    pid = await _new_project(db_session, "still-builds")
+    await _dirty(pid)
+    assert await bm25_scheduler.tick(_later()) == [pid]
+    assert calls == [(pid, 1)]
+
+
+async def test_tick_runs_the_sweep(users, db_session, lock, index_dir, fresh_store):
+    import uuid
+
+    orphan = str(uuid.uuid4())
+    _aged_dir(index_dir / orphan, 3600)
+    await bm25_scheduler.tick(_later())
+    assert not (index_dir / orphan).exists()

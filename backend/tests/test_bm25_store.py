@@ -165,3 +165,42 @@ async def test_search_clamps_limit_and_orders_best_first(db_session, index_dir):
     idx = await s.get(db_session, pid)
     assert s.search(idx, "zebra", 100) == ["a", "b", "c"]
     assert s.search(idx, "zebra", 2) == ["a", "b"]
+
+
+async def test_an_index_from_another_tokenizer_version_is_not_loaded(db_session, index_dir):
+    import json
+
+    pid = await _project(db_session, "oldtok", version=1)
+    _build(index_dir, pid, 1, DOCS)
+    cfg = index_dir / pid / "1" / "tokenizer.json"
+    stale = json.loads(cfg.read_text())
+    stale["version"] = stale["version"] - 1
+    cfg.write_text(json.dumps(stale))
+    assert await Bm25Store().get(db_session, pid) is None
+
+
+async def test_an_empty_index_from_another_tokenizer_version_is_not_loaded(db_session, index_dir):
+    import json
+
+    pid = await _project(db_session, "oldtok-empty", version=1)
+    build_version(index_dir / pid / "1", [], [])
+    cfg = index_dir / pid / "1" / "tokenizer.json"
+    assert cfg.is_file()  # the build stamps EMPTY versions too
+    cfg.write_text(json.dumps({**json.loads(cfg.read_text()), "version": -1}))
+    assert await Bm25Store().get(db_session, pid) is None
+
+
+async def test_an_index_with_no_tokenizer_stamp_is_not_loaded(db_session, index_dir):
+    pid = await _project(db_session, "nostamp", version=1)
+    _build(index_dir, pid, 1, DOCS)
+    (index_dir / pid / "1" / "tokenizer.json").unlink()
+    assert await Bm25Store().get(db_session, pid) is None
+
+
+def test_evict_forgets_a_project():
+    s = Bm25Store()
+    s._cache["p"] = object()
+    s._versions["p"] = (0.0, 3)
+    s.evict("p")
+    s.evict("never-seen")
+    assert "p" not in s._cache and "p" not in s._versions

@@ -5,9 +5,12 @@ own indexed form. `local_rag/index.py` and the retrieval harness both import
 this module rather than repeating the stopword list and stemmer. PURE: only
 `bm25s` and `Stemmer`, no DB, ORM or service imports.
 
-`TOKENIZER_CONFIG` is meant to be stamped onto anything persisted from this
-tokenizer (nothing persists it yet), so a change here (stopwords, stemmer,
-version bump) can be detected as a stale index instead of silently mixing two
+`TOKENIZER_CONFIG` is stamped onto everything persisted from this tokenizer:
+`bm25_build` writes it as `tokenizer.json` beside every index version (EMPTY
+ones included), and `bm25_index_state.tokenizer_ver` records its `version`. A
+change here (stopwords, stemmer) must bump `version`: the scheduler then marks
+every built project stale and rebuilds it, and the store refuses to load an
+index stamped by another version, instead of silently mixing two
 vocabularies.
 """
 

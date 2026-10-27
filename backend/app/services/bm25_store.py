@@ -4,8 +4,9 @@
 `bm25_index_state` (the read is cached for `version_ttl_s`), loads that version
 directory off the event loop with `mmap=True`, and keeps the `max_projects`
 most recently used. A project with no index yet, or whose version directory is
-missing or incomplete, yields None: the sparse leg is simply empty for that
-turn, never an error (the scheduler repairs a missing directory).
+missing, incomplete, corrupt or stamped by another tokenizer version, yields
+None: the sparse leg is simply empty for that turn, never an error (the
+scheduler repairs a missing directory and rebuilds a stale tokenizer).
 
 An `EMPTY` version loads as an index that returns no hits. `search` tokenises
 the query with the shared tokenizer, and a scoped search masks the corpus with
@@ -15,6 +16,7 @@ bm25s's `weight_mask` so only the allowed chunks are ranked.
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from collections import OrderedDict
 from collections.abc import Collection
@@ -30,7 +32,7 @@ from app.core.config import settings
 from app.core.logging import log
 from app.db.models import Bm25IndexState
 from app.services.bm25_build import DONE, EMPTY
-from app.services.bm25_tokenizer import terms
+from app.services.bm25_tokenizer import TOKENIZER_CONFIG, terms
 
 
 @dataclass(frozen=True)
@@ -48,6 +50,20 @@ def _load(project_id: str, version: int) -> LoadedIndex | None:
         log.warning("bm25_index_dir_missing", project_id=project_id, version=version)
         return None
     try:
+        # Every version the builder writes, EMPTY included, carries the
+        # tokenizer config. One stamped by another version would tokenise
+        # queries against a foreign vocabulary: load nothing (dense-only)
+        # until the scheduler's rebuild publishes a matching version.
+        stamped = json.loads((directory / "tokenizer.json").read_text()).get("version")
+        if stamped != TOKENIZER_CONFIG["version"]:
+            log.warning(
+                "bm25_index_tokenizer_mismatch",
+                project_id=project_id,
+                version=version,
+                index_tokenizer=stamped,
+                tokenizer=TOKENIZER_CONFIG["version"],
+            )
+            return None
         chunk_ids = np.load(directory / "chunk_ids.npy")
         retriever = (
             None if (directory / EMPTY).exists() else bm25s.BM25.load(str(directory), mmap=True)
@@ -68,6 +84,13 @@ class Bm25Store:
         self._cache: OrderedDict[str, LoadedIndex] = OrderedDict()
         self._versions: dict[str, tuple[float, int]] = {}
         self._locks: dict[str, asyncio.Lock] = {}
+
+    def evict(self, project_id: str) -> None:
+        """Forget a project (its directory was removed): drop the mmap and
+        the cached version read."""
+        self._cache.pop(project_id, None)
+        self._versions.pop(project_id, None)
+        self._locks.pop(project_id, None)
 
     async def _current_version(self, db: AsyncSession, project_id: str) -> int:
         now = time.monotonic()

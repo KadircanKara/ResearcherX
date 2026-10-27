@@ -1,8 +1,14 @@
-"""Registry of in-flight research-run tasks.
+"""Registry of in-flight research-run tasks, and of long-lived lifespan tasks.
 
 Replaces bare fire-and-forget ``asyncio.create_task``: every spawned run is
 tracked so it can be cancelled (viewer gone, server shutting down) and so
 shutdown can wait for cancellations to finish instead of killing mid-write.
+
+It also holds the app's lifespan background tasks (the bm25 scheduler, under
+the key ``bm25-scheduler``), so ``cancel_all()`` stops them before the engine
+is disposed. Research routes authorize a run id against the database before
+touching the registry, which is what keeps a client from reaching a
+lifespan task's key; a new route that looks a key up here must do the same.
 
 In-process and single-worker only (like the event bus) — uvicorn must run
 ``--workers 1``. Multi-replica needs the Arq/Redis upgrade documented in the

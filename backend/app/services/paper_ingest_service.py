@@ -178,7 +178,18 @@ async def _mark_failed(db: AsyncSession, paper_id: str, exc: Exception) -> None:
             if failed is not None:
                 failed.status = PaperStatus.FAILED
                 failed.ingest_error = reason
+                project_id = failed.project_id  # read before commit expires it
                 await fresh.commit()
+                # A failure after the chunks committed leaves them on disk but
+                # out of scope: rebuild the bm25 index so it stops spending
+                # sparse slots on them. Separate commit, so a failure here can
+                # never lose the FAILED status written above.
+                try:
+                    await mark_dirty(fresh, project_id)
+                    await fresh.commit()
+                except Exception:  # noqa: BLE001 -- only costs a stale index
+                    await fresh.rollback()
+                    log.warning("paper_mark_failed_dirty_failed", paper_id=paper_id, exc_info=True)
     except Exception:  # noqa: BLE001 -- the original error is what matters
         log.exception("paper_mark_failed_failed", paper_id=paper_id)
     log.warning("paper_ingest_failed", paper_id=paper_id, error=reason)

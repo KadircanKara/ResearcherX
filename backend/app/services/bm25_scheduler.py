@@ -17,6 +17,11 @@ one at a time. Per project:
    project dirty and the next quiet tick builds again.
 5. Garbage-collect versions other than the current and the previous one.
 
+Every tick also sweeps ORPHANS: a project deleted while idle loses its state
+row (it cascades) but not its directory, which nothing would ever visit again.
+`sweep_orphans` removes a UUID-named directory whose project no longer exists
+once it is older than `bm25_gc_grace_s`, under that project's advisory lock.
+
 A failed, killed or timed-out build publishes nothing and leaves the project
 dirty, and its half-written `.tmp` is removed. Correctness never depends on
 the single uvicorn worker: cross-process state is the `bm25_index_state` row
@@ -30,6 +35,7 @@ import re
 import shutil
 import sys
 import time
+import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -40,9 +46,9 @@ from sqlalchemy import select, text
 from app.core import observability
 from app.core.config import settings
 from app.core.logging import log
-from app.db.models import Bm25IndexState, _now
+from app.db.models import Bm25IndexState, Project, _now
 from app.db.session import SessionLocal, engine
-from app.services import bm25_state
+from app.services import bm25_state, bm25_store
 from app.services.bm25_build import DONE
 from app.services.bm25_tokenizer import TOKENIZER_CONFIG
 
@@ -67,6 +73,13 @@ _UNLOCK_SQL = text("SELECT pg_advisory_unlock(hashtext('bm25:' || :project_id))"
 # Projects whose index is missing or stale and that nothing has marked yet.
 # Already-dirty rows are left alone: `mark_dirty` moves `last_change_at`, so
 # re-marking on every tick would restart the debounce forever.
+#
+# An `EMBEDDING_MODEL` change is deliberately NOT a stale trigger here: the
+# state row records no model. After a switch the published index holds only
+# old-model chunk ids, every one of which serving filters out, so the sparse
+# arm is empty (turns are dense-only) until `scripts/reindex_papers` re-embeds
+# the papers -- its `index_chunks` marks each project dirty, and the next quiet
+# tick rebuilds. The switch needs that re-index anyway, so nothing is lost.
 _STALE_SQL = text("""
     SELECT pr.id AS project_id
     FROM projects pr
@@ -339,6 +352,64 @@ async def build_project(project_id: str) -> bool:
         return await _build_locked(project_id)
 
 
+def _is_project_dir_name(name: str) -> bool:
+    """Only a canonical UUID can be a project's directory; anything else under
+    the index root is not ours to remove."""
+    try:
+        return str(uuid.UUID(name)) == name
+    except ValueError:
+        return False
+
+
+async def _project_ids() -> set[str]:
+    async with SessionLocal() as db:
+        return set((await db.execute(select(Project.id))).scalars())
+
+
+async def _project_exists(project_id: str) -> bool:
+    async with SessionLocal() as db:
+        return await db.get(Project, project_id) is not None
+
+
+async def sweep_orphans(now: float) -> list[str]:
+    """Remove index directories of projects that no longer exist.
+
+    One query for the live ids and one listing of the root; only directories
+    named by a canonical UUID, older than `bm25_gc_grace_s`, are candidates.
+    Each is removed under its project's advisory lock, after re-checking the
+    project still does not exist, so a build that just started for that id is
+    never raced. A locked directory is left for a later tick.
+    """
+    root = Path(settings.bm25_index_dir)
+    try:
+        candidates = [d for d in root.iterdir() if _is_project_dir_name(d.name) and d.is_dir()]
+    except FileNotFoundError:
+        return []
+    if not candidates:
+        return []
+    live = await _project_ids()
+    removed = []
+    for d in sorted(candidates, key=lambda p: p.name):
+        project_id = d.name
+        if project_id in live:
+            continue
+        try:
+            if now - d.stat().st_mtime < settings.bm25_gc_grace_s:
+                continue
+        except FileNotFoundError:
+            continue
+        async with advisory_lock(project_id) as got:
+            if not got or await _project_exists(project_id):
+                continue
+            shutil.rmtree(d, ignore_errors=True)
+        bm25_store.store.evict(project_id)
+        _backoff.pop(project_id, None)
+        removed.append(project_id)
+    if removed:
+        log.info("bm25_orphans_removed", count=len(removed))
+    return removed
+
+
 async def tick(now: datetime) -> list[str]:
     """One scheduler pass; returns the projects published this tick."""
     await _mark_stale()
@@ -354,6 +425,10 @@ async def tick(now: datetime) -> list[str]:
         except Exception:
             log.error("bm25_build_error", project_id=project_id, exc_info=True)
             _record_failure(project_id)
+    try:
+        await sweep_orphans(time.time())
+    except Exception:  # housekeeping only: a sweep error never costs a tick
+        log.warning("bm25_orphan_sweep_failed", exc_info=True)
     return built
 
 
