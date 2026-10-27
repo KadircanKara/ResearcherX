@@ -238,6 +238,12 @@ class Settings(BaseSettings):
     bm25_tick_s: int = 20
     bm25_gc_grace_s: int = 600
     bm25_build_timeout_s: int = 1800
+    # Which engine serves the hybrid path's LEXICAL arm. "postgres" is the
+    # `tsv` arm inside the one hybrid SQL statement; "bm25s" runs plan 2's
+    # dense-only scan and ranks the lexical arm from the project's bm25s
+    # index (services/bm25_store.py), dense-only while no index exists.
+    # Stays "postgres" until the retrieval eval favours bm25s.
+    sparse_backend: Literal["postgres", "bm25s"] = "postgres"
 
     # Single-paper cut under hybrid. Replaces intra_paper_delta, which is a
     # distance-space rule (best + delta) and has no meaning against a fused
