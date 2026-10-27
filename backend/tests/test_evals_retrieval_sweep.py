@@ -92,22 +92,44 @@ def test_best_breaks_ties_toward_current_settings():
     assert best(pts).k == 100  # r@60 breaks the tie before distance does
 
 
-def test_tune_point_is_chosen_without_test_cases(capsys):
-    tune = [_rankings("tune")]
-    chosen = best(sweep(tune, budget=60))
-    # A test case whose answer only a different point would rank first.
-    test = [
-        CaseRankings(
-            _case("t", "test"),
-            ["x", "a"],
-            [],
-            {"x": _row("x"), "a": _row("a", "needle")},
-        )
-    ]
-    payload = report(tune, test, budget=60)
+def _opposed_rankings():
+    """A tune case that wants a dense-heavy point and a test case that wants a
+    sparse-heavy one. In both, the rival sits at dense rank 1 vs the other at
+    dense rank 40, so which one fuses first flips with w_dense * 39 / (k + 40)
+    against w_sparse."""
+    fillers = [f"f{i}" for i in range(38)]
+    ids = ["ans", "d", "x1", "a", *fillers]
+    by_id = {i: _row(i) for i in ids}
+    by_id["ans"] = _row("ans", "has needle")
+    by_id["a"] = _row("a", "has needle")
+    # Tune: the answer is dense rank 1; a distractor is sparse rank 1.
+    tune = CaseRankings(_case("tune1", "tune"), ["ans", *fillers, "d"], ["d"], by_id)
+    # Test: the answer is dense rank 40 but sparse rank 1; x1 leads dense.
+    test = CaseRankings(_case("test1", "test"), ["x1", *fillers, "a"], ["a"], by_id)
+    return tune, test
+
+
+def test_tune_point_is_chosen_without_test_cases():
+    tune, test = _opposed_rankings()
+    chosen = best(sweep([tune], budget=60))
+    assert chosen.macro_mrr == 1.0
+    # The test case really does disagree: it is not perfect at the tune pick,
+    # and pooling it would move the choice.
+    pooled = best(sweep([tune, test], budget=60))
+    assert (pooled.w_dense, pooled.k) != (chosen.w_dense, chosen.k)
+
+    payload = report([tune], [test], budget=60)
     assert (payload["best_tune"]["w_dense"], payload["best_tune"]["k"]) == (
         chosen.w_dense,
         chosen.k,
     )
-    assert payload["best_test"] is not None and payload["current_test"] is not None
-    assert report(tune, [], budget=60)["best_test"] is None
+    assert (payload["best_tune"]["w_dense"], payload["best_tune"]["k"]) != (
+        pooled.w_dense,
+        pooled.k,
+    )
+    # Test-split numbers come from the test cases alone.
+    assert payload["n_tune"] == 1 and payload["n_test"] == 1
+    expected = sw.evaluate_point([test], chosen.w_dense, chosen.k, budget=60)
+    assert payload["best_test"] == vars(expected)
+    assert payload["best_test"]["macro_mrr"] < 1.0
+    assert report([tune], [], budget=60)["best_test"] is None
