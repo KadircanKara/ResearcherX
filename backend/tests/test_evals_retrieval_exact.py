@@ -146,8 +146,8 @@ async def test_exact_flag_disables_index_scan():
         db, _svc(), case, _project(), threshold=settings.similarity_threshold
     )
     statements = _statements(db)
-    assert statements[:3] == _hnsw_settings_sql(settings.hybrid_dense_pool)
-    assert not any("enable_indexscan" in s for s in statements)
+    assert statements[:4] == _hnsw_settings_sql(settings.hybrid_dense_pool)
+    assert not any("enable_indexscan = off" in s for s in statements)
 
 
 async def test_each_dense_query_starts_a_fresh_transaction():
@@ -205,7 +205,7 @@ async def test_dense_ids_for_times_and_reports_the_fallback():
     assert probe.ids == ["c0", "c1", "c2"]
     assert probe.fell_back is True
     assert probe.ms >= 0.0
-    assert any("enable_indexscan" in s for s in _statements(db))
+    assert any("enable_indexscan = off" in s for s in _statements(db))
 
 
 async def test_mention_eval_mirror_uses_productions_exact_shape():

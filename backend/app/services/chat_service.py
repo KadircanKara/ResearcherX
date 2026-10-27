@@ -313,7 +313,12 @@ def _sql_int(value) -> int:
 # Requires pgvector >= 0.8: the extension reserves the `hnsw.` prefix, so on
 # an older version `SET LOCAL hnsw.iterative_scan` raises an ERROR.
 def _hnsw_settings_sql(pool: int) -> list[str]:
-    """The three `SET LOCAL` statements every dense candidate query runs first.
+    """The four `SET LOCAL` statements every HNSW dense candidate query runs
+    first.
+
+    `enable_indexscan = on` leads: an exact query earlier in the same
+    transaction (the fallback, a harness arm) sets it off, and without the
+    reset this query would quietly run exact too.
 
     Without them an HNSW scan stops after `ef_search` candidates (pgvector's
     default is 40) and THEN applies the project/model/paper filter, so a
@@ -329,6 +334,7 @@ def _hnsw_settings_sql(pool: int) -> list[str]:
     ef_search = min(max(_sql_int(settings.hnsw_ef_search), _sql_int(pool)), _HNSW_EF_SEARCH_MAX)
     max_scan = _sql_int(settings.hnsw_max_scan_tuples)
     return [
+        "SET LOCAL enable_indexscan = on",
         "SET LOCAL hnsw.iterative_scan = relaxed_order",
         f"SET LOCAL hnsw.ef_search = {ef_search}",
         f"SET LOCAL hnsw.max_scan_tuples = {max_scan}",

@@ -1677,7 +1677,10 @@ async def test_threshold_is_applied_outside_the_ann_scan(hybrid):
     assert params["threshold"] == settings.similarity_threshold
 
 
-def test_hnsw_settings_sql_is_three_set_local_statements():
+def test_hnsw_settings_sql_is_four_set_local_statements():
+    """`enable_indexscan = on` comes first: an exact query earlier in the
+    same transaction would otherwise leave the index off, and the "HNSW"
+    query would run exact with nothing saying so."""
     from app.services.chat_service import _hnsw_settings_sql
 
     with (
@@ -1685,11 +1688,12 @@ def test_hnsw_settings_sql_is_three_set_local_statements():
         patch.object(settings, "hnsw_max_scan_tuples", 100_000),
     ):
         assert _hnsw_settings_sql(60) == [
+            "SET LOCAL enable_indexscan = on",
             "SET LOCAL hnsw.iterative_scan = relaxed_order",
             "SET LOCAL hnsw.ef_search = 200",
             "SET LOCAL hnsw.max_scan_tuples = 100000",
         ]
-        assert _hnsw_settings_sql(300)[1] == "SET LOCAL hnsw.ef_search = 300"
+        assert _hnsw_settings_sql(300)[2] == "SET LOCAL hnsw.ef_search = 300"
 
 
 def test_hnsw_settings_sql_refuses_anything_but_an_int():
@@ -1710,12 +1714,12 @@ def test_hnsw_ef_search_is_clamped_to_pgvectors_maximum():
     an ERROR that fails the turn."""
     from app.services.chat_service import _hnsw_settings_sql
 
-    assert _hnsw_settings_sql(5000)[1] == "SET LOCAL hnsw.ef_search = 1000"
+    assert _hnsw_settings_sql(5000)[2] == "SET LOCAL hnsw.ef_search = 1000"
 
 
 @pytest.mark.parametrize("hybrid", [True, False])
 async def test_hnsw_settings_are_set_before_every_dense_query(hybrid):
-    """A GLOBAL call: SET LOCAL lasts until the transaction ends, so the three
+    """A GLOBAL call: SET LOCAL lasts until the transaction ends, so the four
     statements run on the same session immediately before the dense query."""
     from app.services.chat_service import ChatService, PaperInfo, _hnsw_settings_sql
 
@@ -1739,12 +1743,12 @@ async def test_hnsw_settings_are_set_before_every_dense_query(hybrid):
         dense_pool = _candidate_calls(db)[0].args[1]["dense_pool"]
         expected = _hnsw_settings_sql(dense_pool)
 
-    assert calls[:3] == expected
-    assert len(calls) == 4
-    assert "enable_indexscan" not in " ".join(calls)
+    assert calls[:4] == expected
+    assert len(calls) == 5
+    assert "enable_indexscan = off" not in " ".join(calls)
     # ef_search = max(hnsw_ef_search=200, dense pool).
     assert dense_pool == (300 if hybrid else settings.max_context_chunks)
-    assert expected[1] == f"SET LOCAL hnsw.ef_search = {max(200, dense_pool)}"
+    assert expected[2] == f"SET LOCAL hnsw.ef_search = {max(200, dense_pool)}"
 
 
 @pytest.mark.parametrize("hybrid", [True, False])
@@ -1886,9 +1890,11 @@ async def test_a_widened_mention_turn_scans_the_scope_exactly_and_the_library_by
     kinds = []
     for c in db.execute.await_args_list:
         sql = str(c.args[0])
-        kinds.append("EXACT" if "enable_indexscan" in sql else "HNSW" if "hnsw." in sql else "Q")
-    # scoped dense (exact), guarantee, fill dense (HNSW: three SETs)
-    assert kinds == ["EXACT", "Q", "Q", "HNSW", "HNSW", "HNSW", "Q"]
+        exact = "enable_indexscan = off" in sql
+        hnsw = "hnsw." in sql or "enable_indexscan = on" in sql
+        kinds.append("EXACT" if exact else "HNSW" if hnsw else "Q")
+    # scoped dense (exact), guarantee, fill dense (HNSW: four SETs)
+    assert kinds == ["EXACT", "Q", "Q", "HNSW", "HNSW", "HNSW", "HNSW", "Q"]
     first, _, fill = _candidate_calls(db)
     assert first.args[1]["project_id"] == fill.args[1]["project_id"] == "proj-1"
 
