@@ -75,3 +75,16 @@ def test_system_prompt_is_the_spike_prompt():
         hashlib.sha256(SYSTEM.encode()).hexdigest()
         == "6dbf5a4c52f0530e21a4172745dbf31db79889ae9a55c18f7935b05aec2b1809"
     )
+
+
+def test_parse_survives_deeply_nested_json():
+    assert parse("[" * 200000, max_keywords=3) is None
+
+
+def test_clean_keywords_skips_non_strings():
+    assert clean_keywords(["a1", None, 3, "b2"], max_keywords=5) == ("a1", "b2")  # type: ignore[list-item]
+
+
+def test_full_text_sorts_missing_page_last_and_skips_bad_text():
+    pages = [{"page": None, "text": "end"}, {"page": 1, "text": "one"}, {"page": 2, "text": 5}]
+    assert full_text(pages, None, None, cap=100) == "one\n\nend"

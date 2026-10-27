@@ -46,8 +46,12 @@ def full_text(
     text = ""
     if extracted_pages:
         pages = sorted(
-            (p for p in extracted_pages if isinstance(p, dict) and p.get("text")),
-            key=lambda p: p.get("page") if isinstance(p.get("page"), int) else 0,
+            (
+                p
+                for p in extracted_pages
+                if isinstance(p, dict) and isinstance(p.get("text"), str) and p["text"]
+            ),
+            key=lambda p: ((0, p["page"]) if isinstance(p.get("page"), int) else (1, 0)),
         )
         text = "\n\n".join(p["text"] for p in pages)
     if not text:
@@ -71,6 +75,8 @@ def clean_keywords(raw: Iterable[str], *, max_keywords: int) -> tuple[str, ...]:
     seen: set[str] = set()
     out: list[str] = []
     for item in raw:
+        if not isinstance(item, str):
+            continue
         k = item.strip()
         if not k or _NUMBER_ONLY.fullmatch(k):
             continue
@@ -90,7 +96,7 @@ def parse(content: str | None, *, max_keywords: int) -> SummaryRecord | None:
         return None
     try:
         data = json.loads(content)
-    except ValueError:
+    except (ValueError, RecursionError):
         return None
     if not isinstance(data, dict) or set(data) != {"summary", "keywords"}:
         return None
