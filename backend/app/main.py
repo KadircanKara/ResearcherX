@@ -1,3 +1,4 @@
+import asyncio
 import json
 from contextlib import asynccontextmanager
 
@@ -15,6 +16,7 @@ from app.db.migrate import run_migrations
 from app.db.models import ResearchRun, RunStatus
 from app.db.seed import seed_dev_data
 from app.db.session import SessionLocal, engine
+from app.services import bm25_scheduler
 from app.services.task_registry import registry
 from app.services.usage_service import LimitExceeded
 
@@ -65,6 +67,29 @@ async def _warn_stale_embeddings() -> None:
         )
 
 
+def bm25_scheduler_wanted() -> bool:
+    """The rebuild scheduler needs Postgres advisory locks: off under sqlite
+    (tests) and whenever the setting turns it off."""
+    return settings.bm25_scheduler_enabled and engine.dialect.name == "postgresql"
+
+
+def _start_bm25_scheduler() -> None:
+    """Registered, so shutdown cancels it (killing any build subprocess)
+    BEFORE the engine is disposed. Marking unindexed projects runs inside the
+    task, so a slow scan never delays startup."""
+    if not bm25_scheduler_wanted():
+        return
+
+    async def run() -> None:
+        try:
+            await bm25_scheduler.mark_unindexed_projects()
+        except Exception:
+            log.error("bm25_mark_unindexed_failed", exc_info=True)
+        await bm25_scheduler.run_forever()
+
+    registry.register("bm25-scheduler", asyncio.create_task(run()))
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     configure_logging()
@@ -77,6 +102,7 @@ async def lifespan(app: FastAPI):
     async with SessionLocal() as db:
         await seed_dev_data(db)
         await db.commit()
+    _start_bm25_scheduler()
     yield
     # Cancel in-flight runs first (their CancelledError handlers write final
     # statuses to the DB), then the grace-window watchers — each sleeps and

@@ -1,0 +1,311 @@
+"""Background rebuilds of the per-project bm25s indexes.
+
+A lifespan task (`run_forever`) calls `tick` every `bm25_tick_s`. Each tick
+marks projects whose index is missing or was built by an older tokenizer,
+then rebuilds every project that has been quiet for `bm25_quiet_period_s`,
+one at a time. Per project:
+
+1. Take `pg_try_advisory_lock` on a DEDICATED connection held for the whole
+   build; another process (a dev reload, a script) already building it means
+   skip, not wait.
+2. Under the lock, read `current_version` and snapshot `last_change_at`.
+3. Run `python -m app.services.bm25_build` as a subprocess, so tokenising a
+   large corpus never holds the API's event loop or memory.
+4. Only after it exits 0 AND the version directory holds `DONE`, publish with
+   `bm25_state.swap_version`. The swap clears the dirty flag only if nothing
+   changed since the snapshot; a paper ingested during the build leaves the
+   project dirty and the next quiet tick builds again.
+5. Garbage-collect versions other than the current and the previous one.
+
+A failed, killed or timed-out build publishes nothing and leaves the project
+dirty, and its half-written `.tmp` is removed. Correctness never depends on
+the single uvicorn worker: cross-process state is the `bm25_index_state` row
+and the advisory lock.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import shutil
+import sys
+import time
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from datetime import datetime
+from pathlib import Path
+
+from sqlalchemy import select, text
+
+from app.core import observability
+from app.core.config import settings
+from app.core.logging import log
+from app.db.models import Bm25IndexState, _now
+from app.db.session import SessionLocal, engine
+from app.services import bm25_state
+from app.services.bm25_build import DONE
+from app.services.bm25_tokenizer import TOKENIZER_CONFIG
+
+# The directory `-m app.services.bm25_build` must run from.
+_BACKEND_ROOT = Path(__file__).resolve().parents[2]
+_STDERR_TAIL = 2000
+
+_LOCK_SQL = text("SELECT pg_try_advisory_lock(hashtext('bm25:' || :project_id))")
+_UNLOCK_SQL = text("SELECT pg_advisory_unlock(hashtext('bm25:' || :project_id))")
+
+# Projects whose index is missing or stale and that nothing has marked yet.
+# Already-dirty rows are left alone: `mark_dirty` moves `last_change_at`, so
+# re-marking on every tick would restart the debounce forever.
+_STALE_SQL = text("""
+    SELECT pr.id AS project_id
+    FROM projects pr
+    LEFT JOIN bm25_index_state s ON s.project_id = pr.id
+    WHERE (s.project_id IS NULL OR s.dirty_since IS NULL)
+      AND (
+        (
+          (s.project_id IS NULL OR s.current_version = 0)
+          AND EXISTS (
+            SELECT 1
+            FROM paper_chunk_embeddings c
+            JOIN papers p ON p.id = c.paper_id
+            WHERE c.project_id = pr.id AND c.model = :model AND p.status = 'ready'
+          )
+        )
+        OR (s.current_version > 0 AND s.tokenizer_ver <> :tokenizer_ver)
+      )
+""")
+
+
+async def _mark_stale() -> int:
+    async with SessionLocal() as db:
+        rows = await db.execute(
+            _STALE_SQL,
+            {"model": settings.embedding_model, "tokenizer_ver": TOKENIZER_CONFIG["version"]},
+        )
+        ids = [r.project_id for r in rows.all()]
+        # A published version whose files are gone (a lost volume, a build
+        # written inside a container that was then recreated) would leave the
+        # project dense-only until its next chunk change.
+        published = await db.execute(
+            select(Bm25IndexState.project_id, Bm25IndexState.current_version).where(
+                Bm25IndexState.current_version > 0, Bm25IndexState.dirty_since.is_(None)
+            )
+        )
+        root = Path(settings.bm25_index_dir)
+        ids += [
+            pid
+            for pid, version in published.all()
+            if pid not in ids and not (root / pid / str(version) / DONE).is_file()
+        ]
+        for project_id in ids:
+            await bm25_state.mark_dirty(db, project_id)
+        await db.commit()
+    if ids:
+        log.info("bm25_projects_marked_stale", count=len(ids))
+    return len(ids)
+
+
+async def mark_unindexed_projects() -> int:
+    """Mark every project with ready chunks but no built index, an index from
+    an older tokenizer, or a published version missing on disk. Run once at
+    startup (every tick repeats it); returns how many."""
+    count = await _mark_stale()
+    log.info("bm25_mark_unindexed_projects", count=count)
+    return count
+
+
+@asynccontextmanager
+async def advisory_lock(project_id: str) -> AsyncIterator[bool]:
+    """Yield whether this process holds the project's build lock.
+
+    Session-level, so the transaction that took it is committed at once and
+    the connection does not sit idle in a transaction for the whole build.
+    Unlocked on the SAME connection; if that fails, the connection is thrown
+    away, which releases the lock with it.
+    """
+    async with engine.connect() as conn:
+        got = bool((await conn.execute(_LOCK_SQL, {"project_id": project_id})).scalar())
+        await conn.commit()
+        if not got:
+            yield False
+            return
+        try:
+            yield True
+        finally:
+            try:
+                await conn.execute(_UNLOCK_SQL, {"project_id": project_id})
+                await conn.commit()
+            except Exception:
+                log.warning("bm25_unlock_failed", project_id=project_id, exc_info=True)
+                await conn.invalidate()
+
+
+def build_argv(project_id: str, version: int, root: Path) -> list[str]:
+    return [sys.executable, "-m", "app.services.bm25_build", project_id, str(version), str(root)]
+
+
+def _discard(root: Path, version: int) -> None:
+    """Remove an unpublished version and its `.tmp` leftover."""
+    shutil.rmtree(root / f"{version}.tmp", ignore_errors=True)
+    shutil.rmtree(root / str(version), ignore_errors=True)
+
+
+async def _kill(proc: asyncio.subprocess.Process) -> None:
+    try:
+        proc.kill()
+    except ProcessLookupError:
+        pass
+    await proc.wait()
+
+
+async def run_build(project_id: str, version: int, root: Path) -> int | None:
+    """Run the build subprocess; the chunk count on success, None on failure.
+
+    stderr is captured and logged only on failure: bm25s writes progress noise
+    there, so its presence means nothing.
+    """
+    proc = await asyncio.create_subprocess_exec(
+        *build_argv(project_id, version, root),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        cwd=_BACKEND_ROOT,
+    )
+    try:
+        out, err = await asyncio.wait_for(proc.communicate(), timeout=settings.bm25_build_timeout_s)
+    except TimeoutError:
+        await _kill(proc)
+        shutil.rmtree(root / f"{version}.tmp", ignore_errors=True)
+        log.warning(
+            "bm25_build_timeout",
+            project_id=project_id,
+            timeout_s=settings.bm25_build_timeout_s,
+        )
+        return None
+    except BaseException:
+        # Cancelled (shutdown): the build must not outlive the app.
+        await _kill(proc)
+        shutil.rmtree(root / f"{version}.tmp", ignore_errors=True)
+        raise
+    if proc.returncode != 0:
+        shutil.rmtree(root / f"{version}.tmp", ignore_errors=True)
+        log.warning(
+            "bm25_build_failed",
+            project_id=project_id,
+            returncode=proc.returncode,
+            stderr=err.decode(errors="replace")[-_STDERR_TAIL:],
+        )
+        return None
+    try:
+        return int(out.decode().strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        log.warning("bm25_build_bad_output", project_id=project_id, stdout=out[-200:])
+        return None
+
+
+def gc_old_versions(project_dir: Path, keep: set[int], now: float, grace_s: int) -> list[Path]:
+    """Delete version directories not in `keep` whose mtime is older than
+    `grace_s`. Anything that is not a numbered directory is left alone."""
+    if not project_dir.is_dir():
+        return []
+    removed = []
+    for d in sorted(project_dir.iterdir(), key=lambda p: p.name):
+        if not (d.is_dir() and d.name.isdigit()) or int(d.name) in keep:
+            continue
+        if now - d.stat().st_mtime < grace_s:
+            continue
+        shutil.rmtree(d, ignore_errors=True)
+        removed.append(d)
+    return removed
+
+
+async def _build_locked(project_id: str) -> bool:
+    async with SessionLocal() as db:
+        state = await db.get(Bm25IndexState, project_id)
+    if state is None or state.dirty_since is None:
+        return False  # another process built it between due_projects and the lock
+    version = (state.current_version or 0) + 1
+    snapshot = state.last_change_at  # passed to the swap exactly as read
+    root = Path(settings.bm25_index_dir) / project_id
+    # A version this number may exist unpublished: a build whose swap never
+    # landed. Nothing can be reading it, and the build refuses to overwrite.
+    _discard(root, version)
+    root.mkdir(parents=True, exist_ok=True)
+
+    started = time.monotonic()
+    ok = False
+    cleared = False
+    count: int | None = None
+    with observability.span("bm25.build", attributes={"project_id": project_id}) as s:
+        try:
+            count = await run_build(project_id, version, root)
+            ok = count is not None and (root / str(version) / DONE).is_file()
+            if ok:
+                async with SessionLocal() as db:
+                    cleared = await bm25_state.swap_version(
+                        db,
+                        project_id,
+                        new_version=version,
+                        snapshot_change_at=snapshot,
+                        chunk_count=count,
+                        tokenizer_ver=TOKENIZER_CONFIG["version"],
+                    )
+                    await db.commit()
+            else:
+                _discard(root, version)
+        finally:
+            duration = round(time.monotonic() - started, 3)
+            observability.set_attributes(
+                s, {"chunk_count": count, "duration_s": duration, "ok": ok}
+            )
+    log.info(
+        "bm25_build_done" if ok else "bm25_build_not_published",
+        project_id=project_id,
+        version=version,
+        chunk_count=count,
+        duration_s=duration,
+        still_dirty=ok and not cleared,
+    )
+    if ok:
+        removed = gc_old_versions(
+            root, {version, version - 1}, now=time.time(), grace_s=settings.bm25_gc_grace_s
+        )
+        if removed:
+            log.info("bm25_versions_removed", project_id=project_id, count=len(removed))
+    return ok
+
+
+async def build_project(project_id: str) -> bool:
+    """Build and publish one project if its lock is free. True when published."""
+    async with advisory_lock(project_id) as got:
+        if not got:
+            log.info("bm25_build_skipped_locked", project_id=project_id)
+            return False
+        return await _build_locked(project_id)
+
+
+async def tick(now: datetime) -> list[str]:
+    """One scheduler pass; returns the projects published this tick."""
+    await _mark_stale()
+    async with SessionLocal() as db:
+        due = await bm25_state.due_projects(db, quiet_s=settings.bm25_quiet_period_s, now=now)
+    built = []
+    for project_id in due:  # one at a time, deliberately
+        try:
+            if await build_project(project_id):
+                built.append(project_id)
+        except Exception:
+            log.error("bm25_build_error", project_id=project_id, exc_info=True)
+    return built
+
+
+async def run_forever() -> None:
+    """Tick every `bm25_tick_s` until cancelled; a failing tick is logged and
+    the loop carries on."""
+    log.info("bm25_scheduler_started", tick_s=settings.bm25_tick_s)
+    while True:
+        try:
+            await tick(_now())
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.error("bm25_tick_failed", exc_info=True)
+        await asyncio.sleep(settings.bm25_tick_s)
