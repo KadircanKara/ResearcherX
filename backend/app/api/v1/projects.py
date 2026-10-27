@@ -21,6 +21,7 @@ from app.db.models import (
     PaperChunkEmbedding,
     PaperFile,
     PaperSource,
+    PaperStatus,
     ProjectMember,
     ResearchRun,
     User,
@@ -221,6 +222,18 @@ def _duplicate_source(exc) -> HTTPException:
     )
 
 
+def _ready_if_textless_manual(paper: Paper) -> None:
+    """A manual paper with no text is `ready` with 0 chunks -- the empty-
+    document rule `index_chunks` applies -- for the paths that never reach
+    it. Left `pending`, nothing would ever flip it, and it would drop out of
+    the PAPERS block for good."""
+    if paper.source == PaperSource.MANUAL and not (
+        (paper.abstract or "").strip() or (paper.body or "").strip()
+    ):
+        paper.status = PaperStatus.READY
+        paper.ingest_error = None
+
+
 async def _paper_out(db: AsyncSession, paper: Paper) -> PaperOut:
     out = PaperOut.model_validate(paper)
     counts = await _chunk_counts(db, [paper.id])
@@ -268,6 +281,7 @@ async def create_paper(
             await db.rollback()
             raise _duplicate_source(exc) from None
     else:
+        _ready_if_textless_manual(paper)
         await db.commit()
 
     await db.refresh(paper)
@@ -320,6 +334,7 @@ async def update_paper(
             await db.rollback()
             raise _duplicate_source(exc) from None
     else:
+        _ready_if_textless_manual(paper)
         await db.commit()
 
     await db.refresh(paper)

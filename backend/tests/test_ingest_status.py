@@ -624,3 +624,68 @@ async def test_a_duplicate_retry_leaves_a_ready_papers_chunks_alone(db_session, 
     assert await _ingest(db_session, pid) == n
     assert await _chunks(pid) == n
     assert (await _fresh(pid)).status == PaperStatus.READY
+
+
+# ── a textless manual paper is ready ─────────────────────────────────────────
+
+
+async def test_a_manual_paper_created_without_text_is_ready(client, db_session, you, project):
+    """Nothing to index is the empty-document rule `index_chunks` applies: a
+    ready paper with 0 chunks, listed in the PAPERS block. Pending would hide
+    it from chat for good, since nothing would ever flip it."""
+    with patch.object(settings, "feature_manual_papers", True):
+        r = await client.post(
+            f"/v1/projects/{project.id}/papers",
+            json={"title": "Only a title", "source": "manual"},
+            headers={"X-Dev-User-Id": you.id},
+        )
+    assert r.status_code == 201
+    pid = r.json()["id"]
+    assert r.json()["status"] == "ready"
+    assert (await _fresh(pid)).status == PaperStatus.READY
+    assert await _chunks(pid) == 0
+
+
+async def test_clearing_a_manual_papers_text_leaves_it_ready_with_no_chunks(
+    client, db_session, you, project
+):
+    headers = {"X-Dev-User-Id": you.id}
+    with (
+        patch.object(settings, "feature_manual_papers", True),
+        patch.object(svc._embedding_svc, "embed_batch", _embed_ok()),
+    ):
+        r = await client.post(
+            f"/v1/projects/{project.id}/papers",
+            json={"title": "M", "source": "manual", "abstract": "An abstract.", "body": "Body."},
+            headers=headers,
+        )
+        pid = r.json()["id"]
+        assert await _chunks(pid) > 0
+        r = await client.patch(
+            f"/v1/projects/{project.id}/papers/{pid}",
+            json={"abstract": None, "body": None},
+            headers=headers,
+        )
+    assert r.status_code == 200
+    assert r.json()["status"] == "ready"
+    row = await _fresh(pid)
+    assert row.status == PaperStatus.READY
+    assert row.source_hash is None
+    assert await _chunks(pid) == 0
+
+
+async def test_patching_a_pending_textless_manual_paper_makes_it_ready(
+    client, db_session, you, project
+):
+    """A textless manual paper left pending (created before this rule) is
+    healed by any edit, even one that changes no text."""
+    pid = (await _paper(db_session, project, "M", source="manual")).id
+    assert (await _fresh(pid)).status == PaperStatus.PENDING
+    with patch.object(settings, "feature_manual_papers", True):
+        r = await client.patch(
+            f"/v1/projects/{project.id}/papers/{pid}",
+            json={"title": "Renamed"},
+            headers={"X-Dev-User-Id": you.id},
+        )
+    assert r.status_code == 200
+    assert (await _fresh(pid)).status == PaperStatus.READY
