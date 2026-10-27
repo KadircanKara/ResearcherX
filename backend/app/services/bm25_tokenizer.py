@@ -36,3 +36,12 @@ def tokenize(texts: list[str], *, return_ids: bool):
 def terms(text: str) -> list[str]:
     """Stemmed, stopword-free tokens of one text; order and duplicates kept."""
     return list(tokenize([text], return_ids=False)[0])
+
+
+def index_text(section_text: str | None, text: str) -> str:
+    """What BM25 indexes for a chunk: the generated `tsv` column's expression.
+
+    The one definition; the production build and the retrieval harness both
+    call it, so the lexical document cannot drift between them.
+    """
+    return f"{section_text or ''} {text}"
