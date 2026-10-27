@@ -403,9 +403,14 @@ def test_keyword_field_rejected_on_other_kinds(tmp_path: Path):
 
 def test_keyword_must_appear_in_question(tmp_path: Path):
     with pytest.raises(GoldenSetError, match="keyword"):
-        _load(tmp_path, _case(kind="keyword", keyword="PSO"))
-    cases = _load(tmp_path, _case(kind="keyword", keyword="cbba"))
+        _load(tmp_path, _case(kind="paraphrase_keyword", keyword="PSO"))
+    cases = _load(tmp_path, _case(kind="paraphrase_keyword", keyword="cbba", question="a cbba"))
     assert cases[0].keyword == "cbba"
+
+
+def test_keyword_kind_rejects_a_keyword_field(tmp_path: Path):
+    with pytest.raises(GoldenSetError, match="only allowed on paraphrase_keyword"):
+        _load(tmp_path, _case(kind="keyword", keyword="cbba", question="a cbba"))
 
 
 def test_split_must_be_tune_or_test(tmp_path: Path):

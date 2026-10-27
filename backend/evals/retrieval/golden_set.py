@@ -61,10 +61,10 @@ def _parse_case(raw: dict) -> Case:
 
     keyword = raw.get("keyword")
     if kind == "paraphrase_keyword" or keyword is not None:
-        if kind not in ("paraphrase_keyword", "keyword"):
+        if kind != "paraphrase_keyword":
             raise GoldenSetError(
                 f"case {case_id!r}: keyword is only allowed on paraphrase_keyword "
-                f"and keyword cases, not {kind!r}"
+                f"cases, not {kind!r}"
             )
         if not isinstance(keyword, str) or not keyword.strip():
             raise GoldenSetError(f"case {case_id!r}: {kind} case needs a non-empty keyword")
