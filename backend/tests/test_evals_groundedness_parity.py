@@ -118,6 +118,9 @@ def test_every_retrieval_call_is_scoped_to_the_project():
     for call in ("_retrieve_mentioned_chunks(", "_retrieve_paper_chunks("):
         assert _call_passes(production, call, "project_id="), f"production changed: {call}"
         assert _call_passes(harness, call, "project_id="), f"harness drops it: {call}"
+    # Both global calls declare the whole-project scope: HNSW with fallback.
+    for source in (production, harness):
+        assert _call_passes(source, "_retrieve_paper_chunks(", "exact=False")
 
 
 def _call_passes(source: str, call: str, keyword: str) -> bool:

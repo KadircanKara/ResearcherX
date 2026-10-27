@@ -143,7 +143,9 @@ async def test_retrieve_paper_chunks_uses_settings_similarity_threshold():
     papers = [PaperInfo(paper_id="p1", title="Test Paper"), PaperInfo(paper_id="p2", title="B")]
 
     with patch.object(settings, "similarity_threshold", 0.42):
-        await svc._retrieve_paper_chunks(mock_db, papers, [0.0] * 768, "q", project_id="proj-1")
+        await svc._retrieve_paper_chunks(
+            mock_db, papers, [0.0] * 768, "q", project_id="proj-1", exact=False
+        )
 
     _, params = mock_db.execute.call_args.args
     assert params["threshold"] == 0.42
@@ -175,6 +177,8 @@ def _mock_db_returning(n_rows: int) -> MagicMock:
             # before structured chunking actually has.
             section=[],
             page=None,
+            # The dense scan's own row count, carried on every row.
+            dense_raw_n=n_rows,
         )
         for i in range(n_rows)
     ]
@@ -195,10 +199,13 @@ async def test_retrieve_paper_chunks_issues_one_query_for_the_whole_library():
     from app.services.chat_service import ChatService, PaperInfo
 
     svc = ChatService()
-    mock_db = _mock_db_returning(0)
+    # A full dense pool: a short one would (correctly) re-run exact.
+    mock_db = _mock_db_returning(settings.hybrid_dense_pool)
     papers = [PaperInfo(paper_id=f"p{i}", title=f"Paper {i}") for i in range(100)]
 
-    await svc._retrieve_paper_chunks(mock_db, papers, [0.0] * 768, "q", project_id="proj-1")
+    await svc._retrieve_paper_chunks(
+        mock_db, papers, [0.0] * 768, "q", project_id="proj-1", exact=False
+    )
 
     assert len(_candidate_calls(mock_db)) == 1
 
@@ -217,7 +224,7 @@ async def test_retrieve_paper_chunks_caps_total_at_settings_max_context_chunks()
 
     with patch.object(settings, "max_context_chunks", 40):
         chunks = await svc._retrieve_paper_chunks(
-            mock_db, papers, [0.0] * 768, "q", project_id="proj-1"
+            mock_db, papers, [0.0] * 768, "q", project_id="proj-1", exact=False
         )
 
     assert len(chunks) == 40
@@ -237,7 +244,9 @@ async def test_retrieve_paper_chunks_scopes_to_this_projects_papers():
     mock_db = _mock_db_returning(0)
     papers = [PaperInfo(paper_id=f"p{i}", title=f"Paper {i}") for i in range(3)]
 
-    await svc._retrieve_paper_chunks(mock_db, papers, [0.0] * 768, "q", project_id="proj-1")
+    await svc._retrieve_paper_chunks(
+        mock_db, papers, [0.0] * 768, "q", project_id="proj-1", exact=False
+    )
 
     _, params = mock_db.execute.call_args.args
     assert json.loads(params["ids"]) == ["p0", "p1", "p2"]
@@ -246,7 +255,9 @@ async def test_retrieve_paper_chunks_scopes_to_this_projects_papers():
 def _hybrid_db(rows: list[dict]) -> MagicMock:
     """Fake AsyncSession returning explicitly-ranked hybrid rows."""
     mock_result = MagicMock()
-    mock_result.fetchall.return_value = [MagicMock(**row) for row in rows]
+    mock_result.fetchall.return_value = [
+        MagicMock(**{"dense_raw_n": _FULL_SCAN, **row}) for row in rows
+    ]
     mock_db = MagicMock()
     mock_db.execute = AsyncMock(return_value=mock_result)
     return mock_db
@@ -262,7 +273,7 @@ async def test_hybrid_query_binds_the_question_text_for_the_sparse_arm():
     papers = [PaperInfo(paper_id="p1", title="A"), PaperInfo(paper_id="p2", title="B")]
 
     await svc._retrieve_paper_chunks(
-        mock_db, papers, [0.0] * 768, "what reward function", project_id="proj-1"
+        mock_db, papers, [0.0] * 768, "what reward function", project_id="proj-1", exact=False
     )
 
     _, params = mock_db.execute.call_args.args
@@ -280,7 +291,9 @@ async def test_hybrid_binds_both_pool_sizes():
         patch.object(settings, "hybrid_dense_pool", 111),
         patch.object(settings, "hybrid_sparse_pool", 22),
     ):
-        await svc._retrieve_paper_chunks(mock_db, papers, [0.0] * 768, "q", project_id="proj-1")
+        await svc._retrieve_paper_chunks(
+            mock_db, papers, [0.0] * 768, "q", project_id="proj-1", exact=False
+        )
 
     _, params = mock_db.execute.call_args.args
     assert params["dense_pool"] == 111
@@ -341,7 +354,7 @@ async def test_a_sparse_only_chunk_can_outrank_a_dense_chunk():
 
     with patch.object(settings, "max_context_chunks", 200):
         chunks = await svc._retrieve_paper_chunks(
-            mock_db, papers, [0.0] * 768, "reward table", project_id="proj-1"
+            mock_db, papers, [0.0] * 768, "reward table", project_id="proj-1", exact=False
         )
 
     texts = [c.text for c in chunks]
@@ -389,7 +402,7 @@ async def test_a_both_arms_chunk_outranks_a_dense_only_top_hit():
     papers = [PaperInfo(paper_id="p1", title="A"), PaperInfo(paper_id="p2", title="B")]
 
     chunks = await svc._retrieve_paper_chunks(
-        mock_db, papers, [0.0] * 768, "q", project_id="proj-1"
+        mock_db, papers, [0.0] * 768, "q", project_id="proj-1", exact=False
     )
 
     assert [c.text for c in chunks] == ["both arms", "dense only"]
@@ -434,7 +447,7 @@ async def test_citations_are_numbered_contiguously_after_fusion():
     papers = [PaperInfo(paper_id="p1", title="A"), PaperInfo(paper_id="p2", title="B")]
 
     chunks = await svc._retrieve_paper_chunks(
-        mock_db, papers, [0.0] * 768, "q", project_id="proj-1"
+        mock_db, papers, [0.0] * 768, "q", project_id="proj-1", exact=False
     )
 
     # Both at position 1 in their own arm: dense's 0.7 weight beats sparse's
@@ -452,7 +465,7 @@ async def test_single_paper_scope_applies_the_rank_window():
 
     with patch.object(settings, "intra_paper_rank_window", 7):
         chunks = await svc._retrieve_paper_chunks(
-            mock_db, papers, [0.0] * 768, "q", project_id="proj-1"
+            mock_db, papers, [0.0] * 768, "q", project_id="proj-1", exact=False
         )
 
     assert len(chunks) == 7
@@ -472,7 +485,7 @@ async def test_multi_paper_scope_does_not_apply_the_rank_window():
         patch.object(settings, "max_context_chunks", 40),
     ):
         chunks = await svc._retrieve_paper_chunks(
-            mock_db, papers, [0.0] * 768, "q", project_id="proj-1"
+            mock_db, papers, [0.0] * 768, "q", project_id="proj-1", exact=False
         )
 
     assert len(chunks) == 40
@@ -499,7 +512,7 @@ async def test_the_budget_is_applied_before_the_rank_window():
         patch.object(settings, "intra_paper_rank_window", 999),
     ):
         chunks = await svc._retrieve_paper_chunks(
-            mock_db, papers, [0.0] * 768, "q", project_id="proj-1"
+            mock_db, papers, [0.0] * 768, "q", project_id="proj-1", exact=False
         )
 
     assert len(chunks) == 10
@@ -515,7 +528,9 @@ async def test_hybrid_disabled_falls_back_to_the_dense_only_query():
     papers = [PaperInfo(paper_id="p1", title="A"), PaperInfo(paper_id="p2", title="B")]
 
     with patch.object(settings, "hybrid_retrieval", False):
-        await svc._retrieve_paper_chunks(mock_db, papers, [0.0] * 768, "q", project_id="proj-1")
+        await svc._retrieve_paper_chunks(
+            mock_db, papers, [0.0] * 768, "q", project_id="proj-1", exact=False
+        )
 
     sql, params = mock_db.execute.call_args.args
     assert "tsv" not in str(sql)
@@ -536,7 +551,7 @@ async def test_hybrid_disabled_still_applies_the_distance_delta_cut():
         patch.object(settings, "intra_paper_delta", 0.0),
     ):
         chunks = await svc._retrieve_paper_chunks(
-            mock_db, papers, [0.0] * 768, "q", project_id="proj-1"
+            mock_db, papers, [0.0] * 768, "q", project_id="proj-1", exact=False
         )
 
     # _mock_db_returning spaces distances 0.0001 apart, so delta 0.0 keeps
@@ -670,7 +685,7 @@ async def test_retrieve_paper_chunks_numbers_citations_contiguously_after_cappin
 
     with patch.object(settings, "max_context_chunks", 40):
         chunks = await svc._retrieve_paper_chunks(
-            mock_db, papers, [0.0] * 768, "q", project_id="proj-1"
+            mock_db, papers, [0.0] * 768, "q", project_id="proj-1", exact=False
         )
 
     assert [c.n for c in chunks] == list(range(1, 41))
@@ -832,7 +847,9 @@ async def test_single_paper_scope_binds_the_intra_paper_ceiling():
         patch.object(settings, "intra_paper_ceiling", 0.85),
         patch.object(settings, "similarity_threshold", 0.75),
     ):
-        await svc._retrieve_paper_chunks(mock_db, [paper], [0.0] * 768, "q", project_id="proj-1")
+        await svc._retrieve_paper_chunks(
+            mock_db, [paper], [0.0] * 768, "q", project_id="proj-1", exact=False
+        )
 
     _, params = mock_db.execute.call_args.args
     assert params["threshold"] == 0.85
@@ -861,7 +878,7 @@ async def test_single_paper_scope_applies_the_delta_cut():
         patch.object(settings, "intra_paper_delta", 0.25),
     ):
         chunks = await svc._retrieve_paper_chunks(
-            mock_db, [paper], [0.0] * 768, "q", project_id="proj-1"
+            mock_db, [paper], [0.0] * 768, "q", project_id="proj-1", exact=True
         )
 
     # best 0.50 + 0.25 = 0.75 -> the 0.80 row is cut, the 0.74 row survives
@@ -898,7 +915,7 @@ async def test_multi_paper_scope_applies_no_delta_cut():
         patch.object(settings, "intra_paper_delta", 0.25),
     ):
         chunks = await svc._retrieve_paper_chunks(
-            mock_db, papers, [0.0] * 768, "q", project_id="proj-1"
+            mock_db, papers, [0.0] * 768, "q", project_id="proj-1", exact=True
         )
 
     assert len(chunks) == 3
@@ -919,7 +936,7 @@ async def test_single_paper_scope_with_empty_sql_result_returns_empty():
     paper = PaperInfo(paper_id="p1", title="Only Paper")
 
     chunks = await svc._retrieve_paper_chunks(
-        mock_db, [paper], [0.0] * 768, "q", project_id="proj-1"
+        mock_db, [paper], [0.0] * 768, "q", project_id="proj-1", exact=False
     )
 
     assert chunks == []
@@ -1107,6 +1124,7 @@ async def test_widening_pins_the_mentioned_papers_and_fills_globally(
         query_text,
         *,
         project_id,
+        exact,
         pool_limit=None,
         guarantee_per_paper=0,
         reranker=None,
@@ -1182,6 +1200,7 @@ async def test_mentions_with_no_chunks_at_all_fall_back_to_the_library(
         query_text,
         *,
         project_id,
+        exact,
         pool_limit=None,
         guarantee_per_paper=0,
         reranker=None,
@@ -1306,6 +1325,7 @@ async def test_widened_fill_is_capped_at_the_context_budget(
         query_text,
         *,
         project_id,
+        exact,
         pool_limit=None,
         guarantee_per_paper=0,
         reranker=None,
@@ -1379,6 +1399,11 @@ def _ranked_db(rows: list) -> MagicMock:
     return mock_db
 
 
+# A dense scan that filled any pool: these fakes never trip the HNSW
+# exact fallback unless a test means to.
+_FULL_SCAN = 10_000
+
+
 def _row(i: int, paper_id: str) -> MagicMock:
     return MagicMock(
         id=f"c{i}",
@@ -1395,6 +1420,7 @@ def _row(i: int, paper_id: str) -> MagicMock:
         # database has.
         section=[],
         page=None,
+        dense_raw_n=_FULL_SCAN,
     )
 
 
@@ -1543,16 +1569,19 @@ async def test_the_global_path_issues_exactly_the_candidate_query_it_always_did(
     path is the entire library. Folding it into the shipped candidate query
     would make every ordinary turn rank-number thousands of chunks per
     partition for a guarantee nothing asked for. One query, no window over
-    paper_id, no `guarantee` bind — on BOTH retrieval paths.
+    paper_id, no `guarantee` bind — on BOTH retrieval paths. The dense scan
+    fills its pool here, so the HNSW exact fallback does not fire either.
     """
     from app.services.chat_service import ChatService, PaperInfo
 
     svc = ChatService()
     papers = [PaperInfo(paper_id=f"p{i}", title=f"P{i}") for i in range(3)]
-    mock_db = _mock_db_returning_no_rows()
+    mock_db = _mock_db_returning(settings.hybrid_dense_pool)
 
     with patch.object(settings, "hybrid_retrieval", hybrid):
-        await svc._retrieve_paper_chunks(mock_db, papers, [0.0] * 768, "q", project_id="proj-1")
+        await svc._retrieve_paper_chunks(
+            mock_db, papers, [0.0] * 768, "q", project_id="proj-1", exact=False
+        )
 
     assert len(_candidate_calls(mock_db)) == 1
     sql, params = _candidate_calls(mock_db)[0].args
@@ -1572,14 +1601,14 @@ def _cte_body(sql: str, name: str) -> tuple[str, str]:
     raise AssertionError(f"unbalanced CTE {name}")
 
 
-async def _dense_sql(hybrid: bool, papers=None) -> tuple[str, dict, MagicMock]:
+async def _dense_sql(hybrid: bool, *, exact: bool = False) -> tuple[str, dict, MagicMock]:
     from app.services.chat_service import ChatService, PaperInfo
 
-    papers = papers or [PaperInfo(paper_id="p1", title="A"), PaperInfo(paper_id="p2", title="B")]
-    db = _mock_db_returning_no_rows()
+    papers = [PaperInfo(paper_id="p1", title="A"), PaperInfo(paper_id="p2", title="B")]
+    db = _mock_db_returning(settings.hybrid_dense_pool)
     with patch.object(settings, "hybrid_retrieval", hybrid):
         await ChatService()._retrieve_paper_chunks(
-            db, papers, [0.0] * 768, "q", project_id="proj-1"
+            db, papers, [0.0] * 768, "q", project_id="proj-1", exact=exact
         )
     (call,) = _candidate_calls(db)
     sql, params = call.args
@@ -1597,6 +1626,23 @@ async def test_dense_query_orders_by_distance_inside_a_materialized_cte(hybrid):
     assert "ORDER BY c.embedding <=> CAST(:qvec AS halfvec(768))" in body
     assert "LIMIT :dense_pool" in body
     assert "ROW_NUMBER" not in body
+    assert "COUNT" not in body
+
+
+def test_both_arms_share_one_dense_scan_fragment():
+    """The scan is one constant, so the dense-only and hybrid arms cannot
+    drift apart."""
+    import inspect
+
+    from app.services import chat_service
+
+    for method in (
+        chat_service.ChatService._dense_only_rows,
+        chat_service.ChatService._hybrid_rows,
+    ):
+        source = inspect.getsource(method)
+        assert "_DENSE_RAW_CTE" in source
+        assert "embedding <=> CAST" not in source
 
 
 @pytest.mark.parametrize("hybrid", [True, False])
@@ -1613,15 +1659,18 @@ async def test_dense_query_filters_project_id_and_casts_halfvec(hybrid):
 @pytest.mark.parametrize("hybrid", [True, False])
 async def test_threshold_is_applied_outside_the_ann_scan(hybrid):
     """`relaxed_order` returns rows slightly out of order, so the rank is
-    assigned and the gate applied OUTSIDE the scan, over a re-sort."""
+    assigned and the gate applied OUTSIDE the scan, over a re-sort. The scan's
+    row count is carried out with every row, even when the gate rejects all."""
     sql, params, _ = await _dense_sql(hybrid)
     body, after = _cte_body(sql, "dense_raw")
     assert ":threshold" not in body
     assert "distance < :threshold" in after
+    assert "COUNT(*) AS dense_raw_n FROM dense_raw" in after
+    assert "FROM dense_n n\n            LEFT JOIN" in after
     if hybrid:
         assert "ROW_NUMBER() OVER (ORDER BY distance, id) AS d_rank" in after
     else:
-        assert "ORDER BY distance ASC, id" in after
+        assert "ORDER BY d.distance ASC, d.id" in after
     assert params["threshold"] == settings.similarity_threshold
 
 
@@ -1645,7 +1694,7 @@ def test_hnsw_settings_sql_refuses_anything_but_an_int():
     so a non-int must never reach the f-string."""
     from app.services.chat_service import _hnsw_settings_sql
 
-    for bad in ("200; DROP TABLE papers", 200.0, None):
+    for bad in ("200; DROP TABLE papers", 200.0, None, True):
         with pytest.raises(TypeError):
             _hnsw_settings_sql(bad)
     with patch.object(settings, "hnsw_ef_search", "200"), pytest.raises(TypeError):
@@ -1663,18 +1712,24 @@ def test_hnsw_ef_search_is_clamped_to_pgvectors_maximum():
 
 @pytest.mark.parametrize("hybrid", [True, False])
 async def test_hnsw_settings_are_set_before_every_dense_query(hybrid):
-    """SET LOCAL lasts until the transaction ends, so the three statements run
-    on the same session immediately before the dense query, every time."""
+    """A GLOBAL call: SET LOCAL lasts until the transaction ends, so the three
+    statements run on the same session immediately before the dense query."""
     from app.services.chat_service import ChatService, PaperInfo, _hnsw_settings_sql
 
     papers = [PaperInfo(paper_id="p1", title="A"), PaperInfo(paper_id="p2", title="B")]
-    db = _mock_db_returning_no_rows()
+    db = _mock_db_returning(1000)
     with (
         patch.object(settings, "hybrid_retrieval", hybrid),
         patch.object(settings, "hybrid_dense_pool", 300),
     ):
         await ChatService()._retrieve_paper_chunks(
-            db, papers, [0.0] * 768, "q", project_id="proj-1"
+            db,
+            papers,
+            [0.0] * 768,
+            "q",
+            project_id="proj-1",
+            exact=False,
+            guarantee_per_paper=0,
         )
         calls = [str(c.args[0]) for c in db.execute.await_args_list]
         dense_pool = _candidate_calls(db)[0].args[1]["dense_pool"]
@@ -1682,14 +1737,82 @@ async def test_hnsw_settings_are_set_before_every_dense_query(hybrid):
 
     assert calls[:3] == expected
     assert len(calls) == 4
+    assert "enable_indexscan" not in " ".join(calls)
     # ef_search = max(hnsw_ef_search=200, dense pool).
     assert dense_pool == (300 if hybrid else settings.max_context_chunks)
     assert expected[1] == f"SET LOCAL hnsw.ef_search = {max(200, dense_pool)}"
 
 
-async def test_a_widened_mention_turn_sets_hnsw_before_both_dense_queries():
-    """The widened path runs two dense queries on two sessions; each needs its
-    own SET LOCAL, because each session is its own transaction."""
+@pytest.mark.parametrize("hybrid", [True, False])
+async def test_a_scoped_call_scans_exactly_and_never_touches_hnsw(hybrid):
+    """An explicit scope (mentions, resolver, one paper) is a tiny slice of a
+    project-agnostic index whose filters apply after the graph walk, so HNSW
+    could return it short with nothing saying so. It takes the exact scan."""
+    from app.services.chat_service import ChatService, PaperInfo
+
+    papers = [PaperInfo(paper_id="p1", title="A"), PaperInfo(paper_id="p2", title="B")]
+    db = _mock_db_returning(3)  # short, and still no re-run: exact is exact
+    with patch.object(settings, "hybrid_retrieval", hybrid):
+        await ChatService()._retrieve_paper_chunks(
+            db, papers, [0.0] * 768, "q", project_id="proj-1", exact=True
+        )
+
+    calls = [str(c.args[0]) for c in db.execute.await_args_list]
+    assert calls[0] == "SET LOCAL enable_indexscan = off"
+    assert not any("hnsw." in c for c in calls)
+    assert len(_candidate_calls(db)) == 1
+
+
+@pytest.mark.parametrize("hybrid", [True, False])
+async def test_a_short_global_hnsw_scan_re_runs_exact(hybrid):
+    """Fewer than `dense_pool` rows from the HNSW scan means the project is
+    smaller than the pool (exact is cheap) or the scan hit max_scan_tuples
+    (exact is correct). Either way the same query runs again, exact."""
+    from app.services.chat_service import ChatService, PaperInfo, _hnsw_settings_sql
+
+    papers = [PaperInfo(paper_id="p1", title="A"), PaperInfo(paper_id="p2", title="B")]
+    db = _mock_db_returning(7)  # dense_raw_n = 7 < any pool
+    with patch.object(settings, "hybrid_retrieval", hybrid):
+        chunks = await ChatService()._retrieve_paper_chunks(
+            db, papers, [0.0] * 768, "q", project_id="proj-1", exact=False
+        )
+
+    calls = [str(c.args[0]) for c in db.execute.await_args_list]
+    first, second = _candidate_calls(db)
+    pool = first.args[1]["dense_pool"]
+    assert calls == [
+        *_hnsw_settings_sql(pool),
+        str(first.args[0]),
+        "SET LOCAL enable_indexscan = off",
+        str(second.args[0]),
+    ]
+    assert first.args == second.args
+    assert len(chunks) == 7
+
+
+async def test_the_placeholder_row_of_an_all_gated_scan_never_reaches_the_model():
+    """`dense_n` is LEFT JOINed so the count survives a gate that rejects
+    every row; that placeholder (NULL id) must be dropped."""
+    from app.services.chat_service import ChatService, PaperInfo
+
+    placeholder = MagicMock(id=None, dense_raw_n=settings.hybrid_dense_pool)
+    result = MagicMock()
+    result.fetchall.return_value = [placeholder]
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=result)
+    papers = [PaperInfo(paper_id="p1", title="A"), PaperInfo(paper_id="p2", title="B")]
+    with patch.object(settings, "hybrid_retrieval", False):
+        chunks = await ChatService()._retrieve_paper_chunks(
+            db, papers, [0.0] * 768, "q", project_id="proj-1", exact=False
+        )
+
+    assert chunks == []
+    assert len(_candidate_calls(db)) == 1  # a full scan: no fallback
+
+
+async def test_a_widened_mention_turn_scans_the_scope_exactly_and_the_library_by_hnsw():
+    """The scoped query is exact; the widened fill spans the whole library and
+    takes HNSW. Two sessions, two transactions, each sets its own path."""
     from app.services.chat_service import ChatService, PaperInfo
 
     scope = [PaperInfo(paper_id="pA", title="A"), PaperInfo(paper_id="pB", title="B")]
@@ -1700,10 +1823,14 @@ async def test_a_widened_mention_turn_sets_hnsw_before_both_dense_queries():
             scope, library, [0.0] * 768, "compare", True, project_id="proj-1"
         )
 
-    kinds = ["SET" if _is_set(c.args[0]) else "Q" for c in db.execute.await_args_list]
-    # scoped dense, guarantee (exact scan, no SETs needed), fill dense
-    assert kinds == ["SET", "SET", "SET", "Q", "Q", "SET", "SET", "SET", "Q"]
-    assert all(c.args[1]["project_id"] == "proj-1" for c in _candidate_calls(db)[::2])
+    kinds = []
+    for c in db.execute.await_args_list:
+        sql = str(c.args[0])
+        kinds.append("EXACT" if "enable_indexscan" in sql else "HNSW" if "hnsw." in sql else "Q")
+    # scoped dense (exact), guarantee, fill dense (HNSW: three SETs)
+    assert kinds == ["EXACT", "Q", "Q", "HNSW", "HNSW", "HNSW", "Q"]
+    first, _, fill = _candidate_calls(db)
+    assert first.args[1]["project_id"] == fill.args[1]["project_id"] == "proj-1"
 
 
 @pytest.mark.parametrize("hybrid", [True, False])
@@ -1727,6 +1854,7 @@ async def test_a_single_paper_scope_never_issues_the_guarantee_query(hybrid):
             "q",
             guarantee_per_paper=settings.mention_per_paper_floor,
             project_id="proj-1",
+            exact=True,
         )
 
     assert len(_candidate_calls(mock_db)) == 1
@@ -1781,7 +1909,7 @@ async def test_a_guaranteed_candidate_never_outranks_a_genuinely_better_chunk():
 
     db = _sequenced_db(ranked, guaranteed)
     chunks = await svc._retrieve_paper_chunks(
-        db, papers, [0.0] * 768, "q", guarantee_per_paper=floor, project_id="proj-1"
+        db, papers, [0.0] * 768, "q", guarantee_per_paper=floor, project_id="proj-1", exact=True
     )
 
     assert [c.paper_id for c in chunks] == ["pA"] * 3 + ["pB"] * floor
@@ -1813,6 +1941,7 @@ async def test_the_candidate_pool_never_scales_with_library_size():
         query_text,
         *,
         project_id,
+        exact,
         pool_limit=None,
         guarantee_per_paper=0,
         reranker=None,
@@ -1892,6 +2021,7 @@ async def test_a_widened_turn_that_lands_no_library_chunk_is_not_reported_widene
         query_text,
         *,
         project_id,
+        exact,
         pool_limit=None,
         guarantee_per_paper=0,
         reranker=None,
@@ -2444,7 +2574,7 @@ async def test_the_rerank_changes_which_chunks_reach_the_model():
 
     with patch.object(settings, "max_context_chunks", 60):
         chunks = await svc._retrieve_paper_chunks(
-            mock_db, papers, [0.0] * 768, "q", reranker=spy, project_id="proj-1"
+            mock_db, papers, [0.0] * 768, "q", reranker=spy, project_id="proj-1", exact=False
         )
 
     assert chunks[0].text == "p1 chunk 69"
@@ -2467,6 +2597,7 @@ async def test_a_failing_reranker_leaves_the_fused_selection_untouched():
             "q",
             reranker=None,
             project_id="proj-1",
+            exact=False,
         )
         degraded = await svc._retrieve_paper_chunks(
             _hybrid_db(_dense_rows(70)),
@@ -2475,6 +2606,7 @@ async def test_a_failing_reranker_leaves_the_fused_selection_untouched():
             "q",
             reranker=_SpyReranker(order=None),
             project_id="proj-1",
+            exact=False,
         )
 
     assert [c.text for c in degraded] == [c.text for c in baseline]
@@ -2492,7 +2624,7 @@ async def test_the_dense_only_path_never_reranks():
 
     with patch.object(settings, "hybrid_retrieval", False):
         await svc._retrieve_paper_chunks(
-            mock_db, papers, [0.0] * 768, "q", reranker=spy, project_id="proj-1"
+            mock_db, papers, [0.0] * 768, "q", reranker=spy, project_id="proj-1", exact=False
         )
 
     assert spy.calls == []
@@ -2513,7 +2645,7 @@ async def test_only_rerank_candidates_documents_are_sent():
         patch.object(settings, "max_context_chunks", 60),
     ):
         await svc._retrieve_paper_chunks(
-            mock_db, papers, [0.0] * 768, "q", reranker=spy, project_id="proj-1"
+            mock_db, papers, [0.0] * 768, "q", reranker=spy, project_id="proj-1", exact=False
         )
 
     assert len(spy.calls) == 1
@@ -2529,7 +2661,13 @@ async def test_the_reranker_is_given_the_question_and_the_chunk_text():
     spy = _SpyReranker(order=[0])
 
     await svc._retrieve_paper_chunks(
-        mock_db, papers, [0.0] * 768, "what reward function", reranker=spy, project_id="proj-1"
+        mock_db,
+        papers,
+        [0.0] * 768,
+        "what reward function",
+        reranker=spy,
+        project_id="proj-1",
+        exact=False,
     )
 
     assert spy.calls[0]["query"] == "what reward function"
@@ -2558,6 +2696,7 @@ async def test_single_paper_scope_cuts_before_the_rerank_sees_the_list():
             "q",
             reranker=spy,
             project_id="proj-1",
+            exact=False,
         )
 
     assert len(spy.calls[0]["documents"]) == 30
@@ -2580,7 +2719,14 @@ async def test_guaranteed_rows_are_never_sent_to_the_reranker():
     spy = _SpyReranker(order=[0])
 
     chunks = await svc._retrieve_paper_chunks(
-        db, scope, [0.0] * 768, "q", guarantee_per_paper=2, reranker=spy, project_id="proj-1"
+        db,
+        scope,
+        [0.0] * 768,
+        "q",
+        guarantee_per_paper=2,
+        reranker=spy,
+        project_id="proj-1",
+        exact=True,
     )
 
     sent = spy.calls[0]["documents"]
@@ -2637,7 +2783,9 @@ async def test_every_retrieval_query_selects_section_and_page():
     # Dense-only path: one SELECT, no outer projection to lose them in.
     db = _mock_db_returning(0)
     with patch.object(settings, "hybrid_retrieval", False):
-        await svc._retrieve_paper_chunks(db, papers, [0.0] * 768, "q", project_id="proj-1")
+        await svc._retrieve_paper_chunks(
+            db, papers, [0.0] * 768, "q", project_id="proj-1", exact=False
+        )
     dense_only_sql = db.execute.call_args.args[0].text
     assert "c.text, c.section, c.page," in dense_only_sql
 
@@ -2645,7 +2793,9 @@ async def test_every_retrieval_query_selects_section_and_page():
     # three have to carry the columns.
     db = _mock_db_returning(0)
     with patch.object(settings, "hybrid_retrieval", True):
-        await svc._retrieve_paper_chunks(db, papers, [0.0] * 768, "q", project_id="proj-1")
+        await svc._retrieve_paper_chunks(
+            db, papers, [0.0] * 768, "q", project_id="proj-1", exact=False
+        )
     hybrid_sql = db.execute.call_args.args[0].text
     dense_arm, sep, rest = hybrid_sql.partition("sparse AS (")
     assert sep, "hybrid query no longer has a sparse arm -- this test is stale"
@@ -2659,7 +2809,7 @@ async def test_every_retrieval_query_selects_section_and_page():
     # column by name, which is exactly where they are easiest to drop.
     db = _sequenced_db([], [])
     await svc._retrieve_paper_chunks(
-        db, papers, [0.0] * 768, "q", guarantee_per_paper=2, project_id="proj-1"
+        db, papers, [0.0] * 768, "q", guarantee_per_paper=2, project_id="proj-1", exact=True
     )
     guarantee_sql = db.execute.call_args_list[-1].args[0].text
     ranked_cte, sep, guarantee_outer = guarantee_sql.partition("SELECT id, paper_id")

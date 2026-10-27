@@ -157,6 +157,7 @@ class AnswerGenerator:
                     embedding,
                     question,
                     project_id=project_id,
+                    exact=False,
                     reranker=self._chat._reranker,
                     fusion_scorer=self._chat._fusion_scorer,
                 )
