@@ -468,3 +468,101 @@ async def test_ingested_chunks_carry_the_papers_project(db_session, project):
             .all()
         )
     assert rows and all(r.project_id == project.id for r in rows)
+
+
+# ── fix round 1 ──────────────────────────────────────────────────────────────
+
+
+async def test_same_bytes_other_failed_paper_raises_duplicate_source(db_session, project):
+    """Deliberate: the unique index allows one row per hash whatever its
+    status, so a FAILED holder blocks the bytes too. The fix is to retry it."""
+    a_id = (await _paper(db_session, project, "Broken copy")).id
+    b_id = (await _paper(db_session, project, "New copy")).id
+    with pytest.raises(RuntimeError):
+        await _ingest(db_session, a_id, embed=AsyncMock(side_effect=RuntimeError("x")))
+    assert (await _fresh(a_id)).status == PaperStatus.FAILED
+    with pytest.raises(svc.DuplicateSource) as caught:
+        await _ingest(db_session, b_id)
+    assert (caught.value.paper_id, caught.value.title) == (a_id, "Broken copy")
+
+
+async def test_reupload_after_an_embedding_model_change_reindexes(db_session, project):
+    """Ready under the same hash but nothing searchable at the configured
+    model: re-index, never report a silent 0."""
+    pid = (await _paper(db_session, project, "A")).id
+    await _ingest(db_session, pid)
+    embed = _embed_ok()
+    with patch.object(settings, "embedding_model", "some-new-model"):
+        n = await _ingest(db_session, pid, embed=embed)
+        assert await svc.stored_chunk_count(db_session, pid) == n
+    assert embed.await_count == 1
+    assert n > 0
+
+
+async def test_a_noop_retry_and_a_duplicate_do_not_charge_the_meter(
+    client, db_session, you, project, monkeypatch
+):
+    from app.db.models import UsageEvent
+
+    monkeypatch.setattr(settings, "user_ingests_per_day", 5)
+    a = await _create(client, you, project, "Original")
+    b = await _create(client, you, project, "Copy")
+    with patch.object(svc._embedding_svc, "embed_batch", _embed_ok()):
+        assert (await _upload(client, you, project, a)).status_code == 200
+        assert (await _upload(client, you, project, a)).status_code == 200
+        assert (await _upload(client, you, project, b)).status_code == 409
+    events = (await db_session.execute(select(UsageEvent))).scalars().all()
+    assert len(events) == 1
+
+
+async def test_url_route_noop_retry_commits_the_resolved_url(client, db_session, you, project):
+    data = b"%PDF-ish bytes served by a mirror"
+    pid = await _create(client, you, project, "Original")
+    await _ingest(db_session, pid, data)
+    embed = _embed_ok()
+    with (
+        patch.object(svc._embedding_svc, "embed_batch", embed),
+        patch(
+            "app.services.paper_fetch_service.fetch_pdf",
+            new=AsyncMock(return_value=(data, "https://mirror.example.org/p.pdf")),
+        ),
+        patch.object(settings, "feature_paper_url", True),
+    ):
+        r = await client.post(
+            f"/v1/projects/{project.id}/papers/{pid}/ingest-from-url",
+            json={"url": "https://example.org/p.pdf"},
+            headers={"X-Dev-User-Id": you.id},
+        )
+    assert r.status_code == 200
+    assert r.json()["chunks_stored"] > 0
+    assert embed.await_count == 0
+    assert (await _fresh(pid)).resolved_pdf_url == "https://mirror.example.org/p.pdf"
+
+
+async def test_a_manual_create_race_is_a_409_not_a_500(client, db_session, you, project):
+    """Two identical manual entries that both pass the existence check: the
+    unique index catches the second, which is mapped to the same 409."""
+    body = {"title": "M", "source": "manual", "abstract": "Same.", "body": "Text."}
+    headers = {"X-Dev-User-Id": you.id}
+    real = svc._find_holder
+    calls = []
+
+    async def blind_first(*args):
+        calls.append(args)
+        return None if len(calls) == 1 else await real(*args)
+
+    with (
+        patch.object(settings, "feature_manual_papers", True),
+        patch.object(svc._embedding_svc, "embed_batch", _embed_ok()),
+    ):
+        first = await client.post(f"/v1/projects/{project.id}/papers", json=body, headers=headers)
+        assert first.status_code == 201
+        with patch.object(svc, "_find_holder", blind_first):
+            r = await client.post(
+                f"/v1/projects/{project.id}/papers", json={**body, "title": "M2"}, headers=headers
+            )
+    assert r.status_code == 409
+    assert r.json()["detail"]["paper_id"] == first.json()["id"]
+    async with SessionLocal() as db:
+        titles = (await db.execute(select(Paper.title))).scalars().all()
+    assert titles == ["M"]

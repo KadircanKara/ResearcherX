@@ -354,7 +354,8 @@ class ChatService:
                 with observability.span("chat.load", parent=turn):
                     conv = await self._conv_svc.get_conversation(db, conversation_id)
                     # This project's READY papers. A pending or failed paper
-                    # has no chunks, so it is out of retrieval scope AND out
+                    # is not searchable (a failed RE-upload may even keep its
+                    # old chunks), so it is out of retrieval scope AND out
                     # of the PAPERS block: listing it would invite questions
                     # that have no evidence. A mention of one still validates
                     # (it is in the project) and widens like a deleted one.

@@ -87,16 +87,34 @@ async def _find_holder(
     return (row[0], row[1]) if row is not None else None
 
 
-async def check_duplicate(db: AsyncSession, paper_id: str, data: bytes) -> None:
-    """Raise `DuplicateSource` when `data` is already another paper of this
-    paper's project. For the upload route, which must refuse BEFORE it stores
-    the file; `ingest` runs the same check itself."""
-    project_id = (
-        await db.execute(select(Paper.project_id).where(Paper.id == paper_id))
-    ).scalar_one()
-    holder = await _find_holder(db, project_id, source_hash(data), paper_id)
+async def _unchanged_count(db: AsyncSession, paper: Paper, digest: str) -> int | None:
+    """The stored chunk count when `paper` is already `ready` under `digest`
+    AND searchable under the configured embedding model; None when the work
+    must run. Only a ready row qualifies, so a failed or crashed ingest is
+    retried in full, and a ready paper with no chunks at the configured model
+    (an embedding-model change) is re-indexed rather than reported as 0."""
+    if paper.status != PaperStatus.READY or paper.source_hash != digest:
+        return None
+    n = await stored_chunk_count(db, paper.id)
+    return n if n > 0 else None
+
+
+async def precheck_source(db: AsyncSession, paper_id: str, data: bytes) -> int | None:
+    """What `ingest` would decide about `data` before doing any work.
+
+    Raises `DuplicateSource` when the bytes are already ANOTHER paper of
+    this paper's project; returns the stored chunk count when they are this
+    paper's own unchanged, searchable source; None when ingest must run. For
+    the routes, so a refused or no-op upload is answered before the file is
+    stored or the daily ingest meter is charged. `ingest` decides again
+    itself; this is a peek, not a reservation.
+    """
+    paper = (await db.execute(select(Paper).where(Paper.id == paper_id))).scalar_one()
+    digest = source_hash(data)
+    holder = await _find_holder(db, paper.project_id, digest, paper_id)
     if holder is not None:
         raise DuplicateSource(*holder)
+    return await _unchanged_count(db, paper, digest)
 
 
 async def stored_chunk_count(db: AsyncSession, paper_id: str) -> int:
@@ -267,8 +285,14 @@ async def ingest(
     the new hash before anything is parsed, `index_chunks` flips it `ready`
     with its chunks, and any exception marks it `failed` and re-raises. Only
     a `ready` row short-circuits, so a failed or crashed ingest is retried
-    in full. A re-upload after an embedding-model change is not re-embedded
-    here; that is `scripts/reindex_papers`'s job.
+    in full, and so is a ready paper with no chunks under the configured
+    embedding model (a re-upload after a model change re-indexes).
+
+    A CANCELLED ingest (client disconnect: `CancelledError` is not an
+    `Exception`) is not caught and stays `pending` -- excluded from
+    retrieval, listed in the Papers tab, retryable. After a failure the
+    caller's session has been ROLLED BACK, so every ORM object it loaded is
+    expired: read ids before calling, never attributes after a raise.
 
     One trace per ingest: extraction, every embedding batch and the metadata
     call nest under it.
@@ -284,8 +308,8 @@ async def ingest(
     ) as span:
         digest = source_hash(file_bytes)
         paper = (await db.execute(select(Paper).where(Paper.id == paper_id))).scalar_one()
-        if paper.status == PaperStatus.READY and paper.source_hash == digest:
-            n = await stored_chunk_count(db, paper_id)
+        n = await _unchanged_count(db, paper, digest)
+        if n is not None:
             log.info("paper_ingest_unchanged", paper_id=paper_id, chunks=n)
             observability.set_attributes(
                 span, {"langfuse.trace.metadata.chunks": n, "langfuse.trace.metadata.skipped": True}
@@ -396,6 +420,8 @@ async def index_manual(
     body = body or ""
     paper = (await db.execute(select(Paper).where(Paper.id == paper_id))).scalar_one()
     title = paper.title
+    project_id = paper.project_id
+    digest: str | None = None
     if paper.source == PaperSource.MANUAL:
         digest = manual_source_hash(abstract, body)
         if digest is not None:
@@ -407,4 +433,16 @@ async def index_manual(
     if abstract and abstract.strip() and _norm(abstract) not in _norm(body):
         records.append(ChunkRecord(text=abstract.strip(), section=(), page=None, kind="abstract"))
     records += await asyncio.to_thread(chunk_records_for_markdown, body)
-    return await index_chunks(db, paper_id, records, title=title)
+    try:
+        return await index_chunks(db, paper_id, records, title=title)
+    except IntegrityError:
+        # Two identical manual entries that both passed the check above: the
+        # unique index is the backstop, and the loser gets the same
+        # DuplicateSource as the check would have raised, not a 500.
+        await db.rollback()
+        holder = (
+            await _find_holder(db, project_id, digest, paper_id) if digest is not None else None
+        )
+        if holder is None:
+            raise
+        raise DuplicateSource(*holder) from None

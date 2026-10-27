@@ -510,11 +510,25 @@ async def ingest_paper(
         text_extraction.format_for_extension(ext)
     except text_extraction.UnsupportedFileType as exc:
         raise HTTPException(status_code=422, detail=exc.message) from None
-    await usage_service.enforce_ingest(db, user)
     paper = await db.get(Paper, paper_id)
     if paper is None or paper.project_id != project_id:
         raise HTTPException(status_code=404, detail="Paper not found")
     file_bytes = await _read_capped_body(request)
+
+    from app.services.paper_ingest_service import DuplicateSource, ingest, precheck_source
+
+    # Decided BEFORE the meter is charged and before the file is stored. A
+    # file that is already ANOTHER paper of this project is refused (it is not
+    # this paper's file); a retry of this paper's own unchanged, searchable
+    # file is answered from the stored count. Neither is paid work. `ingest`
+    # decides again itself.
+    try:
+        unchanged = await precheck_source(db, paper_id, file_bytes)
+    except DuplicateSource as exc:
+        raise _duplicate_source(exc) from None
+    if unchanged is not None:
+        return {"chunks_stored": unchanged}
+    await usage_service.enforce_ingest(db, user)
 
     # Content is confirmed against the extension BEFORE anything is stored:
     # a refused file is not the user's paper, and a .docx's decompression
@@ -524,15 +538,6 @@ async def ingest_paper(
         file_format = await run_in_threadpool(text_extraction.detect_format, ext, file_bytes)
     except (text_extraction.UnsupportedFileType, text_extraction.UnreadableFile) as exc:
         raise HTTPException(status_code=422, detail=exc.message) from None
-
-    from app.services.paper_ingest_service import DuplicateSource, check_duplicate, ingest
-
-    # A file that is already ANOTHER paper of this project is refused before
-    # it is stored: it is not this paper's file. `ingest` checks again.
-    try:
-        await check_duplicate(db, paper_id, file_bytes)
-    except DuplicateSource as exc:
-        raise _duplicate_source(exc) from None
 
     # Stored BEFORE extraction, deliberately. Keeping the user's own file is
     # the whole point of this table, and extraction is the part that fails --
@@ -633,7 +638,7 @@ async def ingest_paper_from_url(
         raise HTTPException(status_code=404, detail="Paper not found")
 
     from app.services.paper_fetch_service import UnsafeUrl, fetch_pdf, PaywallError
-    from app.services.paper_ingest_service import DuplicateSource, ingest
+    from app.services.paper_ingest_service import DuplicateSource, ingest, precheck_source
 
     try:
         pdf_bytes, served_by = await fetch_pdf(body.url)
@@ -653,10 +658,23 @@ async def ingest_paper_from_url(
                 "message": "No open-access version found. Upload the PDF directly.",
             },
         )
+    # Unlike the upload route, the meter is charged BEFORE this check: the
+    # bytes do not exist until the fetch, and the fetch is part of the
+    # metered work. The check still runs before any extraction or embedding.
+    try:
+        unchanged = await precheck_source(db, paper_id, pdf_bytes)
+    except DuplicateSource as exc:
+        raise _duplicate_source(exc) from None
+
     # Recorded only when it DIFFERS: a null means "the URL the user pasted
     # served the file", which is the common case and needs no second copy.
     if served_by != body.url:
         paper.resolved_pdf_url = served_by
+    if unchanged is not None:
+        # `ingest` would return without a commit on this path, so the URL
+        # that served the file is committed here or lost.
+        await db.commit()
+        return {"chunks_stored": unchanged}
 
     try:
         n = await ingest(db, paper_id, pdf_bytes, source_url=body.url)
