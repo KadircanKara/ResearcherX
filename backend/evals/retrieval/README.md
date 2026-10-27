@@ -82,7 +82,7 @@ SQL on the exact scan. The plain dense arm (`_SQL`) is NOT production's
 query: it ranks every chunk in the project, with index scans off, because the
 golden-set status check and the threshold sweep need the whole corpus.
 
-One divergence remains:
+One further divergence, beside that tsquery swap:
 
 - **Query reformulation.** Production (`chat_service.py`) reformulates the
   query through a `QueryReformulatorAgent` only when the conversation has
@@ -321,7 +321,7 @@ run, because rows nobody needs cost no answer. `max_scan_tuples` stayed at
 | 400 | 2 (`drrt-xeon-disks`, `myerson-auction-payment`) | 84/90 | 11.6 / 88 | 16.2 / 20.0 | 1 |
 | **600** | **0** | 82/90 | 5.8 / 34 | 20.6 / 25.7 | **0** |
 
-Exact search cost 376–391 ms p50 (p95 398–431) in every run, so HNSW at 600
+Exact search cost 376–391 ms p50 (p95 398–489) in every run, so HNSW at 600
 is about 18x faster. Latency is per dense query, timed in the harness
 (tracing was not used): the `SET LOCAL`s, the query, and any fallback.
 
@@ -345,6 +345,12 @@ the first value that passes. It costs about 8 ms p50 per dense query over 200.
 A confirmation run at the new default, with no env override, reproduced the
 600 row exactly (0 misses, 82/90 differing, exit 0), at p50 21.6 / p95
 26.8 ms against exact search's 387.7 / 489.1 ms.
+
+ef_search 600 was validated at 100k chunks and 90 positives only. Re-run
+`--exact` at scale before trusting it for a 1–2M-chunk project. The migration
+that builds the index (`a1b2c3d4e5f7`) spends about 83 s rewriting the chunk
+table and building HNSW, and it runs at backend startup, so deploy it while
+chat is idle.
 
 ### Measured — 2026-08-12 [old golden set, pre-2026-10-27]
 
