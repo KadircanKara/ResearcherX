@@ -25,7 +25,8 @@ def test_loads_a_content_case(tmp_path: Path):
             "cases": [
                 {
                     "id": "c1",
-                    "kind": "content",
+                    "kind": "paraphrase",
+                    "split": "tune",
                     "question": "What about revisit time?",
                     "paper_title_contains": "Joint Optimization",
                     "expect_substrings": ["revisit time"],
@@ -45,7 +46,9 @@ def test_loads_an_off_topic_case(tmp_path: Path):
         tmp_path,
         {
             "version": 1,
-            "cases": [{"id": "n1", "kind": "off_topic", "question": "Recipe for cake?"}],
+            "cases": [
+                {"id": "n1", "kind": "off_topic", "split": "tune", "question": "Recipe for cake?"}
+            ],
         },
     )
     cases = load_golden_set(path)
@@ -65,6 +68,7 @@ def test_rejects_off_topic_case_carrying_expectations(tmp_path: Path):
                 {
                     "id": "bad",
                     "kind": "off_topic",
+                    "split": "tune",
                     "question": "Recipe?",
                     "expect_substrings": ["cake"],
                 }
@@ -83,7 +87,8 @@ def test_rejects_content_case_without_expectations(tmp_path: Path):
             "cases": [
                 {
                     "id": "bad",
-                    "kind": "content",
+                    "kind": "paraphrase",
+                    "split": "tune",
                     "question": "What?",
                     "paper_title_contains": "Joint",
                 }
@@ -124,7 +129,8 @@ def test_rejects_duplicate_ids(tmp_path: Path):
     """
     case = {
         "id": "zzz-repeat",
-        "kind": "content",
+        "kind": "paraphrase",
+        "split": "tune",
         "question": "q",
         "paper_title_contains": "X",
         "expect_substrings": ["y"],
@@ -146,7 +152,8 @@ def test_rejects_non_list_expect_substrings(tmp_path: Path):
             "cases": [
                 {
                     "id": "bad",
-                    "kind": "content",
+                    "kind": "paraphrase",
+                    "split": "tune",
                     "question": "q",
                     "paper_title_contains": "X",
                     "expect_substrings": "revisit time",
@@ -179,7 +186,8 @@ def test_rejects_whitespace_only_title(tmp_path: Path):
             "cases": [
                 {
                     "id": "bad",
-                    "kind": "content",
+                    "kind": "paraphrase",
+                    "split": "tune",
                     "question": "q",
                     "paper_title_contains": "   ",
                     "expect_substrings": ["y"],
@@ -203,7 +211,8 @@ def test_rejects_empty_string_expect_substrings_element(tmp_path: Path):
             "cases": [
                 {
                     "id": "bad",
-                    "kind": "content",
+                    "kind": "paraphrase",
+                    "split": "tune",
                     "question": "q",
                     "paper_title_contains": "X",
                     "expect_substrings": [""],
@@ -225,7 +234,8 @@ def test_rejects_whitespace_only_expect_substrings_element(tmp_path: Path):
             "cases": [
                 {
                     "id": "bad",
-                    "kind": "content",
+                    "kind": "paraphrase",
+                    "split": "tune",
                     "question": "q",
                     "paper_title_contains": "X",
                     "expect_substrings": ["revisit time", " "],
@@ -250,7 +260,8 @@ def test_rejects_non_string_expect_substrings_element(tmp_path: Path):
             "cases": [
                 {
                     "id": "bad",
-                    "kind": "content",
+                    "kind": "paraphrase",
+                    "split": "tune",
                     "question": "q",
                     "paper_title_contains": "X",
                     "expect_substrings": [123],
@@ -277,7 +288,8 @@ def test_expect_substrings_elements_are_stored_stripped(tmp_path: Path):
             "cases": [
                 {
                     "id": "c1",
-                    "kind": "content",
+                    "kind": "paraphrase",
+                    "split": "tune",
                     "question": "q",
                     "paper_title_contains": "Joint Optimization",
                     "expect_substrings": ["  revisit time  "],
@@ -300,7 +312,8 @@ def test_loads_a_case_with_multiple_valid_substrings(tmp_path: Path):
             "cases": [
                 {
                     "id": "c1",
-                    "kind": "content",
+                    "kind": "paraphrase",
+                    "split": "tune",
                     "question": "q",
                     "paper_title_contains": "Joint Optimization",
                     "expect_substrings": ["revisit time", "coverage"],
@@ -318,7 +331,7 @@ def test_rejects_dict_valued_cases(tmp_path: Path):
     'cases' must be a list' branch that the non-dict-entry test doesn't."""
     path = _write(
         tmp_path,
-        {"version": 1, "cases": {"c1": {"id": "c1", "kind": "content"}}},
+        {"version": 1, "cases": {"c1": {"id": "c1", "kind": "paraphrase", "split": "tune"}}},
     )
     with pytest.raises(GoldenSetError, match="'cases' must be a list"):
         load_golden_set(path)
@@ -328,7 +341,7 @@ def test_satisfies_requires_all_substrings():
     """All, not any — one common word must not carry a case."""
     case = Case(
         id="c",
-        kind="content",
+        kind="paraphrase",
         question="q",
         paper_title_contains="Joint Optimization",
         expect_substrings=("revisit time", "coverage"),
@@ -341,7 +354,7 @@ def test_satisfies_requires_all_substrings():
 def test_satisfies_is_case_insensitive():
     case = Case(
         id="c",
-        kind="content",
+        kind="paraphrase",
         question="q",
         paper_title_contains="joint optimization",
         expect_substrings=("REVISIT TIME",),
@@ -353,9 +366,67 @@ def test_satisfies_requires_the_expected_paper():
     """A matching substring in the wrong paper is not a hit."""
     case = Case(
         id="c",
-        kind="content",
+        kind="paraphrase",
         question="q",
         paper_title_contains="Joint Optimization",
         expect_substrings=("revisit time",),
     )
     assert not chunk_satisfies(case, "Cooperative Multi-Target Search", "revisit time")
+
+
+def _case(**over):
+    base = {
+        "id": "k1",
+        "kind": "paraphrase",
+        "split": "tune",
+        "question": "How does CBBA allocate tasks?",
+        "paper_title_contains": "Joint",
+        "expect_substrings": ["bundle"],
+    }
+    base.update(over)
+    return base
+
+
+def _load(tmp_path: Path, *cases: dict, split: str = "all"):
+    return load_golden_set(_write(tmp_path, {"version": 2, "cases": list(cases)}), split=split)
+
+
+def test_paraphrase_keyword_requires_keyword(tmp_path: Path):
+    with pytest.raises(GoldenSetError, match="pk1"):
+        _load(tmp_path, _case(id="pk1", kind="paraphrase_keyword"))
+
+
+def test_keyword_field_rejected_on_other_kinds(tmp_path: Path):
+    with pytest.raises(GoldenSetError, match="k1"):
+        _load(tmp_path, _case(kind="paraphrase", keyword="CBBA"))
+
+
+def test_keyword_must_appear_in_question(tmp_path: Path):
+    with pytest.raises(GoldenSetError, match="keyword"):
+        _load(tmp_path, _case(kind="keyword", keyword="PSO"))
+    cases = _load(tmp_path, _case(kind="keyword", keyword="cbba"))
+    assert cases[0].keyword == "cbba"
+
+
+def test_split_must_be_tune_or_test(tmp_path: Path):
+    with pytest.raises(GoldenSetError, match="split"):
+        _load(tmp_path, _case(split="train"))
+    missing = _case()
+    del missing["split"]
+    with pytest.raises(GoldenSetError, match="split"):
+        _load(tmp_path, missing)
+
+
+@pytest.mark.parametrize("old", ["content", "metadata", "figure"])
+def test_old_kinds_are_rejected(tmp_path: Path, old: str):
+    with pytest.raises(GoldenSetError, match="kind"):
+        _load(tmp_path, _case(kind=old))
+
+
+def test_load_filters_by_split(tmp_path: Path):
+    cases = [_case(id="a"), _case(id="b", split="test"), _case(id="c")]
+    assert len(_load(tmp_path, *cases)) == 3
+    assert [c.id for c in _load(tmp_path, *cases, split="test")] == ["b"]
+    assert [c.id for c in _load(tmp_path, *cases, split="tune")] == ["a", "c"]
+    with pytest.raises(GoldenSetError, match="split"):
+        _load(tmp_path, *cases, split="bogus")
