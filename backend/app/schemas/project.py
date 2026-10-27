@@ -135,6 +135,12 @@ class PaperOut(BaseModel):
     # its status, so a stuck or failed one can be retried; only `ready`
     # papers are retrieved. `ingest_error` is deliberately NOT exposed.
     status: str
+    # Per index, from `paper_index_status`. Dense: embedded | pending |
+    # failed | none. Keyword: indexed | queued | pending | failed | none,
+    # following `sparse_backend` (`queued` only under bm25s, while the
+    # paper waits for the next background index build).
+    dense_status: str = "none"
+    keyword_status: str = "none"
     created_at: datetime
     model_config = {"from_attributes": True}
 

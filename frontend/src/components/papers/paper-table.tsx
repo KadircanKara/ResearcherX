@@ -7,8 +7,9 @@ import type { Paper } from "@/lib/types";
 /**
  * The library table.
  *
- * Four columns — Paper, Added, Retriever, State — because that is what the
- * API carries: `PaperOut` has no authors and no year.
+ * Six columns — Paper, Added, # Chunks, Embeddings, Keyword, State — because
+ * that is what the API carries: `PaperOut` has no authors and no year, and it
+ * reports where each paper stands in the dense and the keyword index.
  */
 export function PaperTable({
   papers,
@@ -37,10 +38,12 @@ export function PaperTable({
 }) {
   return (
     <div className="rounded-lg border">
-      <div className="hidden grid-cols-[1fr_110px_120px_150px] gap-4 border-b bg-muted/40 px-4 py-2 text-[11px] font-medium uppercase tracking-wide text-muted-foreground md:grid">
+      <div className="hidden grid-cols-[1fr_100px_80px_110px_100px_140px] gap-4 border-b bg-muted/40 px-4 py-2 text-[11px] font-medium uppercase tracking-wide text-muted-foreground md:grid">
         <div>Paper</div>
         <div>Added</div>
-        <div>Retriever</div>
+        <div># Chunks</div>
+        <div>Embeddings</div>
+        <div>Keyword</div>
         <div>State</div>
       </div>
       <div>

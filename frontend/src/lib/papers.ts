@@ -1,5 +1,5 @@
 import { formatDate, plural } from "./format";
-import type { Paper } from "./types";
+import type { IndexStatus, Paper } from "./types";
 
 /**
  * What this project can say about a paper's place in the retriever.
@@ -97,9 +97,25 @@ export function libraryHeadline(summary: LibrarySummary): string {
   return `${papers}, ${summary.searchable} of them searchable`;
 }
 
-/** The table's Retriever cell: how much the retriever holds for the paper. */
-export function retrieverLabel(state: PaperState): string {
-  return state.chunks > 0 ? plural(state.chunks, "chunk") : "holds nothing";
+/** A status cell: the word and which dot to draw. */
+export interface StatusCell {
+  label: string;
+  tone: "on" | "idle" | "bad";
+}
+
+const INDEX_CELLS: Record<IndexStatus, StatusCell> = {
+  embedded: { label: "embedded", tone: "on" },
+  indexed: { label: "indexed", tone: "on" },
+  queued: { label: "queued", tone: "idle" },
+  pending: { label: "processing", tone: "idle" },
+  failed: { label: "failed", tone: "bad" },
+  none: { label: "—", tone: "idle" },
+};
+
+/** The table's Embeddings and Keyword cells. An unknown status (an older
+ * server) reads as nothing rather than a claim. */
+export function indexCell(status: IndexStatus | undefined): StatusCell {
+  return (status && INDEX_CELLS[status]) || INDEX_CELLS.none;
 }
 
 /**

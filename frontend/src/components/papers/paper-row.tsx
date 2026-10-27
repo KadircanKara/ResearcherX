@@ -4,7 +4,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { PaperRowBody } from "@/components/papers/paper-row-body";
 import { PaperStateDot } from "@/components/papers/paper-state-dot";
 import { formatDate } from "@/lib/format";
-import { retrieverLabel, sourceLine, type PaperState } from "@/lib/papers";
+import { indexCell, sourceLine, type PaperState } from "@/lib/papers";
 import type { Paper } from "@/lib/types";
 
 /**
@@ -55,7 +55,7 @@ export function PaperRow({
         )}
         <button
           type="button"
-          className="grid flex-1 grid-cols-1 gap-1 rounded-sm text-left outline-none focus-visible:ring-2 focus-visible:ring-ring md:grid-cols-[1fr_110px_120px_150px] md:items-center md:gap-4"
+          className="grid flex-1 grid-cols-1 gap-1 rounded-sm text-left outline-none focus-visible:ring-2 focus-visible:ring-ring md:grid-cols-[1fr_100px_80px_110px_100px_140px] md:items-center md:gap-4"
           onClick={editing ? onToggleSelect : onToggleOpen}
           aria-expanded={isOpen}
           aria-controls={bodyId}
@@ -70,9 +70,17 @@ export function PaperRow({
             <span className="text-muted-foreground md:hidden">Added: </span>
             {formatDate(paper.created_at)}
           </div>
-          <div className="text-[13px] text-muted-foreground">
-            <span className="text-muted-foreground md:hidden">Retriever: </span>
-            {retrieverLabel(state)}
+          <div className="text-[13px] tabular-nums text-muted-foreground">
+            <span className="text-muted-foreground md:hidden"># Chunks: </span>
+            {paper.chunk_count}
+          </div>
+          <div>
+            <span className="text-muted-foreground md:hidden">Embeddings: </span>
+            <PaperStateDot state={indexCell(paper.dense_status)} />
+          </div>
+          <div>
+            <span className="text-muted-foreground md:hidden">Keyword: </span>
+            <PaperStateDot state={indexCell(paper.keyword_status)} />
           </div>
           <div>
             <span className="text-muted-foreground md:hidden">State: </span>

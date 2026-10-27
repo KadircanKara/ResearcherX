@@ -4,13 +4,15 @@ Counted under the configured embedding model only, in one grouped query for
 the whole list -- the Papers page reads it instead of probing each paper.
 """
 
+from datetime import datetime, timedelta, timezone
+
 import pytest_asyncio
 from httpx import AsyncClient
 from sqlalchemy import event, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
-from app.db.models import Paper, PaperChunkEmbedding, Project, ProjectMember, User
+from app.db.models import Bm25IndexState, Paper, PaperChunkEmbedding, Project, ProjectMember, User
 from app.db.seed import seed_users
 from app.db.session import engine
 
@@ -38,7 +40,7 @@ async def project(db_session: AsyncSession, you: User) -> Project:
 async def _add_paper(
     db: AsyncSession, project: Project, title: str, chunks: int, stale: int = 0
 ) -> Paper:
-    paper = Paper(project_id=project.id, title=title, source="upload")
+    paper = Paper(project_id=project.id, title=title, source="upload", status="ready")
     db.add(paper)
     await db.flush()
     for i in range(chunks + stale):
@@ -108,3 +110,46 @@ async def test_query_count_does_not_grow_with_paper_count(
 
     assert with_six == with_one
     assert sum("paper_chunk_embeddings" in s for s in statements) == 1
+
+
+async def _statuses(client: AsyncClient, you: User, project: Project) -> dict[str, tuple]:
+    r = await client.get(f"/v1/projects/{project.id}/papers", headers={"X-Dev-User-Id": you.id})
+    assert r.status_code == 200
+    return {p["title"]: (p["dense_status"], p["keyword_status"]) for p in r.json()}
+
+
+async def test_list_reports_dense_and_keyword_status(
+    client: AsyncClient, db_session: AsyncSession, you: User, project: Project, monkeypatch
+):
+    monkeypatch.setattr(settings, "sparse_backend", "postgres")
+    await _add_paper(db_session, project, "Indexed", chunks=2)
+    await _add_paper(db_session, project, "Scanned", chunks=0)
+    pending = await _add_paper(db_session, project, "Pending", chunks=0)
+    pending.status = "pending"
+    await db_session.commit()
+
+    assert await _statuses(client, you, project) == {
+        "Indexed": ("embedded", "indexed"),
+        "Scanned": ("none", "none"),
+        "Pending": ("pending", "pending"),
+    }
+
+
+async def test_bm25s_keyword_status_waits_for_the_index_build(
+    client: AsyncClient, db_session: AsyncSession, you: User, project: Project, monkeypatch
+):
+    monkeypatch.setattr(settings, "sparse_backend", "bm25s")
+    await _add_paper(db_session, project, "New", chunks=2)
+
+    # No index built yet: the paper is embedded but waits for keyword search.
+    assert await _statuses(client, you, project) == {"New": ("embedded", "queued")}
+
+    db_session.add(
+        Bm25IndexState(
+            project_id=project.id,
+            current_version=1,
+            built_at=datetime.now(timezone.utc) + timedelta(seconds=5),
+        )
+    )
+    await db_session.commit()
+    assert await _statuses(client, you, project) == {"New": ("embedded", "indexed")}

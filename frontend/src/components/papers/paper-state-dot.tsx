@@ -1,14 +1,14 @@
-import type { PaperState } from "@/lib/papers";
+import type { StatusCell } from "@/lib/papers";
 import { cn } from "@/lib/utils";
 
 /**
- * Small state dot + label used in the paper table.
+ * Small dot + label used in the paper table's status cells.
  *
  * Both words come from `lib/papers.ts` — this component picks no vocabulary
  * and makes no claim of its own, it only decides which colour a tone is
  * drawn in.
  */
-export function PaperStateDot({ state }: { state: PaperState }) {
+export function PaperStateDot({ state }: { state: StatusCell }) {
   const dotClass =
     state.tone === "on"
       ? "bg-green-500 dark:bg-green-400"

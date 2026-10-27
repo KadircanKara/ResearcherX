@@ -6,7 +6,7 @@ import {
   lastAddedLabel,
   libraryHeadline,
   paperState,
-  retrieverLabel,
+  indexCell,
   sourceLine,
   stateDetail,
   summarize,
@@ -24,6 +24,8 @@ function paper(over: Partial<Paper> = {}): Paper {
     resolved_pdf_url: null,
     has_pdf: false,
     chunk_count: 0,
+    dense_status: "none",
+    keyword_status: "none",
     source: "upload" as PaperSource,
     created_at: "2026-08-14T09:30:00Z",
     ...over,
@@ -145,15 +147,21 @@ describe("abstractExcerpt", () => {
   });
 });
 
-describe("retrieverLabel", () => {
-  it("states the chunk count for a searchable paper", () => {
-    expect(retrieverLabel(paperState(paper({ chunk_count: 1 })))).toBe("1 chunk");
-    expect(retrieverLabel(paperState(paper({ chunk_count: 42 })))).toBe("42 chunks");
+describe("indexCell", () => {
+  it("marks a paper in the index as on", () => {
+    expect(indexCell("embedded")).toEqual({ label: "embedded", tone: "on" });
+    expect(indexCell("indexed")).toEqual({ label: "indexed", tone: "on" });
   });
 
-  it("says holds nothing for both ways of holding nothing", () => {
-    expect(retrieverLabel(paperState(paper()))).toBe("holds nothing");
-    expect(retrieverLabel(paperState(paper({ source: "manual" })))).toBe("holds nothing");
+  it("shows waiting states as idle and a failure as bad", () => {
+    expect(indexCell("queued")).toEqual({ label: "queued", tone: "idle" });
+    expect(indexCell("pending")).toEqual({ label: "processing", tone: "idle" });
+    expect(indexCell("failed")).toEqual({ label: "failed", tone: "bad" });
+  });
+
+  it("claims nothing for none or a status it does not know", () => {
+    expect(indexCell("none")).toEqual({ label: "—", tone: "idle" });
+    expect(indexCell(undefined)).toEqual({ label: "—", tone: "idle" });
   });
 });
 

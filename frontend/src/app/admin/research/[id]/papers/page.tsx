@@ -6,7 +6,6 @@ import { Plus, Search } from "lucide-react";
 import { BulkEditBar } from "@/components/bulk-edit-bar";
 import { PageHeader } from "@/components/page-header";
 import { AddPaperDialog } from "@/components/papers/add-paper-dialog";
-import { LibraryRail } from "@/components/papers/library-rail";
 import { PaperTable } from "@/components/papers/paper-table";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
@@ -219,7 +218,7 @@ export default function PapersPage() {
         }
       />
 
-      <div className="flex flex-col gap-6 lg:flex-row">
+      <div className="flex flex-col gap-6">
         <div className="min-w-0 flex-1 space-y-4">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="relative w-full sm:w-72">
@@ -303,8 +302,6 @@ export default function PapersPage() {
             />
           )}
         </div>
-
-        <LibraryRail summary={summary} onOpenAdd={openAdd} />
       </div>
 
       <AddPaperDialog

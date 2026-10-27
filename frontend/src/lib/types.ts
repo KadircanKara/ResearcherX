@@ -181,6 +181,8 @@ export type ChatEvent =
 
 export type PaperSource = "upload" | "link" | "manual";
 
+export type IndexStatus = "embedded" | "indexed" | "queued" | "pending" | "failed" | "none";
+
 export interface Paper {
   id: string;
   project_id: string;
@@ -199,5 +201,11 @@ export interface Paper {
   /** Chunks the retriever holds for this paper under the configured
    * embedding model. 0 means chat cannot search it. */
   chunk_count: number;
+  /** Dense vectors: embedded | pending | failed | none. */
+  dense_status: IndexStatus;
+  /** Keyword search, following the server's sparse backend:
+   * indexed | queued | pending | failed | none. `queued` means embedded
+   * but waiting for the next background keyword-index build. */
+  keyword_status: IndexStatus;
   created_at: string;
 }
