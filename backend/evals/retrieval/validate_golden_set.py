@@ -1,7 +1,8 @@
 """Read-only check of every golden-set case against the live dev database.
 
-For each positive case: exactly one paper must hold chunks satisfying it (the
-shared `chunk_satisfies` rule), and the question's wording must pass the
+For each positive case: exactly one paper may hold every expected substring
+(matched across ALL chunks, whatever the title), that paper's title must contain
+`paper_title_contains`, and the question's wording must pass the
 leakage checker for its kind. Off-topic cases are never a failure; the nearest
 chunks are printed so a human can confirm the corpus really does not cover
 them. Exit 1 on any problem.
@@ -24,7 +25,7 @@ from sqlalchemy import text
 from app.core.config import settings
 from app.services.bm25_tokenizer import terms
 from evals.retrieval.bm25_arm import CorpusChunk, index_text
-from evals.retrieval.golden_set import Case, GoldenSetError, chunk_satisfies, load_golden_set
+from evals.retrieval.golden_set import Case, GoldenSetError, load_golden_set
 from evals.retrieval.leakage import check
 
 _DEFAULT_SET = Path(__file__).parent / "golden_set.json"
@@ -45,10 +46,17 @@ def document_frequencies(texts: Iterable[str]) -> tuple[dict[str, int], int]:
 
 
 def satisfying_papers(case: Case, chunks: Iterable[CorpusChunk]) -> dict[str, list[CorpusChunk]]:
-    """paper_id -> the chunks of that paper which satisfy `case`."""
+    """paper_id -> the chunks of that paper holding every expected substring.
+
+    Deliberately ignores `paper_title_contains`: the title is checked in
+    `validate_case` only after uniqueness, so the same evidence sitting in a
+    differently titled paper still counts as ambiguity. Scoring elsewhere
+    keeps using `chunk_satisfies`, which requires the title as well.
+    """
     out: dict[str, list[CorpusChunk]] = defaultdict(list)
     for c in chunks:
-        if chunk_satisfies(case, c.paper_title, c.text):
+        text = c.text.lower()
+        if all(sub.lower() in text for sub in case.expect_substrings):
             out[c.paper_id].append(c)
     return dict(out)
 
@@ -66,6 +74,12 @@ def validate_case(
         titles = sorted({chunks[0].paper_title for chunks in by_paper.values()})
         return [f"{case.id}: satisfied by {len(by_paper)} papers: " + "; ".join(titles)]
     chunks = next(iter(by_paper.values()))
+    wanted = case.paper_title_contains or ""
+    if wanted.lower() not in chunks[0].paper_title.lower():
+        return [
+            f"{case.id}: the only paper holding the evidence is {chunks[0].paper_title!r}, "
+            f"whose title does not contain {wanted!r}"
+        ]
     evidence = "\n".join(
         [chunks[0].paper_title, *(f"{c.section_text or ''}\n{c.text}" for c in chunks)]
     )

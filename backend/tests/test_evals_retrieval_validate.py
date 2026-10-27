@@ -62,3 +62,25 @@ def test_clean_case_has_no_problems():
     case = _case(question="How does the striped animal behave?")
     by_paper = satisfying_papers(case, [_chunk("1", "p1", "Alpha paper", "a zebra")])
     assert validate_case(case, by_paper, {}, 100) == []
+
+
+def test_ambiguity_is_found_in_a_paper_whose_title_does_not_match():
+    # The second paper holds the evidence under a title that does NOT contain
+    # the case's title text; `chunk_satisfies` alone would never see it.
+    case = _case(title="Alpha")
+    chunks = [
+        _chunk("1", "p1", "Alpha paper", "a zebra"),
+        _chunk("2", "p2", "Gamma survey", "another zebra"),
+    ]
+    by_paper = satisfying_papers(case, chunks)
+    assert set(by_paper) == {"p1", "p2"}
+    problems = validate_case(case, by_paper, {}, 10)
+    assert len(problems) == 1
+    assert "Alpha paper" in problems[0] and "Gamma survey" in problems[0]
+
+
+def test_sole_evidence_paper_must_carry_the_expected_title():
+    case = _case(title="Alpha")
+    by_paper = satisfying_papers(case, [_chunk("1", "p2", "Gamma survey", "a zebra")])
+    problems = validate_case(case, by_paper, {}, 10)
+    assert len(problems) == 1 and "Alpha" in problems[0] and "Gamma survey" in problems[0]
