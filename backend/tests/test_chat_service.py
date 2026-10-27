@@ -1802,6 +1802,41 @@ async def test_a_short_global_hnsw_scan_re_runs_exact(hybrid):
     assert len(chunks) == 7
 
 
+async def test_the_exact_fallback_logs_at_info_and_marks_the_span():
+    """A fallback costs a whole-project exact scan, so it is visible in the
+    logs and the trace by default, not only at debug."""
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    from app.core import observability
+    from app.services import chat_service
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    observability.install_provider(provider)
+    try:
+        db = _mock_db_returning(7)  # dense_raw_n = 7 < pool
+        params = {"dense_pool": 60, "project_id": "proj-1"}
+        with patch.object(chat_service, "log") as log, observability.span("chat.retrieve"):
+            _, fell_back = await chat_service._dense_query(
+                db, "chat.dense", lambda exact: "SELECT 1", params, exact=False
+            )
+    finally:
+        observability.install_provider(None)
+
+    assert fell_back is True
+    log.info.assert_called_once()
+    event, fields = log.info.call_args.args[0], log.info.call_args.kwargs
+    assert event == "hnsw_short_scan_exact_fallback"
+    assert fields["project_id"] == "proj-1"
+    assert fields["dense_pool"] == 60
+    assert fields["rows"] == 7 and "scoped_rows" in fields
+    parent = {s.name: s for s in exporter.get_finished_spans()}["chat.retrieve"]
+    assert parent.attributes["retrieval.dense.fallback"] is True
+
+
 @pytest.mark.parametrize("hybrid", [True, False])
 async def test_the_global_ann_scan_never_joins_the_scope(hybrid):
     """A scope semi-join inside `dense_raw` steered the planner to the

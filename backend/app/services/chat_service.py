@@ -517,12 +517,18 @@ async def _dense_query(
     if not exact:
         raw, scoped = _dense_counts(rows)
         if min(raw, scoped) < pool:
-            log.debug(
+            # Info, not debug: each fallback is a whole-project exact scan,
+            # linear in project size, so a run of them is worth seeing.
+            log.info(
                 "hnsw_short_scan_exact_fallback",
                 query=name,
+                project_id=params.get("project_id"),
                 rows=raw,
                 scoped_rows=scoped,
                 dense_pool=pool,
+            )
+            observability.set_attributes(
+                observability.current_span(), {"retrieval.dense.fallback": True}
             )
             await _apply_dense_path(db, pool, exact=True)
             rows = await _fetch_traced(f"{name}.exact", db, sql(True), params)

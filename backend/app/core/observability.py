@@ -230,6 +230,11 @@ async def iterate_under(source: AsyncIterable, parent: Span) -> AsyncIterator:
         yield item
 
 
+def current_span() -> Span:
+    """The current span; a non-recording one when nothing is current."""
+    return trace.get_current_span()
+
+
 def set_attributes(s: Span, attributes: dict[str, Any]) -> None:
     if not s.is_recording():
         return
