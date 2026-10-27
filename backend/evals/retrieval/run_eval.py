@@ -41,11 +41,18 @@ from app.core.config import settings
 from app.db.session import SessionLocal
 from app.local_rag.rerank import CohereReranker
 from app.services.embedding_service import EmbeddingService
-from app.services.hybrid_ranker import fuse_rrf, keep_within_rank_window
+from app.services.hybrid_ranker import SPARSE_TSQUERY_SQL, fuse_rrf, keep_within_rank_window
 from app.services.intra_paper_ranker import keep_within_paper
 from app.services.jev_reranker import JevReranker
 from app.services.rerank_ranker import rank_candidates, rerank_items
 from evals.retrieval.arms import ARMS, ArmReranker, MemoReranker, needs, parse_arms
+from evals.retrieval.bm25_arm import (
+    Bm25Corpus,
+    CorpusChunk,
+    fuse_with_bm25,
+    sparse_holds_answer,
+    sparse_row_count,
+)
 from evals.retrieval.golden_set import Case, load_golden_set
 from evals.retrieval.metrics import (
     rerank_lost_count,
@@ -86,6 +93,18 @@ _MIN_NEGATIVES_FOR_CONFIDENCE = 10
 
 _MODEL_COUNTS_SQL = text("SELECT model, count(*) AS n FROM paper_chunk_embeddings GROUP BY model")
 
+# The --bm25 arm's documents: every chunk the hybrid query could return for
+# this project, at the configured model, read once per run. Ordered so the
+# index is built identically on every run.
+_CORPUS_SQL = text("""
+    SELECT c.id AS chunk_id, c.paper_id, p.title AS paper_title, c.text, c.section_text
+    FROM paper_chunk_embeddings c
+    JOIN papers p ON p.id = c.paper_id
+    WHERE c.model = :model
+      AND p.project_id = :project_id
+    ORDER BY c.id
+""")
+
 # Mirrors chat_service._retrieve_paper_chunks: same <=> operator, same model
 # filter, same project scoping, and since 2026-08-10 the same GLOBAL top-k —
 # there is no per-paper ceiling in production to diverge from.
@@ -122,12 +141,12 @@ _SQL = text("""
 # other and match rows back after fusion. Ranking stops at the ranks here too
 # -- fusion, the budget, and the single-paper cut all stay in Python and are
 # IMPORTED from app.services.hybrid_ranker, never reimplemented.
-_HYBRID_SQL = text("""
+_HYBRID_SQL = text(f"""
     WITH scope AS (
         SELECT id AS paper_id FROM papers WHERE project_id = :project_id
     ),
     q AS (
-        SELECT websearch_to_tsquery('english', :qtext) AS tsq
+        SELECT {SPARSE_TSQUERY_SQL} AS tsq
     ),
     dense AS (
         SELECT c.id, c.paper_id, c.text,
@@ -181,12 +200,12 @@ _HYBRID_SQL = text("""
 # caller here: targeted mode always passes `intra_paper_ceiling`, matching
 # `chat_service._retrieve_paper_chunks`'s `single_paper` branch, never
 # `similarity_threshold` (see `_hybrid_chunks_for`'s `threshold` parameter).
-_HYBRID_SQL_PAPER = text("""
+_HYBRID_SQL_PAPER = text(f"""
     WITH scope AS (
         SELECT id AS paper_id FROM papers WHERE id = :paper_id
     ),
     q AS (
-        SELECT websearch_to_tsquery('english', :qtext) AS tsq
+        SELECT {SPARSE_TSQUERY_SQL} AS tsq
     ),
     dense AS (
         SELECT c.id, c.paper_id, c.text,
@@ -701,6 +720,14 @@ async def main() -> None:  # noqa: PLR0912, PLR0915 — a report script, not a l
         ),
     )
     parser.add_argument(
+        "--bm25",
+        action="store_true",
+        help=(
+            "also run the hybrid arm with bm25s (over the same Postgres chunks) "
+            "as the sparse arm, and report it beside the SQL full-text arm"
+        ),
+    )
+    parser.add_argument(
         "--rerank",
         action="store_true",
         help=(
@@ -730,6 +757,11 @@ async def main() -> None:  # noqa: PLR0912, PLR0915 — a report script, not a l
     # dense-only ordering, which is a policy production never runs.
     if args.rerank and not args.hybrid:
         print("\nERROR: --rerank requires --hybrid (it reorders the fused candidates)")
+        return
+    # The bm25s arm reuses the hybrid query's dense half, so it has nothing to
+    # fuse without it.
+    if args.bm25 and not args.hybrid:
+        print("\nERROR: --bm25 requires --hybrid (it swaps the hybrid arm's sparse half)")
         return
     reranker = None
     if args.rerank:
@@ -816,6 +848,10 @@ async def main() -> None:  # noqa: PLR0912, PLR0915 — a report script, not a l
     # `rerank_rescued_count` refuses a misaligned pair rather than silently
     # attributing one case's answer to another's ranking.
     rerank_positives: list[tuple[Case, list[Scored]]] = []
+    # bm25s arm. Populated only with --bm25, case-for-case with
+    # `hybrid_positives`, and the same raw fused shape (see bm25_arm.py).
+    bm25_positives: list[tuple[Case, list[Scored]]] = []
+    bm25_corpus: Bm25Corpus | None = None
 
     async with SessionLocal() as db:
         counts = {r.model: r.n for r in (await db.execute(_MODEL_COUNTS_SQL)).fetchall()}
@@ -823,6 +859,26 @@ async def main() -> None:  # noqa: PLR0912, PLR0915 — a report script, not a l
         if mismatch:
             print(f"\nERROR: {mismatch}")
             return
+
+        if args.bm25:
+            corpus_rows = (
+                await db.execute(
+                    _CORPUS_SQL,
+                    {"model": settings.embedding_model, "project_id": args.project_id},
+                )
+            ).fetchall()
+            bm25_corpus = Bm25Corpus(
+                [
+                    CorpusChunk(
+                        chunk_id=r.chunk_id,
+                        paper_id=r.paper_id,
+                        paper_title=r.paper_title,
+                        text=r.text,
+                        section_text=r.section_text,
+                    )
+                    for r in corpus_rows
+                ]
+            )
 
         corpus_note = ""
         for case in cases:
@@ -899,6 +955,22 @@ async def main() -> None:  # noqa: PLR0912, PLR0915 — a report script, not a l
                     db, svc, case, args.project_id, threshold=settings.similarity_threshold
                 )
                 hybrid_positives.append((case, hybrid_chunks))
+
+                if bm25_corpus is not None:
+                    bm25_positives.append(
+                        (
+                            case,
+                            fuse_with_bm25(
+                                hybrid_chunks,
+                                bm25_corpus,
+                                case.question,
+                                sparse_pool=settings.hybrid_sparse_pool,
+                                w_dense=settings.hybrid_dense_weight,
+                                w_sparse=settings.hybrid_sparse_weight,
+                                k=settings.hybrid_rrf_k,
+                            ),
+                        )
+                    )
 
                 for name in arm_names:
                     spec = ARMS[name]
@@ -1054,6 +1126,46 @@ async def main() -> None:  # noqa: PLR0912, PLR0915 — a report script, not a l
             )
         else:
             print("hybrid arm: skipped — no positive cases scored (see ERRORS above)")
+            print()
+
+    # --- bm25s arm: SQL full-text sparse arm vs bm25s sparse arm ------------
+    # Same dense half, same fusion constants, same chunks; only the sparse
+    # ranking differs. `holds answer` asks whether the sparse arm ALONE
+    # returned an answering chunk at any rank -- the ceiling on what it can
+    # contribute, whatever the weights.
+    if args.bm25:
+        print()
+        if bm25_positives:
+            budget = settings.max_context_chunks
+            n = len(bm25_positives)
+            print(
+                f"bm25s sparse arm ({len(bm25_corpus.chunks) if bm25_corpus else 0} chunks indexed, "
+                f"sparse_pool={settings.hybrid_sparse_pool}, fusion as hybrid arm):"
+            )
+            print(
+                f"  {'arm':<12} {'r@10':>5} {'r@20':>5} {f'r@{args.k}':>6} {'MRR':>6} "
+                f"{f'resc@{budget}':>8} {'holds':>6} {'rows/q':>7}"
+            )
+            for label, rows in (("sql-fts", hybrid_positives), ("bm25s", bm25_positives)):
+                holds = sum(sparse_holds_answer(case, chunks) for case, chunks in rows)
+                mean_rows = sum(sparse_row_count(chunks) for _, chunks in rows) / n
+                print(
+                    f"  {label:<12} "
+                    f"{recall_at_k(rows, 10, presorted=True):>5.2f} "
+                    f"{recall_at_k(rows, 20, presorted=True):>5.2f} "
+                    f"{recall_at_k(rows, args.k, presorted=True):>6.2f} "
+                    f"{mean_reciprocal_rank(rows, args.k, presorted=True):>6.3f} "
+                    f"{rescued_count(rows, budget):>8} "
+                    f"{f'{holds}/{n}':>6} "
+                    f"{mean_rows:>7.1f}"
+                )
+            moved_in = rerank_rescued_count(hybrid_positives, bm25_positives, budget)
+            moved_out = rerank_lost_count(hybrid_positives, bm25_positives, budget)
+            print(f"  vs sql-fts at the budget edge: {moved_in} answers gained, {moved_out} lost")
+            print("  (weights and rrf_k were tuned on ts_rank_cd, not on bm25s)")
+            print()
+        else:
+            print("bm25s arm: skipped — no positive cases scored (see ERRORS above)")
             print()
 
     # --- rerank arm: fused order vs cross-encoder order ---------------------
@@ -1370,6 +1482,18 @@ async def main() -> None:  # noqa: PLR0912, PLR0915 — a report script, not a l
                     "separation": separation,
                     "targeted": targeted_rows if args.targeted else None,
                     "hybrid": hybrid_payload,
+                    "bm25": (
+                        None
+                        if not (args.bm25 and bm25_positives)
+                        else {
+                            "recall": recall_at_k(bm25_positives, args.k, presorted=True),
+                            "mrr": mean_reciprocal_rank(bm25_positives, args.k, presorted=True),
+                            "holds_answer": sum(
+                                sparse_holds_answer(c, ch) for c, ch in bm25_positives
+                            ),
+                            "n_cases": len(bm25_positives),
+                        }
+                    ),
                 },
                 indent=2,
             )

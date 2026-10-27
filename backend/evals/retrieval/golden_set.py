@@ -12,7 +12,7 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
-_KINDS = {"content", "metadata", "figure", "off_topic"}
+_KINDS = {"content", "metadata", "figure", "keyword", "off_topic"}
 
 
 class GoldenSetError(ValueError):

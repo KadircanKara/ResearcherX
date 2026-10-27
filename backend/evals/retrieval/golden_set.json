@@ -2,21 +2,168 @@
  "version": 1,
  "cases": [
   {
-   "id": "revisit-time-objective",
+   "id": "covins-euroc-sequences",
    "kind": "content",
-   "question": "What is achieved by minimizing revisit time in multi-UAV path planning?",
-   "paper_title_contains": "Joint Optimization of Connectivity",
+   "question": "Which EuRoC sequences were used to evaluate the accuracy of the COVINS-G collaborative SLAM back-end with three to five agents?",
+   "paper_title_contains": "COVINS-G",
    "expect_substrings": [
-    "revisit time"
+    "Machine Hall (MH) and the Vicon Room 1 (V1)"
    ]
   },
   {
-   "id": "occupancy-updates",
+   "id": "search-drone-resnet-layers",
    "kind": "content",
-   "question": "How is probabilistic occupancy used during cooperative search?",
-   "paper_title_contains": "Cooperative Multi-Target",
+   "question": "How many convolutional layers does the ResNet used for target detection in the autonomous search drone with missed-detection and false-alarm probabilities have?",
+   "paper_title_contains": "A Search and Detection Autonomous Drone System",
    "expect_substrings": [
-    "probabilistic occupancy updates"
+    "12 convolutional layers"
+   ]
+  },
+  {
+   "id": "recharging-drone-models",
+   "kind": "content",
+   "question": "Which commercial drone models had their power consumption measured to build the energy model for planning drone recharging stops?",
+   "paper_title_contains": "Autonomous Recharging and Flight Mission Planning",
+   "expect_substrings": [
+    "3DR Solo",
+    "DJI Matrice 600 Pro"
+   ]
+  },
+  {
+   "id": "wildfire-coalition-setup",
+   "kind": "content",
+   "question": "In the wildfire coverage simulations with drone coalitions, how many drones, coalitions and sectors were used?",
+   "paper_title_contains": "Wildfire Monitoring in Remote Areas",
+   "expect_substrings": [
+    "N=20 drones"
+   ]
+  },
+  {
+   "id": "storm-realworld-frequency",
+   "kind": "content",
+   "question": "At what average frequency does the STORM spatial-temporal trajectory optimizer run on the real multicopter platform?",
+   "paper_title_contains": "STORM: Spatial-Temporal",
+   "expect_substrings": [
+    "average frequency of 50 Hz"
+   ]
+  },
+  {
+   "id": "bonirob-crop-row-detection",
+   "kind": "content",
+   "question": "Which crop row detection algorithm lets the BoniRob UGV steer along the rows without crushing crops?",
+   "paper_title_contains": "Precision Farming",
+   "expect_substrings": [
+    "Pattern Hough Transform"
+   ]
+  },
+  {
+   "id": "pdsr-sensing-features",
+   "kind": "content",
+   "question": "Which four features does the low-altitude UAV consider during the PDSR multi-modal sensing mission?",
+   "paper_title_contains": "PDSR",
+   "expect_substrings": [
+    "Doppler frequency, UWB detection output, FMCW readings, and UAV altitude"
+   ]
+  },
+  {
+   "id": "aeros-process-stages",
+   "kind": "content",
+   "question": "How many stages does the AERoS assurance process for emergent swarm behaviour have, and which framework is it built on?",
+   "paper_title_contains": "AERoS",
+   "expect_substrings": [
+    "six-stage development process AERoS"
+   ]
+  },
+  {
+   "id": "fstsp-road-baselines",
+   "kind": "content",
+   "question": "Which two baselines is the truck-and-drone FSTSP method over road networks compared against in its experiments?",
+   "paper_title_contains": "Multi-Agent Flying Sidekick",
+   "expect_substrings": [
+    "column generation-based method",
+    "hill-climbing algorithm"
+   ]
+  },
+  {
+   "id": "sagr-llm-inputs",
+   "kind": "content",
+   "question": "In the SAGR framework, which structured information does the LLM receive for coordinating the robots?",
+   "paper_title_contains": "Semantic Area Graph Reasoning",
+   "expect_substrings": [
+    "room connectivity, frontier statistics, task specification"
+   ]
+  },
+  {
+   "id": "contention-scenario2-robots",
+   "kind": "content",
+   "question": "In the resource-contention task allocation study with uncertain timing, how many controlled robots collect packages in the scenario where task order is unspecified?",
+   "paper_title_contains": "Modelling resource contention",
+   "expect_substrings": [
+    "30 controlled robots"
+   ]
+  },
+  {
+   "id": "edge-hub-cloud-jetson",
+   "kind": "content",
+   "question": "In the task allocation framework that places tasks on edge devices, a hub and the cloud, which board served as device e in configuration C1 and lowered energy consumption?",
+   "paper_title_contains": "edge/hub/cloud",
+   "expect_substrings": [
+    "Jetson TX2",
+    "configuration C1"
+   ]
+  },
+  {
+   "id": "defmarl-fig4-position",
+   "kind": "figure",
+   "question": "In the comparison on modified MPE and Safe Multi-agent MuJoCo, where does Def-MARL sit in the cost versus safety plots?",
+   "paper_title_contains": "Distributed Epigraph Form MARL",
+   "expect_substrings": [
+    "consistently closest to the top-left corner"
+   ]
+  },
+  {
+   "id": "submodular-fig7-utilities",
+   "kind": "figure",
+   "question": "With 15 robots and 8 attacks, whose utilities does the figure track over time for the distributed submodular action-selection method under adversarial attacks?",
+   "paper_title_contains": "Distributed Resilient Submodular Action Selection",
+   "expect_substrings": [
+    "utilities of the 7 robots that are not attacked"
+   ]
+  },
+  {
+   "id": "gas-field-jackals",
+   "kind": "figure",
+   "question": "How many Jackal robots reconstructed the gas field in the second urban scenario of the multi-modal source localization experiments?",
+   "paper_title_contains": "Active Sensing Strategy",
+   "expect_substrings": [
+    "9 Jackals in Scenario 2"
+   ]
+  },
+  {
+   "id": "ir2-exploration-maps",
+   "kind": "figure",
+   "question": "Which three maps are shown in the IR2 implicit rendezvous exploration figure?",
+   "paper_title_contains": "IR2",
+   "expect_substrings": [
+    "_Corridor_ , _Hybrid_ , and _Complex_ maps"
+   ]
+  },
+  {
+   "id": "bicl-fig5-alignment",
+   "kind": "figure",
+   "question": "What does the Bi-CL figure with four robots and four adversaries compare?",
+   "paper_title_contains": "Bi-CL",
+   "expect_substrings": [
+    "cumulative reward for different alignment penalties"
+   ]
+  },
+  {
+   "id": "joint-space-planner-bars",
+   "kind": "figure",
+   "question": "In the sequential planner results for learned decentralized heuristics, how many instances does each bar represent?",
+   "paper_title_contains": "Joint-Space Multi-Robot Motion Planning",
+   "expect_substrings": [
+    "each bar represents 100 instances"
    ]
   },
   {
@@ -29,250 +176,104 @@
    ]
   },
   {
-   "id": "ground-control-station",
-   "kind": "content",
-   "question": "What role does the ground control station play?",
-   "paper_title_contains": "Cooperative Multi-Target",
+   "id": "connectivity-cbf-authors",
+   "kind": "metadata",
+   "question": "Who are the authors of the global connectivity maintenance approach that uses control barrier functions?",
+   "paper_title_contains": "Connectivity Maintenance: Global and Optimized",
    "expect_substrings": [
-    "Ground Control Station"
+    "Beatrice Capelli",
+    "Lorenzo Sabattini"
    ]
   },
   {
-   "id": "handover-figure",
-   "kind": "figure",
-   "question": "What does the figure comparing handover types show?",
-   "paper_title_contains": "Survey of Important Issues",
+   "id": "kw-tum-rgbd-sequences",
+   "kind": "keyword",
+   "question": "TUM RGB-D sequences ORB-SLAM3 ATE comparison",
+   "paper_title_contains": "Enhanced Multi-Robot SLAM",
    "expect_substrings": [
-    "Hard Handover",
-    "Soft Handover"
+    "fr1 xyz, fr3 teddy, and fr1 desk2"
    ]
   },
   {
-   "id": "radioml-datasets",
-   "kind": "content",
-   "question": "Which datasets are used to evaluate the online machine learning method?",
-   "paper_title_contains": "UAV-Assisted Online Machine Learning",
+   "id": "kw-pettingzoo-ippo-success",
+   "kind": "keyword",
+   "question": "IPPO PettingZoo MPE success rate",
+   "paper_title_contains": "Learning to Lead Themselves",
    "expect_substrings": [
-    "RADIOML",
-    "FMNIST"
+    "91%"
    ]
   },
   {
-   "id": "dcgan-video-production",
-   "kind": "content",
-   "question": "How are deep convolutional GANs applied in UAV imaging?",
-   "paper_title_contains": "Reliable and Efficient Data Collection",
+   "id": "kw-multiagentaviary-observation",
+   "kind": "keyword",
+   "question": "MultiAgentAviary PettingZoo ParallelEnv per-agent observation",
+   "paper_title_contains": "MuJoCo-Drones-Gym",
    "expect_substrings": [
-    "image and video production"
+    "per-agent observation is 13-D"
    ]
   },
   {
-   "id": "marl-security-attacks",
-   "kind": "content",
-   "question": "Which security attacks does the multi-agent RL survey review?",
-   "paper_title_contains": "Applications of Multi-Agent Reinforcement Learning",
+   "id": "kw-abecis-matrice-images",
+   "kind": "keyword",
+   "question": "ABECIS DJI Matrice 300 RTK images taken",
+   "paper_title_contains": "Automated Building Exterior Crack",
    "expect_substrings": [
-    "eavesdropping attacks",
-    "DDoS"
+    "14 images were taken"
    ]
   },
   {
-   "id": "deep-q-routing",
-   "kind": "content",
-   "question": "What routing method uses extra information to lower delivery delay?",
-   "paper_title_contains": "Applications of Multi-Agent Reinforcement Learning",
+   "id": "kw-matrice300-battery",
+   "kind": "keyword",
+   "question": "DJI Matrice 300 battery life minutes",
+   "paper_title_contains": "Redefining Aerial Innovation",
    "expect_substrings": [
-    "deep Q- routing"
+    "Matrice 300|55"
    ]
   },
   {
-   "id": "hybrid-split-federated",
-   "kind": "content",
-   "question": "What distributed learning structure combines split and federated learning?",
-   "paper_title_contains": "Distributed Machine Learning for UAV Swarms",
+   "id": "kw-fiat-bev-co2",
+   "kind": "keyword",
+   "question": "Fiat BEV truck vs DJI Matrice 300 RTK CO2 emissions",
+   "paper_title_contains": "Truck-Drone Collaborative",
    "expect_substrings": [
-    "hybrid split and federated learning"
+    "approximately 17%"
    ]
   },
   {
-   "id": "deadly-triad",
-   "kind": "content",
-   "question": "Which three elements make value-based reinforcement learning unstable and divergent?",
-   "paper_title_contains": "Single and Multi-Agent Deep Reinforcement Learning",
+   "id": "kw-fireextinguishingenv",
+   "kind": "keyword",
+   "question": "FireExtinguishingEnvParallel bulldozers PettingZoo",
+   "paper_title_contains": "Wildfire Autonomous Response and Prediction",
    "expect_substrings": [
-    "_deadly triad_ : _function approximation_"
+    "FireExtinguishingEnvParallel",
+    "bulldozers"
    ]
   },
   {
-   "id": "drl-subagent-decomposition",
-   "kind": "content",
-   "question": "How is the reinforcement learning training decomposed into simpler pieces?",
-   "paper_title_contains": "Application of Deep Reinforcement Learning",
+   "id": "kw-latent-marl-hyperparams",
+   "kind": "keyword",
+   "question": "latent variable MARL PettingZoo Adam batch size",
+   "paper_title_contains": "Latent Variable Modeling in Multi-Agent",
    "expect_substrings": [
-    "task-oriented DRL sub-agents"
+    "batch size of 256"
    ]
   },
   {
-   "id": "coverage-mission-nine-uavs",
-   "kind": "content",
-   "question": "How many UAVs minimise the total time of the coverage mission?",
-   "paper_title_contains": "Cooperative multi-UAV coverage mission",
+   "id": "kw-gbplanner2-anymal-minutes",
+   "kind": "keyword",
+   "question": "GBPlanner2 ANYmal C RMF-Obelix Hagerbach mine exploration time",
+   "paper_title_contains": "Autonomous Teamed Exploration of Subterranean",
    "expect_substrings": [
-    "global minimum when the mission is performed with 9 UAVs"
+    "37 min"
    ]
   },
   {
-   "id": "harvested-power-duration-figure",
-   "kind": "figure",
-   "question": "What does the figure of harvested power versus mission duration show?",
-   "paper_title_contains": "UAV-Enabled Wireless Power Transfer",
+   "id": "kw-anymal-gr1-mha",
+   "kind": "keyword",
+   "question": "ANYmal-D GR-1 map scans MHA dimension",
+   "paper_title_contains": "Attention-Based Map Encoding",
    "expect_substrings": [
-    "minimum average harvested power of GDs versus the UAV mission duration"
-   ]
-  },
-  {
-   "id": "ruav-cluster-count",
-   "kind": "content",
-   "question": "How does the coefficient c affect the number of remaining UAV clusters?",
-   "paper_title_contains": "Resilient UAV Swarm Communications",
-   "expect_substrings": [
-    "average number of RUAV clusters"
-   ]
-  },
-  {
-   "id": "mogoa-framework-figure",
-   "kind": "figure",
-   "question": "What does the figure of the MOGOA framework depict?",
-   "paper_title_contains": "UAV Swarm-Enabled Collaborative Secure Relay",
-   "expect_substrings": [
-    "rectangles filled in light green"
-   ]
-  },
-  {
-   "id": "episode-duration-obstacle-figure",
-   "kind": "figure",
-   "question": "What does the CDF plot for the obstacle scenario compare?",
-   "paper_title_contains": "Distributed Reinforcement Learning for Flexible",
-   "expect_substrings": [
-    "CDF of the episode duration for different algorithms in the obstacle scenario"
-   ]
-  },
-  {
-   "id": "demand-algorithm-baselines",
-   "kind": "content",
-   "question": "Which two baseline demand algorithms is the trajectory work compared against?",
-   "paper_title_contains": "Deep Reinforcement Learning for Trajectory Path Planning",
-   "expect_substrings": [
-    "sigmoid demand algorithm",
-    "linear demand algorithm"
-   ]
-  },
-  {
-   "id": "iot-lowpower-protocols",
-   "kind": "content",
-   "question": "Which low-power short-range technologies do IoT devices use for local data transmission?",
-   "paper_title_contains": "Reliable and Efficient Data Collection",
-   "expect_substrings": [
-    "6TiSCH or LoRaWAN"
-   ]
-  },
-  {
-   "id": "nemo-mobility",
-   "kind": "content",
-   "question": "Which IETF proposal handles network mobility, and why does it struggle in vehicular networks?",
-   "paper_title_contains": "Survey of Important Issues",
-   "expect_substrings": [
-    "NEMO (network mobility)"
-   ]
-  },
-  {
-   "id": "lazy-agents-reward",
-   "kind": "content",
-   "question": "What is the drawback of giving every agent one common global reward?",
-   "paper_title_contains": "Applications of Multi-Agent Reinforcement Learning",
-   "expect_substrings": [
-    "breed lazy agents"
-   ]
-  },
-  {
-   "id": "hnpfl-fair-comparison",
-   "kind": "content",
-   "question": "How is a fair comparison between the proposed method and the federated baseline ensured?",
-   "paper_title_contains": "UAV-Assisted Online Machine Learning",
-   "expect_substrings": [
-    "fair comparison between HN-PFL and H-FL"
-   ]
-  },
-  {
-   "id": "epec-stackelberg",
-   "kind": "content",
-   "question": "What game-theoretic problem arises from the Stackelberg power pricing formulation?",
-   "paper_title_contains": "Distributed Machine Learning for UAV Swarms",
-   "expect_substrings": [
-    "equilibrium program with equilibrium constraints"
-   ]
-  },
-  {
-   "id": "irs-benchmark-td",
-   "kind": "content",
-   "question": "What does the trajectory-design benchmark optimise while communication resources stay fixed?",
-   "paper_title_contains": "Aerial Intelligent Reflecting Surface",
-   "expect_substrings": [
-    "Keeping the communication resources fixed"
-   ]
-  },
-  {
-   "id": "brkga-convergence-figure",
-   "kind": "figure",
-   "question": "What does the figure of the genetic algorithm's convergence rates show?",
-   "paper_title_contains": "Multi-UAV Coverage Path Planning for the Inspection",
-   "expect_substrings": [
-    "BRKGA convergence rates for three-UAV cases"
-   ]
-  },
-  {
-   "id": "forest-submaps",
-   "kind": "content",
-   "question": "How are local observations compressed before being shared under the forest canopy?",
-   "paper_title_contains": "Search and rescue under the forest canopy",
-   "expect_substrings": [
-    "lightweight submaps"
-   ]
-  },
-  {
-   "id": "cinematography-chase-shot",
-   "kind": "content",
-   "question": "Which shot types are combined in the three-UAV filming experiment?",
-   "paper_title_contains": "Optimal Trajectory Planning for Cinematography",
-   "expect_substrings": [
-    "performs a chase shot"
-   ]
-  },
-  {
-   "id": "u2o-collision-trigger",
-   "kind": "content",
-   "question": "At what distance is the collision avoidance process activated?",
-   "paper_title_contains": "E2CoPre",
-   "expect_substrings": [
-    "minimum U2O distance falls below 50"
-   ]
-  },
-  {
-   "id": "frontier-mesh-clustering",
-   "kind": "content",
-   "question": "How are frontier meshes reduced for efficient decision making?",
-   "paper_title_contains": "Meeting-Merging-Mission",
-   "expect_substrings": [
-    "Frontier Mesh Clustering"
-   ]
-  },
-  {
-   "id": "jamming-policy-algorithm",
-   "kind": "content",
-   "question": "What algorithm optimises the jamming policy?",
-   "paper_title_contains": "Resource Allocation for Secure Multi-UAV",
-   "expect_substrings": [
-    "Jamming Policy Optimization Algorithm"
+    "MHA dimension"
    ]
   },
   {
@@ -283,7 +284,7 @@
   {
    "id": "offtopic-capital",
    "kind": "off_topic",
-   "question": "What is the capital of France?"
+   "question": "What is the capital of Australia?"
   },
   {
    "id": "offtopic-gibberish",
@@ -291,14 +292,34 @@
    "question": "zxqw plorb fnargle wibbet"
   },
   {
-   "id": "offtopic-part107",
+   "id": "offtopic-world-cup",
    "kind": "off_topic",
-   "question": "What are the FAA Part 107 requirements for getting a remote pilot certificate?"
+   "question": "Who won the 2018 FIFA World Cup final?"
   },
   {
-   "id": "offtopic-lipo-chemistry",
+   "id": "offtopic-vat-return",
    "kind": "off_topic",
-   "question": "Which lithium polymer cell chemistry gives the longest cycle life in a consumer quadcopter battery?"
+   "question": "How do I file a quarterly VAT return for a small business in Germany?"
+  },
+  {
+   "id": "offtopic-ibuprofen",
+   "kind": "off_topic",
+   "question": "What is the recommended adult dose of ibuprofen for a headache?"
+  },
+  {
+   "id": "offtopic-linked-list",
+   "kind": "off_topic",
+   "question": "How do I reverse a linked list in JavaScript?"
+  },
+  {
+   "id": "offtopic-roman-empire",
+   "kind": "off_topic",
+   "question": "Why did the Western Roman Empire fall?"
+  },
+  {
+   "id": "offtopic-weather",
+   "kind": "off_topic",
+   "question": "What is the weather forecast for Istanbul tomorrow?"
   },
   {
    "id": "offtopic-spray-nozzle",
@@ -306,9 +327,9 @@
    "question": "What nozzle size and boom pressure should I set on a crop-spraying drone before treating a vineyard?"
   },
   {
-   "id": "offtopic-drone-insurance",
+   "id": "offtopic-compass-calibration",
    "kind": "off_topic",
-   "question": "How much does commercial drone liability insurance cost per year?"
+   "question": "How do I calibrate the compass on a DJI Mavic 3 before flight?"
   },
   {
    "id": "offtopic-fpv-gear",
@@ -326,96 +347,34 @@
    "question": "What payback period do retailers report after buying stocktaking drones for their warehouses?"
   },
   {
-   "id": "offtopic-airworthiness",
-   "kind": "off_topic",
-   "question": "Which airworthiness certificate must a parcel delivery drone hold under EU aviation law, and how long does approval take?"
-  },
-  {
    "id": "offtopic-propeller-shop",
    "kind": "off_topic",
    "question": "Where can I buy replacement carbon fibre propellers for a DJI Mavic?"
   },
   {
-   "id": "fig-maxmin-period-trend",
-   "kind": "figure",
-   "question": "For the two-UAV system, how do the max-min rates of the three schemes behave as the period T grows?",
-   "paper_title_contains": "Joint Trajectory and Communication Design",
-   "expect_substrings": [
-    "max-min rates of all the three schemes increase"
-   ]
+   "id": "offtopic-dji-price",
+   "kind": "off_topic",
+   "question": "What is the retail price of a DJI Mini 4 Pro in Europe?"
   },
   {
-   "id": "fig-training-reward-convergence",
-   "kind": "figure",
-   "question": "In the training curves, where do the total rewards of the proposed scheme settle, and how does the weaker baseline behave?",
-   "paper_title_contains": "Cooperative Multiagent Deep Reinforcement",
-   "expect_substrings": [
-    "converge at around",
-    "fluctuates"
-   ]
+   "id": "offtopic-firmware-update",
+   "kind": "off_topic",
+   "question": "How do I update the firmware on my DJI RC controller?"
   },
   {
-   "id": "fig-collection-ratio-more-uavs",
-   "kind": "figure",
-   "question": "What happens to the average data collection ratio as more drones are deployed?",
-   "paper_title_contains": "Multi-UAV Path Planning for Wireless Data Harvesting",
-   "expect_substrings": [
-    "increase in collection performance when more UAVs are deployed"
-   ]
+   "id": "offtopic-kids-drone-gift",
+   "kind": "off_topic",
+   "question": "What is a good beginner drone to buy for a ten-year-old as a birthday present?"
   },
   {
-   "id": "fig-arc-distance-steering",
-   "kind": "figure",
-   "question": "In the hardware-in-the-loop run, what do the arc distances between the aircraft settle at?",
-   "paper_title_contains": "Coordinated Path-Following Control",
-   "expect_substrings": [
-    "arc distances can be steered to around the"
-   ]
+   "id": "offtopic-sunset-settings",
+   "kind": "off_topic",
+   "question": "What camera ISO and shutter settings work best for filming sunsets with a consumer drone?"
   },
   {
-   "id": "fig-u2u-to-u2b-switch",
-   "kind": "figure",
-   "question": "What change in link type is observed as the drones move nearer to the base station?",
-   "paper_title_contains": "Bayesian Optimization Enhanced Deep Reinforcement",
-   "expect_substrings": [
-    "switch from the U2U"
-   ]
-  },
-  {
-   "id": "fig-camera-target-verification",
-   "kind": "figure",
-   "question": "How did the field trial confirm the aircraft had actually acquired the moving ground target?",
-   "paper_title_contains": "Motion-Encoded Particle Swarm Optimization",
-   "expect_substrings": [
-    "displays the target within the vision of the camera"
-   ]
-  },
-  {
-   "id": "fig-angle-deviation-convergence",
-   "kind": "figure",
-   "question": "How does a larger spread in angle deviations affect the number of rounds federated learning needs?",
-   "paper_title_contains": "Federated Learning in the Sky",
-   "expect_substrings": [
-    "FL needs more communication rounds to converge"
-   ]
-  },
-  {
-   "id": "fig-energy-arrival-aoi",
-   "kind": "figure",
-   "question": "What effect does a higher energy arrival probability at the sensor nodes have on the total average age of information?",
-   "paper_title_contains": "Cooperative Data Collection",
-   "expect_substrings": [
-    "the total average AoI decreases"
-   ]
-  },
-  {
-   "id": "uav-search-reward-weights",
-   "kind": "content",
-   "question": "What reward function does the reinforcement learning planner proposed in the paper where reinforcement learning methods and evolutionary algorithm methods were compared in the multi-UAV path planning missions?",
-   "paper_title_contains": "Cooperative Multi-Target Search with UAV Swarms",
-   "expect_substrings": [
-    "weighted sum designed to promote"
-   ]
+   "id": "offtopic-drone-stock",
+   "kind": "off_topic",
+   "question": "What is AeroVironment's share price today?"
   }
  ]
 }

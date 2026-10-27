@@ -28,7 +28,7 @@ from app.services.citation_attribution import (
 )
 from app.services.conversation_service import ConversationService
 from app.services.embedding_service import EmbeddingService
-from app.services.hybrid_ranker import fuse_rrf, keep_within_rank_window
+from app.services.hybrid_ranker import SPARSE_TSQUERY_SQL, fuse_rrf, keep_within_rank_window
 from app.services.intra_paper_ranker import keep_within_paper
 from app.local_rag.rerank import CohereReranker
 from app.services.mention_ranker import apply_per_paper_floor
@@ -994,8 +994,8 @@ class ChatService:
         pre-2026-08-15 path exactly and is both the eval harness's control arm
         and production's kill switch.
 
-        A stopword-only question degrades for free: websearch_to_tsquery
-        returns an empty query, `@@` matches nothing, the sparse arm is empty,
+        A stopword-only question degrades for free: `SPARSE_TSQUERY_SQL`
+        yields an empty query, `@@` matches nothing, the sparse arm is empty,
         and RRF collapses to the dense ordering.
 
         `pool_limit` bounds the RANKED candidate list and defaults to
@@ -1352,13 +1352,13 @@ class ChatService:
         constants (dense 200 against a <= 110 pool) the `max()` returns 200
         unchanged and nothing about the tuned fusion moves.
         """
-        sql = text("""
+        sql = text(f"""
             WITH scope AS (
                 SELECT value AS paper_id
                 FROM jsonb_array_elements_text(CAST(:ids AS jsonb))
             ),
             q AS (
-                SELECT websearch_to_tsquery('english', :qtext) AS tsq
+                SELECT {SPARSE_TSQUERY_SQL} AS tsq
             ),
             dense AS (
                 SELECT c.id, c.paper_id, c.chunk_index, c.text, c.section, c.page,

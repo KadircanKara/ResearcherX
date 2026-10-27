@@ -72,7 +72,7 @@ from app.core.config import settings
 from app.local_rag.rerank import CohereReranker
 from app.db.session import SessionLocal
 from app.services.embedding_service import EmbeddingService
-from app.services.hybrid_ranker import fuse_rrf, keep_within_rank_window
+from app.services.hybrid_ranker import SPARSE_TSQUERY_SQL, fuse_rrf, keep_within_rank_window
 from app.services.intra_paper_ranker import keep_within_paper
 from app.services.mention_ranker import apply_per_paper_floor
 from evals.retrieval.comparison_set import ComparisonCase, load_comparison_set
@@ -159,13 +159,13 @@ _SCOPED_DENSE_SQL = text("""
 # while the sparse LIMIT stays exactly `hybrid_sparse_pool` (that arm's
 # admission rule, not a candidate bound). Fusion, the budget and every cut
 # stay in Python and are IMPORTED from production.
-_SCOPED_HYBRID_SQL = text("""
+_SCOPED_HYBRID_SQL = text(f"""
     WITH scope AS (
         SELECT value AS paper_id
         FROM jsonb_array_elements_text(CAST(:ids AS jsonb))
     ),
     q AS (
-        SELECT websearch_to_tsquery('english', :qtext) AS tsq
+        SELECT {SPARSE_TSQUERY_SQL} AS tsq
     ),
     dense AS (
         SELECT c.id, c.paper_id, c.text,
