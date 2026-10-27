@@ -258,3 +258,12 @@ async def test_an_exact_run_with_no_positive_cases_exits_2():
 
 async def test_the_same_early_stop_without_exact_keeps_its_exit_code():
     assert not await _main_with(["--hybrid", "--rerank"])
+
+
+def test_mention_eval_pairs_only_ready_papers():
+    """The second mention is picked from what a user could `@`-pick and
+    production could retrieve: a pending or failed paper is neither."""
+    from evals.retrieval import mention_eval
+
+    sql = " ".join(mention_eval._PAPER_BEST_SQL.text.split())
+    assert "AND p.status = 'ready'" in sql

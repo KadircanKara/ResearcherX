@@ -111,6 +111,9 @@ _DEFAULT_COMPARISON_SET = Path(__file__).parent / "comparison_set.json"
 # the second mention is chosen from the whole project the way a user picking
 # from the `@` menu would be — not from whatever survived a gate. Ordered
 # `best ASC, paper_id ASC` so `nearest_other` walks a deterministic list.
+# Ready papers only, as production scopes them: a pending or failed paper
+# is out of retrieval, so pairing with one would measure a scope chat never
+# assembles.
 _PAPER_BEST_SQL = text("""
     SELECT c.paper_id AS paper_id,
            p.title AS paper_title,
@@ -119,6 +122,7 @@ _PAPER_BEST_SQL = text("""
     JOIN papers p ON p.id = c.paper_id
     WHERE c.model = :model
       AND p.project_id = :project_id
+      AND p.status = 'ready'
     GROUP BY c.paper_id, p.title
     ORDER BY best ASC, c.paper_id ASC
 """)
