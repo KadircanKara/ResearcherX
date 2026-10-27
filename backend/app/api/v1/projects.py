@@ -46,7 +46,7 @@ from app.schemas.project import (
 )
 from app.schemas.research import RunOut
 from app.schemas.user import UserOut
-from app.services import project_service, usage_service
+from app.services import bm25_state, project_service, usage_service
 
 router = APIRouter(tags=["projects"])
 
@@ -353,6 +353,7 @@ async def delete_paper(
     if paper is None or paper.project_id != project_id:
         raise HTTPException(status_code=404, detail="Paper not found")
     await db.delete(paper)
+    await bm25_state.mark_dirty(db, project_id)
     await db.commit()
     return Response(status_code=204)
 

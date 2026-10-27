@@ -4,6 +4,7 @@ from enum import StrEnum
 
 from sqlalchemy import (
     JSON,
+    BigInteger,
     Boolean,
     CheckConstraint,
     DateTime,
@@ -517,3 +518,29 @@ class ConversationMessageEmbedding(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
     message: Mapped[ChatMessage] = relationship(back_populates="embedding")
+
+
+class Bm25IndexState(Base):
+    """Where one project's bm25s sparse index stands.
+
+    `dirty_since` is when the first unindexed change landed (NULL = the built
+    version covers every change) and `last_change_at` the latest one; a build
+    snapshots `last_change_at` and the swap clears `dirty_since` only if it
+    has not moved since. `current_version` names the on-disk index directory.
+    `tokenizer_ver` is bm25_tokenizer's config version at build time, so a
+    tokenizer change forces a rebuild. Rows are written by
+    services/bm25_state.py, in the same transaction as the chunk change.
+    """
+
+    __tablename__ = "bm25_index_state"
+
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE", name="fk_bm25_state_project_id"),
+        primary_key=True,
+    )
+    current_version: Mapped[int] = mapped_column(BigInteger, default=0, server_default="0")
+    built_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
+    dirty_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
+    last_change_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=None)
+    chunk_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    tokenizer_ver: Mapped[int] = mapped_column(Integer, default=0, server_default="0")

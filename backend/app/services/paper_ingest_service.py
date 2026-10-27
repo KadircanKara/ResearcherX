@@ -28,6 +28,7 @@ from app.core import observability
 from app.core.logging import log
 from app.db.models import Paper, PaperChunkEmbedding, PaperSource, PaperStatus, _now
 from app.db.session import SessionLocal
+from app.services.bm25_state import mark_dirty
 from app.services.chunk_header import embed_text, section_path_text
 from app.services.embedding_service import EmbeddingService
 from app.services.paper_metadata_service import apply_metadata
@@ -151,6 +152,7 @@ async def _claim_hash(db: AsyncSession, paper: Paper, digest: str) -> None:
     if holder is not None:
         raise DuplicateSource(*holder)
     await db.execute(delete(PaperChunkEmbedding).where(PaperChunkEmbedding.paper_id == paper_id))
+    await mark_dirty(db, project_id)
     paper.status = PaperStatus.PENDING
     paper.source_hash = digest
     paper.ingest_error = None
@@ -214,6 +216,7 @@ async def index_chunks(
     await db.execute(delete(PaperChunkEmbedding).where(PaperChunkEmbedding.paper_id == paper_id))
 
     if not chunks:
+        await mark_dirty(db, project_id)
         paper.status = PaperStatus.READY
         paper.ingest_error = None
         await db.commit()
@@ -260,6 +263,10 @@ async def index_chunks(
                 "now": now,
             },
         )
+    # Marked after the paid embedding call, not before, so the state row's lock
+    # is not held across it; same transaction as the chunks, so the dirty flag
+    # and the change never disagree.
+    await mark_dirty(db, project_id)
     paper.status = PaperStatus.READY
     paper.ingest_error = None
     await db.commit()
