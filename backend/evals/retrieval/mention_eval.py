@@ -76,6 +76,7 @@ from app.services.embedding_service import EmbeddingService
 from app.services.hybrid_ranker import fuse_rrf, keep_within_rank_window
 from app.services.intra_paper_ranker import keep_within_paper
 from app.services.mention_ranker import apply_per_paper_floor
+from evals.retrieval.arms import sparse_backend_refusal
 from evals.retrieval.comparison_set import ComparisonCase, load_comparison_set
 from evals.retrieval.golden_set import Case, chunk_satisfies, load_golden_set
 from evals.retrieval.mention_metrics import (
@@ -179,8 +180,13 @@ class Arm:
 def _arms() -> list[Arm]:
     """Built at call time, not import time, so an env override
     (`SIMILARITY_THRESHOLD=...`) reaches the arms the same way it reaches
-    production."""
-    return [
+    production.
+
+    The mirror arms run `_hybrid_sql` directly, so under hybrid with a
+    non-postgres `SPARSE_BACKEND` they would measure a lexical arm production
+    is not running; they are refused then (`main` says so) and only the
+    production arms, which follow the setting, run."""
+    arms = [
         # First, and the only arms that import the shipped path end to end.
         Arm("production", "production", settings.similarity_threshold, None),
         # The same shipped path with the rerank stage on, so the two rows are
@@ -205,6 +211,17 @@ def _arms() -> list[Arm]:
             settings.intra_paper_ceiling,
         ),
     ]
+    if _mirror_refusal() is not None:
+        arms = [arm for arm in arms if arm.mode == "production"]
+    return arms
+
+
+def _mirror_refusal() -> str | None:
+    """Why the mirror arms may not run, or None. The dense-only branch never
+    touches the lexical arm, so only the hybrid branch is refused."""
+    if not settings.hybrid_retrieval:
+        return None
+    return sparse_backend_refusal(settings.sparse_backend)
 
 
 def _vec(embedding: list[float]) -> str:
@@ -824,6 +841,9 @@ async def main() -> None:  # noqa: PLR0912 — a report script, not a library AP
     comparisons = [] if args.skip_comparisons else load_comparison_set(args.comparison_set)
     svc = EmbeddingService()
     arms = _arms()
+    refusal = _mirror_refusal()
+    if refusal:
+        print(f"\nERROR: mirror arms refused, production arms only. {refusal}\n")
 
     # Said once, loudly, rather than letting every case quietly measure a
     # no-op arm as though the stage had run. A rerank arm without a key is

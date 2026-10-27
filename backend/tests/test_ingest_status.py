@@ -689,3 +689,22 @@ async def test_patching_a_pending_textless_manual_paper_makes_it_ready(
         )
     assert r.status_code == 200
     assert (await _fresh(pid)).status == PaperStatus.READY
+
+
+async def test_mark_failed_marks_the_project_dirty(db_session, project):
+    from app.db.models import Bm25IndexState
+
+    project_id = project.id  # `_mark_failed` rolls back, expiring `project`
+    pid = (await _paper(db_session, project, "A")).id
+    await svc._mark_failed(db_session, pid, RuntimeError("late failure"))
+    async with SessionLocal() as db:
+        state = await db.get(Bm25IndexState, project_id)
+    assert state is not None and state.dirty_since is not None
+    assert (await _fresh(pid)).status == PaperStatus.FAILED
+
+
+async def test_mark_failed_keeps_the_status_when_marking_dirty_fails(db_session, project):
+    pid = (await _paper(db_session, project, "A")).id
+    with patch.object(svc, "mark_dirty", AsyncMock(side_effect=RuntimeError("db hiccup"))):
+        await svc._mark_failed(db_session, pid, RuntimeError("late failure"))
+    assert (await _fresh(pid)).status == PaperStatus.FAILED

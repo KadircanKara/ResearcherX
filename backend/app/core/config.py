@@ -226,6 +226,25 @@ class Settings(BaseSettings):
     hnsw_ef_search: int = 600
     hnsw_max_scan_tuples: int = 100_000
 
+    # Background bm25s rebuilds (services/bm25_scheduler.py). A project is
+    # rebuilt once it has had no chunk change for `bm25_quiet_period_s`; the
+    # scheduler looks every `bm25_tick_s`. Each project's directory under
+    # `bm25_index_dir` keeps its current and previous version; any other
+    # version is deleted once it is older than `bm25_gc_grace_s`. Off under
+    # test (sqlite has no advisory locks) and on any non-Postgres database.
+    bm25_scheduler_enabled: bool = True
+    bm25_index_dir: str = "/data/bm25"
+    bm25_quiet_period_s: int = 60
+    bm25_tick_s: int = 20
+    bm25_gc_grace_s: int = 600
+    bm25_build_timeout_s: int = 1800
+    # Which engine serves the hybrid path's LEXICAL arm. "postgres" is the
+    # `tsv` arm inside the one hybrid SQL statement; "bm25s" runs plan 2's
+    # dense-only scan and ranks the lexical arm from the project's bm25s
+    # index (services/bm25_store.py), dense-only while no index exists.
+    # Stays "postgres" until the retrieval eval favours bm25s.
+    sparse_backend: Literal["postgres", "bm25s"] = "postgres"
+
     # Single-paper cut under hybrid. Replaces intra_paper_delta, which is a
     # distance-space rule (best + delta) and has no meaning against a fused
     # rank. TUNED BY THE SWEEP -- see the measured block in

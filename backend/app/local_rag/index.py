@@ -23,6 +23,7 @@ from pathlib import Path
 
 import bm25s
 
+from app.services.bm25_build import EmptyCorpus, build_index
 from app.services.bm25_tokenizer import tokenize
 
 
@@ -56,10 +57,15 @@ class BM25Index:
 
 
 def build_bm25(texts: list[str]) -> BM25Index:
-    if not texts:
+    """Index through production's `build_index`, the one BM25 build rule.
+
+    Its `EmptyCorpus` (no documents, or text that is all stopwords) is the
+    empty index here, exactly as production writes an `EMPTY` version.
+    """
+    try:
+        retriever = build_index([str(i) for i in range(len(texts))], texts)
+    except EmptyCorpus:
         return BM25Index(retriever=None, n_docs=0)
-    retriever = bm25s.BM25()
-    retriever.index(tokenize(texts, return_ids=True), show_progress=False)
     return BM25Index(retriever=retriever, n_docs=len(texts))
 
 

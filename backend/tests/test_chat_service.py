@@ -2937,3 +2937,420 @@ async def test_section_tuple_accepts_a_tuple_and_drops_empty_elements():
     assert _section_tuple(42) == ()
     assert _section_tuple("not json") == ()
     assert _section_tuple('{"a": 1}') == ()
+
+
+# --- Sparse backend switch (plan 3, task 5) ---------------------------------
+
+
+def _chunk_row(cid: str, paper_id: str = "p1", *, distance=None) -> MagicMock:
+    return MagicMock(
+        id=cid,
+        paper_id=paper_id,
+        chunk_index=int("".join(ch for ch in cid if ch.isdigit()) or 0),
+        text=f"text {cid}",
+        section=[],
+        page=None,
+        distance=distance,
+        dense_raw_n=_FULL_SCAN,
+        dense_scoped_n=_FULL_SCAN,
+    )
+
+
+def _bm25s_db(
+    dense_ids: list[str],
+    chunk_rows: dict[str, MagicMock],
+    allowed: list[str] = (),
+    *,
+    scan_n: int = _FULL_SCAN,
+):
+    """A fake session that answers each bm25s-path query by its shape: the
+    dense-only scan, the scope's chunk ids, the sparse-only row fetch."""
+
+    def _result(rows):
+        result = MagicMock()
+        result.fetchall.return_value = rows
+        result.scalars.return_value.all.return_value = rows
+        return result
+
+    async def execute(sql, params=None, *args, **kwargs):
+        s = str(sql)
+        if _is_set(s):
+            return _result([])
+        if "dense_raw" in s:
+            rows = [_chunk_row(cid, distance=0.1 + i * 0.01) for i, cid in enumerate(dense_ids)]
+            for row in rows:
+                row.dense_raw_n = row.dense_scoped_n = scan_n
+            return _result(rows)
+        if "SELECT c.id FROM" in s:
+            return _result([MagicMock(id=cid) for cid in allowed])
+        if "bm25_index_state" in s:  # the traced freshness lookup: a clean index
+            result = _result([])
+            result.scalar_one_or_none.return_value = None
+            return result
+        if ":chunk_ids" in s:
+            wanted = json.loads(params["chunk_ids"])
+            return _result([chunk_rows[cid] for cid in wanted if cid in chunk_rows])
+        raise AssertionError(f"unexpected query: {s[:80]}")
+
+    db = MagicMock()
+    db.execute = AsyncMock(side_effect=execute)
+    return db
+
+
+def _fake_store(hits: list[str] | None, version: int = 7) -> MagicMock:
+    """`hits=None` means the project has no usable index."""
+    fake = MagicMock()
+    idx = None if hits is None else MagicMock(version=version)
+    fake.get = AsyncMock(return_value=idx)
+    fake.search = MagicMock(return_value=list(hits or []))
+    return fake
+
+
+# sha256 of `_hybrid_sql(exact).text` as it stood before the bm25s backend
+# landed (b4c599b). Absolute on purpose: comparing against the live builder
+# would pin the dispatch, not the bytes Postgres receives.
+_HYBRID_SQL_SHA256 = {
+    False: "3dbaf8f21be664000eba561b6ac790c0e8d57c8bca3c789867caf14ca103a4d1",
+    True: "4cbaaf9f1a83aec7dd238351f08f279a8794c08146d108f56fec15a4b2351d13",
+}
+
+
+@pytest.mark.parametrize("exact", [False, True])
+async def test_postgres_backend_issues_todays_hybrid_sql(exact):
+    """The default backend is byte-for-byte today's query: the same SET
+    LOCALs, one hybrid statement with today's params under today's span name,
+    and the bm25s store is never consulted."""
+    import hashlib
+
+    from app.services import bm25_store, chat_service
+    from app.services.chat_service import ChatService, PaperInfo, _vec_str
+
+    papers = [PaperInfo(paper_id="p1", title="A"), PaperInfo(paper_id="p2", title="B")]
+    db = _mock_db_returning(settings.hybrid_dense_pool)
+    spy = _fake_store(["x"])
+    dense_query = AsyncMock(side_effect=chat_service._dense_query)
+    assert settings.sparse_backend == "postgres"
+    with (
+        patch.object(bm25_store, "store", spy),
+        patch.object(chat_service, "_dense_query", dense_query),
+    ):
+        await ChatService()._retrieve_paper_chunks(
+            db, papers, [0.0] * 768, "q", project_id="proj-1", exact=exact
+        )
+
+    assert db.execute.await_count == (2 if exact else 5)
+    (call,) = _candidate_calls(db)
+    sql, params = call.args
+    assert hashlib.sha256(sql.text.encode()).hexdigest() == _HYBRID_SQL_SHA256[exact]
+    assert params == {
+        "qvec": _vec_str([0.0] * 768),
+        "qtext": "q",
+        "ids": json.dumps(["p1", "p2"]),
+        "project_id": "proj-1",
+        "model": settings.embedding_model,
+        "threshold": settings.similarity_threshold,
+        "dense_pool": 200,
+        "sparse_pool": 100,
+    }
+    assert dense_query.await_args.args[1] == "retrieval.hybrid"
+    spy.get.assert_not_called()
+    spy.search.assert_not_called()
+
+
+async def test_bm25s_backend_fuses_dense_sql_with_store_ranking():
+    from app.services import bm25_store
+    from app.services.chat_service import ChatService, PaperInfo, _dense_only_sql
+    from app.services.hybrid_ranker import fuse_rrf
+
+    papers = [PaperInfo(paper_id="p1", title="A"), PaperInfo(paper_id="p2", title="B")]
+    dense = [f"d{i}" for i in range(1, 11)]
+    hits = ["s1", "d9"]
+    db = _bm25s_db(dense, {"s1": _chunk_row("s1", "p2")})
+    fake = _fake_store(hits)
+    with (
+        patch.object(settings, "sparse_backend", "bm25s"),
+        patch.object(bm25_store, "store", fake),
+    ):
+        chunks = await ChatService()._retrieve_paper_chunks(
+            db, papers, [0.0] * 768, "reward table", project_id="proj-1", exact=False
+        )
+
+    # The dense leg is plan 2's dense-only scan, at the hybrid dense pool.
+    calls = _candidate_calls(db)
+    dense_sql, dense_params = calls[0].args
+    assert dense_sql.text == _dense_only_sql(False).text
+    assert dense_params["dense_pool"] == max(
+        settings.hybrid_dense_pool, settings.max_context_chunks
+    )
+    # The store ranks the whole project (no mask) on the question text.
+    fake.search.assert_called_once()
+    idx, query, limit, allowed = fake.search.call_args.args
+    assert (query, limit, allowed) == ("reward table", settings.hybrid_sparse_pool, None)
+    # Only the sparse-only id is fetched, filtered on model AND the ready scope.
+    fetch_sql, fetch_params = calls[1].args
+    assert json.loads(fetch_params["chunk_ids"]) == ["s1"]
+    assert fetch_params["model"] == settings.embedding_model
+    assert json.loads(fetch_params["ids"]) == ["p1", "p2"]
+    assert "c.model = :model" in fetch_sql.text
+    assert "SELECT paper_id FROM scope" in fetch_sql.text
+    assert len(calls) == 2
+
+    expected = [
+        key
+        for key, _ in fuse_rrf(
+            dense,
+            hits,
+            w_dense=settings.hybrid_dense_weight,
+            w_sparse=settings.hybrid_sparse_weight,
+            k=settings.hybrid_rrf_k,
+        )
+    ]
+    assert [f"text {key}" for key in expected] == [c.text for c in chunks]
+    s1 = next(c for c in chunks if c.text == "text s1")
+    assert s1.paper_id == "p2"
+
+
+async def test_bm25s_backend_drops_ids_missing_from_postgres():
+    """An id the index still holds but Postgres no longer does (deleted,
+    re-chunked, a paper no longer ready) never reaches the model."""
+    from app.services import bm25_store
+    from app.services.chat_service import ChatService, PaperInfo
+
+    papers = [PaperInfo(paper_id="p1", title="A"), PaperInfo(paper_id="p2", title="B")]
+    db = _bm25s_db(["d1"], {"s1": _chunk_row("s1")})
+    with (
+        patch.object(settings, "sparse_backend", "bm25s"),
+        patch.object(bm25_store, "store", _fake_store(["gone", "s1"])),
+    ):
+        chunks = await ChatService()._retrieve_paper_chunks(
+            db, papers, [0.0] * 768, "q", project_id="proj-1", exact=False
+        )
+
+    assert sorted(c.text for c in chunks) == ["text d1", "text s1"]
+
+
+async def test_bm25s_backend_with_no_index_is_dense_only():
+    from app.services import bm25_store
+    from app.services.chat_service import ChatService, PaperInfo
+
+    papers = [PaperInfo(paper_id="p1", title="A"), PaperInfo(paper_id="p2", title="B")]
+    db = _bm25s_db(["d1", "d2", "d3"], {})
+    fake = _fake_store(None)
+    with (
+        patch.object(settings, "sparse_backend", "bm25s"),
+        patch.object(bm25_store, "store", fake),
+    ):
+        chunks = await ChatService()._retrieve_paper_chunks(
+            db, papers, [0.0] * 768, "q", project_id="proj-1", exact=False
+        )
+
+    assert [c.text for c in chunks] == ["text d1", "text d2", "text d3"]
+    fake.search.assert_not_called()
+    assert len(_candidate_calls(db)) == 1
+
+
+async def test_mention_scope_passes_allowed_ids():
+    """An explicit scope masks the index to the named papers' chunks, so the
+    ranking happens INSIDE the scope rather than over-retrieve-then-filter."""
+    from app.services import bm25_store
+    from app.services.chat_service import ChatService, PaperInfo
+
+    papers = [PaperInfo(paper_id="p1", title="A"), PaperInfo(paper_id="p2", title="B")]
+    db = _bm25s_db(["d1"], {"a": _chunk_row("a")}, allowed=["a", "b", "d1"])
+    fake = _fake_store(["a"])
+    with (
+        patch.object(settings, "sparse_backend", "bm25s"),
+        patch.object(bm25_store, "store", fake),
+    ):
+        await ChatService()._retrieve_paper_chunks(
+            db, papers, [0.0] * 768, "q", project_id="proj-1", exact=True
+        )
+
+    _, _, _, allowed = fake.search.call_args.args
+    assert set(allowed) == {"a", "b", "d1"}
+    scope_sql, scope_params = next(
+        c.args for c in _candidate_calls(db) if "SELECT c.id FROM" in str(c.args[0])
+    )
+    assert "c.model = :model" in scope_sql.text
+    assert "SELECT paper_id FROM scope" in scope_sql.text
+    assert json.loads(scope_params["ids"]) == ["p1", "p2"]
+    assert scope_params["model"] == settings.embedding_model
+
+
+@pytest.mark.parametrize("backend", ["postgres", "bm25s"])
+async def test_kill_switch_stays_dense_only_under_both_backends(backend):
+    from app.services import bm25_store
+    from app.services.chat_service import ChatService, PaperInfo, _dense_only_sql
+
+    papers = [PaperInfo(paper_id="p1", title="A"), PaperInfo(paper_id="p2", title="B")]
+    db = _mock_db_returning(settings.max_context_chunks)
+    fake = _fake_store(["x"])
+    with (
+        patch.object(settings, "sparse_backend", backend),
+        patch.object(settings, "hybrid_retrieval", False),
+        patch.object(bm25_store, "store", fake),
+    ):
+        await ChatService()._retrieve_paper_chunks(
+            db, papers, [0.0] * 768, "q", project_id="proj-1", exact=False
+        )
+
+    (call,) = _candidate_calls(db)
+    assert call.args[0].text == _dense_only_sql(False).text
+    fake.get.assert_not_called()
+    fake.search.assert_not_called()
+
+
+async def test_bm25s_retrieval_spans_carry_backend_and_freshness():
+    from datetime import timedelta
+
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    from app.core import observability
+    from app.db.models import _now
+    from app.services import bm25_store, chat_service
+    from app.services.chat_service import ChatService, PaperInfo
+
+    papers = [PaperInfo(paper_id="p1", title="A"), PaperInfo(paper_id="p2", title="B")]
+    db = _bm25s_db(["d1"], {"s1": _chunk_row("s1")})
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    observability.install_provider(provider)
+    dirty_since = _now() - timedelta(seconds=90)
+    try:
+        with (
+            patch.object(settings, "sparse_backend", "bm25s"),
+            patch.object(bm25_store, "store", _fake_store(["s1", "d1"], version=4)),
+            patch.object(chat_service, "_index_freshness", AsyncMock(return_value=dirty_since)),
+        ):
+            await ChatService()._retrieve_paper_chunks(
+                db, papers, [0.0] * 768, "q", project_id="proj-1", exact=False
+            )
+    finally:
+        observability.install_provider(None)
+
+    spans = {s.name: s for s in exporter.get_finished_spans()}
+    sparse = spans["retrieval.sparse"].attributes
+    assert sparse["retrieval.backend"] == "bm25s"
+    assert sparse["retrieval.hits"] == 2
+    assert sparse["retrieval.index_version"] == 4
+    assert sparse["retrieval.dirty"] is True
+    assert sparse["retrieval.stale_s"] >= 90
+    dense = spans["retrieval.dense"].attributes
+    assert dense["retrieval.backend"] == "bm25s"
+    assert dense["retrieval.hits"] == 1
+
+
+async def test_index_freshness_reads_dirty_since(db_session: AsyncSession, project: Project):
+    from app.services.bm25_state import mark_dirty
+    from app.services.chat_service import _index_freshness
+
+    assert await _index_freshness(db_session, project.id) is None
+    await mark_dirty(db_session, project.id)
+    await db_session.commit()
+    assert await _index_freshness(db_session, project.id) is not None
+
+
+def _span_exporter():
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    from app.core import observability
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    observability.install_provider(provider)
+    return exporter
+
+
+@pytest.mark.parametrize("path", ["kill_switch", "postgres", "bm25s"])
+async def test_the_dense_fallback_is_marked_on_the_retrieval_dense_span_on_every_path(path):
+    """One span carries `retrieval.dense.fallback`, whichever path ran."""
+    from app.core import observability
+    from app.services import bm25_store
+    from app.services.chat_service import ChatService, PaperInfo
+
+    papers = [PaperInfo(paper_id="p1", title="A"), PaperInfo(paper_id="p2", title="B")]
+    # A short scan: 7 rows against a far larger pool, so HNSW re-runs exact.
+    db = _bm25s_db(["d1"], {}, scan_n=7) if path == "bm25s" else _mock_db_returning(7)
+    exporter = _span_exporter()
+    try:
+        with (
+            patch.object(settings, "hybrid_retrieval", path != "kill_switch"),
+            patch.object(settings, "sparse_backend", "bm25s" if path == "bm25s" else "postgres"),
+            patch.object(bm25_store, "store", _fake_store(None)),
+            observability.span("chat.retrieve"),
+        ):
+            await ChatService()._retrieve_paper_chunks(
+                db, papers, [0.0] * 768, "q", project_id="proj-1", exact=False
+            )
+    finally:
+        observability.install_provider(None)
+
+    marked = [
+        s.name
+        for s in exporter.get_finished_spans()
+        if s.attributes.get("retrieval.dense.fallback") is True
+    ]
+    assert marked == ["retrieval.dense"]
+
+
+async def test_a_failing_bm25s_search_leaves_the_turn_dense_only():
+    """A query-time failure inside the index fails open to no lexical hits,
+    logged and marked on the span, never a failed turn."""
+    from app.core import observability
+    from app.services import bm25_store, chat_service
+    from app.services.chat_service import ChatService, PaperInfo
+
+    papers = [PaperInfo(paper_id="p1", title="A"), PaperInfo(paper_id="p2", title="B")]
+    db = _bm25s_db(["d1", "d2"], {})
+    fake = _fake_store([])
+    fake.search.side_effect = RuntimeError("bad mmap")
+    exporter = _span_exporter()
+    try:
+        with (
+            patch.object(settings, "sparse_backend", "bm25s"),
+            patch.object(bm25_store, "store", fake),
+            patch.object(chat_service, "log") as log,
+        ):
+            chunks = await ChatService()._retrieve_paper_chunks(
+                db, papers, [0.0] * 768, "q", project_id="proj-1", exact=False
+            )
+    finally:
+        observability.install_provider(None)
+
+    assert [c.text for c in chunks] == ["text d1", "text d2"]
+    assert not [c for c in _candidate_calls(db) if ":chunk_ids" in str(c.args[0])]
+    assert log.warning.call_args.args[0] == "bm25_search_failed"
+    sparse = {s.name: s for s in exporter.get_finished_spans()}["retrieval.sparse"]
+    assert sparse.attributes["retrieval.sparse.failed"] is True
+    assert sparse.attributes["retrieval.hits"] == 0
+
+
+async def test_bm25s_search_runs_off_the_event_loop():
+    """`search` is synchronous CPU work over an mmap; on the loop thread it
+    would stall every other request for its duration."""
+    import threading
+
+    from app.services import bm25_store
+    from app.services.chat_service import ChatService, PaperInfo
+
+    papers = [PaperInfo(paper_id="p1", title="A"), PaperInfo(paper_id="p2", title="B")]
+    db = _bm25s_db(["d1"], {})
+    fake = _fake_store([])
+    callers: list[int] = []
+    fake.search.side_effect = lambda *args: callers.append(threading.get_ident()) or []
+    with (
+        patch.object(settings, "sparse_backend", "bm25s"),
+        patch.object(bm25_store, "store", fake),
+    ):
+        await ChatService()._retrieve_paper_chunks(
+            db, papers, [0.0] * 768, "q", project_id="proj-1", exact=False
+        )
+
+    assert len(callers) == 1
+    assert callers[0] != threading.get_ident()

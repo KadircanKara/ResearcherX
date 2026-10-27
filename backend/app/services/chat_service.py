@@ -5,9 +5,12 @@ All DB sessions are created internally (called from a streaming HTTP handler
 whose FastAPI session closes immediately after yielding the EventSourceResponse).
 """
 
+import asyncio
 import json
 import re
 from collections.abc import AsyncGenerator
+from dataclasses import dataclass
+from datetime import datetime, timezone
 
 from pydantic import BaseModel
 from sqlalchemy import TextClause, select, text
@@ -19,8 +22,9 @@ from app.agents.scope_widener import ScopeWidenerAgent, WidenerInput
 from app.core import observability
 from app.core.config import settings
 from app.core.logging import log
-from app.db.models import Paper, PaperStatus
+from app.db.models import Bm25IndexState, Paper, PaperStatus, _now
 from app.db.session import SessionLocal
+from app.services import bm25_store
 from app.services.citation_attribution import (
     expand_grouped_citations,
     split_prose_segments,
@@ -495,6 +499,69 @@ def _hybrid_sql(exact: bool, *, tsquery_sql: str = _WEBSEARCH_TSQUERY_SQL) -> Te
             LEFT JOIN (dense d FULL OUTER JOIN sparse sp ON sp.id = d.id) ON true
         """
     )
+
+
+# The bm25s backend's two Postgres reads. Both carry `model` and the scope,
+# so an id the index still holds but this scope or model no longer does --
+# a deleted or re-chunked chunk, a paper that stopped being `ready` -- is
+# never fetched and so never reaches the model.
+_SCOPE_CHUNK_IDS_SQL = text(
+    "WITH"
+    + _SCOPE_CTE
+    + """
+            SELECT c.id FROM paper_chunk_embeddings c
+            WHERE c.project_id = :project_id
+              AND c.model = :model
+              AND c.paper_id IN (SELECT paper_id FROM scope)
+        """
+)
+
+_SPARSE_ROWS_SQL = text(
+    "WITH"
+    + _SCOPE_CTE
+    + """
+            SELECT c.id, c.paper_id, c.chunk_index, c.text, c.section, c.page
+            FROM paper_chunk_embeddings c
+            WHERE c.id IN (
+                    SELECT value FROM jsonb_array_elements_text(CAST(:chunk_ids AS jsonb))
+                  )
+              AND c.project_id = :project_id
+              AND c.model = :model
+              AND c.paper_id IN (SELECT paper_id FROM scope)
+        """
+)
+
+
+@dataclass(frozen=True)
+class _Candidate:
+    """One hybrid candidate in the shape `_hybrid_sql` returns: a NULL
+    `distance`/`d_rank` for a chunk only the sparse arm found."""
+
+    id: str
+    paper_id: str
+    chunk_index: int
+    text: str
+    section: object
+    page: int | None
+    distance: float | None
+    d_rank: int | None
+    s_rank: int | None
+
+
+async def _index_freshness(db: AsyncSession, project_id: str) -> datetime | None:
+    """`dirty_since` of the project's bm25 index state: when the oldest chunk
+    change the live index does not hold yet happened, or None if it is current."""
+    return (
+        await db.execute(
+            select(Bm25IndexState.dirty_since).where(Bm25IndexState.project_id == project_id)
+        )
+    ).scalar_one_or_none()
+
+
+def _seconds_since(moment: datetime) -> int:
+    if moment.tzinfo is None:  # sqlite hands back naive UTC
+        moment = moment.replace(tzinfo=timezone.utc)
+    return max(0, int((_now() - moment).total_seconds()))
 
 
 async def _dense_query(
@@ -1598,20 +1665,24 @@ class ChatService:
         rejects everything (a placeholder row with a NULL id, dropped by
         `_dense_query`).
         """
-        rows, _ = await _dense_query(
-            db,
-            "retrieval.dense",
-            _dense_only_sql,
-            {
-                "qvec": qvec,
-                "ids": ids,
-                "project_id": project_id,
-                "model": settings.embedding_model,
-                "threshold": threshold,
-                "dense_pool": pool,
-            },
-            exact=exact,
-        )
+        # Every path's dense scan runs inside one `retrieval.dense` span, so
+        # `_dense_query`'s `retrieval.dense.fallback` always lands there.
+        with observability.span("retrieval.dense", kind="retriever") as dense_span:
+            rows, _ = await _dense_query(
+                db,
+                "retrieval.dense.sql",
+                _dense_only_sql,
+                {
+                    "qvec": qvec,
+                    "ids": ids,
+                    "project_id": project_id,
+                    "model": settings.embedding_model,
+                    "threshold": threshold,
+                    "dense_pool": pool,
+                },
+                exact=exact,
+            )
+            observability.set_attributes(dense_span, {"retrieval.hits": len(rows)})
         return rows
 
     async def _hybrid_rows(
@@ -1656,21 +1727,189 @@ class ChatService:
         so the scan's row count survives both arms coming back empty.
         """
         dense_pool = max(settings.hybrid_dense_pool, pool)
+        if settings.sparse_backend == "bm25s":
+            return await self._bm25s_rows(
+                db, project_id, ids, qvec, qtext, threshold, dense_pool, exact=exact
+            )
 
-        rows, _ = await _dense_query(
-            db,
-            "retrieval.hybrid",
-            _hybrid_sql,
-            {
-                "qvec": qvec,
-                "qtext": qtext,
-                "ids": ids,
-                "project_id": project_id,
-                "model": settings.embedding_model,
-                "threshold": threshold,
-                "dense_pool": dense_pool,
-                "sparse_pool": settings.hybrid_sparse_pool,
-            },
-            exact=exact,
-        )
+        # Both arms are one statement here, so the dense span times both and
+        # the sparse span only reports what its arm contributed.
+        with observability.span("retrieval.dense", kind="retriever") as dense_span:
+            rows, _ = await _dense_query(
+                db,
+                "retrieval.hybrid",
+                _hybrid_sql,
+                {
+                    "qvec": qvec,
+                    "qtext": qtext,
+                    "ids": ids,
+                    "project_id": project_id,
+                    "model": settings.embedding_model,
+                    "threshold": threshold,
+                    "dense_pool": dense_pool,
+                    "sparse_pool": settings.hybrid_sparse_pool,
+                },
+                exact=exact,
+            )
+            observability.set_attributes(
+                dense_span,
+                {
+                    "retrieval.backend": "postgres",
+                    "retrieval.hits": sum(1 for r in rows if r.d_rank is not None),
+                },
+            )
+        with observability.span("retrieval.sparse", kind="retriever") as sparse_span:
+            observability.set_attributes(
+                sparse_span,
+                {
+                    "retrieval.backend": "postgres",
+                    "retrieval.hits": sum(1 for r in rows if r.s_rank is not None),
+                    "retrieval.in_dense_query": True,
+                },
+            )
+        return rows
+
+    async def _bm25s_rows(
+        self,
+        db: AsyncSession,
+        project_id: str,
+        ids: str,
+        qvec: str,
+        qtext: str,
+        threshold: float,
+        dense_pool: int,
+        *,
+        exact: bool,
+    ) -> list[_Candidate]:
+        """`_hybrid_rows` with the lexical arm served by the project's bm25s
+        index, returning the same row shape.
+
+        (a) The dense arm is `_dense_only_sql` -- the same scan, gate and
+        HNSW fallback as the kill switch, at the hybrid dense pool -- and its
+        order is `d_rank`, exactly the `ROW_NUMBER() OVER (distance, id)` of
+        the hybrid statement. (b) The store ranks the question text; an
+        explicit scope (`exact`) masks the index to the scope's chunk ids so
+        ranking happens inside the scope, while the whole-project scope ranks
+        unmasked. (c) Ids the dense arm did not return are fetched in one
+        query filtered on model AND scope, so a stale index entry, a chunk of
+        a paper that is not `ready`, or a chunk past the distance gate is
+        handled the way the hybrid statement handles it: dropped when it is
+        no longer in scope, otherwise kept as a sparse-only row with a NULL
+        distance. `s_rank` is the position in the bm25s result.
+
+        No index yet (or a broken one) means the sparse arm is empty and the
+        turn is dense-only, never an error.
+        """
+        with observability.span("retrieval.dense", kind="retriever") as dense_span:
+            dense, _ = await _dense_query(
+                db,
+                "retrieval.dense.sql",
+                _dense_only_sql,
+                {
+                    "qvec": qvec,
+                    "ids": ids,
+                    "project_id": project_id,
+                    "model": settings.embedding_model,
+                    "threshold": threshold,
+                    "dense_pool": dense_pool,
+                },
+                exact=exact,
+            )
+            observability.set_attributes(
+                dense_span, {"retrieval.backend": "bm25s", "retrieval.hits": len(dense)}
+            )
+
+        with observability.span("retrieval.sparse", kind="retriever") as sparse_span:
+            store = bm25_store.store
+            idx = await store.get(db, project_id)
+            hits: list[str] = []
+            if idx is not None:
+                allowed = None
+                if exact:
+                    scope_rows = await _fetch_traced(
+                        "retrieval.sparse.scope",
+                        db,
+                        _SCOPE_CHUNK_IDS_SQL,
+                        {"ids": ids, "project_id": project_id, "model": settings.embedding_model},
+                    )
+                    allowed = [row.id for row in scope_rows]
+                try:
+                    hits = await asyncio.to_thread(
+                        store.search, idx, qtext, settings.hybrid_sparse_pool, allowed
+                    )
+                except Exception as exc:
+                    # Fail open to the neutral value: an index that breaks at
+                    # query time costs this turn its lexical arm, never the turn.
+                    log.warning(
+                        "bm25_search_failed",
+                        project_id=project_id,
+                        version=idx.version,
+                        error=str(exc),
+                    )
+                    observability.set_attributes(sparse_span, {"retrieval.sparse.failed": True})
+                    hits = []
+
+            s_rank = {cid: rank for rank, cid in enumerate(hits, 1)}
+            rows = [
+                _Candidate(
+                    id=row.id,
+                    paper_id=row.paper_id,
+                    chunk_index=row.chunk_index,
+                    text=row.text,
+                    section=row.section,
+                    page=row.page,
+                    distance=row.distance,
+                    d_rank=rank,
+                    s_rank=s_rank.get(row.id),
+                )
+                for rank, row in enumerate(dense, 1)
+            ]
+            in_dense = {row.id for row in dense}
+            sparse_only = [cid for cid in hits if cid not in in_dense]
+            fetched: dict = {}
+            if sparse_only:
+                fetched = {
+                    row.id: row
+                    for row in await _fetch_traced(
+                        "retrieval.sparse.rows",
+                        db,
+                        _SPARSE_ROWS_SQL,
+                        {
+                            "chunk_ids": json.dumps(sparse_only),
+                            "ids": ids,
+                            "project_id": project_id,
+                            "model": settings.embedding_model,
+                        },
+                    )
+                }
+            rows += [
+                _Candidate(
+                    id=row.id,
+                    paper_id=row.paper_id,
+                    chunk_index=row.chunk_index,
+                    text=row.text,
+                    section=row.section,
+                    page=row.page,
+                    distance=None,
+                    d_rank=None,
+                    s_rank=s_rank[cid],
+                )
+                for cid in sparse_only
+                if (row := fetched.get(cid)) is not None
+            ]
+
+            attributes = {
+                "retrieval.backend": "bm25s",
+                "retrieval.hits": len(hits),
+                "retrieval.dropped": len(sparse_only) - len(fetched),
+                "retrieval.index_version": idx.version if idx is not None else 0,
+            }
+            # A trace attribute must never cost an untraced turn a query.
+            if sparse_span.is_recording():
+                dirty_since = await _index_freshness(db, project_id)
+                attributes["retrieval.dirty"] = dirty_since is not None
+                attributes["retrieval.stale_s"] = (
+                    _seconds_since(dirty_since) if dirty_since is not None else 0
+                )
+            observability.set_attributes(sparse_span, attributes)
         return rows

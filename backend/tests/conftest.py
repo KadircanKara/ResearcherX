@@ -52,6 +52,9 @@ os.environ["AUTH_MODE"] = "dev"
 os.environ["SUPABASE_URL"] = ""
 os.environ["REQUIRE_AUTH"] = "false"
 os.environ["DEMO_MAX_USERS"] = "0"
+# The bm25 rebuild scheduler needs Postgres advisory locks; the scheduler's
+# tests drive `tick` directly with the lock and the subprocess faked.
+os.environ["BM25_SCHEDULER_ENABLED"] = "false"
 for _feature in ("LATEX", "RESEARCH", "PAPER_URL", "SHARING", "MANUAL_PAPERS"):
     os.environ[f"FEATURE_{_feature}"] = "true"
 for _limit in (

@@ -14,8 +14,8 @@ What is held equal, so the comparison measures the scorer and nothing else:
 - fusion: the IMPORTED `fuse_rrf` with production's weights, `k` and sparse
   pool size.
 
-The BM25 index and tokenizer are IMPORTED from `app.local_rag.index` rather
-than rebuilt, so this arm and the database-free RAG system score identically.
+The BM25 index is built by production's own `bm25_build.build_index`, so this
+arm and the production sparse leg score identically.
 
 Note the RRF weights and `k` were tuned against `ts_rank_cd`'s rankings
 (see `hybrid_rrf_k` in config.py). A bm25s arm that loses here at those
@@ -27,7 +27,9 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from app.local_rag.index import build_bm25
+from app.local_rag.index import BM25Index
+from app.services import bm25_tokenizer
+from app.services.bm25_build import EmptyCorpus, build_index
 from app.services.hybrid_ranker import fuse_rrf
 from evals.retrieval.golden_set import Case, chunk_satisfies
 from evals.retrieval.metrics import Scored
@@ -44,7 +46,7 @@ class CorpusChunk:
 
 def index_text(chunk: CorpusChunk) -> str:
     """What BM25 sees for a chunk: the `tsv` column's own expression."""
-    return f"{chunk.section_text or ''} {chunk.text}"
+    return bm25_tokenizer.index_text(chunk.section_text, chunk.text)
 
 
 class Bm25Corpus:
@@ -53,7 +55,13 @@ class Bm25Corpus:
     def __init__(self, chunks: Sequence[CorpusChunk]) -> None:
         self.chunks = list(chunks)
         self.by_id = {c.chunk_id: c for c in self.chunks}
-        self._index = build_bm25([index_text(c) for c in self.chunks])
+        try:
+            retriever = build_index(
+                [c.chunk_id for c in self.chunks], [index_text(c) for c in self.chunks]
+            )
+            self._index = BM25Index(retriever=retriever, n_docs=len(self.chunks))
+        except EmptyCorpus:
+            self._index = BM25Index(retriever=None, n_docs=0)
 
     def sparse_ranked(self, query: str, limit: int) -> list[str]:
         """Chunk ids, best first, zero scores dropped -- the bm25s analogue of

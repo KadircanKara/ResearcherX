@@ -71,6 +71,16 @@ services:
       # Abuse-limit tunables (defaults in config.py; override without edits).
       GLOBAL_DAILY_RUN_CAP: ${GLOBAL_DAILY_RUN_CAP:-10}
       RATE_LIMIT_RUNS: ${RATE_LIMIT_RUNS:-3/hour;10/day}
+      # bm25s sparse indexes (services/bm25_scheduler.py). SPARSE_BACKEND
+      # stays postgres until the retrieval eval favours bm25s; the scheduler
+      # builds into BM25_INDEX_DIR either way, so the volume below is needed
+      # from the first deploy.
+      BM25_INDEX_DIR: /data/bm25
+      SPARSE_BACKEND: ${SPARSE_BACKEND:-postgres}
+    volumes:
+      # Without this volume every deploy starts with no indexes and rebuilds
+      # them all on startup (the dense-only fallback serves meanwhile).
+      - bm25_indexes:/data/bm25
     depends_on:
       db:
         condition: service_healthy
@@ -102,3 +112,4 @@ services:
 volumes:
   caddy_data:
   caddy_config:
+  bm25_indexes:

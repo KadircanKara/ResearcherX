@@ -86,3 +86,11 @@ def test_an_empty_corpus_builds_and_searches_as_empty(tmp_path: Path):
 def test_loading_a_missing_index_says_so(tmp_path: Path):
     with pytest.raises(FileNotFoundError, match="no BM25 index"):
         load_bm25(tmp_path / "never-built")
+
+
+def test_an_all_stopword_corpus_builds_as_empty():
+    """The production builder's empty-vocabulary rule applies here too: bm25s
+    would otherwise raise an opaque ValueError."""
+    index = build_bm25(["the and of", "for the"])
+    assert index.retriever is None
+    assert index.search("the", limit=5) == []

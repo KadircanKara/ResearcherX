@@ -35,8 +35,13 @@ COPY app ./app
 COPY alembic ./alembic
 COPY alembic.ini ./
 
-# Non-root; /app stays root-owned read-only — the app writes nothing to disk.
-RUN useradd --create-home --uid 1000 appuser
+# Non-root; /app stays root-owned read-only. The one path the app writes is
+# /data/bm25 (the bm25s index volume, BM25_INDEX_DIR). It is created here and
+# owned by appuser because a fresh named volume copies the ownership of the
+# image directory it mounts over; without it the volume is root-owned and
+# every index build fails with PermissionError.
+RUN useradd --create-home --uid 1000 appuser \
+  && mkdir -p /data/bm25 && chown appuser:appuser /data/bm25
 USER appuser
 
 EXPOSE 8000
