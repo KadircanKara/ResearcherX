@@ -57,6 +57,8 @@ from evals.retrieval.bm25_arm import (
 from evals.retrieval.golden_set import Case, load_golden_set
 from evals.retrieval.per_kind import ARMS as PER_KIND_ARMS
 from evals.retrieval.per_kind import macro, per_kind_table
+from evals.retrieval.sweep import CaseRankings, build_rankings
+from evals.retrieval.sweep import report as sweep_report
 from evals.retrieval.metrics import (
     rerank_lost_count,
     rerank_rescued_count,
@@ -754,12 +756,22 @@ async def main() -> None:  # noqa: PLR0912, PLR0915 — a report script, not a l
         ),
     )
     parser.add_argument(
+        "--sweep",
+        action="store_true",
+        help=(
+            "sweep RRF w_dense x k for the dense + bm25s hybrid (no rerank), choosing the "
+            "best point on the tune split. Requires --hybrid --bm25."
+        ),
+    )
+    parser.add_argument(
         "--jev-repeats",
         type=int,
         default=1,
         help="re-run every Jev-backed arm N times with fresh calls (Jev is not deterministic)",
     )
     args = parser.parse_args()
+    if args.sweep and not (args.hybrid and args.bm25):
+        parser.error("--sweep requires --hybrid and --bm25")
 
     # The rerank consumes a fused candidate list, and there is no fused list
     # without the hybrid arm. Refusing is better than silently reranking the
@@ -865,6 +877,7 @@ async def main() -> None:  # noqa: PLR0912, PLR0915 — a report script, not a l
     # from the arm lists above because they need the sparse-only rankings too.
     pk_cases: list[Case] = []
     pk_lists: dict[str, list[list[Scored]]] = {arm: [] for arm in PER_KIND_ARMS}
+    sweep_rankings: list[CaseRankings] = []
 
     async with SessionLocal() as db:
         counts = {r.model: r.n for r in (await db.execute(_MODEL_COUNTS_SQL)).fetchall()}
@@ -992,6 +1005,10 @@ async def main() -> None:  # noqa: PLR0912, PLR0915 — a report script, not a l
                     pk_lists["sparse_bm25"].append(
                         sparse_only_ranking(bm25_corpus, case.question, settings.hybrid_sparse_pool)
                     )
+                    if args.sweep:
+                        sweep_rankings.append(
+                            build_rankings(case, hybrid_chunks, pk_lists["sparse_bm25"][-1])
+                        )
                     pk_lists["hybrid_sql"].append(hybrid_chunks)
                     pk_lists["hybrid_bm25"].append(bm25_fused)
 
@@ -1210,6 +1227,16 @@ async def main() -> None:  # noqa: PLR0912, PLR0915 — a report script, not a l
         else:
             print("bm25s arm: skipped — no positive cases scored (see ERRORS above)")
             print()
+
+    sweep_payload = None
+    if args.sweep:
+        tune_rk = [r for r in sweep_rankings if r.case.split == "tune"]
+        test_rk = [r for r in sweep_rankings if r.case.split == "test"]
+        if not tune_rk:
+            print("sweep: skipped — no tune-split positives scored (use --split all or tune)")
+        else:
+            sweep_payload = sweep_report(tune_rk, test_rk, budget=settings.max_context_chunks)
+        print()
 
     # --- rerank arm: fused order vs cross-encoder order ---------------------
     # Reported against the HYBRID arm, never against the dense baseline: the
@@ -1525,6 +1552,7 @@ async def main() -> None:  # noqa: PLR0912, PLR0915 — a report script, not a l
                     "separation": separation,
                     "targeted": targeted_rows if args.targeted else None,
                     "hybrid": hybrid_payload,
+                    "rrf_sweep": sweep_payload,
                     "per_kind": [
                         {
                             "kind": r.kind,
