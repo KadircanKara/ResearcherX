@@ -1,6 +1,7 @@
 "use client";
 
 import { ExternalLink } from "lucide-react";
+import { PaperSummaryBlock } from "@/components/papers/paper-summary-block";
 import { formatDate } from "@/lib/format";
 import { abstractExcerpt, sourceLine, stateDetail, type PaperState } from "@/lib/papers";
 import type { Paper } from "@/lib/types";
@@ -43,6 +44,7 @@ export function PaperRowBody({
           {abstractExcerpt(abstract)}
         </blockquote>
       )}
+      <PaperSummaryBlock paper={paper} />
       <div className="flex flex-wrap gap-x-4 gap-y-2 pt-1">
         {/* A paper we hold the PDF for downloads; a link-sourced one opens
             where it lives; a paper with neither was added before PDFs were

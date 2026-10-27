@@ -1,6 +1,6 @@
 import { apiGet, apiSend, authHeaders, onAuthFailure, API_BASE } from "./api";
 import { ApiError, detailOf } from "./api-error";
-import type { Project, ProjectDetail, Paper, PaperSource } from "./types";
+import type { Project, ProjectDetail, Paper, PaperSource, PaperSummary } from "./types";
 
 export async function listProjects(): Promise<Project[]> {
   return apiGet<Project[]>("/projects");
@@ -158,4 +158,9 @@ export async function getPaperChunk(
   return apiGet<PaperChunk>(
     `/projects/${projectId}/papers/${paperId}/chunks/${chunkIndex}`
   );
+}
+
+/** The paper's summary and keywords; rejects with a 404 when none exists yet. */
+export async function getPaperSummary(projectId: string, paperId: string): Promise<PaperSummary> {
+  return apiGet<PaperSummary>(`/projects/${projectId}/papers/${paperId}/summary`);
 }

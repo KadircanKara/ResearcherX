@@ -1,14 +1,15 @@
 "use client";
 
 import { PaperRow } from "@/components/papers/paper-row";
-import { paperState } from "@/lib/papers";
 import type { Paper } from "@/lib/types";
 
 /**
  * The library table.
  *
- * Four columns — Paper, Added, Retriever, State — because that is what the
- * API carries: `PaperOut` has no authors and no year.
+ * Seven columns — Paper, Added, # Chunks, Embeddings, Keyword, Summary,
+ * State — because that is what the API carries: `PaperOut` has no authors and
+ * no year, and it reports where each paper stands in the dense and keyword
+ * indexes and whether its summary record exists.
  */
 export function PaperTable({
   papers,
@@ -33,14 +34,17 @@ export function PaperTable({
   deletingId: string | null;
   onRename: (paper: Paper) => void;
   onRemove: (paper: Paper) => void;
-  onDownload: (paper: Paper) => void;
+  onDownload: (paper: Paper) => void | Promise<void>;
 }) {
   return (
     <div className="rounded-lg border">
-      <div className="hidden grid-cols-[1fr_110px_120px_150px] gap-4 border-b bg-muted/40 px-4 py-2 text-[11px] font-medium uppercase tracking-wide text-muted-foreground md:grid">
+      <div className="hidden grid-cols-[1fr_96px_76px_104px_96px_104px_120px] gap-4 border-b bg-muted/40 px-4 py-2 text-[11px] font-medium uppercase tracking-wide text-muted-foreground md:grid">
         <div>Paper</div>
         <div>Added</div>
-        <div>Retriever</div>
+        <div># Chunks</div>
+        <div>Embeddings</div>
+        <div>Keyword</div>
+        <div>Summary</div>
         <div>State</div>
       </div>
       <div>
@@ -48,17 +52,16 @@ export function PaperTable({
           <PaperRow
             key={paper.id}
             paper={paper}
-            state={paperState(paper)}
             editing={editing}
             selected={selectedIds.has(paper.id)}
-            onToggleSelect={() => onToggleSelect(paper)}
+            onToggleSelect={onToggleSelect}
             isOpen={openId === paper.id}
-            onToggleOpen={() => onToggleOpen(paper)}
+            onToggleOpen={onToggleOpen}
             downloading={downloadingId === paper.id}
             deleting={deletingId === paper.id}
-            onRename={() => onRename(paper)}
-            onRemove={() => onRemove(paper)}
-            onDownload={() => onDownload(paper)}
+            onRename={onRename}
+            onRemove={onRemove}
+            onDownload={onDownload}
           />
         ))}
       </div>

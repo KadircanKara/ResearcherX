@@ -135,6 +135,15 @@ class PaperOut(BaseModel):
     # its status, so a stuck or failed one can be retried; only `ready`
     # papers are retrieved. `ingest_error` is deliberately NOT exposed.
     status: str
+    # Per index, from `paper_index_status`. Dense: embedded | pending |
+    # failed | none. Keyword: indexed | queued | pending | failed | none,
+    # following `sparse_backend` (`queued` only under bm25s, while the
+    # paper waits for the next background index build).
+    dense_status: str = "none"
+    keyword_status: str = "none"
+    # The paper's `paper_summaries` row: ready | abstract (no LLM summary,
+    # the abstract stands in) | pending | failed | none (no row yet).
+    summary_status: str = "none"
     created_at: datetime
     model_config = {"from_attributes": True}
 
@@ -153,6 +162,17 @@ class SuggestTitleFromUrlResponse(BaseModel):
     title: str | None
     abstract: str | None
     requires_manual: bool
+
+
+class PaperSummaryOut(BaseModel):
+    """One paper's index record, for the opened row on the Papers page."""
+
+    status: str
+    source: str | None
+    summary: str | None
+    keywords: list[str] = []
+    summary_model: str | None
+    updated_at: datetime
 
 
 class PaperChunkOut(BaseModel):

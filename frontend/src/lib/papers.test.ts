@@ -2,11 +2,13 @@ import { describe, expect, it } from "vitest";
 import {
   abstractExcerpt,
   hasText,
+  highlightKeywords,
   hostOf,
   lastAddedLabel,
   libraryHeadline,
   paperState,
-  retrieverLabel,
+  indexCell,
+  summaryCell,
   sourceLine,
   stateDetail,
   summarize,
@@ -24,6 +26,9 @@ function paper(over: Partial<Paper> = {}): Paper {
     resolved_pdf_url: null,
     has_pdf: false,
     chunk_count: 0,
+    dense_status: "none",
+    keyword_status: "none",
+    summary_status: "none",
     source: "upload" as PaperSource,
     created_at: "2026-08-14T09:30:00Z",
     ...over,
@@ -145,15 +150,35 @@ describe("abstractExcerpt", () => {
   });
 });
 
-describe("retrieverLabel", () => {
-  it("states the chunk count for a searchable paper", () => {
-    expect(retrieverLabel(paperState(paper({ chunk_count: 1 })))).toBe("1 chunk");
-    expect(retrieverLabel(paperState(paper({ chunk_count: 42 })))).toBe("42 chunks");
+describe("indexCell", () => {
+  it("marks a paper in the index as on", () => {
+    expect(indexCell("embedded")).toEqual({ label: "embedded", tone: "on" });
+    expect(indexCell("indexed")).toEqual({ label: "indexed", tone: "on" });
   });
 
-  it("says holds nothing for both ways of holding nothing", () => {
-    expect(retrieverLabel(paperState(paper()))).toBe("holds nothing");
-    expect(retrieverLabel(paperState(paper({ source: "manual" })))).toBe("holds nothing");
+  it("shows waiting states as idle and a failure as bad", () => {
+    expect(indexCell("queued")).toEqual({ label: "queued", tone: "idle" });
+    expect(indexCell("pending")).toEqual({ label: "processing", tone: "idle" });
+    expect(indexCell("failed")).toEqual({ label: "failed", tone: "bad" });
+  });
+
+  it("claims nothing for none or a status it does not know", () => {
+    expect(indexCell("none")).toEqual({ label: "—", tone: "idle" });
+    expect(indexCell(undefined)).toEqual({ label: "—", tone: "idle" });
+  });
+});
+
+describe("summaryCell", () => {
+  it("marks an LLM summary ready and an abstract stand-in as idle", () => {
+    expect(summaryCell("ready")).toEqual({ label: "ready", tone: "on" });
+    expect(summaryCell("abstract")).toEqual({ label: "abstract only", tone: "idle" });
+  });
+
+  it("shows processing, failure and absence", () => {
+    expect(summaryCell("pending")).toEqual({ label: "processing", tone: "idle" });
+    expect(summaryCell("failed")).toEqual({ label: "failed", tone: "bad" });
+    expect(summaryCell("none")).toEqual({ label: "—", tone: "idle" });
+    expect(summaryCell(undefined)).toEqual({ label: "—", tone: "idle" });
   });
 });
 
@@ -170,5 +195,40 @@ describe("lastAddedLabel", () => {
 
   it("says nothing was added rather than formatting a date it does not have", () => {
     expect(lastAddedLabel([])).toBe("Nothing added yet");
+  });
+});
+
+describe("highlightKeywords", () => {
+  const bolded = (text: string, keywords: string[]) =>
+    highlightKeywords(text, keywords)
+      .filter((s) => s.bold)
+      .map((s) => s.text);
+
+  it("bolds every occurrence, case-insensitively, and keeps the text intact", () => {
+    const text = "UAV networks differ from MANETs; uav swarms too.";
+    const segments = highlightKeywords(text, ["UAV", "MANETs"]);
+    expect(segments.map((s) => s.text).join("")).toBe(text);
+    expect(bolded(text, ["UAV", "MANETs"])).toEqual(["UAV", "MANETs", "uav"]);
+  });
+
+  it("prefers the longest keyword where several match", () => {
+    expect(bolded("Multi-UAV Networks rely on UAV links.", ["UAV", "Multi-UAV Networks"])).toEqual([
+      "Multi-UAV Networks",
+      "UAV",
+    ]);
+  });
+
+  it("never bolds part of a longer word", () => {
+    expect(bolded("Routing and SDN-based routers.", ["rout", "SDN"])).toEqual(["SDN"]);
+  });
+
+  it("treats regex characters in a keyword literally", () => {
+    expect(bolded("We use C++ and (x) here, not Cx.", ["C++", "(x)"])).toEqual(["C++", "(x)"]);
+    expect(bolded("Energy (J) per bit.", ["Energy"])).toEqual(["Energy"]);
+  });
+
+  it("returns the text unbolded with no keywords, and nothing for empty text", () => {
+    expect(highlightKeywords("plain", [])).toEqual([{ text: "plain", bold: false }]);
+    expect(highlightKeywords("", ["x"])).toEqual([]);
   });
 });

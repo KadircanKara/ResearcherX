@@ -181,6 +181,20 @@ export type ChatEvent =
 
 export type PaperSource = "upload" | "link" | "manual";
 
+export type IndexStatus = "embedded" | "indexed" | "queued" | "pending" | "failed" | "none";
+
+export type SummaryStatus = "ready" | "abstract" | "pending" | "failed" | "none";
+
+/** `GET /projects/{id}/papers/{paperId}/summary`. */
+export interface PaperSummary {
+  status: string;
+  source: string | null;
+  summary: string | null;
+  keywords: string[];
+  summary_model: string | null;
+  updated_at: string;
+}
+
 export interface Paper {
   id: string;
   project_id: string;
@@ -199,5 +213,14 @@ export interface Paper {
   /** Chunks the retriever holds for this paper under the configured
    * embedding model. 0 means chat cannot search it. */
   chunk_count: number;
+  /** Dense vectors: embedded | pending | failed | none. */
+  dense_status: IndexStatus;
+  /** Keyword search, following the server's sparse backend:
+   * indexed | queued | pending | failed | none. `queued` means embedded
+   * but waiting for the next background keyword-index build. */
+  keyword_status: IndexStatus;
+  /** The paper's summary record: ready | abstract (the abstract stands in
+   * for an LLM summary) | pending | failed | none (none yet). */
+  summary_status: SummaryStatus;
   created_at: string;
 }

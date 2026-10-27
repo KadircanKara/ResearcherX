@@ -17,11 +17,13 @@ from app.core.features import feature_enabled, require_feature
 from app.core.identity import get_current_user
 from app.core.logging import log
 from app.db.models import (
+    Bm25IndexState,
     Paper,
     PaperChunkEmbedding,
     PaperFile,
     PaperSource,
     PaperStatus,
+    PaperSummary,
     ProjectMember,
     ResearchRun,
     User,
@@ -33,6 +35,7 @@ from app.schemas.project import (
     MemberOut,
     MemberRoleUpdate,
     PaperChunkOut,
+    PaperSummaryOut,
     PaperCreate,
     PaperIngestUrlRequest,
     PaperOut,
@@ -46,7 +49,13 @@ from app.schemas.project import (
 )
 from app.schemas.research import RunOut
 from app.schemas.user import UserOut
-from app.services import bm25_state, paper_summary_service, project_service, usage_service
+from app.services import (
+    bm25_state,
+    paper_index_status,
+    paper_summary_service,
+    project_service,
+    usage_service,
+)
 
 router = APIRouter(tags=["projects"])
 
@@ -192,25 +201,59 @@ async def _stored_pdf_ids(db: AsyncSession, paper_ids: list[str]) -> set[str]:
     return set(rows.scalars().all())
 
 
-async def _chunk_counts(db: AsyncSession, paper_ids: list[str]) -> dict[str, int]:
-    """How many chunks each paper has under the CONFIGURED embedding model.
+async def _index_fields(db: AsyncSession, papers: list[Paper]) -> dict[str, dict]:
+    """`chunk_count` and the dense, keyword and summary status of each paper.
 
-    One grouped query for the whole list, never one per paper. The model
-    filter is mandatory: rows from a previous model are invisible to
-    retrieval, so counting them would call an un-searchable paper searchable.
-    A paper with no rows is absent from the result; callers read it as 0.
+    Three queries for the whole list, never one per paper: chunks grouped by
+    paper, the summary rows, and the project's bm25 index state. Chunks are counted under the
+    CONFIGURED embedding model only: rows from a previous model are invisible
+    to retrieval, so counting them would call an un-searchable paper
+    searchable. The statuses are decided in `paper_index_status` (pure).
     """
-    if not paper_ids:
+    if not papers:
         return {}
+    ids = [p.id for p in papers]
     rows = await db.execute(
-        sa_select(PaperChunkEmbedding.paper_id, func.count())
+        sa_select(
+            PaperChunkEmbedding.paper_id,
+            func.count(),
+            func.max(PaperChunkEmbedding.created_at),
+        )
         .where(
-            PaperChunkEmbedding.paper_id.in_(paper_ids),
+            PaperChunkEmbedding.paper_id.in_(ids),
             PaperChunkEmbedding.model == settings.embedding_model,
         )
         .group_by(PaperChunkEmbedding.paper_id)
     )
-    return {paper_id: count for paper_id, count in rows.all()}
+    stats = {paper_id: (count, newest) for paper_id, count, newest in rows.all()}
+    summary_rows = await db.execute(
+        sa_select(PaperSummary.paper_id, PaperSummary.status, PaperSummary.source).where(
+            PaperSummary.paper_id.in_(ids)
+        )
+    )
+    summaries = {paper_id: (status, source) for paper_id, status, source in summary_rows.all()}
+    index = None
+    if settings.sparse_backend == "bm25s":
+        state = await db.get(Bm25IndexState, papers[0].project_id)
+        if state is not None:
+            index = paper_index_status.Bm25Index(
+                current_version=state.current_version,
+                built_at=state.built_at,
+                dirty_since=state.dirty_since,
+            )
+    out: dict[str, dict] = {}
+    for p in papers:
+        chunks, newest = stats.get(p.id, (0, None))
+        status = str(p.status)
+        out[p.id] = {
+            "chunk_count": chunks,
+            "dense_status": paper_index_status.dense_status(status, chunks),
+            "keyword_status": paper_index_status.keyword_status(
+                status, chunks, newest, backend=settings.sparse_backend, index=index
+            ),
+            "summary_status": paper_index_status.summary_status(*summaries.get(p.id, (None, None))),
+        }
+    return out
 
 
 def _duplicate_source(exc) -> HTTPException:
@@ -236,13 +279,8 @@ def _ready_if_textless_manual(paper: Paper) -> None:
 
 async def _paper_out(db: AsyncSession, paper: Paper) -> PaperOut:
     out = PaperOut.model_validate(paper)
-    counts = await _chunk_counts(db, [paper.id])
-    return out.model_copy(
-        update={
-            "has_pdf": bool(await _stored_pdf_ids(db, [paper.id])),
-            "chunk_count": counts.get(paper.id, 0),
-        }
-    )
+    fields = (await _index_fields(db, [paper]))[paper.id]
+    return out.model_copy(update={"has_pdf": bool(await _stored_pdf_ids(db, [paper.id])), **fields})
 
 
 @router.post("/projects/{project_id}/papers", response_model=PaperOut, status_code=201)
@@ -373,13 +411,52 @@ async def list_papers(
     papers = list(result.scalars().all())
     ids = [p.id for p in papers]
     with_pdf = await _stored_pdf_ids(db, ids)
-    counts = await _chunk_counts(db, ids)
+    fields = await _index_fields(db, papers)
     return [
-        PaperOut.model_validate(p).model_copy(
-            update={"has_pdf": p.id in with_pdf, "chunk_count": counts.get(p.id, 0)}
-        )
+        PaperOut.model_validate(p).model_copy(update={"has_pdf": p.id in with_pdf, **fields[p.id]})
         for p in papers
     ]
+
+
+@router.get("/projects/{project_id}/papers/{paper_id}/summary", response_model=PaperSummaryOut)
+async def get_paper_summary(
+    project_id: str,
+    paper_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
+) -> PaperSummaryOut:
+    """The paper's summary and keywords, for the opened row on the Papers page.
+
+    Selects columns, never the ORM row: `doc_embedding` is a `vector` in
+    Postgres and has no business in this response. 404 when the paper has no
+    summary row yet.
+    """
+    await project_service.require_member(db, project_id, user.id, "member")
+    paper = await db.get(Paper, paper_id)
+    if paper is None or paper.project_id != project_id:
+        raise HTTPException(status_code=404, detail="Paper not found")
+    row = (
+        await db.execute(
+            sa_select(
+                PaperSummary.status,
+                PaperSummary.source,
+                PaperSummary.summary,
+                PaperSummary.keywords,
+                PaperSummary.summary_model,
+                PaperSummary.updated_at,
+            ).where(PaperSummary.paper_id == paper_id)
+        )
+    ).one_or_none()
+    if row is None:
+        raise HTTPException(status_code=404, detail="No summary yet")
+    return PaperSummaryOut(
+        status=row.status,
+        source=row.source,
+        summary=row.summary,
+        keywords=list(row.keywords or []),
+        summary_model=row.summary_model,
+        updated_at=row.updated_at,
+    )
 
 
 @router.get(

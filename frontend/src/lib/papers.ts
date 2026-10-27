@@ -1,5 +1,5 @@
 import { formatDate, plural } from "./format";
-import type { Paper } from "./types";
+import type { IndexStatus, Paper, SummaryStatus } from "./types";
 
 /**
  * What this project can say about a paper's place in the retriever.
@@ -97,9 +97,38 @@ export function libraryHeadline(summary: LibrarySummary): string {
   return `${papers}, ${summary.searchable} of them searchable`;
 }
 
-/** The table's Retriever cell: how much the retriever holds for the paper. */
-export function retrieverLabel(state: PaperState): string {
-  return state.chunks > 0 ? plural(state.chunks, "chunk") : "holds nothing";
+/** A status cell: the word and which dot to draw. */
+export interface StatusCell {
+  label: string;
+  tone: "on" | "idle" | "bad";
+}
+
+const INDEX_CELLS: Record<IndexStatus, StatusCell> = {
+  embedded: { label: "embedded", tone: "on" },
+  indexed: { label: "indexed", tone: "on" },
+  queued: { label: "queued", tone: "idle" },
+  pending: { label: "processing", tone: "idle" },
+  failed: { label: "failed", tone: "bad" },
+  none: { label: "—", tone: "idle" },
+};
+
+/** The table's Embeddings and Keyword cells. An unknown status (an older
+ * server) reads as nothing rather than a claim. */
+export function indexCell(status: IndexStatus | undefined): StatusCell {
+  return (status && INDEX_CELLS[status]) || INDEX_CELLS.none;
+}
+
+const SUMMARY_CELLS: Record<SummaryStatus, StatusCell> = {
+  ready: { label: "ready", tone: "on" },
+  abstract: { label: "abstract only", tone: "idle" },
+  pending: { label: "processing", tone: "idle" },
+  failed: { label: "failed", tone: "bad" },
+  none: { label: "—", tone: "idle" },
+};
+
+/** The table's Summary cell. */
+export function summaryCell(status: SummaryStatus | undefined): StatusCell {
+  return (status && SUMMARY_CELLS[status]) || SUMMARY_CELLS.none;
 }
 
 /**
@@ -146,4 +175,43 @@ const ABSTRACT_MAX = 320;
 export function abstractExcerpt(abstract: string): string {
   if (abstract.length <= ABSTRACT_MAX) return abstract;
   return `${abstract.slice(0, ABSTRACT_MAX).trimEnd()}…`;
+}
+
+/** One run of summary text, bold when it is one of the paper's keywords. */
+export interface SummarySegment {
+  text: string;
+  bold: boolean;
+}
+
+const ESCAPE_RE = /[.*+?^${}()|[\]\\]/g;
+
+/**
+ * The summary split into runs, with every keyword occurrence marked bold.
+ *
+ * Case-insensitive and whole-word (a keyword never bolds half of a longer
+ * word), longest keyword first, so "UAV Networks" wins over "UAV" where both
+ * match. The text itself is never altered: joining the runs gives it back.
+ */
+export function highlightKeywords(
+  text: string,
+  keywords: readonly string[]
+): SummarySegment[] {
+  const terms = [...new Set(keywords.map((k) => k.trim()).filter(Boolean))].sort(
+    (a, b) => b.length - a.length
+  );
+  if (terms.length === 0 || !text) return text ? [{ text, bold: false }] : [];
+  const pattern = new RegExp(
+    `(?<![\\p{L}\\p{N}])(?:${terms.map((t) => t.replace(ESCAPE_RE, "\\$&")).join("|")})(?![\\p{L}\\p{N}])`,
+    "giu"
+  );
+  const segments: SummarySegment[] = [];
+  let last = 0;
+  for (const match of text.matchAll(pattern)) {
+    const start = match.index;
+    if (start > last) segments.push({ text: text.slice(last, start), bold: false });
+    segments.push({ text: match[0], bold: true });
+    last = start + match[0].length;
+  }
+  if (last < text.length) segments.push({ text: text.slice(last), bold: false });
+  return segments;
 }
