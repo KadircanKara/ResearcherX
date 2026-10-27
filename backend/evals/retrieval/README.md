@@ -72,6 +72,16 @@ reason. Under the old per-paper top-k an unscoped harness was harmless, since
 another project's chunks could not take a slot away from the paper being
 measured; under a global top-k they compete for the same fixed budget directly.
 
+Since 2026-10-27 the hybrid arm runs production's own candidate SQL, imported
+(`chat_service._hybrid_sql` through `chat_service._dense_query`), with the
+project's ready papers as the scope: HNSW plus its `SET LOCAL`s and the
+short-scan exact fallback for the whole project, the exact scan for a
+targeted (one-paper) scope. Only the sparse tsquery is swapped, for the
+OR-of-lexemes candidate. `mention_eval`'s mirror arms run the same imported
+SQL on the exact scan. The plain dense arm (`_SQL`) is NOT production's
+query: it ranks every chunk in the project, with index scans off, because the
+golden-set status check and the threshold sweep need the whole corpus.
+
 One divergence remains:
 
 - **Query reformulation.** Production (`chat_service.py`) reformulates the
@@ -288,6 +298,53 @@ per kind makes every per-kind test cell coarse. No production setting was
 changed by this measurement. Consistency check: the (0.7, 30) point
 reproduces the `hybrid_bm25` row (macro MRR (2x0.378 + 0.294)/3 = 0.350,
 r@60 0.84).
+
+### Measured — 2026-10-27 (HNSW vs exact)
+
+Run: `docker compose exec -T backend python -m evals.retrieval.run_eval
+--project-id fa2ab869-6b13-4b31-be5e-ff0c22652922 --hybrid --bm25 --exact`,
+with `-e HNSW_EF_SEARCH=<n>` on the exec for each value tried. The project
+has 2,024 ready papers and 99,828 chunks; 90 positive cases (30 per kind).
+
+`--exact` runs production's whole-project dense query
+(`chat_service._dense_only_sql`, dense_pool 200, gate 0.75) twice per
+positive case, once on HNSW and once with `enable_indexscan = off`, and
+re-runs the hybrid arm exact. A **miss** is a case whose answering chunk
+(`chunk_satisfies`) is in the exact 200-row dense pool and not in the HNSW
+one; any miss exits 1. Id-set differences are reported but do not fail the
+run, because rows nobody needs cost no answer. `max_scan_tuples` stayed at
+100,000, and no HNSW scan fell back to exact in any run (0/90).
+
+| ef_search | misses | cases whose ids differ | exact rows HNSW lacks, mean / max | dense p50 / p95 ms | exit |
+|---|---|---|---|---|---|
+| 200 | 3 (`subsurface-csqmi-planning`, `drrt-xeon-disks`, `myerson-auction-payment`) | 90/90 | 24.1 / 105 | 12.2 / 21.2 | 1 |
+| 400 | 2 (`drrt-xeon-disks`, `myerson-auction-payment`) | 84/90 | 11.6 / 88 | 16.2 / 20.0 | 1 |
+| **600** | **0** | 82/90 | 5.8 / 34 | 20.6 / 25.7 | **0** |
+
+Exact search cost 376–391 ms p50 (p95 398–431) in every run, so HNSW at 600
+is about 18x faster. Latency is per dense query, timed in the harness
+(tracing was not used): the `SET LOCAL`s, the query, and any fallback.
+
+Per-kind r@60 at ef_search 600, HNSW vs exact:
+
+| kind | n | dense hnsw | dense exact | hybrid hnsw | hybrid exact |
+|---|---|---|---|---|---|
+| paraphrase | 30 | 0.67 | 0.67 | 0.63 | 0.63 |
+| paraphrase_keyword | 30 | 0.90 | 0.87 | 0.87 | 0.87 |
+| keyword | 30 | 0.77 | 0.77 | 0.83 | 0.80 |
+
+HNSW can score above exact at r@60: when it skips a nearer non-answering
+chunk, the answer moves up the list. The three misses at 200 sat in the tail
+of the 200-row pool. Hybrid r@60 was the same on both scans at 200 too, so
+the misses did not change what reached the 60-chunk budget on this set. The
+pool is still the contract, because a miss there is an answer the fusion and
+the reranker can never see.
+
+**Shipped:** `hnsw_ef_search` 200 → **600** (`app/core/config.py`). This is
+the first value that passes. It costs about 8 ms p50 per dense query over 200.
+A confirmation run at the new default, with no env override, reproduced the
+600 row exactly (0 misses, 82/90 differing, exit 0), at p50 21.6 / p95
+26.8 ms against exact search's 387.7 / 489.1 ms.
 
 ### Measured — 2026-08-12 [old golden set, pre-2026-10-27]
 

@@ -113,9 +113,9 @@ def test_window_on_empty_input_keeps_nothing():
 
 def test_only_the_run_eval_candidate_arms_use_the_or_tsquery():
     """The OR query is a measured CANDIDATE, not production. `run_eval`'s
-    hybrid_sql/sparse_sql arms paste the one shared copy; `chat_service` and
-    the `mention_eval` mirror stay on the AND-ed `websearch_to_tsquery` that
-    ships."""
+    hybrid_sql/sparse_sql arms pass the one shared copy into production's
+    own builder; `chat_service` and the `mention_eval` mirror stay on the
+    AND-ed `websearch_to_tsquery` that ships."""
     import inspect
 
     from app.services import chat_service
@@ -124,12 +124,14 @@ def test_only_the_run_eval_candidate_arms_use_the_or_tsquery():
 
     assert "plainto_tsquery" in SPARSE_TSQUERY_SQL
     assert "' | '" in SPARSE_TSQUERY_SQL
-    run_eval_source = inspect.getsource(run_eval)
-    assert "{SPARSE_TSQUERY_SQL}" in run_eval_source
-    assert SPARSE_TSQUERY_SQL in str(run_eval._HYBRID_SQL)
-    assert SPARSE_TSQUERY_SQL in str(run_eval._HYBRID_SQL_PAPER)
+    for exact in (True, False):
+        candidate = str(run_eval._hybrid_candidate_sql(exact))
+        assert SPARSE_TSQUERY_SQL in candidate
+        assert "websearch_to_tsquery" not in candidate
+        shipped = str(chat_service._hybrid_sql(exact))
+        assert "websearch_to_tsquery('english', :qtext)" in shipped
+        assert "plainto_tsquery" not in shipped
     for module in (chat_service, mention_eval):
-        source = inspect.getsource(module)
-        assert "SPARSE_TSQUERY_SQL" not in source, module.__name__
-        assert "websearch_to_tsquery('english', :qtext)" in source, module.__name__
-    assert "websearch_to_tsquery" in str(mention_eval._SCOPED_HYBRID_SQL)
+        assert "SPARSE_TSQUERY_SQL" not in inspect.getsource(module), module.__name__
+    # The mirror takes production's builder at its default tsquery.
+    assert "_hybrid_sql," in inspect.getsource(mention_eval._fetch_scope)

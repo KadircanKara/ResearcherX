@@ -10,7 +10,7 @@ import re
 from collections.abc import AsyncGenerator
 
 from pydantic import BaseModel
-from sqlalchemy import select, text
+from sqlalchemy import TextClause, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.chat_agent import ChatAgent, ChatAgentInput, ChunkContext, PaperMetaContext
@@ -407,6 +407,121 @@ def _dense_counts(rows) -> tuple[int, int]:
     if not rows:
         return 0, 0
     return rows[0].dense_raw_n, rows[0].dense_scoped_n
+
+
+# The sparse arm's query in production: the AND of the question's terms.
+_WEBSEARCH_TSQUERY_SQL = "websearch_to_tsquery('english', :qtext)"
+
+
+def _dense_only_sql(exact: bool) -> TextClause:
+    """The kill-switch path's candidate query (`_dense_only_rows`).
+
+    Module-level, like `_hybrid_sql`, so the retrieval harnesses run this
+    exact text rather than a copy of it."""
+    return text(
+        "WITH"
+        + _SCOPE_CTE
+        + ","
+        + _dense_ctes(exact=exact)
+        + """
+            SELECT d.id, d.paper_id, d.chunk_index, d.text, d.section, d.page,
+                   d.distance, n.dense_raw_n, n.dense_scoped_n
+            FROM dense_n n
+            LEFT JOIN dense_scoped d ON d.distance < :threshold
+            ORDER BY d.distance ASC, d.id
+        """
+    )
+
+
+def _hybrid_sql(exact: bool, *, tsquery_sql: str = _WEBSEARCH_TSQUERY_SQL) -> TextClause:
+    """The hybrid candidate query (`_hybrid_rows`); see that method.
+
+    `tsquery_sql` exists for `evals/retrieval/run_eval.py`, whose candidate
+    arm measures the OR-of-lexemes query against this same SQL. Production
+    always takes the default."""
+    return text(
+        "WITH"
+        + _SCOPE_CTE
+        + f""",
+            q AS (
+                SELECT {tsquery_sql} AS tsq
+            ),"""
+        + _dense_ctes(exact=exact)
+        + """,
+            dense AS (
+                SELECT *, ROW_NUMBER() OVER (ORDER BY distance, id) AS d_rank
+                FROM dense_scoped
+                WHERE distance < :threshold
+            ),
+            sparse AS (
+                SELECT c.id, c.paper_id, c.chunk_index, c.text, c.section, c.page,
+                       ROW_NUMBER() OVER (
+                           ORDER BY ts_rank_cd(c.tsv, q.tsq) DESC, c.id
+                       ) AS s_rank
+                FROM paper_chunk_embeddings c
+                JOIN scope s ON s.paper_id = c.paper_id
+                CROSS JOIN q
+                WHERE c.model = :model
+                  AND c.tsv @@ q.tsq
+                ORDER BY ts_rank_cd(c.tsv, q.tsq) DESC, c.id
+                LIMIT :sparse_pool
+            )
+            SELECT COALESCE(d.id, sp.id)                   AS id,
+                   COALESCE(d.paper_id, sp.paper_id)       AS paper_id,
+                   COALESCE(d.chunk_index, sp.chunk_index) AS chunk_index,
+                   COALESCE(d.text, sp.text)               AS text,
+                   -- Both arms carry these for the same reason both carry
+                   -- `text`: the FULL OUTER JOIN admits a chunk that only
+                   -- one arm found, and a sparse-only chunk with a NULL
+                   -- section would reach the model as an excerpt that has
+                   -- lost the heading it sits under. d and sp are the same
+                   -- physical row whenever both are present, so the
+                   -- COALESCE can never pick one chunk's section for
+                   -- another chunk's text.
+                   COALESCE(d.section, sp.section)         AS section,
+                   COALESCE(d.page, sp.page)               AS page,
+                   d.distance                              AS distance,
+                   d.d_rank                                AS d_rank,
+                   sp.s_rank                                AS s_rank,
+                   n.dense_raw_n                           AS dense_raw_n,
+                   n.dense_scoped_n                        AS dense_scoped_n
+            FROM dense_n n
+            LEFT JOIN (dense d FULL OUTER JOIN sparse sp ON sp.id = d.id) ON true
+        """
+    )
+
+
+async def _dense_query(
+    db: AsyncSession, name: str, sql, params: dict, *, exact: bool
+) -> tuple[list, bool]:
+    """Run a dense candidate query on the scan the caller chose.
+
+    `sql(exact)` builds the query for a scan. HNSW (`exact=False`) re-runs
+    the EXACT shape when fewer than `dense_pool` rows survived the scope
+    filter: see `_retrieve_paper_chunks`. Either way the `dense_n`
+    placeholder row is dropped before returning.
+
+    Returns (rows, whether the HNSW scan fell back to exact). Module-level so
+    the retrieval harnesses run the same path, fallback included.
+    """
+    pool = params["dense_pool"]
+    await _apply_dense_path(db, pool, exact=exact)
+    rows = await _fetch_traced(name, db, sql(exact), params)
+    fell_back = False
+    if not exact:
+        raw, scoped = _dense_counts(rows)
+        if min(raw, scoped) < pool:
+            log.debug(
+                "hnsw_short_scan_exact_fallback",
+                query=name,
+                rows=raw,
+                scoped_rows=scoped,
+                dense_pool=pool,
+            )
+            await _apply_dense_path(db, pool, exact=True)
+            rows = await _fetch_traced(f"{name}.exact", db, sql(True), params)
+            fell_back = True
+    return [row for row in rows if row.id is not None], fell_back
 
 
 def stage_labels(reranker: Reranker | None, fusion_scorer: Reranker | None) -> tuple[str, str]:
@@ -1471,26 +1586,10 @@ class ChatService:
         rejects everything (a placeholder row with a NULL id, dropped by
         `_dense_query`).
         """
-
-        def sql(exact: bool):
-            return text(
-                "WITH"
-                + _SCOPE_CTE
-                + ","
-                + _dense_ctes(exact=exact)
-                + """
-            SELECT d.id, d.paper_id, d.chunk_index, d.text, d.section, d.page,
-                   d.distance, n.dense_raw_n, n.dense_scoped_n
-            FROM dense_n n
-            LEFT JOIN dense_scoped d ON d.distance < :threshold
-            ORDER BY d.distance ASC, d.id
-        """
-            )
-
-        return await self._dense_query(
+        rows, _ = await _dense_query(
             db,
             "retrieval.dense",
-            sql,
+            _dense_only_sql,
             {
                 "qvec": qvec,
                 "ids": ids,
@@ -1501,31 +1600,7 @@ class ChatService:
             },
             exact=exact,
         )
-
-    async def _dense_query(self, db: AsyncSession, name: str, sql, params: dict, *, exact: bool):
-        """Run a dense candidate query on the scan the caller chose.
-
-        `sql(exact)` builds the query for a scan. HNSW (`exact=False`) re-runs
-        the EXACT shape when fewer than `dense_pool` rows survived the scope
-        filter: see `_retrieve_paper_chunks`. Either way the `dense_n`
-        placeholder row is dropped before returning.
-        """
-        pool = params["dense_pool"]
-        await _apply_dense_path(db, pool, exact=exact)
-        rows = await _fetch_traced(name, db, sql(exact), params)
-        if not exact:
-            raw, scoped = _dense_counts(rows)
-            if min(raw, scoped) < pool:
-                log.debug(
-                    "hnsw_short_scan_exact_fallback",
-                    query=name,
-                    rows=raw,
-                    scoped_rows=scoped,
-                    dense_pool=pool,
-                )
-                await _apply_dense_path(db, pool, exact=True)
-                rows = await _fetch_traced(f"{name}.exact", db, sql(True), params)
-        return [row for row in rows if row.id is not None]
+        return rows
 
     async def _hybrid_rows(
         self,
@@ -1570,62 +1645,10 @@ class ChatService:
         """
         dense_pool = max(settings.hybrid_dense_pool, pool)
 
-        def sql(exact: bool):
-            return text(
-                "WITH"
-                + _SCOPE_CTE
-                + """,
-            q AS (
-                SELECT websearch_to_tsquery('english', :qtext) AS tsq
-            ),"""
-                + _dense_ctes(exact=exact)
-                + """,
-            dense AS (
-                SELECT *, ROW_NUMBER() OVER (ORDER BY distance, id) AS d_rank
-                FROM dense_scoped
-                WHERE distance < :threshold
-            ),
-            sparse AS (
-                SELECT c.id, c.paper_id, c.chunk_index, c.text, c.section, c.page,
-                       ROW_NUMBER() OVER (
-                           ORDER BY ts_rank_cd(c.tsv, q.tsq) DESC, c.id
-                       ) AS s_rank
-                FROM paper_chunk_embeddings c
-                JOIN scope s ON s.paper_id = c.paper_id
-                CROSS JOIN q
-                WHERE c.model = :model
-                  AND c.tsv @@ q.tsq
-                ORDER BY ts_rank_cd(c.tsv, q.tsq) DESC, c.id
-                LIMIT :sparse_pool
-            )
-            SELECT COALESCE(d.id, sp.id)                   AS id,
-                   COALESCE(d.paper_id, sp.paper_id)       AS paper_id,
-                   COALESCE(d.chunk_index, sp.chunk_index) AS chunk_index,
-                   COALESCE(d.text, sp.text)               AS text,
-                   -- Both arms carry these for the same reason both carry
-                   -- `text`: the FULL OUTER JOIN admits a chunk that only
-                   -- one arm found, and a sparse-only chunk with a NULL
-                   -- section would reach the model as an excerpt that has
-                   -- lost the heading it sits under. d and sp are the same
-                   -- physical row whenever both are present, so the
-                   -- COALESCE can never pick one chunk's section for
-                   -- another chunk's text.
-                   COALESCE(d.section, sp.section)         AS section,
-                   COALESCE(d.page, sp.page)               AS page,
-                   d.distance                              AS distance,
-                   d.d_rank                                AS d_rank,
-                   sp.s_rank                                AS s_rank,
-                   n.dense_raw_n                           AS dense_raw_n,
-                   n.dense_scoped_n                        AS dense_scoped_n
-            FROM dense_n n
-            LEFT JOIN (dense d FULL OUTER JOIN sparse sp ON sp.id = d.id) ON true
-        """
-            )
-
-        return await self._dense_query(
+        rows, _ = await _dense_query(
             db,
             "retrieval.hybrid",
-            sql,
+            _hybrid_sql,
             {
                 "qvec": qvec,
                 "qtext": qtext,
@@ -1638,3 +1661,4 @@ class ChatService:
             },
             exact=exact,
         )
+        return rows

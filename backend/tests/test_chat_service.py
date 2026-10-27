@@ -1639,13 +1639,12 @@ def test_both_arms_share_one_dense_scan_fragment():
 
     from app.services import chat_service
 
-    for method in (
-        chat_service.ChatService._dense_only_rows,
-        chat_service.ChatService._hybrid_rows,
-    ):
-        source = inspect.getsource(method)
+    for builder in (chat_service._dense_only_sql, chat_service._hybrid_sql):
+        source = inspect.getsource(builder)
         assert "_dense_ctes(exact=exact)" in source
         assert "embedding <=> CAST" not in source
+    assert "_dense_only_sql" in inspect.getsource(chat_service.ChatService._dense_only_rows)
+    assert "_hybrid_sql" in inspect.getsource(chat_service.ChatService._hybrid_rows)
 
 
 @pytest.mark.parametrize("hybrid", [True, False])
@@ -1725,6 +1724,7 @@ async def test_hnsw_settings_are_set_before_every_dense_query(hybrid):
     with (
         patch.object(settings, "hybrid_retrieval", hybrid),
         patch.object(settings, "hybrid_dense_pool", 300),
+        patch.object(settings, "hnsw_ef_search", 200),
     ):
         await ChatService()._retrieve_paper_chunks(
             db,

@@ -216,7 +216,14 @@ class Settings(BaseSettings):
     # scan (relaxed_order) keeps walking the graph until the LIMIT is met or
     # `hnsw_max_scan_tuples` tuples were visited. ef_search is
     # max(hnsw_ef_search, pool), clamped to pgvector's maximum of 1000.
-    hnsw_ef_search: int = 200
+    #
+    # 600 is MEASURED (evals/retrieval/README.md, "Measured -- 2026-10-27
+    # (HNSW vs exact)"): `run_eval --exact` over the 90 golden-set positives
+    # on the 2,024-paper project. At 200, exact search found 3 answers that
+    # HNSW's 200-row dense pool lost; at 400, 2; at 600, none. That costs
+    # about 8 ms per dense query over 200 (p50 20.6 ms vs 12.2 ms), and exact
+    # search costs about 380 ms.
+    hnsw_ef_search: int = 600
     hnsw_max_scan_tuples: int = 100_000
 
     # Single-paper cut under hybrid. Replaces intra_paper_delta, which is a

@@ -129,8 +129,10 @@ def test_hnsw_max_scan_tuples_must_be_positive():
 
 
 def test_hnsw_defaults():
+    """600 is the smallest ef_search at which `run_eval --exact` finds no
+    answer HNSW loses against exact search (2026-10-27, README)."""
     s = Settings()
-    assert s.hnsw_ef_search == 200
+    assert s.hnsw_ef_search == 600
     assert s.hnsw_max_scan_tuples == 100_000
 
 
