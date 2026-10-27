@@ -34,6 +34,8 @@ os.environ["JUDGE_API_KEY"] = ""
 os.environ["JUDGE_MODEL"] = "gpt-4.1-mini"
 # Jev's OpenRouter key: same repr-leak rule as the judge pair.
 os.environ["DECISIONS_API_KEY"] = ""
+# The paper-summary OpenRouter key: same repr-leak rule as the judge pair.
+os.environ["SUMMARY_API_KEY"] = ""
 # A dev .env carrying a Jev arm (RERANK_PROVIDER=jev, FUSION_MODE=jev, ...)
 # must not change the stage defaults the suite assumes, or trip the Jev
 # validator at import.

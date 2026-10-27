@@ -322,6 +322,30 @@ class Settings(BaseSettings):
     # answer recall at 0.72 and left 58% of off_topic questions with nothing;
     # 0.5 cost one question for 75%. No Cohere value has been measured.
     rerank_min_score: float | None = Field(default=None, ge=0.0, le=1.0)
+    # Paper summaries through OpenRouter, on their OWN client: never the
+    # ProviderPool, which injects the chat model and rotates on quota. The
+    # chain is sent as OpenRouter's `models` list; a 200 that fails the schema
+    # or stops on `length` does not fall through there, so the client retries
+    # from the model after the one that served. Empty key = summaries fall
+    # back to the abstract; never a startup failure.
+    summary_base_url: str = "https://openrouter.ai/api/v1"
+    summary_api_key: str = ""
+    summary_models: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: [
+            "deepseek/deepseek-v4.1-flash",
+            "deepseek/deepseek-v4.1-flash-1017",
+            "anthropic/claude-haiku-5.5",
+        ]
+    )
+    paper_summary_max_tokens: int = 4000
+    paper_summary_max_keywords: int = 120
+    # The largest paper in the eval project is 459k chars.
+    paper_summary_input_chars: int = 600_000
+    # Backfill via OpenRouter's batch API: the normal slug (`:batch` slugs are
+    # rejected on chat/completions), pinned to one provider.
+    summary_batch_model: str = "deepseek/deepseek-v4.1-flash"
+    summary_batch_provider: str = "sail-research"
+    summary_batch_chunk: int = 200
     # Jev through OpenRouter's TypeSafe-compatible endpoint. NOT
     # /chat/completions: OpenRouter rejects a decisions model there with 400.
     # Empty key = both Jev stages are off (logged once at construction).
@@ -600,9 +624,9 @@ class Settings(BaseSettings):
     # models, token counts and ids only.
     langfuse_capture_content: bool = True
 
-    @field_validator("cors_origins", mode="before")
+    @field_validator("cors_origins", "summary_models", mode="before")
     @classmethod
-    def _split_cors(cls, v: object) -> object:
+    def _split_csv(cls, v: object) -> object:
         if isinstance(v, str):
             return [o.strip() for o in v.split(",") if o.strip()]
         return v
