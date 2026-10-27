@@ -1,10 +1,11 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { highlightKeywords } from "@/lib/papers";
 import { getPaperSummary } from "@/lib/projects";
 import type { Paper, PaperSummary } from "@/lib/types";
 
-/** Keywords shown before "show all"; papers can carry up to 120. */
+/** Keywords shown while collapsed; papers can carry up to 120. */
 const KEYWORDS_SHOWN = 24;
 
 /**
@@ -38,7 +39,7 @@ export function PaperSummaryBlock({ paper }: { paper: Paper }) {
   if (!record || !record.summary) return null;
 
   const keywords = allKeywords ? record.keywords : record.keywords.slice(0, KEYWORDS_SHOWN);
-  const hidden = record.keywords.length - keywords.length;
+  const overflow = record.keywords.length - KEYWORDS_SHOWN;
 
   return (
     <div className="space-y-2">
@@ -50,7 +51,17 @@ export function PaperSummaryBlock({ paper }: { paper: Paper }) {
             ? ` · ${record.summary_model}`
             : ""}
       </p>
-      <p className="leading-relaxed text-foreground">{record.summary}</p>
+      <p className="leading-relaxed text-foreground">
+        {highlightKeywords(record.summary, record.keywords).map((seg, i) =>
+          seg.bold ? (
+            <strong key={i} className="font-semibold">
+              {seg.text}
+            </strong>
+          ) : (
+            seg.text
+          )
+        )}
+      </p>
       {keywords.length > 0 && (
         <div className="flex flex-wrap gap-1.5">
           {keywords.map((k) => (
@@ -61,13 +72,13 @@ export function PaperSummaryBlock({ paper }: { paper: Paper }) {
               {k}
             </span>
           ))}
-          {hidden > 0 && (
+          {overflow > 0 && (
             <button
               type="button"
               className="px-1 text-[12px] text-primary underline-offset-2 hover:underline"
-              onClick={() => setAllKeywords(true)}
+              onClick={() => setAllKeywords((all) => !all)}
             >
-              +{hidden} more
+              {allKeywords ? "Show less" : `+${overflow} more`}
             </button>
           )}
         </div>

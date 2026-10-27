@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   abstractExcerpt,
   hasText,
+  highlightKeywords,
   hostOf,
   lastAddedLabel,
   libraryHeadline,
@@ -194,5 +195,40 @@ describe("lastAddedLabel", () => {
 
   it("says nothing was added rather than formatting a date it does not have", () => {
     expect(lastAddedLabel([])).toBe("Nothing added yet");
+  });
+});
+
+describe("highlightKeywords", () => {
+  const bolded = (text: string, keywords: string[]) =>
+    highlightKeywords(text, keywords)
+      .filter((s) => s.bold)
+      .map((s) => s.text);
+
+  it("bolds every occurrence, case-insensitively, and keeps the text intact", () => {
+    const text = "UAV networks differ from MANETs; uav swarms too.";
+    const segments = highlightKeywords(text, ["UAV", "MANETs"]);
+    expect(segments.map((s) => s.text).join("")).toBe(text);
+    expect(bolded(text, ["UAV", "MANETs"])).toEqual(["UAV", "MANETs", "uav"]);
+  });
+
+  it("prefers the longest keyword where several match", () => {
+    expect(bolded("Multi-UAV Networks rely on UAV links.", ["UAV", "Multi-UAV Networks"])).toEqual([
+      "Multi-UAV Networks",
+      "UAV",
+    ]);
+  });
+
+  it("never bolds part of a longer word", () => {
+    expect(bolded("Routing and SDN-based routers.", ["rout", "SDN"])).toEqual(["SDN"]);
+  });
+
+  it("treats regex characters in a keyword literally", () => {
+    expect(bolded("We use C++ and (x) here, not Cx.", ["C++", "(x)"])).toEqual(["C++", "(x)"]);
+    expect(bolded("Energy (J) per bit.", ["Energy"])).toEqual(["Energy"]);
+  });
+
+  it("returns the text unbolded with no keywords, and nothing for empty text", () => {
+    expect(highlightKeywords("plain", [])).toEqual([{ text: "plain", bold: false }]);
+    expect(highlightKeywords("", ["x"])).toEqual([]);
   });
 });

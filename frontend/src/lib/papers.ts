@@ -176,3 +176,42 @@ export function abstractExcerpt(abstract: string): string {
   if (abstract.length <= ABSTRACT_MAX) return abstract;
   return `${abstract.slice(0, ABSTRACT_MAX).trimEnd()}…`;
 }
+
+/** One run of summary text, bold when it is one of the paper's keywords. */
+export interface SummarySegment {
+  text: string;
+  bold: boolean;
+}
+
+const ESCAPE_RE = /[.*+?^${}()|[\]\\]/g;
+
+/**
+ * The summary split into runs, with every keyword occurrence marked bold.
+ *
+ * Case-insensitive and whole-word (a keyword never bolds half of a longer
+ * word), longest keyword first, so "UAV Networks" wins over "UAV" where both
+ * match. The text itself is never altered: joining the runs gives it back.
+ */
+export function highlightKeywords(
+  text: string,
+  keywords: readonly string[]
+): SummarySegment[] {
+  const terms = [...new Set(keywords.map((k) => k.trim()).filter(Boolean))].sort(
+    (a, b) => b.length - a.length
+  );
+  if (terms.length === 0 || !text) return text ? [{ text, bold: false }] : [];
+  const pattern = new RegExp(
+    `(?<![\\p{L}\\p{N}])(?:${terms.map((t) => t.replace(ESCAPE_RE, "\\$&")).join("|")})(?![\\p{L}\\p{N}])`,
+    "giu"
+  );
+  const segments: SummarySegment[] = [];
+  let last = 0;
+  for (const match of text.matchAll(pattern)) {
+    const start = match.index;
+    if (start > last) segments.push({ text: text.slice(last, start), bold: false });
+    segments.push({ text: match[0], bold: true });
+    last = start + match[0].length;
+  }
+  if (last < text.length) segments.push({ text: text.slice(last), bold: false });
+  return segments;
+}
