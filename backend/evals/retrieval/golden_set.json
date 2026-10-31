@@ -5,7 +5,7 @@
    "id": "annealing-direct-misallocation",
    "kind": "paraphrase",
    "split": "test",
-   "question": "In multi-robot information gathering with a cooling schedule, why does assigning measurements directly from estimated noise levels do badly at first?",
+   "question": "In multi-robot information gathering with unknown sensor noise, why does the direct coverage method allocate its measurements poorly at the start?",
    "paper_title_contains": "Simulated Annealing for Multi-Robot Ergodic",
    "expect_substrings": [
     "misallocate the samples"
@@ -15,7 +15,7 @@
    "id": "billiards-random-walk-underestimated",
    "kind": "paraphrase",
    "split": "tune",
-   "question": "Why did purely random robot motion cover the area nearly as completely as more structured decentralized strategies?",
+   "question": "Is simple random motion really that bad for multi-robot area coverage compared with centralized or decentralized control?",
    "paper_title_contains": "Centralization vs. decentralization in multi-robot sweep coverage",
    "expect_substrings": [
     "when run for a long time, can reach quite high coverage completeness"
@@ -25,7 +25,7 @@
    "id": "byzantine-observation-error",
    "kind": "paraphrase",
    "split": "tune",
-   "question": "When drones become less sure of what they observe, how does that change the sway attackers have over the swarm's decisions?",
+   "question": "In a game-theoretic model of a UAV swarm with compromised members, how does higher observation error change the spread of false information?",
    "paper_title_contains": "Byzantine Attack",
    "expect_substrings": [
     "weakens the directional induction effect of malicious nodes"
@@ -35,7 +35,7 @@
    "id": "collocation-segment-violation",
    "kind": "paraphrase",
    "split": "test",
-   "question": "Why isn't checking only the sampled trajectory points against an obstacle's safety radius enough to guarantee clearance?",
+   "question": "In optimization-based UAV trajectory planning, why is it not enough to only check the discretization points against an obstacle's safety radius?",
    "paper_title_contains": "Potential Field Approach for Dynamic Collision Avoida",
    "expect_substrings": [
     "is still passing through the safety sphere"
@@ -45,7 +45,7 @@
    "id": "deadlock-definition-intralogistics",
    "kind": "paraphrase",
    "split": "tune",
-   "question": "How is the situation defined where processes wait forever for resources held by others in warehouse robot fleets?",
+   "question": "How is a situation where warehouse mobile robots are stuck waiting on each other's resources formally defined?",
    "paper_title_contains": "Deadlock Handling among Autonomous Mobile Robots",
    "expect_substrings": [
     "endlessly waits for additional resources"
@@ -55,7 +55,7 @@
    "id": "delivery-roof-misclassified",
    "kind": "paraphrase",
    "split": "tune",
-   "question": "What segmentation mistakes did the parcel drone make on the darker parts of rooftops?",
+   "question": "What segmentation mistakes did the drone delivery system make when choosing a landing spot at a customer's home?",
    "paper_title_contains": "Autonomous Drone Delivery to Your Door",
    "expect_substrings": [
     "misclassified as paved areas"
@@ -65,7 +65,7 @@
    "id": "e2coop-threat-near-obstacle",
    "kind": "paraphrase",
    "split": "test",
-   "question": "Under the environment field model, how does each drone sense growing danger as the group nears something in its way?",
+   "question": "In a potential-field approach to swarm obstacle avoidance, how does the danger each drone perceives change as the swarm nears an obstacle?",
    "paper_title_contains": "Energy Efficient and Cooperative Obstacle Detection",
    "expect_substrings": [
     "feels stronger threat when the swarm gets closer to the obstacle"
@@ -75,7 +75,7 @@
    "id": "ergodic-gaps-slow-map",
    "kind": "paraphrase",
    "split": "tune",
-   "question": "What assumption about how fast the information map changes relative to robot motion does the feedback-driven coverage method make?",
+   "question": "In multi-robot adaptive coverage of unknown environments, what is assumed about how fast the information map changes relative to the robots' motion?",
    "paper_title_contains": "Mind the Gaps",
    "expect_substrings": [
     "varies slowly compared with the dynamics of the robots"
@@ -85,7 +85,7 @@
    "id": "global-games-capable-forager",
    "kind": "paraphrase",
    "split": "tune",
-   "question": "As the environmental signal rises, which of two differently capable robots is assigned to food gathering first in the game-theoretic allocation?",
+   "question": "In game-theoretic task allocation for a robot group with different costs, which robot gets assigned to the task first?",
    "paper_title_contains": "Colony Maintenance Problem",
    "expect_substrings": [
     "the more capable robot will be assigned to the foraging task"
@@ -95,7 +95,7 @@
    "id": "gnn-coverage-delay-negligible",
    "kind": "paraphrase",
    "split": "test",
-   "question": "Why can the learned graph controller for spreading robots over an area ignore communication lag?",
+   "question": "What assumption about communication latency is made when using graph neural networks for decentralized coverage control?",
    "paper_title_contains": "Coverage Control in Multi-Robot Systems via Graph Neural Networks",
    "expect_substrings": [
     "the accrued communication delay is negligible"
@@ -105,7 +105,7 @@
    "id": "harps-human-sensor-modes",
    "kind": "paraphrase",
    "split": "tune",
-   "question": "In what two ways can a person supply observations to the robot in the human-assisted planning and sensing framework?",
+   "question": "In human-robot teaming where a person feeds observations to a UAV search planner, what two roles can the human play as a sensor?",
    "paper_title_contains": "HARPS",
    "expect_substrings": [
     "passive semantic sensor",
@@ -116,7 +116,7 @@
    "id": "icl-instruction-split-stages",
    "kind": "paraphrase",
    "split": "tune",
-   "question": "When teaching a home robot with progressively harder tasks, how is a request such as putting food into the refrigerator split up?",
+   "question": "How was the long household task instruction split up for staged training in language-guided robot navigation?",
    "paper_title_contains": "Incremental Curriculum Learning",
    "expect_substrings": [
     "deconstructed into four stages"
@@ -126,7 +126,7 @@
    "id": "indoor-heading-definition",
    "kind": "paraphrase",
    "split": "test",
-   "question": "How is the heading angle in the state space of the two-drone navigation policy defined?",
+   "question": "How is the heading state defined in reinforcement learning based multi-UAV indoor path planning?",
    "paper_title_contains": "Indoor Path Planning for Multiple Unmanned Aerial Vehicles via Curriculum",
    "expect_substrings": [
     "counterclockwise rotation angle"
@@ -136,7 +136,7 @@
    "id": "isac-routing-update-metric",
    "kind": "paraphrase",
    "split": "tune",
-   "question": "How do the authors define the delay for every node in a drone swarm network to repair its paths after the topology changes?",
+   "question": "How do they define the time it takes for routes to be updated after topology changes in a UAV swarm network?",
    "paper_title_contains": "Integrated Sensing, Communication and Control enabled Agile UAV Swarm",
    "expect_substrings": [
     "Routing table update time refers to the time interval"
@@ -146,7 +146,7 @@
    "id": "koopman-butterfly-gain",
    "kind": "paraphrase",
    "split": "tune",
-   "question": "On which obstacle trajectory did the data-driven linear predictor beat the Gaussian process model by the widest margin?",
+   "question": "Which test trajectory showed the largest improvement in obstacle motion prediction for the learned linear operator model over the Gaussian process baseline?",
    "paper_title_contains": "Distributed Switching Model Predictive Control Meets Koopman",
    "expect_substrings": [
     "The most significant gains appear in the 3-dimensional butterfly trajectory"
@@ -156,7 +156,7 @@
    "id": "lora-forest-tree-species",
    "kind": "paraphrase",
    "split": "test",
-   "question": "What kind of trees made up the woodland where the radio link between a person and a drone was measured?",
+   "question": "What tree species dominated the woodland where the human-carried radio to drone links were measured?",
    "paper_title_contains": "Near-Ground LoRa Links",
    "expect_substrings": [
     "mostly composed of poplars"
@@ -166,7 +166,7 @@
    "id": "los-mimo-why-distributed",
    "kind": "paraphrase",
    "split": "tune",
-   "question": "Why do the authors avoid computing every relay drone's position at a single central node for the cooperative multi-antenna link?",
+   "question": "Why use a distributed formulation instead of centralized optimization to place UAVs for cooperative multi-antenna backhaul?",
    "paper_title_contains": "Cooperative Line-of-sight MIMO",
    "expect_substrings": [
     "we recast the problem into a distributed formulation"
@@ -176,7 +176,7 @@
    "id": "maritime-channel-fdtd",
    "kind": "paraphrase",
    "split": "tune",
-   "question": "Which time-domain numerical technique has been applied to model the radio link between drones and boats offshore?",
+   "question": "Which full-wave electromagnetic simulation method has been used to model UAV air-to-surface channels in offshore settings?",
    "paper_title_contains": "UAV-Aided Maritime Communications",
    "expect_substrings": [
     "finite-difference time domain method (FDTD)"
@@ -186,7 +186,7 @@
    "id": "marl-rvo-nonholonomic",
    "kind": "paraphrase",
    "split": "test",
-   "question": "Does the learned joint goal-assignment and planning method still settle when the robots cannot move sideways?",
+   "question": "Does the learned multi-robot planner with a collision-avoidance safety layer still converge when the robots have car-like dynamics?",
    "paper_title_contains": "Learning Safe Unlabeled Multi-Robot Planning",
    "expect_substrings": [
     "When robot dynamics are changed to that of a non holonomic robot"
@@ -196,7 +196,7 @@
    "id": "masonry-mortar-manual",
    "kind": "paraphrase",
    "split": "tune",
-   "question": "In early multi-drone construction work, how was the cement between blocks handled?",
+   "question": "In earlier multi-drone construction work, who applied the bonding material between the blocks?",
    "paper_title_contains": "Autonomous Masonry Construction",
    "expect_substrings": [
     "The mortar between the bricks was placed manually"
@@ -206,7 +206,7 @@
    "id": "medical-mdp-21-drones",
    "kind": "paraphrase",
    "split": "tune",
-   "question": "In the decision-process model for managing emergency supply drone deliveries, up to how many drones per station could exact dynamic programming still be solved?",
+   "question": "What is the largest drone fleet exact dynamic programming could handle for healthcare supply delivery scheduling?",
    "paper_title_contains": "Managing Medical Drone Deliveries",
    "expect_substrings": [
     "can solve the problem with at most 21 drones"
@@ -216,7 +216,7 @@
    "id": "mixed-size-small-uav-rooms",
    "kind": "paraphrase",
    "split": "test",
-   "question": "Why could only the smaller drone enter some spaces in the simulated workplace used to test the aerial team?",
+   "question": "In the heterogeneous UAV indoor exploration simulation, which spaces could only the smaller drone enter?",
    "paper_title_contains": "Mixed-Size UAV Team",
    "expect_substrings": [
     "where only the sUAV can safely fit"
@@ -226,7 +226,7 @@
    "id": "nn-collision-yaw-unstuck",
    "kind": "paraphrase",
    "split": "tune",
-   "question": "Why don't the learned quadcopter policies get trapped in big groups, unlike earlier neighbour-based methods?",
+   "question": "Why don't the learned neighbour-based collision avoidance policies for quadrotor swarms deadlock in large swarms?",
    "paper_title_contains": "Nearest-Neighbor-based Collision Avoidance",
    "expect_substrings": [
     "communicating with each other via the yaw angle"
@@ -236,7 +236,7 @@
    "id": "occlusion-transport-limitation",
    "kind": "paraphrase",
    "split": "tune",
-   "question": "What goes wrong when swarm robots move an object by acting only when it blocks their view of the goal?",
+   "question": "What is the limitation of the line-of-sight-based cooperative object transport strategy for robot swarms in cluttered environments?",
    "paper_title_contains": "Occlusion-Based Object Transportation",
    "expect_substrings": [
     "not effective in complex environments where an obstacle may impede"
@@ -246,7 +246,7 @@
    "id": "opportunistic-uav-data-mule",
    "kind": "paraphrase",
    "split": "test",
-   "question": "In simulations mixing flying and ground robots, how does adding a flying robot help small ground teams find more goals?",
+   "question": "In the air-ground robot team experiment, what role does the drone play in passing information between the ground robots?",
    "paper_title_contains": "Opportunistic Communications",
    "expect_substrings": [
     "acts as a data mule"
@@ -256,7 +256,7 @@
    "id": "ot-exploration-moving-targets",
    "kind": "paraphrase",
    "split": "tune",
-   "question": "When the search density changes over time in an energy-limited multi-robot exploration scheme, how are the targets assumed to move?",
+   "question": "How is target motion modelled when the reference distribution changes over time in energy-constrained multi-robot exploration?",
    "paper_title_contains": "Efficient Multi-Robot Exploration with Energy Constraint",
    "expect_substrings": [
     "the uncorrelated random walk is considered here"
@@ -266,7 +266,7 @@
    "id": "prospect-theory-rationality",
    "kind": "paraphrase",
    "split": "tune",
-   "question": "Why might human decision makers depart from expected-utility reasoning in a drone-delivery attack game?",
+   "question": "Why model the attacker and defender of a drone delivery network as subjective decision makers rather than expected-value maximizers?",
    "paper_title_contains": "Prospect Theory for Enhanced Cyber-Physical Security",
    "expect_substrings": [
     "deviate from this full rationality"
@@ -276,7 +276,7 @@
    "id": "swarmvlm-robot-longer-path",
    "kind": "paraphrase",
    "split": "test",
-   "question": "Why did the wheeled robot travel farther than the aerial vehicle it followed in the real experiments?",
+   "question": "Why does the ground robot travel a longer path than the drone in vision-language model guided leader-follower warehouse navigation?",
    "paper_title_contains": "SwarmVLM",
    "expect_substrings": [
     "The robot consistently takes a longer path due to short obstacle avoidance"
@@ -286,7 +286,7 @@
    "id": "tspd-realistic-customer-locations",
    "kind": "paraphrase",
    "split": "tune",
-   "question": "In the deep reinforcement learning approach to truck-and-drone routing, what real-world urban data were used to place customers realistically?",
+   "question": "What real-world data was used for customer locations when solving truck-drone delivery routing with deep reinforcement learning?",
    "paper_title_contains": "Traveling Salesman Problem with Drone",
    "expect_substrings": [
     "electric vehicle (EV) parking location dataset"
@@ -296,7 +296,7 @@
    "id": "urban-waste-bins-reduced",
    "kind": "paraphrase",
    "split": "tune",
-   "question": "When tuning the self-organised city garbage-collecting robots, which behaviour keeps fewer containers full and which reduces uncollected garbage?",
+   "question": "How should the robot swarm be tuned to reduce the number of overflowing garbage containers in a city?",
    "paper_title_contains": "Urban Swarms",
    "expect_substrings": [
     "higher exploration (needed to reduce the FTB)"
@@ -306,18 +306,18 @@
    "id": "adarp-grid-size",
    "kind": "paraphrase_keyword",
    "split": "test",
-   "question": "What size of map is used to evaluate A-DARP?",
+   "question": "What grid map size is used in the simulations comparing the improved DARP algorithm with the original for multi-robot coverage?",
    "paper_title_contains": "Improved DARP Algorithm",
    "expect_substrings": [
     "64*64 grid map"
    ],
-   "keyword": "A-DARP"
+   "keyword": "DARP"
   },
   {
    "id": "arm2air-runtime-reduction",
    "kind": "paraphrase_keyword",
    "split": "tune",
-   "question": "By how much did Arm2Air cut planning time against the quickest classical planner?",
+   "question": "How much does Arm2Air reduce planning time compared with conventional planners?",
    "paper_title_contains": "Arm2Air",
    "expect_substrings": [
     "reduced median end-to-end planning runtime by 64.9%"
@@ -328,7 +328,7 @@
    "id": "badgr-distance-limit",
    "kind": "paraphrase_keyword",
    "split": "tune",
-   "question": "How far could BADGR drive before failing in the off-road navigation tests?",
+   "question": "How far could BADGR drive in the point-goal navigation tests on off-road terrain?",
    "paper_title_contains": "Cropped Image Patches",
    "expect_substrings": [
     "BADGR failed to drive beyond 25m"
@@ -339,7 +339,7 @@
    "id": "balcony-ptam-rejected",
    "kind": "paraphrase_keyword",
    "split": "test",
-   "question": "Why was PTAM rejected for camera-based localization on the delivery drone?",
+   "question": "Why was PTAM rejected for localization in the urban drone delivery prototype?",
    "paper_title_contains": "Autonomous Drone Delivery to Your Balcony",
    "expect_substrings": [
     "it is not precise and robust enough"
@@ -350,7 +350,7 @@
    "id": "cemrs-important-factors",
    "kind": "paraphrase_keyword",
    "split": "tune",
-   "question": "Why does CE-MRS keep only the most important differences between two plans?",
+   "question": "Why does CE-MRS only report the most important differing factors when explaining multi-robot task allocations?",
    "paper_title_contains": "CE-MRS",
    "expect_substrings": [
     "leads to improved user understanding"
@@ -361,7 +361,7 @@
    "id": "cheeger-interference-trajectory",
    "kind": "paraphrase_keyword",
    "split": "tune",
-   "question": "What role does the Cheeger constant play in the drone interference management algorithm?",
+   "question": "How is the Cheeger constant used in UAV trajectory design for interference management?",
    "paper_title_contains": "Dynamic Interference Management for UAV-Assisted",
    "expect_substrings": [
     "solved based on the Cheeger constant"
@@ -372,7 +372,7 @@
    "id": "cl-det-uav-position",
    "kind": "paraphrase_keyword",
    "split": "test",
-   "question": "In CL-Det, how is the drone's position taken from the clustered point cloud?",
+   "question": "How does CL-Det estimate the UAV position from LiDAR point clusters?",
    "paper_title_contains": "Clustering-based Learning for UAV Tracking",
    "expect_substrings": [
     "midpoint of the largest cluster assumed to be the UAV position"
@@ -383,7 +383,7 @@
    "id": "comuros-best-llm",
    "kind": "paraphrase_keyword",
    "split": "tune",
-   "question": "Which language model gave CoMuRoS its best results?",
+   "question": "Which LLM performed best with CoMuRoS for heterogeneous robot task planning?",
    "paper_title_contains": "Heterogeneous Robot Teams with Event-Driv",
    "expect_substrings": [
     "CoMuRoS performs better using Grok 3"
@@ -394,7 +394,7 @@
    "id": "d3qn-stability",
    "kind": "paraphrase_keyword",
    "split": "tune",
-   "question": "Why is D3QN considered more stable than the other value-based learners in the drone data-gathering study?",
+   "question": "Why is D3QN more stable than other deep Q-network variants for UAV data collection path planning?",
    "paper_title_contains": "Learning-Based UAV Path Planning for Data Collection",
    "expect_substrings": [
     "D3QN does not have this issue"
@@ -405,7 +405,7 @@
    "id": "distillation-student-dimension",
    "kind": "paraphrase_keyword",
    "split": "test",
-   "question": "In the compressed feature extractor for multi-robot mapping, how does the output size of the small network compare with HyNet's?",
+   "question": "How large are the compact network's output vectors compared with HyNet?",
    "paper_title_contains": "Descriptor Distillation for Efficient Multi-Robot SLAM",
    "expect_substrings": [
     "For our student model, the output dimension is 64"
@@ -416,7 +416,7 @@
    "id": "dynacon-reasoning-types",
    "kind": "paraphrase_keyword",
    "split": "tune",
-   "question": "What two kinds of reasoning does the example scenario given to DynaCon's language model cover?",
+   "question": "What kinds of reasoning does DynaCon use to infer navigation goals with an LLM?",
    "paper_title_contains": "DynaCon",
    "expect_substrings": [
     "pattern-based reasoning"
@@ -427,7 +427,7 @@
    "id": "earol-tilt-calibration",
    "kind": "paraphrase_keyword",
    "split": "tune",
-   "question": "How does EAROL work out the angle at which its laser scanner is mounted each time it powers on?",
+   "question": "How does EAROL figure out the LiDAR mounting angle each time it powers on?",
    "paper_title_contains": "EAROL",
    "expect_substrings": [
     "utilizes the acceleration data measured by the IMU"
@@ -438,7 +438,7 @@
    "id": "epistemic-empathy-state",
    "kind": "paraphrase_keyword",
    "split": "test",
-   "question": "What does an empathy state represent for a robot coordinating with teammates it cannot always talk to?",
+   "question": "What is an empathy state in multi-robot mission planning?",
    "paper_title_contains": "Robust Online Epistemic Replanning",
    "expect_substrings": [
     "belief about itself from the perspective of other robots"
@@ -449,7 +449,7 @@
    "id": "formation-flow-ford-fulkerson",
    "kind": "paraphrase_keyword",
    "split": "tune",
-   "question": "What is Ford Fulkerson used for when routing several drones to their formation positions?",
+   "question": "What is Ford Fulkerson used for in flow-based path planning for multi-UAV formation flight?",
    "paper_title_contains": "Flow-Based Path Planning for Multiple Homogenous UAVs",
    "expect_substrings": [
     "to find a solution to the maximum flow problem"
@@ -460,7 +460,7 @@
    "id": "gengrid-size",
    "kind": "paraphrase_keyword",
    "split": "tune",
-   "question": "How large is the GenGrid test bed and how many tiles does it have?",
+   "question": "How many modules does the GenGrid swarm robotics platform have and how big is it?",
    "paper_title_contains": "GenGrid",
    "expect_substrings": [
     "25 modules with a footprint of 375 mm"
@@ -471,7 +471,7 @@
    "id": "giant-closest-cluster-point",
    "kind": "paraphrase_keyword",
    "split": "test",
-   "question": "In GIANT, why is the nearest point of each obstacle group given to the network instead of its centre?",
+   "question": "In GIANT, which point of a detected dynamic obstacle cluster goes into the observation?",
    "paper_title_contains": "GIANT",
    "expect_substrings": [
     "the point within the cluster that is closest to the robot"
@@ -482,7 +482,7 @@
    "id": "ground-air-charging-mcts",
    "kind": "paraphrase_keyword",
    "split": "tune",
-   "question": "How does the ground-to-air recharging route planner use MCTS?",
+   "question": "How is MCTS used to plan energy allocation when a ground vehicle recharges UAVs?",
    "paper_title_contains": "Mobile Ground-to-Air Charging",
    "expect_substrings": [
     "allocating energy levels (or ranges) at each site using MCTS"
@@ -493,7 +493,7 @@
    "id": "iql-vs-qmix-nonstationarity",
    "kind": "paraphrase_keyword",
    "split": "tune",
-   "question": "Why does IQL fall well short of the value-factorization baseline when several drones learn data-collection routes?",
+   "question": "Why does IQL perform worse than the value-mixing approach in multi-UAV trajectory planning?",
    "paper_title_contains": "Model-aided Federated Reinforcement Learning",
    "expect_substrings": [
     "non-stationarity issue in independent learning methods"
@@ -504,7 +504,7 @@
    "id": "mrtagent-alternating-training",
    "kind": "paraphrase_keyword",
    "split": "test",
-   "question": "How often does MRTAgent switch which of its two agents is being trained?",
+   "question": "How are the two agents in MRTAgent trained together?",
    "paper_title_contains": "Together We Rise",
    "expect_substrings": [
     "alternating every 40 episodes"
@@ -515,7 +515,7 @@
    "id": "osmag-why-not-area-graph",
    "kind": "paraphrase_keyword",
    "split": "tune",
-   "question": "Why can't osmAG path planning run directly on the area graph?",
+   "question": "Why can't the osmAG area graph be used directly for path planning?",
    "paper_title_contains": "osmAG",
    "expect_substrings": [
     "the cost is in traversing the vertices"
@@ -526,7 +526,7 @@
    "id": "sas-bicycle-model",
    "kind": "paraphrase_keyword",
    "split": "tune",
-   "question": "In SAS path planning for car-like robots, what simplified vehicle model is used to generate expansion steps?",
+   "question": "What vehicle model does SAS use for car-like robot path planning?",
    "paper_title_contains": "Space Adaptive Search for Nonholonomic",
    "expect_substrings": [
     "simplified bicycle model of a vehicle"
@@ -537,7 +537,7 @@
    "id": "skysim-planning-latency",
    "kind": "paraphrase_keyword",
    "split": "test",
-   "question": "How long does the language model take to produce formation plans for 30 drones in SkySim?",
+   "question": "How long does the LLM take to plan formations for 30 drones in SkySim?",
    "paper_title_contains": "SkySim",
    "expect_substrings": [
     "50 seconds (for N=30)"
@@ -548,7 +548,7 @@
    "id": "stgcs-no-revisits",
    "kind": "paraphrase_keyword",
    "split": "tune",
-   "question": "Why can trajectories planned over an ST-GCS skip going back into a region they already left?",
+   "question": "Why doesn't ST-GCS need to visit the same convex region twice?",
    "paper_title_contains": "Graphs of Space-Time Convex Sets",
    "expect_substrings": [
     "set revisitation is unnecessary"
@@ -559,7 +559,7 @@
    "id": "subsurface-csqmi-planning",
    "kind": "paraphrase_keyword",
    "split": "tune",
-   "question": "In the underground drone exploration planner, what does CSQMI score?",
+   "question": "How is CSQMI used for planning in multi-robot underground exploration with aerial robots?",
    "paper_title_contains": "Subsurface Exploration with Multiple Aerial Robots",
    "expect_substrings": [
     "for a set of motion primitives over a user-specified time horizon"
@@ -570,7 +570,7 @@
    "id": "survey-boustrophedon-merge",
    "kind": "paraphrase_keyword",
    "split": "test",
-   "question": "How does the planner join the pieces of a split area into longer boustrophedon sweeps?",
+   "question": "How are the decomposed regions combined into longer boustrophedon paths for UAV survey coverage around no-fly zones?",
    "paper_title_contains": "exclusion zones",
    "expect_substrings": [
     "A depth-first search (DFS) algorithm generates the connected components"
@@ -581,7 +581,7 @@
    "id": "vbsf-tld-optimizer",
    "kind": "paraphrase_keyword",
    "split": "tune",
-   "question": "Which optimizer was used to train VBSF-TLD?",
+   "question": "Which optimizer was VBSF-TLD trained with?",
    "paper_title_contains": "VBSF-TLD",
    "expect_substrings": [
     "PSO (Particle Swarm Optimization) optimizer"
@@ -592,7 +592,7 @@
    "id": "vln-pilot-fsm-states",
    "kind": "paraphrase_keyword",
    "split": "tune",
-   "question": "What states does the finite state machine in VLN-Pilot include?",
+   "question": "What states does the VLN-Pilot finite state machine have?",
    "paper_title_contains": "VLN-Pilot",
    "expect_substrings": [
     "These states include room recognition, door navigation"
@@ -603,7 +603,7 @@
    "id": "wet-full-csi-pilot-signals",
    "kind": "paraphrase_keyword",
    "split": "test",
-   "question": "In the full-CSI wireless charging scheme for buried sensor devices, what does the power station transmit so each device can estimate its CSI?",
+   "question": "How is CSI obtained in the full-CSI scheme for UAV wireless energy transfer to below-ground devices?",
    "paper_title_contains": "Wireless-Powered Underground Communication",
    "expect_substrings": [
     "In the full-CSI scheme, the PS transmits pilot signals"
@@ -614,7 +614,7 @@
    "id": "wildfire-mip-benders",
    "kind": "paraphrase_keyword",
    "split": "tune",
-   "question": "How is the MIP for assigning the drone swarm solved in the predict-then-optimize work?",
+   "question": "How is the MIP solved for drone swarm deployment?",
    "paper_title_contains": "Using Drone Swarm to Stop Wildfire",
    "expect_substrings": [
     "two-stage Benders Decomposition"
@@ -625,7 +625,7 @@
    "id": "wiserx-overlap-reduction",
    "kind": "paraphrase_keyword",
    "split": "tune",
-   "question": "How much less duplicated coverage does WiSER-X achieve than a baseline where robots share no information?",
+   "question": "How much does WiSER-X reduce coverage overlap compared with no information sharing?",
    "paper_title_contains": "WiSER-X",
    "expect_substrings": [
     "58% less overlap"
@@ -636,7 +636,7 @@
    "id": "air-ground-3d-spf",
    "kind": "keyword",
    "split": "test",
-   "question": "3D-SPF VLM truck pixel position",
+   "question": "3D-SPF frozen VLM downward view height command",
    "paper_title_contains": "Air-Ground Collaborative Vision-and-Language Navigation",
    "expect_substrings": [
     "a frozen VLM receives the downward view"
@@ -646,7 +646,7 @@
    "id": "ambulance-dispatch-las",
    "kind": "keyword",
    "split": "tune",
-   "question": "market-based task allocation ambulance dispatch LAS",
+   "question": "market-based multirobot routing ambulance dispatch",
    "paper_title_contains": "Ambulance Dispatch",
    "expect_substrings": [
     "applied market-based multirobot routing techniques to the ambulance dispatch problem"
@@ -666,7 +666,7 @@
    "id": "c3bf-hocbf-comparison",
    "kind": "keyword",
    "split": "test",
-   "question": "C3BF HO-CBF comparison",
+   "question": "C3BF vs higher order CBF collision cone",
    "paper_title_contains": "Collision Cone Approach for Control Barrier Functions",
    "expect_substrings": [
     "compare with the proposed C3BF"
@@ -676,7 +676,7 @@
    "id": "cmtab-infeasible-constraint",
    "kind": "keyword",
    "split": "tune",
-   "question": "CMTAB infeasible assignment drops constraint",
+   "question": "CMTAB infeasible trait requirement drops constraint",
    "paper_title_contains": "Concurrent Constrained Optimization of Unknown Rewards",
    "expect_substrings": [
     "CMTAB drops the constraint"
@@ -686,7 +686,7 @@
    "id": "composite-cbf-hardware",
    "kind": "keyword",
    "split": "tune",
-   "question": "quadrotor Orin NX Ouster OS0-64",
+   "question": "composite CBF quadrotor Orin NX Ouster LiDAR",
    "paper_title_contains": "Composite Control Barrier Functions",
    "expect_substrings": [
     "NVIDIA Orin NX single-board computer"
@@ -696,7 +696,7 @@
    "id": "connectivity-robot-hardware",
    "kind": "keyword",
    "split": "test",
-   "question": "Mecanum RPLIDAR Jetson TX2 robot",
+   "question": "Mecanum wheel chassis RPLIDAR A2 Jetson TX2",
    "paper_title_contains": "Decentralized Global Connectivity Maintenance",
    "expect_substrings": [
     "DJI Mecanum wheel chassis"
@@ -706,7 +706,7 @@
    "id": "dcad-jerk-flip",
    "kind": "keyword",
    "split": "tune",
-   "question": "DCAD jerk limits quadrotor flipping",
+   "question": "DCAD jerk constraints quadrotor flipping",
    "paper_title_contains": "DCAD",
    "expect_substrings": [
     "prevent quadrotors from flipping over"
@@ -716,7 +716,7 @@
    "id": "drrt-xeon-disks",
    "kind": "keyword",
    "split": "tune",
-   "question": "dRRT Xeon E5-4650",
+   "question": "dRRT* experiments Xeon E5-4650",
    "paper_title_contains": "Scalable Asymptotically-Optimal Multi-Robot Motion Planning",
    "expect_substrings": [
     "Intel(R) Xeon(R) CPU E5-4650"
@@ -726,7 +726,7 @@
    "id": "fanet-mec-slices",
    "kind": "keyword",
    "split": "test",
-   "question": "FANET MEC network slices",
+   "question": "FANET MEC network slices UAV swarm",
    "paper_title_contains": "Swarm-Enabled Edge Computing",
    "expect_substrings": [
     "Flying Ad-Hoc Network (FANET) consisting of the UAVs equipped with MEC facilities"
@@ -736,7 +736,7 @@
    "id": "haucs-glop-hpp",
    "kind": "keyword",
    "split": "tune",
-   "question": "HAUCS ponds GLOP HPP",
+   "question": "GLOP vs HPP pond routing",
    "paper_title_contains": "Robotic Aquaculture Monitoring",
    "expect_substrings": [
     "GLOP is the most efficient solver for 50 to 200 ponds"
@@ -746,7 +746,7 @@
    "id": "intermittent-faults-llr",
    "kind": "keyword",
    "split": "tune",
-   "question": "LLR backup path runtime",
+   "question": "intermittent faults LLR sorting complexity",
    "paper_title_contains": "Proactive-reactive detection and mitigation of intermittent faults",
    "expect_substrings": [
     "sorting the LLRs"
@@ -756,7 +756,7 @@
    "id": "lidar-slam-corridor-zdrift",
    "kind": "keyword",
    "split": "test",
-   "question": "LIDAR-SLAM corridor problem Z-drift",
+   "question": "LiDAR SLAM corridor problem Z-drift",
    "paper_title_contains": "Search and Rescue Real World",
    "expect_substrings": [
     "solution to Z-drift caused by the corridor problem"
@@ -766,7 +766,7 @@
    "id": "llm-dmas-cmas-hmas",
    "kind": "keyword",
    "split": "tune",
-   "question": "DMAS CMAS HMAS LLM frameworks",
+   "question": "DMAS CMAS HMAS LLM multi-robot",
    "paper_title_contains": "Scalable Multi-Robot Collaboration with Large Language Models",
    "expect_substrings": [
     "The first approach (DMAS)"
@@ -776,7 +776,7 @@
    "id": "myerson-auction-payment",
    "kind": "keyword",
    "split": "tune",
-   "question": "Myerson virtual valuation payment",
+   "question": "Myerson auction virtual valuation payment",
    "paper_title_contains": "Aerial Data Collection in Smart City Surveillance",
    "expect_substrings": [
     "the second-highest virtual valuation"
@@ -796,7 +796,7 @@
    "id": "pheromone-repel-deposit",
    "kind": "keyword",
    "split": "tune",
-   "question": "repel pheromones deposited target search",
+   "question": "repel pheromone attract pheromone target search",
    "paper_title_contains": "Connectivity-Aware Pheromone Mobility Model",
    "expect_substrings": [
     "Repel pheromones are deposited when no target is found"
@@ -816,7 +816,7 @@
    "id": "racil-composite-il",
    "kind": "keyword",
    "split": "test",
-   "question": "RaCIL composite imitation learning GAIL",
+   "question": "RaCIL composite imitation learning PPO GAIL behavior cloning",
    "paper_title_contains": "RaCIL",
    "expect_substrings": [
     "composite imitation learning framework combining Proximal Policy Optimization"
@@ -826,7 +826,7 @@
    "id": "radium-baselines",
    "kind": "keyword",
    "split": "tune",
-   "question": "RADIUM baselines L2C counterexamples",
+   "question": "RADIUM baselines learning to collide L2C",
    "paper_title_contains": "RADIUM",
    "expect_substrings": [
     "Learning to collide (L2C)"
@@ -836,7 +836,7 @@
    "id": "rohyta-makespan",
    "kind": "keyword",
    "split": "tune",
-   "question": "Rohyta makespan cleaning robots depot",
+   "question": "Rohyta makespan objective depot",
    "paper_title_contains": "Multi-Robot Hybrid Tasks Allocation for Autonomous Cleaning",
    "expect_substrings": [
     "objective of the Rohyta model is to minimize this"
@@ -846,7 +846,7 @@
    "id": "roman-kimera-baseline",
    "kind": "keyword",
    "split": "test",
-   "question": "ROMAN loop closure Kimera-Multi",
+   "question": "ROMAN Kimera-Multi SALAD SuperPoint LightGlue baseline",
    "paper_title_contains": "Language-Grounded Hierarchical Planning",
    "expect_substrings": [
     "SALAD [15] for place descriptors"
@@ -856,7 +856,7 @@
    "id": "scand-robots",
    "kind": "keyword",
    "split": "tune",
-   "question": "SCAND Jackal Spot robots",
+   "question": "SCAND dataset Jackal Spot robots",
    "paper_title_contains": "SCAND",
    "expect_substrings": [
     "a Clearpath Jackal and a Boston Dynamics Spot"
@@ -866,7 +866,7 @@
    "id": "semantic-nav-aruco-realsense",
    "kind": "keyword",
    "split": "tune",
-   "question": "Aruco markers Realsense D435",
+   "question": "Aruco markers RealSense D435 goal verification",
    "paper_title_contains": "Semantic Navigation of Mobile Robots in Dynamic Environments",
    "expect_substrings": [
     "Fiducial Aruco markers"
@@ -876,7 +876,7 @@
    "id": "skyway-landing-spots",
    "kind": "keyword",
    "split": "test",
-   "question": "skyway network landing spots",
+   "question": "skyway network landing spots drone swarm services",
    "paper_title_contains": "In-Flight Energy-Driven Composition",
    "expect_substrings": [
     "skyway network with landing spots (LS)"
@@ -886,7 +886,7 @@
    "id": "slidegraph-clipper-delaunay",
    "kind": "keyword",
    "split": "tune",
-   "question": "SlideGraph Delaunay descriptors CLIPPER",
+   "question": "SlideGraph CLIPPER Delaunay triangulation landmarks",
    "paper_title_contains": "SlideSLAM",
    "expect_substrings": [
     "applies Delaunay triangulation to two sets of object landmarks"
@@ -896,7 +896,7 @@
    "id": "spot-st-rrt",
    "kind": "keyword",
    "split": "tune",
-   "question": "spatio-temporal RRT travel time root node",
+   "question": "SPOT spatio-temporal RRT* dynamic obstacles",
    "paper_title_contains": "SPOT: Spatio-Temporal Obstacle-free",
    "expect_substrings": [
     "Spatio-Temporal RRT"
@@ -906,7 +906,7 @@
    "id": "storm-jerk-linearized",
    "kind": "keyword",
    "split": "test",
-   "question": "STORM jerk constraints linearized",
+   "question": "STORM knot spans jerk constraints linearized",
    "paper_title_contains": "STORM",
    "expect_substrings": [
     "the constraints on acceleration and jerk are linearized"
@@ -916,7 +916,7 @@
    "id": "thz-backhaul-fronthaul",
    "kind": "keyword",
    "split": "tune",
-   "question": "THz backhaul fronthaul UAV links",
+   "question": "THz backhaul fronthaul UAV disaster recovery",
    "paper_title_contains": "Directional THz Links",
    "expect_substrings": [
     "assisted backhaul/fronthaul links are proposed"
@@ -1051,6 +1051,626 @@
    "kind": "off_topic",
    "split": "tune",
    "question": "Who won the 2018 FIFA World Cup final?"
+  },
+  {
+   "id": "quad-tree-crash-run-count",
+   "kind": "paraphrase",
+   "split": "test",
+   "question": "How many randomized trials were run in total when benchmarking faster collision checking for large multi-robot teams?",
+   "paper_title_contains": "Collision Detection for Multi-Robot Motion Planning",
+   "expect_substrings": [
+    "This results in a total of 60 random trials"
+   ]
+  },
+  {
+   "id": "ground-vehicle-lookalike-outliers",
+   "kind": "paraphrase",
+   "split": "test",
+   "question": "When matching a ground robot's trajectory to an aerial map without GPS, how are wrong position estimates in repetitive-looking areas filtered out?",
+   "paper_title_contains": "Semantics for UGV Registration in GPS-denied",
+   "expect_substrings": [
+    "Incorrect predictions in ambiguous parts of the map tend to be scattered"
+   ]
+  },
+  {
+   "id": "drone-backend-language-choice",
+   "kind": "paraphrase",
+   "split": "test",
+   "question": "Which programming language was used for the onboard communication software of the UAV object tracking system, and why?",
+   "paper_title_contains": "Object Detection and Tracking with Autonomous UAV",
+   "expect_substrings": [
+    "lighter and more efficient on the client side"
+   ]
+  },
+  {
+   "id": "helper-robots-wooden-case",
+   "kind": "paraphrase",
+   "split": "test",
+   "question": "What construction task was used as the case study for multi-robot camera placement on construction sites?",
+   "paper_title_contains": "Adaptive Visual Perception for Robotic Construction Process",
+   "expect_substrings": [
+    "a case study focused on prefabricated wooden frame installation"
+   ]
+  },
+  {
+   "id": "grid-reshape-slot-assignment",
+   "kind": "paraphrase",
+   "split": "test",
+   "question": "Why assign each robot a unique slot when switching between grid-shaped formations in Gaussian process trajectory planning?",
+   "paper_title_contains": "Continuous-time Gaussian Process Trajectory Generation",
+   "expect_substrings": [
+    "conflicts between individuals during the formation transition can be significantly reduced"
+   ]
+  },
+  {
+   "id": "chatbot-guidance-relay-weakness",
+   "kind": "paraphrase",
+   "split": "test",
+   "question": "What limitations of large language models are mentioned for UAV decision making in multi-hop network planning?",
+   "paper_title_contains": "Scalable UAV Multi-Hop Networking",
+   "expect_substrings": [
+    "sensitivity to input prompts can lead to inconsistent decision-making"
+   ]
+  },
+  {
+   "id": "zoned-work-avoids-crash-cost",
+   "kind": "paraphrase",
+   "split": "test",
+   "question": "Why use spatial clustering instead of standard collision avoidance methods in multi-robot task allocation?",
+   "paper_title_contains": "Homogeneous Tasks with Collision Avoidance via Spatial Clustering",
+   "expect_substrings": [
+    "effective, yet generating high computing overhead"
+   ]
+  },
+  {
+   "id": "deeper-model-learner-contrast",
+   "kind": "paraphrase",
+   "split": "test",
+   "question": "How does increasing network depth affect stochastic versus deterministic actor-critic agents for robot navigation without a map?",
+   "paper_title_contains": "Deterministic and Stochastic Analysis of Deep Reinforcement Learning",
+   "expect_substrings": [
+    "the better the performance of agents based on SAC tends to be"
+   ]
+  },
+  {
+   "id": "contest-robots-low-allowance",
+   "kind": "paraphrase",
+   "split": "test",
+   "question": "In the indoor exploration competition entry, what do the robots do when the remaining step budget becomes critical?",
+   "paper_title_contains": "OpenSpace Lab Solution to the IROS 2026",
+   "expect_substrings": [
+    "agents switch to final homing mode"
+   ]
+  },
+  {
+   "id": "bulldozer-first-layout-speed",
+   "kind": "paraphrase",
+   "split": "test",
+   "question": "How fast was the local optimum removal method for potential field planning compared with A* on the first map?",
+   "paper_title_contains": "Efficient Elimination of Local Minima Traps",
+   "expect_substrings": [
+    "a much faster execution time of 0.81 seconds"
+   ]
+  },
+  {
+   "id": "detour-proof-reach-condition",
+   "kind": "paraphrase",
+   "split": "test",
+   "question": "What condition guarantees a robot cannot secretly deviate into a restricted area between two scheduled observations by its teammates?",
+   "paper_title_contains": "Enhancing Security in Multi-Robot Systems",
+   "expect_substrings": [
+    "does not intersect with any forbidden region is sufficient to secure"
+   ]
+  },
+  {
+   "id": "drone-moving-people-relaxation",
+   "kind": "paraphrase",
+   "split": "test",
+   "question": "Why is the minimum rate constraint relaxed in online UAV trajectory planning for mobile users?",
+   "paper_title_contains": "Online UAV Trajectory Planning Under QoS Constraints",
+   "expect_substrings": [
+    "keeping the per-slot optimization always feasible"
+   ]
+  },
+  {
+   "id": "bigger-layout-more-moves",
+   "kind": "paraphrase",
+   "split": "test",
+   "question": "Why do drones need more steps on larger grids in energy-aware multi-agent reinforcement learning for drone networks?",
+   "paper_title_contains": "Scaling up Energy-Aware Multi-Agent Reinforcement Learning",
+   "expect_substrings": [
+    "tasks that are located farther from the base station"
+   ]
+  },
+  {
+   "id": "split-focus-value-estimator",
+   "kind": "paraphrase",
+   "split": "test",
+   "question": "Why is an attention critic with several heads better than a single-head one for multi-robot exploration?",
+   "paper_title_contains": "Efficient Multi-robot Exploration via Multi-head Attention",
+   "expect_substrings": [
+    "can focus on a different weighted mixture of agents"
+   ]
+  },
+  {
+   "id": "crowd-robot-longer-route",
+   "kind": "paraphrase",
+   "split": "test",
+   "question": "Why does the group-aware crowd navigation policy take longer to reach the goal than the baseline policy?",
+   "paper_title_contains": "Learning a Group-Aware Policy for Robot Navigation",
+   "expect_substrings": [
+    "navigating around groups of pedestrians to avoid group intersections"
+   ]
+  },
+  {
+   "id": "production-line-missed-items",
+   "kind": "paraphrase",
+   "split": "test",
+   "question": "In the manufacturing line example for multi-robot task allocation, what happens to items none of the manipulators reach in time?",
+   "paper_title_contains": "Dynamic multi-robot task allocation under uncertainty",
+   "expect_substrings": [
+    "must be sorted by hand afterwards"
+   ]
+  },
+  {
+   "id": "air-ground-surface-grouping",
+   "kind": "paraphrase",
+   "split": "test",
+   "question": "How are terrain types classified from aerial images in UAV-UGV informative sampling?",
+   "paper_title_contains": "Heterogeneous Robot Teams for Informative Sampling",
+   "expect_substrings": [
+    "fed into a K-means classifier to discriminate between"
+   ]
+  },
+  {
+   "id": "pusher-destination-trade-rule",
+   "kind": "paraphrase",
+   "split": "test",
+   "question": "What conditions must hold for two robots to exchange goals in the multi-robot pushing-based manipulation planner?",
+   "paper_title_contains": "Collaborative Multi-Robot Non-Prehensile Manipulation",
+   "expect_substrings": [
+    "the exchange does not increase the total team distance"
+   ]
+  },
+  {
+   "id": "no-message-headcount-estimator",
+   "kind": "paraphrase",
+   "split": "test",
+   "question": "Why are density-based multi-target filters not enough for communication-free multi-robot task allocation?",
+   "paper_title_contains": "Communication-Free Distributed Multi-Robot Task Allocation",
+   "expect_substrings": [
+    "do not explicitly maintain unique target identities"
+   ]
+  },
+  {
+   "id": "lookahead-baseline-replanning",
+   "kind": "paraphrase",
+   "split": "test",
+   "question": "How does the dynamic programming baseline work in reinforcement learning based UAV active target search?",
+   "paper_title_contains": "Reinforcement Learning for Agile Active Target Sensing",
+   "expect_substrings": [
+    "the agent executes a single primitive and replans"
+   ]
+  },
+  {
+   "id": "fixed-wing-spline-length-range",
+   "kind": "paraphrase_keyword",
+   "split": "test",
+   "question": "What spline length range is allowed for the fixed-wing UAV coverage planning actions?",
+   "keyword": "spline",
+   "paper_title_contains": "Fixed-Wing UAVs using Deep Reinforcement Learning",
+   "expect_substrings": [
+    "The predefined range in this work is 2.5-3.5 times"
+   ]
+  },
+  {
+   "id": "mqe-underlying-physics-simulator",
+   "kind": "paraphrase_keyword",
+   "split": "test",
+   "question": "Which physics simulator is MQE built on?",
+   "keyword": "MQE",
+   "paper_title_contains": "Unleashing the Power of Interaction",
+   "expect_substrings": [
+    "operates on NVIDIA’s Isaac Gym"
+   ]
+  },
+  {
+   "id": "saris-single-drone-limit",
+   "kind": "paraphrase_keyword",
+   "split": "test",
+   "question": "Why does SARIS use a swarm of UAVs instead of a single UAV carrying the reflecting surface?",
+   "keyword": "SARIS",
+   "paper_title_contains": "UAV Swarm-Enabled Aerial Reconfigurable Intelligent Surface",
+   "expect_substrings": [
+    "the number of reflecting elements on a single UAV is constrained"
+   ]
+  },
+  {
+   "id": "cppo-learning-speed-comparison",
+   "kind": "paraphrase_keyword",
+   "split": "test",
+   "question": "How does the decentralized model-based approach compare with CPPO in convergence speed for multi-UAV edge computing?",
+   "keyword": "CPPO",
+   "paper_title_contains": "Decentralized Model-Based PPO in Urban Multi-UAV",
+   "expect_substrings": [
+    "converges nearly as fast as centralized PPO"
+   ]
+  },
+  {
+   "id": "mo-nn-robot-top-speed",
+   "kind": "paraphrase_keyword",
+   "split": "test",
+   "question": "What is the maximum robot speed in the MO-NN swarm simulator?",
+   "keyword": "MO-NN",
+   "paper_title_contains": "Evolving Multi-Objective Neural Network Controllers",
+   "expect_substrings": [
+    "can only move forward up to a maximum velocity of 2"
+   ]
+  },
+  {
+   "id": "ray-tracing-indoor-scenes",
+   "kind": "paraphrase_keyword",
+   "split": "test",
+   "question": "How was ray tracing software used to set up the indoor environments for RL-based UAV search and rescue?",
+   "keyword": "ray tracing software",
+   "paper_title_contains": "UAV Aided Search and Rescue Operation",
+   "expect_substrings": [
+    "create two different indoor environments"
+   ]
+  },
+  {
+   "id": "zcbfs-choice-reason",
+   "kind": "paraphrase_keyword",
+   "split": "test",
+   "question": "Why use ZCBFs for multi-robot connectivity?",
+   "keyword": "ZCBFs",
+   "paper_title_contains": "Global and Optimized approach through Control Barrier Functions",
+   "expect_substrings": [
+    "they do not present the drawbacks of a function that assumes unbounded values"
+   ]
+  },
+  {
+   "id": "bmg-q-graph-construction",
+   "kind": "paraphrase_keyword",
+   "split": "test",
+   "question": "How does BMG-Q construct its matching graph between vehicles and orders?",
+   "keyword": "BMG-Q",
+   "paper_title_contains": "Drone Delivery Order Pooling and Road Network Monitoring",
+   "expect_substrings": [
+    "dynamically constructs a bipartite graph between vehicles and candidate orders"
+   ]
+  },
+  {
+   "id": "houli-tunnel-signal-reach",
+   "kind": "paraphrase_keyword",
+   "split": "test",
+   "question": "Why did radio signals travel farther inside Houli Tunnel than in the other tunnels?",
+   "keyword": "Houli Tunnel",
+   "paper_title_contains": "Collision-Tolerant Resource-Constrained Blimp",
+   "expect_substrings": [
+    "Houli Tunnel are 3 times higher than the other two tunnels"
+   ]
+  },
+  {
+   "id": "mlai-drone-flight-control",
+   "kind": "paraphrase_keyword",
+   "split": "test",
+   "question": "How is drone flight controlled in the MLAI framework?",
+   "keyword": "MLAI",
+   "paper_title_contains": "Efficient UAV-based Artificial Intelligence Framework",
+   "expect_substrings": [
+    "implemented an Android application using the commercial DJI SDK"
+   ]
+  },
+  {
+   "id": "titan-placement-search-method",
+   "kind": "paraphrase_keyword",
+   "split": "test",
+   "question": "Which optimization method does TITAN use to find UAV placements?",
+   "keyword": "TITAN",
+   "paper_title_contains": "Twin-Informed Topology Adaptation for LAWN-enabled",
+   "expect_substrings": [
+    "enables Bayesian optimization to efficiently find near-optimal UAV placements"
+   ]
+  },
+  {
+   "id": "auto-multilift-payload-solver",
+   "kind": "paraphrase_keyword",
+   "split": "test",
+   "question": "How does Auto-Multilift handle the payload's optimization problem given the load cannot compute anything?",
+   "keyword": "Auto-Multilift",
+   "paper_title_contains": "Distributed Learning and Control for Cooperative Load Transportation",
+   "expect_substrings": [
+    "a ’central’ agent is randomly selected from the quadrotors"
+   ]
+  },
+  {
+   "id": "hca-star-search-space",
+   "kind": "paraphrase_keyword",
+   "split": "test",
+   "question": "What search does HCA* perform for prioritized multi-robot path planning?",
+   "keyword": "HCA*",
+   "paper_title_contains": "Multi-Robot Path Deconfliction through Prioritization",
+   "expect_substrings": [
+    "applies A* search to a space-time map"
+   ]
+  },
+  {
+   "id": "pre-migration-delay-driver",
+   "kind": "paraphrase_keyword",
+   "split": "test",
+   "question": "What does pre-migration latency depend on for UAV-assisted vehicle task migration?",
+   "keyword": "pre-migration",
+   "paper_title_contains": "UAV-assisted Vehicle Twins Migration in Vehicular Metaverses",
+   "expect_substrings": [
+    "The pre-migration latency is primarily dependent on the physical bandwidth"
+   ]
+  },
+  {
+   "id": "isac-gain-versus-distance",
+   "kind": "paraphrase_keyword",
+   "split": "test",
+   "question": "How does ISAC performance change with link distance for UAV-enabled vehicular networks?",
+   "keyword": "ISAC",
+   "paper_title_contains": "UAV-Enabled Integrated Sensing and Communication",
+   "expect_substrings": [
+    "expected to decrease as the link distance increases"
+   ]
+  },
+  {
+   "id": "fotokite-pro-selection-reason",
+   "kind": "paraphrase_keyword",
+   "split": "test",
+   "question": "Why was the Fotokite Pro used as the UAV for guiding a rescue boat with vision?",
+   "keyword": "Fotokite Pro",
+   "paper_title_contains": "Visual Servoing of Unmanned Surface Vehicle",
+   "expect_substrings": [
+    "receives uninterrupted power supply from the groundstation"
+   ]
+  },
+  {
+   "id": "eavesdropper-sim-helper-height",
+   "kind": "paraphrase_keyword",
+   "split": "test",
+   "question": "At what height does the UAV relay follow the user in the eavesdropper prevention case study?",
+   "keyword": "eavesdropper",
+   "paper_title_contains": "UAV-Assisted Attack Prevention, Detection, and Recovery",
+   "expect_substrings": [
+    "follow the ground user closely at 20 m height"
+   ]
+  },
+  {
+   "id": "jax-training-benefit",
+   "kind": "paraphrase_keyword",
+   "split": "test",
+   "question": "What benefit does JAX give for training the drone capture policies?",
+   "keyword": "JAX",
+   "paper_title_contains": "Intercepting an Agile Target with Net-Carrying Drones",
+   "expect_substrings": [
+    "enabled massively parallelized execution and drastically reduced training times"
+   ]
+  },
+  {
+   "id": "gazebo-empty-box-size",
+   "kind": "paraphrase_keyword",
+   "split": "test",
+   "question": "What Gazebo environments were used to train the deep RL agents for 3D UAV navigation without a map?",
+   "keyword": "Gazebo",
+   "paper_title_contains": "Double Critic Deep Reinforcement Learning for Mapless",
+   "expect_substrings": [
+    "essentially a box of 10 meters of side"
+   ]
+  },
+  {
+   "id": "maplab-shared-map-return",
+   "kind": "paraphrase_keyword",
+   "split": "test",
+   "question": "Can the maplab mapping server send the merged multi-robot map back to the robots?",
+   "keyword": "maplab",
+   "paper_title_contains": "A Modular and Multi-Modal Mapping Framework",
+   "expect_substrings": [
+    "global map can also be transmitted back to the robots"
+   ]
+  },
+  {
+   "id": "sssp-tpg-postprocessing-refinement",
+   "kind": "keyword",
+   "split": "test",
+   "question": "SSSP temporal plan graph TPG postprocessing",
+   "paper_title_contains": "Combining Sampling and Search",
+   "expect_substrings": [
+    "Construct a _temporal plan graph (TPG)_"
+   ]
+  },
+  {
+   "id": "polyblock-overlapped-sensing-mo",
+   "kind": "keyword",
+   "split": "test",
+   "question": "Polyblock monotonic optimization overlapped sensing",
+   "paper_title_contains": "Joint Task Allocation and Power Optimization",
+   "expect_substrings": [
+    "is solved by the generic Polyblock algorithm"
+   ]
+  },
+  {
+   "id": "lip-llm-skill-weights-assignment",
+   "kind": "keyword",
+   "split": "test",
+   "question": "LiP-LLM skill weights linear programming assignment",
+   "paper_title_contains": "Integrating Linear Programming and dependency graph",
+   "expect_substrings": [
+    "a linear programming assignment problem based on skill weights"
+   ]
+  },
+  {
+   "id": "sdaas-dijkstra-brute-force",
+   "kind": "keyword",
+   "split": "test",
+   "question": "SDaaS brute force baseline Dijkstra delivery time",
+   "paper_title_contains": "Swarm-based Drone-as-a-Service (SDaaS) for Delivery",
+   "expect_substrings": [
+    "We consider the Brute Force approach as the baseline."
+   ]
+  },
+  {
+   "id": "apf-ppo-training-setup",
+   "kind": "keyword",
+   "split": "test",
+   "question": "reinforced potential field training arenas six robots circle swap",
+   "paper_title_contains": "Reinforced Potential Field for Multi-Robot Motion Planning",
+   "expect_substrings": [
+    "The proposed algorithm is trained in two different arenas with six robots"
+   ]
+  },
+  {
+   "id": "va-mrmp-composite-rrt-speedup",
+   "kind": "keyword",
+   "split": "test",
+   "question": "Composite RRT-C speedup MotVal vector-accelerated",
+   "paper_title_contains": "Vector-Accelerated Primitives for Sampling-Based Planning",
+   "expect_substrings": [
+    "Composite RRT-C consistently demonstrates the greatest speedup in runtime."
+   ]
+  },
+  {
+   "id": "airsim-vision-occlusion-trees",
+   "kind": "keyword",
+   "split": "test",
+   "question": "AirSim vision occlusion trees enclosing formation",
+   "paper_title_contains": "Formation Control for Enclosing and Tracking via Relative Localization",
+   "expect_substrings": [
+    "a scenario with vision occlusion is constructed"
+   ]
+  },
+  {
+   "id": "launchpad-kiosk-hong-kong",
+   "kind": "keyword",
+   "split": "test",
+   "question": "launchpad kiosk construction costs drone food delivery Hong Kong",
+   "paper_title_contains": "Coordinated Drones and Human Couriers",
+   "expect_substrings": [
+    "Initially, we explore the impacts of the launchpad/kiosk construction costs"
+   ]
+  },
+  {
+   "id": "sagin-ornstein-uhlenbeck-noise",
+   "kind": "keyword",
+   "split": "test",
+   "question": "Ornstein-Uhlenbeck noise Poisson task arrivals GHz base stations space-air-ground scheduling",
+   "paper_title_contains": "Cluster-Based Multi-Agent Task Scheduling",
+   "expect_substrings": [
+    "the experiment used the OrnsteinUhlenbeck process to generate noise"
+   ]
+  },
+  {
+   "id": "edge-cbf-watcher-node",
+   "kind": "keyword",
+   "split": "test",
+   "question": "Watcher edge CBF architecture",
+   "paper_title_contains": "A scalable CBF architecture over EDGE",
+   "expect_substrings": [
+    "a remote monitoring and decisionmaking unit (referred as Watcher)"
+   ]
+  },
+  {
+   "id": "uav-mesh-lightweight-cryptography",
+   "kind": "keyword",
+   "split": "test",
+   "question": "lightweight cryptography UAV swarm mesh network",
+   "paper_title_contains": "Towards Secure Wireless Mesh Networks for UAV Swarm",
+   "expect_substrings": [
+    "Lightweight Cryptography (LWC) with smaller keys sizes and energyawareness"
+   ]
+  },
+  {
+   "id": "tethered-uav-network-densification",
+   "kind": "keyword",
+   "split": "test",
+   "question": "tethered UAV network densification",
+   "paper_title_contains": "Aerial Base Stations Deployment in 6G Cellular Networks using Tethered Drones",
+   "expect_substrings": [
+    "tUAV can be used for network densification"
+   ]
+  },
+  {
+   "id": "p3netfpga-speedup-jetson",
+   "kind": "keyword",
+   "split": "test",
+   "question": "P3NetFPGA speedup Jetson Nano Xavier NX",
+   "paper_title_contains": "An Integrated FPGA Accelerator for Deep Learning-based",
+   "expect_substrings": [
+    "Fig. 14 shows the performance gain of P3NetFPGA over the other planners"
+   ]
+  },
+  {
+   "id": "jamming-rogue-drone-interference",
+   "kind": "keyword",
+   "split": "test",
+   "question": "rogue drone jamming received power interference",
+   "paper_title_contains": "Cooperative Simultaneous Tracking and Jamming for Disabling a Rogue Drone",
+   "expect_substrings": [
+    "maximizes the received power at the rogue drone"
+   ]
+  },
+  {
+   "id": "lte-flagstaff-matrice-tems",
+   "kind": "keyword",
+   "split": "test",
+   "question": "DJI Matrice 200 TEMS Pocket LTE Flagstaff",
+   "paper_title_contains": "Using Commercial LTE Network for UAV Communication in Rural Areas",
+   "expect_substrings": [
+    "We use a commercial drone, DJI Matrice 200"
+   ]
+  },
+  {
+   "id": "mcts-tree-depth-safe-dqn",
+   "kind": "keyword",
+   "split": "test",
+   "question": "Tree-depth MCTS Safe-DQN UAV trajectory",
+   "paper_title_contains": "Interpretable and Secure Trajectory Optimization for UAV-Assisted Communication",
+   "expect_substrings": [
+    "Our proposed Monte Carlo Tree search method"
+   ]
+  },
+  {
+   "id": "swarm-construction-block-centroid",
+   "kind": "keyword",
+   "split": "test",
+   "question": "swarm robot block placement centroid free pixels",
+   "paper_title_contains": "Optimizing robotic swarm based construction tasks",
+   "expect_substrings": [
+    "Set next block position to the centroid of the given shape"
+   ]
+  },
+  {
+   "id": "radiation-chernoff-bounds-classification",
+   "kind": "keyword",
+   "split": "test",
+   "question": "radiation detection Chernoff bounds binary classification",
+   "paper_title_contains": "Visual-Inertial Target Tracking and Motion Planning for UAV-based Radiation Detection",
+   "expect_substrings": [
+    "analytical Chernoff bounds on these have recently been derived"
+   ]
+  },
+  {
+   "id": "marl-nmpc-communication-policy",
+   "kind": "keyword",
+   "split": "test",
+   "question": "NMPC MARL communication policy MAV collision avoidance",
+   "paper_title_contains": "Learning Efficient Communication for Multi-Robot Collision Avoidance",
+   "expect_substrings": [
+    "utilizes the strengths of non-linear model predictive control (NMPC)"
+   ]
+  },
+  {
+   "id": "carp-battery-limited-robots",
+   "kind": "keyword",
+   "split": "test",
+   "question": "CARP capacitated arc routing battery-limited robots",
+   "paper_title_contains": "Heterogeneous Multi-robot Task Allocation for Long-Endurance Missions",
+   "expect_substrings": [
+    "The Capacitated Arc Routing Problem (CARP) adds limited vehicle capacities per tour"
+   ]
   }
  ]
 }
