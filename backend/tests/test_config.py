@@ -230,6 +230,13 @@ def test_jev_settings_default_to_production_behaviour():
     assert s.decisions_base_url == "https://openrouter.ai/api/v1/systemone"
     assert s.jev_question == "noul"
     assert s.jev_concurrency == 16
+    assert s.jev_rate_limit_per_s == 80.0
+
+
+@pytest.mark.parametrize("rate", [0, -5])
+def test_a_non_positive_jev_rate_limit_is_refused(rate):
+    with pytest.raises(ValidationError):
+        Settings(jev_rate_limit_per_s=rate)
 
 
 def test_jev_fusion_with_jev_rerank_is_refused():

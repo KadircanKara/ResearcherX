@@ -33,6 +33,7 @@ from app.core import observability
 from app.core.config import settings
 from app.core.logging import log
 from app.local_rag.rerank import RerankResult
+from app.services.request_pacer import RequestPacer, jev_pacer
 
 Question = Literal["noul", "score"]
 
@@ -107,6 +108,7 @@ class JevReranker:
         deadline_s: float = 60.0,
         max_doc_chars: int = DEFAULT_MAX_DOC_CHARS,
         client: httpx.AsyncClient | None = None,
+        pacer: RequestPacer | None = None,
     ) -> None:
         self._api_key = api_key
         self._model = model
@@ -117,6 +119,7 @@ class JevReranker:
         self._deadline_s = deadline_s
         self._max_doc_chars = max_doc_chars
         self._client = client
+        self._pacer = pacer or jev_pacer()
 
     async def _one(
         self, client: httpx.AsyncClient, sem: asyncio.Semaphore, query: str, doc: str
@@ -125,6 +128,7 @@ class JevReranker:
         headers = {"authorization": f"Bearer {self._api_key}"}
         for attempt in range(_RETRIES + 1):
             async with sem:
+                await self._pacer.wait()
                 try:
                     resp = await client.post(
                         self._base_url, json=payload, headers=headers, timeout=self._timeout_s

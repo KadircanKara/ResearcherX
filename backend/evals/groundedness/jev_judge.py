@@ -47,6 +47,7 @@ from dataclasses import dataclass, field
 import httpx
 
 from app.core import observability
+from app.services.request_pacer import jev_pacer
 from evals.groundedness.judge import AnswerStance, ClaimVerdict
 
 _RETRIES = 4
@@ -218,6 +219,7 @@ class JevJudge:
         headers = {"authorization": f"Bearer {self._api_key}"}
         for attempt in range(_RETRIES + 1):
             async with sem:
+                await jev_pacer().wait()
                 try:
                     resp = await client.post(self._base_url, json=payload, headers=headers)
                 except httpx.TransportError:

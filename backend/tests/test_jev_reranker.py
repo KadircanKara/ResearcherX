@@ -275,3 +275,34 @@ async def test_retry_after_is_capped(monkeypatch):
     out = await _reranker(handler).rerank("q", ["a"], top_n=1)
     assert time.monotonic() - start < 2.0
     assert out is not None and out[0].relevance_score == 0.6
+
+
+class CountingPacer:
+    def __init__(self) -> None:
+        self.waits = 0
+
+    async def wait(self) -> None:
+        self.waits += 1
+
+
+async def test_every_request_waits_on_the_pacer_including_retries(monkeypatch):
+    monkeypatch.setattr(jr, "_BACKOFF_S", 0.0)
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(429)
+        return httpx.Response(200, json=_noul(0.5))
+
+    pacer = CountingPacer()
+    out = await _reranker(handler, pacer=pacer).rerank("q", ["a", "b"], top_n=2)
+    assert out is not None
+    assert pacer.waits == calls["n"] == 3
+
+
+def test_the_default_pacer_is_the_shared_jev_pacer():
+    def handler(request):
+        raise AssertionError("no request expected")
+
+    assert _reranker(handler)._pacer is jr.jev_pacer()

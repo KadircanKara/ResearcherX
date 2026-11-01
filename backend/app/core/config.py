@@ -360,6 +360,11 @@ class Settings(BaseSettings):
     jev_question: Literal["noul", "score"] = "noul"
     # Requests in flight per rerank call. OpenRouter lists 80 req/s for Jev.
     jev_concurrency: int = Field(default=16, ge=1)
+    # Jev's allowed rate on OpenRouter. Every Jev request in the process (the
+    # reranker, the fusion scorer, the eval judge) waits on one pacer at this
+    # rate (`app/services/request_pacer.py`); concurrency alone bounds requests
+    # in flight, not per second, and two rerank calls at once went over it.
+    jev_rate_limit_per_s: float = Field(default=80.0, gt=0)
     jev_timeout_s: float = Field(default=10.0, gt=0)
     # Wall-clock bound on one whole rerank call (all documents, all retries).
     # Past it the call fails open to the incoming order.
