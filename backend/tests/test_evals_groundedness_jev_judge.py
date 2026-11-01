@@ -1,5 +1,7 @@
 """The Jev judge: class answers folded into the verdicts the metrics read."""
 
+import asyncio
+
 import httpx
 import pytest
 
@@ -130,3 +132,28 @@ async def test_an_answer_outside_the_options_raises_instead_of_guessing():
 def test_jev_models_are_recognised():
     assert is_jev_model("~typesafe/jev-latest")
     assert not is_jev_model("gpt-4.1-mini")
+
+
+async def test_the_judge_waits_on_the_shared_jev_pacer_per_request(monkeypatch):
+    from evals.groundedness import jev_judge
+
+    waits = {"n": 0}
+
+    class Pacer:
+        async def wait(self):
+            waits["n"] += 1
+
+    monkeypatch.setattr(jev_judge, "jev_pacer", lambda: Pacer())
+    body = {"answers": {"q": {"choice": "refused", "confidence": 0.9}}}
+    judge = JevJudge(model="~typesafe/jev-latest", api_key="k", base_url="https://x/systemone")
+    judge._client = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda r: httpx.Response(200, json=body))
+    )
+    judge._sem = asyncio.Semaphore(1)
+    question = {
+        "type": "choice",
+        "instructions": "x",
+        "criteria": {"refused": "r", "answered": "a"},
+    }
+    await judge._ask({"a": 1}, question, jev_judge._Usage())
+    assert waits["n"] == 1
