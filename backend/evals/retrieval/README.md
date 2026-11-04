@@ -857,6 +857,119 @@ one composition.
   - `distinct < 1.00` means tied scores. Jev answers at 2-decimal resolution
     and sorting is stable, so ties keep the incoming RRF order.
 
+### Measured — 2026-11-04 (seven rank orders, off_topic only)
+
+The golden set grew to 200 cases: 50 per kind, split 20 tune / 30 test, after
+30 new `off_topic` questions joined the 20 already there. Run by a one-off
+script, not in this repo, over `fa2ab869-…`: dense + bm25s fused at 1:1, k=60,
+the same candidates as the on-topic comparison, NOT production's default
+`postgres` sparse arm. Jev answered every candidate once, so the three Jev
+windows share one set of scores. 0 fail-opens, 0 retries.
+
+Recall and MRR do not exist here (no answering chunk), so this reports scores.
+"Empty" = questions where nothing clears the threshold, out of 50.
+
+| order | median top score | empty at a low cutoff | empty at a high cutoff |
+|---|---|---|---|
+| no rerank | no relevance score | - | - |
+| Cohere | 0.160 | 30 at 0.2 | 38 at 0.3 |
+| Cohere + Jev blend | no single score | - | - |
+| Jev, then Cohere | 0.175 | 27 at 0.2 | 37 at 0.3 |
+| Jev top 100 | 0.075 | 31 at 0.1 | 39 at 0.3 |
+| Jev top 150 | 0.080 | 29 at 0.1 | 38 at 0.3 |
+| Jev all | 0.120 | 23 at 0.1 | 37 at 0.3 |
+
+- **Without a cutoff, every order sends the full 60 excerpts on all 50
+  questions.** bm25s has no distance gate and always returns its 100, so the
+  smallest candidate list is 100 even for "How do I start a sourdough starter".
+  The dense gate only thins the dense half (under 60 rows on 12 questions).
+- A wider Jev window exposes more false positives: at 0.5, 3 questions clear it
+  on the top 100 and 6 on all candidates.
+
+Paired with the on-topic Jev scores saved on 2026-11-02 (same candidates, 150
+positives, t=0 reproduces the recorded recall). Scores are from two Jev runs;
+Jev varies about 0.01 run to run. Kept = mean excerpts per on-topic question.
+
+| Jev window | cutoff | recall@60 | kept | off_topic empty |
+|---|---|---|---|---|
+| top 100 | none | 0.933 | 60.0 | 0/50 |
+| top 100 | 0.3 | 0.933 | 23.9 | 39/50 |
+| top 150 | none | 0.960 | 60.0 | 0/50 |
+| top 150 | 0.3 | 0.960 | 29.6 | 38/50 |
+| all | none | 0.967 | 60.0 | 0/50 |
+| all | 0.3 | 0.967 | 35.9 | 37/50 |
+| all | 0.4 | 0.967 | 28.7 | 40/50 |
+| all | 0.5 | 0.953 | 23.2 | 44/50 |
+
+- Jev loses nothing on tune up to at least 0.7, which loses 3 of 86 answers on
+  test (0.5 loses 2). The lowest answering chunk scores 0.40 across both splits.
+  0.3 was picked after seeing test, so it has no clean held-out reading.
+- Cosine distance does not get there: the dense sweep at 0.50 rejects 36/50
+  off_topic and drops dense recall@60 from 0.83 to 0.79.
+
+Cohere, scored on the same saved candidates (300 calls, 0 fail-opens). t=0
+reproduces the recorded recall exactly and MRR within 0.003.
+
+| arm | cutoff | recall@60 | answers lost | kept | off_topic empty |
+|---|---|---|---|---|---|
+| Cohere | none | 0.920 | - | 60.0 | 0/50 |
+| Cohere | 0.07 | 0.920 | 0 | 52.5 | 12/50 |
+| Cohere | 0.2 | 0.900 | 3 | 34.6 | 30/50 |
+| Cohere | 0.3 | 0.880 | 6 | 24.2 | 38/50 |
+| Jev, then Cohere | none | 0.953 | - | 60.0 | 0/50 |
+| Jev, then Cohere | 0.1 | 0.953 | 0 | 48.5 | 11/50 |
+| Jev, then Cohere | 0.3 | 0.920 | 5 | 26.1 | 37/50 |
+
+Cohere's answering chunks reach as low as 0.039 (5th percentile 0.295), against
+Jev's 0.40 (5th percentile 0.82), so its scores overlap off_topic far more. With
+at least 40/50 off_topic emptied: Jev all 0.967, Jev top 150 0.960, Jev top 100
+0.933, Jev then Cohere 0.893, Cohere 0.873.
+
+Real answers, 2026-11-04: `evals.groundedness.run_eval` over all 200 cases on
+production's path with `SPARSE_BACKEND=bm25s`, weights 0.5/0.5, k=60,
+`FUSION_MODE=jev`, `RERANK_ENABLED=false`, with and without
+`RERANK_MIN_SCORE=0.3`. gpt-5-mini answering, gemini-2.5-flash-lite judging, one
+sampled run per arm, 0 errored cases, 0 fail-opens.
+
+| | no cutoff | Jev 0.3 |
+|---|---|---|
+| off_topic refused | 47/50 | 47/50 |
+| off_topic excerpts, mean | 60.0 | 0.6 |
+| on-topic refused | 9/150 + 1 partial | 1/150 |
+| on-topic evidence reached the model | 137/150 | 144/150 |
+| on-topic excerpts, mean | 58.6 | 35.6 |
+| on-topic unsupported claims | 9/673 | 9/651 |
+| gpt-5-mini input tokens (uncached) | 13.8M (4.4M) | 11.5M (2.6M) |
+
+- **The cutoff does not raise the refusal rate.** The model already refuses
+  47/50 when handed 60 excerpts. Three different questions leak in each arm.
+- **The on-topic gain is the paper resolver, not the cutoff.** The resolver
+  scoped 9 of 50 paraphrase questions, all 9 to the wrong paper, on spans such as
+  "a uav swarm with" and "for multi robot exploration". Without a cutoff that
+  gave 8 refusals. With one, a wrong paper's chunks score below 0.3, the scope
+  empties, and the turn falls back to global, which recovered 7 of the 9.
+- On the other 141 on-topic questions the arms match: evidence 137 and 137,
+  refusals 1 and 2, unsupported claims 9/623 and 9/671.
+- `run_eval` skips the resolver, so its recall cannot see this.
+
+Resolver fix, same day: a >=4-word title run now also has to cover 2/3 of its
+title or hold a word no other title has (`paper_resolver._names_its_paper`).
+Measured on the 2,024-paper library:
+
+| | before | after |
+|---|---|---|
+| golden-set questions that scope to a paper | 9/200, all wrong | 0/200 |
+| full-title questions: right / wrong / fell through (300) | 158 / 43 / 99 | 286 / 3 / 11 |
+| first 6 title words: right / wrong / fell through (284) | 210 / 31 / 43 | 146 / 0 / 138 |
+
+Those 9 questions rerun without a cutoff: 9/9 search globally and answer, and the
+evidence reached the model on 8. That matches the cutoff arm's on-topic gain, so
+the cutoff's on-topic advantage was the resolver bug. The two rule thresholds were
+chosen after seeing every golden-set question, so the 0/200 is not held out.
+`resolver_eval` now holds these 9 as negatives: 13/13 fall through, 2/4 positives
+resolve. Both misses are author questions that also fell through before the fix.
+
+
 ## Multi-mention mode
 
     docker compose exec -T backend python -m evals.retrieval.mention_eval \

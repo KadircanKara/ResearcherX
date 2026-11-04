@@ -335,3 +335,90 @@ def test_resolve_falls_through_when_a_named_year_appears_in_a_title():
         resolve_papers("what does the 2019 benchmark paper find?", [bench, other], max_papers=5)
         == []
     )
+
+
+_GENERIC_LONG = ResolvablePaper(
+    paper_id="g1",
+    title="Toward Secure Communications for a UAV Swarm with Movable Antennas in Hostile Terrain",
+    authors=(),
+    year=2022,
+)
+
+
+def test_a_generic_run_of_a_long_title_does_not_name_the_paper():
+    """The golden-set misfire: every word of the run sits in other titles and
+    the run is a fraction of this one, so the question is not naming it."""
+    only_this_title_has_the_run = [
+        _GENERIC_LONG,
+        ResolvablePaper(
+            paper_id="g3",
+            title="A UAV Survey with Swarm Coverage",
+            authors=(),
+            year=2021,
+        ),
+    ]
+    question = "In a game-theoretic model of a UAV swarm with compromised members, what changes?"
+    assert match_by_title_span(question, only_this_title_has_the_run) == []
+    assert resolve_papers(question, only_this_title_has_the_run, max_papers=3) == []
+
+
+def test_a_run_covering_most_of_a_title_names_the_paper_without_a_unique_word():
+    paper = ResolvablePaper(
+        paper_id="c1", title="Path Planning for Multi UAV Teams", authors=(), year=2020
+    )
+    other = ResolvablePaper(
+        paper_id="c2", title="Teams Planning a Path for Multi Agent UAV", authors=(), year=2021
+    )
+    matches = match_by_title_span("What does path planning for multi UAV say?", [paper, other])
+    assert [m.paper_ids for m in matches] == [("c1",)]
+
+
+def test_a_word_unique_to_one_title_names_the_paper_from_a_short_run():
+    paper = ResolvablePaper(
+        paper_id="u1",
+        title="coExplore Combining Multiple Rankings for Exploration With Limited Radio Range",
+        authors=(),
+        year=2020,
+    )
+    other = ResolvablePaper(
+        paper_id="u2", title="Multiple Rankings for Exploration Teams", authors=(), year=2021
+    )
+    matches = match_by_title_span(
+        "How does coExplore combining multiple rankings work?", [paper, other]
+    )
+    assert [m.paper_ids for m in matches] == [("u1",)]
+
+
+def test_naming_one_title_is_not_polluted_by_a_generic_run_of_another():
+    """Measured: only 158 of 300 full-title questions resolved to exactly their
+    paper, because their words also held runs of other, longer titles."""
+    named = ResolvablePaper(
+        paper_id="n1", title="Path Planning for Multi UAV Teams", authors=(), year=2020
+    )
+    longer = ResolvablePaper(
+        paper_id="n2",
+        title="Scalable Path Planning for Multi UAV Swarms Under Limited Battery Life",
+        authors=(),
+        year=2021,
+    )
+    assert resolve_papers(
+        "Summarize Path Planning for Multi UAV Teams.", [named, longer], max_papers=3
+    ) == ["n1"]
+
+
+def test_a_span_stays_ambiguous_when_only_one_claimant_would_qualify_alone():
+    """Filtering claimants one by one would turn this ambiguity into a guess at
+    whichever paper the run happens to cover most of."""
+    short = ResolvablePaper(
+        paper_id="a1", title="Lazy Agents and Credit Assignment", authors=(), year=2020
+    )
+    long = ResolvablePaper(
+        paper_id="a2",
+        title="Lazy Agents and Credit Assignment in Multi Agent Teams Under Partial Observation",
+        authors=(),
+        year=2021,
+    )
+    assert (
+        resolve_papers("What about lazy agents and credit assignment?", [short, long], max_papers=3)
+        == []
+    )
