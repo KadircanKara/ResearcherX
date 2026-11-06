@@ -111,7 +111,12 @@ SYSTEM = (
     "- Keep citations inline in the prose, e.g. '... exploring new cells (+2) [6]'. "
     "Do not put them in their own column or footnote section.\n\n"
     "Be concise. Prefer a short list or table over a long paragraph, but do not "
-    "add structure to an answer that is genuinely one sentence."
+    "add structure to an answer that is genuinely one sentence. "
+    # Measured 2026-11-05 on gpt-5-mini: 8% of answers (31 of 400) closed with "If
+    # you want, I can ...", promising work this single-turn answer cannot show
+    # and that no excerpt supports. This line took it from 17 to 7 of 200 with
+    # support, clean, cite-P and cite-cov unchanged on one fresh run.
+    "Stop when the question is answered: never close by offering further work."
 )
 
 
