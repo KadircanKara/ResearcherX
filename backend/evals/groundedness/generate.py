@@ -32,7 +32,9 @@ WHAT IS DELIBERATELY NOT REPRODUCED, because the golden set is single-turn:
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from itertools import count
 
 from sqlalchemy import select
 
@@ -59,9 +61,9 @@ from app.services.paper_resolver import ResolvablePaper, resolve_papers_with_evi
 class Generated:
     """One case's answer plus everything needed to judge it.
 
-    `chunks` is the catalog as the model saw it -- ORIGINAL numbering, before
-    renumbering, because that is the numbering the model cited in. `answer` is
-    post-renumbering, so `citations` maps its markers back to papers.
+    `chunks` is the catalog as the model saw it, in the numbering the ANSWER
+    uses (`renumber_catalog`), so each marker names exactly one excerpt.
+    `citations` maps the same markers back to papers.
     """
 
     question: str
@@ -72,6 +74,37 @@ class Generated:
     scoped_titles: tuple[str, ...]
     widened: bool
     stripped_markers: int
+
+    def __post_init__(self) -> None:
+        # Every lookup from a marker or a judge's verdict to a paper is keyed on
+        # `n`, and a repeated number resolves to whichever chunk came last.
+        numbers = [c.n for c in self.chunks]
+        if len(set(numbers)) != len(numbers):
+            raise ValueError("catalog numbers must be unique")
+
+
+def renumber_catalog(
+    chunks: Sequence[ChunkContext], renumbered: Mapping[int, int]
+) -> tuple[ChunkContext, ...]:
+    """The catalog in the numbering the answer uses, with every number unique.
+
+    A cited chunk takes its marker's new number. An uncited chunk stays in the
+    catalog, because it was in front of the model and can still support a claim
+    the model forgot to cite, but it takes the next number after the cited ones
+    rather than its original one. Renumbering hands out 1..N, so an original
+    number below N is already taken by a cited chunk: keeping it gave two
+    excerpts one number on 119 of 200 cases, and 52 of 653 marked claims
+    resolved to the wrong paper (measured 2026-11-05).
+
+    `model_copy`, not a field-by-field rebuild: the rebuild silently dropped
+    `section` and `page` when structured chunking added them, so the stored
+    catalog stopped being the one the model was shown.
+    """
+    next_free = count(max(renumbered.values(), default=0) + 1)
+    return tuple(
+        c.model_copy(update={"n": renumbered[c.n] if c.n in renumbered else next(next_free)})
+        for c in chunks
+    )
 
 
 class AnswerGenerator:
@@ -206,23 +239,12 @@ class AnswerGenerator:
             if old_n in by_old
         ]
 
-        # The judge is shown the catalog in the numbering the ANSWER uses, so
-        # it can be handed the answer's markers verbatim. Chunks that survived
-        # into no citation keep their original number -- they were still in
-        # front of the model and can still support a claim the model forgot to
-        # cite, which is exactly what `citation_coverage` measures.
-        #
-        # `model_copy`, not a field-by-field rebuild: the rebuild silently
-        # dropped `section` and `page` when structured chunking added them, so
-        # the stored catalog stopped being the one the model was shown.
-        renumbered_chunks = tuple(
-            c.model_copy(update={"n": renumbered.get(c.n, c.n)}) for c in chunks
-        )
-
         return Generated(
             question=question,
             answer=clean,
-            chunks=renumbered_chunks,
+            # The judge is shown the catalog in the numbering the ANSWER uses,
+            # so it can be handed the answer's markers verbatim.
+            chunks=renumber_catalog(chunks, renumbered),
             citations=tuple(citations),
             scope_source=scope_source,
             scoped_titles=tuple(p.title for p in scope_infos),

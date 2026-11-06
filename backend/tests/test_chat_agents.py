@@ -250,6 +250,11 @@ def test_system_prompt_demands_a_marker_in_the_sentence_that_makes_the_claim():
     assert "summarized in excerpts" in SYSTEM
 
 
+def test_system_prompt_forbids_closing_with_an_offer():
+    """31 of 400 answers ended "If you want, I can ..."; see the prompt comment."""
+    assert "never close by offering further work" in SYSTEM
+
+
 def test_the_prompt_carries_no_figure_paragraph():
     """A figures-are-not-visible rule was added on 2026-08-22 and reverted the
     same day: measured against the otherwise identical prompt it moved every
