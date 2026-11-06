@@ -49,6 +49,51 @@
       "id": "general-question-resolves-nothing",
       "question": "What is the best UAV swarm paper in this library?",
       "expect_titles": []
+    },
+    {
+      "id": "annealing-direct-misallocation",
+      "question": "In multi-robot information gathering with unknown sensor noise, why does the direct coverage method allocate its measurements poorly at the start?",
+      "expect_titles": []
+    },
+    {
+      "id": "byzantine-observation-error",
+      "question": "In a game-theoretic model of a UAV swarm with compromised members, how does higher observation error change the spread of false information?",
+      "expect_titles": []
+    },
+    {
+      "id": "ergodic-gaps-slow-map",
+      "question": "In multi-robot adaptive coverage of unknown environments, what is assumed about how fast the information map changes relative to the robots' motion?",
+      "expect_titles": []
+    },
+    {
+      "id": "gnn-coverage-delay-negligible",
+      "question": "What assumption about communication latency is made when using graph neural networks for decentralized coverage control?",
+      "expect_titles": []
+    },
+    {
+      "id": "indoor-heading-definition",
+      "question": "How is the heading state defined in reinforcement learning based multi-UAV indoor path planning?",
+      "expect_titles": []
+    },
+    {
+      "id": "koopman-butterfly-gain",
+      "question": "Which test trajectory showed the largest improvement in obstacle motion prediction for the learned linear operator model over the Gaussian process baseline?",
+      "expect_titles": []
+    },
+    {
+      "id": "ot-exploration-moving-targets",
+      "question": "How is target motion modelled when the reference distribution changes over time in energy-constrained multi-robot exploration?",
+      "expect_titles": []
+    },
+    {
+      "id": "split-focus-value-estimator",
+      "question": "Why is an attention critic with several heads better than a single-head one for multi-robot exploration?",
+      "expect_titles": []
+    },
+    {
+      "id": "lookahead-baseline-replanning",
+      "question": "How does the dynamic programming baseline work in reinforcement learning based UAV active target search?",
+      "expect_titles": []
     }
   ]
 }

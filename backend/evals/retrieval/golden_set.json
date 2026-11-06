@@ -1053,6 +1053,186 @@
    "question": "Who won the 2018 FIFA World Cup final?"
   },
   {
+   "id": "offtopic-betaflight-pid",
+   "kind": "off_topic",
+   "split": "tune",
+   "question": "What Betaflight PID values should I use for a 5-inch freestyle quad?"
+  },
+  {
+   "id": "offtopic-drone-pilot-salary",
+   "kind": "off_topic",
+   "split": "tune",
+   "question": "What is the average salary of a commercial drone pilot in Texas?"
+  },
+  {
+   "id": "offtopic-lipo-disposal",
+   "kind": "off_topic",
+   "split": "tune",
+   "question": "How do I safely dispose of a swollen LiPo battery at home?"
+  },
+  {
+   "id": "offtopic-spot-warranty",
+   "kind": "off_topic",
+   "split": "tune",
+   "question": "How long is the warranty on a Boston Dynamics Spot robot dog?"
+  },
+  {
+   "id": "offtopic-boiled-egg",
+   "kind": "off_topic",
+   "split": "tune",
+   "question": "How long should I boil an egg to get a soft yolk?"
+  },
+  {
+   "id": "offtopic-css-center",
+   "kind": "off_topic",
+   "split": "tune",
+   "question": "How do I center a div horizontally and vertically with CSS?"
+  },
+  {
+   "id": "offtopic-offside-rule",
+   "kind": "off_topic",
+   "split": "tune",
+   "question": "How does the offside rule work in football?"
+  },
+  {
+   "id": "offtopic-part107-fee",
+   "kind": "off_topic",
+   "split": "test",
+   "question": "How much does it cost to take the FAA Part 107 knowledge test?"
+  },
+  {
+   "id": "offtopic-drone-insurance",
+   "kind": "off_topic",
+   "split": "test",
+   "question": "What annual premium should a small aerial photography business expect for drone liability insurance?"
+  },
+  {
+   "id": "offtopic-lipo-luggage",
+   "kind": "off_topic",
+   "split": "test",
+   "question": "Can I carry LiPo drone batteries in my checked luggage on a Turkish Airlines flight?"
+  },
+  {
+   "id": "offtopic-wedding-drone",
+   "kind": "off_topic",
+   "split": "test",
+   "question": "Is the DJI Air 3 or the Mavic 3 Classic better for wedding videography?"
+  },
+  {
+   "id": "offtopic-roomba-brush",
+   "kind": "off_topic",
+   "split": "test",
+   "question": "How do I replace the side brush on a Roomba j7?"
+  },
+  {
+   "id": "offtopic-lego-classroom",
+   "kind": "off_topic",
+   "split": "test",
+   "question": "Which LEGO robotics kit is best for a middle school classroom?"
+  },
+  {
+   "id": "offtopic-qgc-install",
+   "kind": "off_topic",
+   "split": "test",
+   "question": "How do I install QGroundControl on Ubuntu 24.04?"
+  },
+  {
+   "id": "offtopic-skydio-funding",
+   "kind": "off_topic",
+   "split": "test",
+   "question": "How much venture funding has Skydio raised so far?"
+  },
+  {
+   "id": "offtopic-prime-air-zip",
+   "kind": "off_topic",
+   "split": "test",
+   "question": "Is Amazon Prime Air drone delivery available in my zip code?"
+  },
+  {
+   "id": "offtopic-drone-show-booking",
+   "kind": "off_topic",
+   "split": "test",
+   "question": "How much does it cost to book a 500-drone light show for a wedding?"
+  },
+  {
+   "id": "offtopic-hagia-sophia",
+   "kind": "off_topic",
+   "split": "test",
+   "question": "Am I allowed to fly a drone over Hagia Sophia as a tourist?"
+  },
+  {
+   "id": "offtopic-esc-soldering",
+   "kind": "off_topic",
+   "split": "test",
+   "question": "What iron temperature should I use to solder motor wires onto an ESC?"
+  },
+  {
+   "id": "offtopic-pixhawk-gps-port",
+   "kind": "off_topic",
+   "split": "test",
+   "question": "Which connector on the Pixhawk 6C do I plug my GPS module into?"
+  },
+  {
+   "id": "offtopic-rosdep-error",
+   "kind": "off_topic",
+   "split": "test",
+   "question": "How do I fix the rosdep 'cannot locate rosdep definition' error on my laptop?"
+  },
+  {
+   "id": "offtopic-easa-registration",
+   "kind": "off_topic",
+   "split": "test",
+   "question": "How do I register as a drone operator with the German aviation authority?"
+  },
+  {
+   "id": "offtopic-pride-prejudice",
+   "kind": "off_topic",
+   "split": "test",
+   "question": "Who wrote Pride and Prejudice?"
+  },
+  {
+   "id": "offtopic-iron-deficiency",
+   "kind": "off_topic",
+   "split": "test",
+   "question": "What are the symptoms of iron deficiency in adults?"
+  },
+  {
+   "id": "offtopic-passport-renewal",
+   "kind": "off_topic",
+   "split": "test",
+   "question": "How do I renew a Turkish passport from abroad?"
+  },
+  {
+   "id": "offtopic-1929-crash",
+   "kind": "off_topic",
+   "split": "test",
+   "question": "What caused the Wall Street crash of 1929?"
+  },
+  {
+   "id": "offtopic-monstera-water",
+   "kind": "off_topic",
+   "split": "test",
+   "question": "How often should I water a monstera houseplant?"
+  },
+  {
+   "id": "offtopic-sql-running-total",
+   "kind": "off_topic",
+   "split": "test",
+   "question": "How do I write a running total with a SQL window function in Postgres?"
+  },
+  {
+   "id": "offtopic-sourdough",
+   "kind": "off_topic",
+   "split": "test",
+   "question": "How do I start a sourdough starter from scratch?"
+  },
+  {
+   "id": "offtopic-crime-punishment",
+   "kind": "off_topic",
+   "split": "test",
+   "question": "What is the plot of Crime and Punishment?"
+  },
+  {
    "id": "quad-tree-crash-run-count",
    "kind": "paraphrase",
    "split": "test",

@@ -4,8 +4,8 @@ Pure functions: no DB session, no ORM types, no LLM, no I/O — the same
 convention as `mention_ranker.py` and `hybrid_ranker.py`, so the eval harness
 can import the production function directly and a measured policy can never
 differ from the shipped one. `chat_service.respond()` already holds every
-paper of the project in memory, and a project is ~100 papers, so a full scan
-needs no index, no Postgres extension and no migration.
+paper of the project in memory, so a full scan needs no index, no Postgres
+extension and no migration.
 
 WHERE THIS SITS IN THE SCOPE DECISION. Retrieval scope is EXPLICIT: an `@`
 mention the user picked always wins and this module is never consulted on
@@ -18,8 +18,9 @@ and chose the paper a question was "about" was measured on 2026-08-18 at 9/30
 correct against 11/30 scoped to a paper that does not hold the answer, and was
 deleted. It failed because a title is a lossy index of contents and the model
 was asked to GUESS. This module never guesses: it fires only when the user's
-own words contain the identifying evidence — a >=4-word contiguous run of a
-title, an attribution construction naming an author, or a corroborated year.
+own words contain the identifying evidence — a >=4-word contiguous run that
+is distinctive for its title (see `_names_its_paper`), an attribution
+construction naming an author, or a corroborated year.
 Every ambiguity falls through ENTIRELY rather than picking a best candidate.
 If you are about to add a "pick the closest match" fallback, stop: that is
 precisely the failure this codebase removed.
@@ -36,6 +37,7 @@ rot on the next upload.
 """
 
 import re
+from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -51,6 +53,16 @@ from app.services.text_matching import word_tokens
 # than a Settings field. Promote it to Settings only if a real deployment
 # needs a different value.
 _MIN_SPAN_WORDS = 4
+
+# Reaching that bar is not enough to NAME a paper. At 2,024 papers, four words
+# of subject vocabulary ("for multi robot exploration", "a uav swarm with") sat
+# inside some title on 9 of 150 golden-set questions, and all 9 scoped to the
+# wrong paper. A run must also cover this share of its title, or hold a word no
+# other title has. Measured 2026-11-04 on that library: 0 of 150 misfire, and
+# full-title questions that resolve to exactly their paper go from 158 to 286
+# of 300. Naming a paper by a generic fragment now falls through to global
+# retrieval, the safe direction.
+_MIN_TITLE_COVERAGE = 2 / 3
 
 
 @dataclass(frozen=True)
@@ -100,22 +112,27 @@ _NO_RESOLUTION = Resolution(paper_ids=(), evidence=())
 
 
 def match_by_title_span(question: str, papers: Sequence[ResolvablePaper]) -> list[SpanMatch]:
-    """Contiguous normalized title runs of >=_MIN_SPAN_WORDS found in `question`.
+    """Distinctive contiguous title runs of >=_MIN_SPAN_WORDS found in `question`.
 
     A paper whose whole title is shorter than the bar matches on its full
     title instead, so a genuinely short title stays resolvable.
 
     Longest span per paper only: a title contributes at most one SpanMatch,
-    keyed on the longest run of it the question contains.
+    keyed on the longest run of it the question contains. A span is kept whole
+    when ANY paper claiming it passes `_names_its_paper`: dropping only the
+    claimants that fail would turn an ambiguity into a guess at the survivor.
     """
     q_tokens = word_tokens(question)
     if not q_tokens or not papers:
         return []
     q_joined = " ".join(q_tokens)
 
+    tokens_by_paper = {paper.paper_id: word_tokens(paper.title) for paper in papers}
+    title_counts = Counter(word for tokens in tokens_by_paper.values() for word in set(tokens))
+
     by_span: dict[str, list[str]] = {}
     for paper in papers:
-        t_tokens = word_tokens(paper.title)
+        t_tokens = tokens_by_paper[paper.paper_id]
         if not t_tokens:
             continue
         # A short title is matched whole; anything else needs a run at the bar.
@@ -133,7 +150,19 @@ def match_by_title_span(question: str, papers: Sequence[ResolvablePaper]) -> lis
         if best is not None:
             by_span.setdefault(best, []).append(paper.paper_id)
 
-    return [SpanMatch(span=span, paper_ids=tuple(ids)) for span, ids in by_span.items()]
+    return [
+        SpanMatch(span=span, paper_ids=tuple(ids))
+        for span, ids in by_span.items()
+        if any(_names_its_paper(span, tokens_by_paper[pid], title_counts) for pid in ids)
+    ]
+
+
+def _names_its_paper(span: str, title_tokens: list[str], title_counts: Counter[str]) -> bool:
+    """Whether this run identifies its title rather than sharing its subject."""
+    words = span.split()
+    return len(words) / len(title_tokens) >= _MIN_TITLE_COVERAGE or any(
+        title_counts[word] == 1 for word in words
+    )
 
 
 def _contains_run(haystack: str, needle: str) -> bool:
