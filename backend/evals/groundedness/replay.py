@@ -27,9 +27,11 @@ from pathlib import Path
 from app.agents.chat_agent import ChunkContext
 from evals.groundedness.generate import Generated
 
-# Bumped when `Generated` changes shape. A silently-mismatched replay would
-# judge answers against a catalog that never produced them.
-CACHE_VERSION = 2
+# Bumped when `Generated` changes shape or its numbering changes meaning. A
+# silently-mismatched replay would judge answers against a catalog that never
+# produced them. 3: catalog numbers are unique (`renumber_catalog`); a version 2
+# cache repeats them on most cases.
+CACHE_VERSION = 3
 
 
 def save_generations(

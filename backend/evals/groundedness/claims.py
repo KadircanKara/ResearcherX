@@ -37,7 +37,17 @@ _MARKER_RE = re.compile(r"\[(\d+)\]")
 # `_split_sentences` slices at `match.end()` rather than using `re.split`,
 # because `re.split` would DISCARD the separator, deleting those markers from
 # the claim entirely while `marker_count` still counted them for the reader.
-_BOUNDARY_RE = re.compile(r"(?<=[.!?])((?:\s*\[\d+\])*)\s+")
+# The end of the text counts as whitespace: without `$`, "... setup. [2]" as the
+# last words of an answer backtracked to a split before the marker, the bare
+# "[2]" was dropped as a fragment, and the claim read as uncited (18 of the 23
+# answers ending in a marker, measured 2026-11-05).
+_BOUNDARY_RE = re.compile(r"(?<=[.!?])((?:\s*\[\d+\])*)(?:\s+|$)")
+
+# A line holding nothing but markers, bulleted or not: the model listing a
+# bullet's sources as sub-bullets ("- claim.\n  - [1]\n  - [2]\n\n- next claim").
+# Those markers belong to the text ABOVE them. Left in place, they open the next
+# piece, so they were credited to the wrong sentence and glued to its text.
+_MARKER_ONLY_LINE_RE = re.compile(r"\s*\n[ \t]*(?:[-*+][ \t]+)?((?:\[\d+\][ \t]*)+)(?=\s*(?:\n|$))")
 
 # Abbreviations whose trailing period is not a sentence end. Deliberately
 # short and domain-picked rather than exhaustive: a missed boundary merges two
@@ -84,6 +94,28 @@ _ENUMERATOR_TAIL_RE = re.compile(r"\n[ \t]*(?:\d+[.)]|[-*+])[ \t]*$")
 # `abstention_rate` carries the entire signal for those cases. A refusal is a
 # behaviour to measure, not a claim to grade.
 REFUSAL = "the ingested documents do not cover this"
+
+# A closing offer of more work ("If you want, I can extract the equations.") is
+# a control response like the refusal, and is excluded for the same reason: it
+# asserts nothing about any paper, so no judge should be asked about it.
+# Measured 2026-11-05 on 200 cases: 17 such sentences in one run and 14 in the
+# other, labelled no_claim 25 times, unsupported 4 and supported 2 by one judge.
+#
+# It has to start a line, so a real recommendation that merely opens with the
+# same words survives: "If you need full coverage, centralized planning is
+# preferable [8]" names no "I" and does not match.
+_OFFER_RE = re.compile(
+    r"^[ \t]*(?:[-*+>][ \t]+)?[*_(]*(?:"
+    r"if you(?: want| need| would like|['’]d like)\b[^.\n]*?\b(?:i can|i could|i will|i'll|tell me|let me know)\b"
+    r"|let me know if\b"
+    r"|would you like me to\b"
+    r")",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+# After a blank line, a paragraph that is not a list item is new content, so the
+# offer before it was not closing the answer.
+_PARAGRAPH_AFTER_RE = re.compile(r"\n[ \t]*\n(?![ \t]*(?:[-*+]|\d+[.)])[ \t])[ \t]*\S")
 
 # A "sentence" shorter than this is a fragment, not a claim: a stray "3." left
 # by a numbered list, a bare "Yes.", the tail of an abbreviation this module
@@ -157,12 +189,30 @@ def _ends_with_abbreviation(text: str) -> bool:
     return any(lowered.endswith(abbr) for abbr in _ABBREVIATIONS)
 
 
+def _without_closing_offer(prose: str) -> str:
+    """`prose` up to a closing offer, or unchanged when there is none.
+
+    The whole tail goes, not one sentence, because an offer is often a list
+    ("If you want, I can:\n- show the LP.\n- work an example.") whose later
+    items would otherwise be judged as claims. Only the LAST candidate is
+    considered and only when nothing but list items follow it: failing to strip
+    leaves a sentence for the judge, while stripping too much hides real claims.
+    """
+    last = None
+    for last in _OFFER_RE.finditer(prose):
+        pass
+    if last is None or _PARAGRAPH_AFTER_RE.search(prose, last.end()):
+        return prose
+    return prose[: last.start()]
+
+
 def _split_sentences(prose: str) -> list[str]:
     """Sentence-split one PROSE segment (never a code span).
 
     Re-joins a split that landed immediately after a known abbreviation, which
     is why this is a manual walk rather than a single `re.split`.
     """
+    prose = _MARKER_ONLY_LINE_RE.sub(r" \1", prose)
     pieces: list[str] = []
     cursor = 0
     for match in _BOUNDARY_RE.finditer(prose):
@@ -248,7 +298,11 @@ def extract_claims(answer: str) -> list[Claim]:
     # Latches on: everything after the hand-off is general knowledge, not just
     # the sentence immediately following it.
     handed_off = False
-    for run, spans in _prose_runs(answer):
+    runs = _prose_runs(answer)
+    for position, (run, spans) in enumerate(runs):
+        # Only the last run can close the answer.
+        if position == len(runs) - 1:
+            run = _without_closing_offer(run)
         for masked in _split_sentences(run):
             # Markers are read from the MASKED sentence, so an inline span's
             # `arr[4]` never counts; everything else reads what the reader sees.

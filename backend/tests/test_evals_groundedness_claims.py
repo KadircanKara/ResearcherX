@@ -169,3 +169,119 @@ def test_a_refusal_does_not_swallow_the_rest_of_an_answer():
     )
     assert len(claims) == 1
     assert "consensus protocols" in claims[0].text
+
+
+def test_a_marker_ending_the_answer_stays_with_its_sentence():
+    """It used to split off as a bare "[2]" and drop as a fragment, so the
+    last claim of most answers read as uncited."""
+    claims = extract_claims("Each episode consists of 505 tasks and 10 robots. [2]")
+    assert len(claims) == 1
+    assert claims[0].markers == (2,)
+    assert claims[0].text.endswith("[2]")
+
+
+def test_several_markers_ending_the_answer_all_stay():
+    claims = extract_claims("Each episode consists of 505 tasks and 10 robots. [2] [3]\n")
+    assert claims[0].markers == (2, 3)
+
+
+def test_a_sentence_ending_the_answer_with_no_marker_is_unchanged():
+    claims = extract_claims("Each episode consists of 505 tasks and 10 robots.")
+    assert [c.text for c in claims] == ["Each episode consists of 505 tasks and 10 robots."]
+
+
+def test_marker_only_bullets_belong_to_the_text_above_them():
+    answer = (
+        "- The third layer is dedicated to auto flight control.\n"
+        "  - [1]\n"
+        "  - [2]\n\n"
+        "- Flight commands are issued through the vendor SDK [3].\n"
+    )
+    claims = extract_claims(answer)
+    assert [c.markers for c in claims] == [(1, 2), (3,)]
+    assert claims[1].text == "- Flight commands are issued through the vendor SDK [3]."
+
+
+def test_a_bare_marker_line_belongs_to_the_text_above_it():
+    claims = extract_claims(
+        "The planner minimises revisit time.\n[4]\n\nIt runs at 10 Hz on board."
+    )
+    assert [c.markers for c in claims] == [(4,), ()]
+
+
+def test_a_marker_ending_a_real_list_item_is_left_where_it_is():
+    claims = extract_claims(
+        "- The planner minimises revisit time [1].\n- It runs at 10 Hz on board [2]."
+    )
+    assert [c.markers for c in claims] == [(1,), (2,)]
+
+
+def test_a_closing_offer_is_not_a_claim():
+    answer = (
+        "The planner minimises revisit time [1].\n\n"
+        "If you want, I can extract the specific equations from the paper."
+    )
+    assert [c.markers for c in extract_claims(answer)] == [(1,)]
+
+
+def test_an_offer_carrying_markers_is_still_not_a_claim():
+    answer = (
+        "The planner minimises revisit time [1].\n\n"
+        "If you’d like, I can extract the entries of Table 2 [1] [2]."
+    )
+    assert len(extract_claims(answer)) == 1
+
+
+def test_every_item_of_an_offered_list_goes_with_the_offer():
+    answer = (
+        "The planner minimises revisit time [1].\n\n"
+        "If you want, I can:\n\n"
+        "- show the linear program as stated in the paper.\n"
+        "- produce a small numeric example with two robots.\n"
+    )
+    assert len(extract_claims(answer)) == 1
+
+
+def test_a_parenthesised_offer_is_not_a_claim():
+    answer = (
+        "The planner minimises revisit time [1].\n\n"
+        "(If you want specific parameter examples, tell me which paper to use.)"
+    )
+    assert len(extract_claims(answer)) == 1
+
+
+def test_a_request_to_be_told_counts_as_an_offer():
+    answer = (
+        "The planner minimises revisit time [1].\n\n"
+        "If you want the raw logged metrics, tell me which one and I will extract it."
+    )
+    assert len(extract_claims(answer)) == 1
+
+
+def test_a_recommendation_opening_with_the_same_words_is_a_claim():
+    """Measured on a real answer: this is the sentence an unanchored rule eats."""
+    answer = "If you need fast, near-complete coverage, centralized planning is preferable [8]."
+    assert [c.markers for c in extract_claims(answer)] == [(8,)]
+
+
+def test_an_offer_followed_by_more_content_was_not_closing_the_answer():
+    """Stripping too much hides real claims, so this falls through to the judge."""
+    answer = (
+        "If you want, I can extract the specific equations from the paper.\n\n"
+        "The planner minimises revisit time [1]."
+    )
+    assert len(extract_claims(answer)) == 2
+
+
+def test_an_offer_before_a_fenced_block_leaves_the_prose_after_it_judged():
+    answer = (
+        "Let me know if you want more detail on this topic.\n\n"
+        "```python\nx = 1\n```\n\n"
+        "The planner minimises revisit time [1]."
+    )
+    assert len(extract_claims(answer)) == 2
+
+
+def test_markers_inside_a_closing_offer_are_still_counted_for_the_reader():
+    answer = "The planner minimises revisit time [1].\n\nIf you want, I can show Table 2 [2]."
+    assert marker_count(answer) == 2

@@ -141,7 +141,7 @@ def test_the_judged_catalog_keeps_the_section_and_page_the_model_was_shown():
     """The excerpt header the model reads carries section and page
     (`chunk_header.excerpt_text`). Rebuilding each chunk field by field dropped
     both, so a replayed catalog was not the catalog that produced the answer."""
-    source = inspect.getsource(generate.AnswerGenerator.generate)
+    source = inspect.getsource(generate.renumber_catalog)
     assert "model_copy(" in source
 
 
