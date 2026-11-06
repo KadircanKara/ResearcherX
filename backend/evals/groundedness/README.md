@@ -433,6 +433,87 @@ trusted.
 
 **Use gpt-4.1-mini for iteration and gpt-4.1 for decisions. Do not use nano.**
 
+### Measured — 2026-11-05 (three harness faults and closing offers)
+
+Found while reading the 18 unsupported claims in the 2026-11-04 Jev runs (200
+cases each, gpt-5-mini answering, gemini-2.5-flash-lite judging; no cutoff, then
+a 0.3 cutoff). Figures are no cutoff / cutoff, recomputed over the saved answers
+with no model calls.
+
+- **Duplicate excerpt numbers.** The catalog kept an uncited chunk's original
+  number after renumbering handed the same number to a cited one. 119 / 118 of
+  200 cases repeated a number, the judge saw two excerpts with one label, and
+  52 of 653 / 42 of 629 marked claims resolved to the wrong paper, because the
+  last chunk with a number won. `renumber_catalog` now gives uncited chunks the
+  numbers after the cited ones: 0 wrong. `cite-P` and `clean` recorded before
+  this date read those wrong papers, so they are not comparable with later runs.
+- **Lost final marker.** A marker ending the answer split off as a fragment and
+  was dropped: 18 of 23 / 16 of 24 such answers. Now 0. This understated
+  `cite-cov`.
+- **Marker-only bullets.** `- claim.\n  - [1]` credited `[1]` to the next
+  sentence and glued it to that text. Those markers now join the text above.
+- **Closing offers.** 17 / 14 answers ended "If you want, I can ...". One judge
+  labelled the same sentence no_claim 25 times, unsupported 4 and supported 2, so
+  4 of the 18 unsupported claims were this one sentence. They are now excluded
+  before judging, as the refusal is.
+
+Replaying the same saved answers through the same judge on the fixed harness:
+
+| run | unsupported, answerable | repeated from the original | clean | cite-P | cite-cov |
+|---|---|---|---|---|---|
+| no cutoff, original | 9 | | 0.95 | 0.98 | 0.95 |
+| no cutoff, replay | 4 | 2 | 0.97 | 0.99 | 0.98 |
+| 0.3 cutoff, original | 9 | | 0.94 | 0.99 | 0.97 |
+| 0.3 cutoff, replay | 8 | 4 | 0.95 | 0.99 | 0.98 |
+
+Four of the original 18 were offers, so 14 could repeat and 6 did. The answers are
+byte-identical, so most of this count moves with the judge: read one run's
+unsupported list as a sample, not as a list of defects. `gemini-2.5-flash-lite`
+was the judge throughout.
+
+`SYSTEM` also now tells the model not to close with an offer. One fresh run, no
+cutoff, against the replay above:
+
+| | old prompt | new prompt |
+|---|---|---|
+| answers closing with an offer, of 200 | 17 | 7 |
+| support / hallucinated, positives | 0.99 / 0.01 | 0.99 / 0.01 |
+| clean / cite-P / cite-cov, positives | 0.97 / 0.99 / 0.98 | 0.97 / 0.99 / 0.98 |
+| unsupported, answerable | 4 | 5 |
+| off_topic refused, of 50 | 47 | 49 |
+| markers removed by the strip | 5 | 10 |
+
+It cuts offers without moving a grounding number, which is the regression
+2026-08-22c would have shown. One sampled run each, so the refusal and strip
+differences are not established. Offers survive in 7 answers, all on keyword
+questions, which is why the claim filter stays.
+
+The new prompt with `RERANK_MIN_SCORE=0.3`, one fresh run:
+
+| | new prompt, no cutoff | new prompt, 0.3 cutoff |
+|---|---|---|
+| support / hallucinated, positives | 0.99 / 0.01 | 1.00 / 0.00 |
+| clean / cite-P / cite-cov, positives | 0.97 / 0.99 / 0.98 | 0.98 / 0.99 / 0.97 |
+| unsupported, answerable | 5 | 3 |
+| positives refused, of 150 | 8 | 2 |
+| off_topic refused, of 50 | 49 | 46 |
+| off_topic claims, unsupported | 2, 0 | 10, 1 |
+| off_topic questions with no excerpts | 0 | 37 |
+| answers closing with an offer | 7 | 3 |
+| markers removed by the strip | 10 | 24 |
+| gpt-5-mini input tokens, 200 cases | 13.8M | 11.5M |
+
+The four off_topic questions answered under the cutoff kept 1 to 6 excerpts that
+really do hold the answer (Canberra, rosdep setup, a DJI Tello, camera settings
+from a drone paper), and 9 of their 10 claims are supported. The model answered
+from what reached it, which the no-cutoff run's 60 mostly unrelated excerpts did
+not invite. Whether that counts as a failure depends on whether those cases should
+be off_topic at all. The strip's rise to 24 is not explained yet.
+
+Generation caches moved to version 3, so a version 2 cache is refused. `--rescore`
+of an older dump is not a fix for any of this: its `marker_papers` carry the fault,
+and a claim whose text gained a marker no longer aligns and is dropped.
+
 ## How answers are produced
 
 `generate.py` assembles production's own components rather than calling
